@@ -39,8 +39,8 @@ CPU-first Phase 7/8 usability slice:
 - `remora.compiler` exposes public source-to-MLIR and source-to-PTX helpers.
 - `remora.runtime` contains an interim typed-AST CPU evaluator for trying Dense
   Core examples before the pinned MLIR CPU `ExecutionEngine` path exists.
-- `remorac` is registered as a console script with `--target cpu`, `--target
-  mlir`, and `--target ptx`.
+- `remorac` is registered as a console script with CPU execution by default,
+  MLIR/PTX inspection targets, and AST/typed-AST/HIR/MLIR/PTX emit flags.
 - `remora` is registered as a CPU-only REPL console script with persistent
   value definitions, `:type`, `:mlir`, `:load`, `:reset`, `:target`, and
   `:help`.
@@ -375,8 +375,9 @@ Deferred pipeline/codegen work:
   reductions, rank-2/rank-3 literals, operator sections, and the narrow direct
   local lambda application pattern.
 - The `remorac` console script defaults to `--target cpu`, printing the
-  evaluated result. `--target mlir` prints validated MLIR and `--target ptx`
-  prints the current IREE-generated CUDA PTX.
+  evaluated result. It also supports `--emit-ast`, `--emit-typed-ast`,
+  `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus `--target mlir` and
+  `--target ptx` aliases for artifact inspection.
 
 Deferred CPU/runtime work:
 
@@ -469,7 +470,9 @@ Current tests cover:
   expression `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
 - CPU runtime and CLI coverage for scalar evaluation, `iota`/`map`/`fold`,
   row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
-  helpers, and `remorac` default CPU output.
+  helpers, `remorac` CPU output over every checked-in example, CLI emit flags,
+  MLIR/PTX target aliases, missing files, invalid sources, and deferred
+  top-level function diagnostics.
 - Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
   and CLI boolean output.
 - REPL coverage for expression evaluation, persistent definitions, definitions

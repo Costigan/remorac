@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from pprint import pformat
 import sys
 
 from remora.codegen import CodegenUnavailable
-from remora.compiler import compile_source_to_mlir, compile_source_to_ptx
+from remora.compiler import compile_source, compile_source_to_ptx
+from remora.defunc import defunctionalize
 from remora.display import format_result
 from remora.errors import RemoraError
+from remora.hir import lower_to_hir
+from remora.parser import parse_program
 from remora.runtime import evaluate_source
+from remora.typechecker import TypeChecker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,16 +27,43 @@ def main(argv: list[str] | None = None) -> int:
         default="cpu",
         help="output target; cpu evaluates the program",
     )
+    parser.add_argument("--emit-ast", action="store_true", help="print parsed AST and exit")
+    parser.add_argument(
+        "--emit-typed-ast",
+        action="store_true",
+        help="print typed AST and exit",
+    )
+    parser.add_argument("--emit-hir", action="store_true", help="print defunctionalized HIR and exit")
+    parser.add_argument("--emit-mlir", action="store_true", help="print validated MLIR and exit")
+    parser.add_argument("--emit-ptx", action="store_true", help="print generated PTX and exit")
     args = parser.parse_args(argv)
 
     try:
         source = args.file.read_text(encoding="utf-8")
+        if args.emit_ast:
+            print(pformat(parse_program(source, str(args.file))))
+            return 0
+        if args.emit_typed_ast:
+            print(pformat(TypeChecker().check_program(parse_program(source, str(args.file)))))
+            return 0
+        if args.emit_hir:
+            typed = TypeChecker().check_program(parse_program(source, str(args.file)))
+            print(pformat(defunctionalize(lower_to_hir(typed))))
+            return 0
+        if args.emit_mlir:
+            print(compile_source(source).mlir_text)
+            return 0
+        if args.emit_ptx:
+            artifact = compile_source_to_ptx(source)
+            print(artifact.ptx_text)
+            return 0
+
         if args.target == "cpu":
             result = evaluate_source(source)
             print(format_result(result.value, result.type))
             return 0
         if args.target == "mlir":
-            print(compile_source_to_mlir(source))
+            print(compile_source(source).mlir_text)
             return 0
         if args.target == "ptx":
             artifact = compile_source_to_ptx(source)

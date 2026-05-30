@@ -1911,8 +1911,9 @@ For the first prototype, `remorac --target` supports `cpu` and `gpu-nvidia` only
 
 Current implementation note: `remorac` is registered as a Python console script
 and defaults to `--target cpu`, using the interim typed-AST evaluator. It also
-supports `--target mlir` and `--target ptx` for developer inspection of the
-current lowering/codegen artifacts.
+supports `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`,
+`--emit-ptx`, plus `--target mlir` and `--target ptx` for developer inspection
+of the current lowering/codegen artifacts.
 
 #### 8.1 AOT Command-Line Interface (`bin/remorac`)
 
@@ -2058,13 +2059,15 @@ def format_result(data: np.ndarray | float | int, ty: RemoraType) -> str:
 #### 8.4 AOT Tasks
 
 - [ ] Implement `bin/remorac` with all flags
-  - Current: the `remorac` console script supports `--target cpu`, `--target mlir`, and `--target ptx`; the broader debug/output flag set is deferred.
+  - Current: the `remorac` console script supports the CPU-first user path: default CPU execution, `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, and `--target mlir`/`--target ptx` aliases. Non-CPU execution flags, `--output`, `--emit-mlir-after`, GPU tuning flags, and broad debug mode are deferred.
 - [x] Implement `format_result` for scalars, vectors, matrices, and higher-rank arrays
   - Current: `remora.display.format_result` handles int/float/bool scalars and rank-1 through rank-3 arrays with Remora-style scalar spelling.
 - [ ] Implement error handling with source-location-annotated messages
+  - Current: `remorac` catches parser/type/runtime/compiler errors, prints `remorac: ...` to stderr, and exits 1. Precise source spans remain deferred.
 - [ ] Add `--output` flag: write PTX + a thin Python launcher script
 - [ ] End-to-end test: `remorac tests/programs/tensor3_scale.rem` prints the expected rank-3 tensor
-- [ ] End-to-end test: `remorac --target cpu tests/programs/vector_scale.rem` works without GPU
+- [x] End-to-end test: `remorac --target cpu tests/programs/vector_scale.rem` works without GPU
+  - Current: `tests/test_cli.py` runs every checked-in `examples/*.remora` through the `remorac` CPU entry point.
 
 **Milestone M7**: generated programs execute through the shared executor API on CPU and NVIDIA.
 Current: output formatting is shared by the interim CPU evaluator, `remorac`,
