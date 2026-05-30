@@ -4,7 +4,16 @@ from pathlib import Path
 import pytest
 
 from remora.defunc import defunctionalize
-from remora.hir import lower_to_hir
+from remora.hir import (
+    HIRCall,
+    HIRFunction,
+    HIRLit,
+    HIRParam,
+    HIRPrimOp,
+    HIRProgram,
+    HIRVar,
+    lower_to_hir,
+)
 from remora.lowering import MLIRLowering, RemoraLoweringError, type_to_mlir
 from remora.parser import parse_program
 from remora.typechecker import TypeChecker
@@ -96,6 +105,35 @@ def test_lowers_scalar_literals(source: str, return_type: str, constant: str):
     assert f": {return_type}" in lowered.text
 
 
+def test_lowers_scalar_let_with_ssa_value():
+    lowered = MLIRLowering().lower_program(hir_from_source("let x = 1 in x + 2"))
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert "arith.addi" in lowered.text
+    assert "return %" in lowered.text
+
+
+def test_lowers_scalar_hir_function_and_call():
+    function = HIRFunction(
+        "__double",
+        [HIRParam("x", INT)],
+        HIRPrimOp("*i", [HIRVar("x", INT), HIRLit(2, INT)], INT),
+        INT,
+    )
+    program = HIRProgram(
+        [function],
+        HIRCall("__double", [HIRLit(21, INT)], INT),
+        INT,
+    )
+
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func private @__double(%arg0: i32) -> i32" in lowered.text
+    assert "call @__double" in lowered.text
+    assert "arith.muli" in lowered.text
+    assert "return %" in lowered.text
+
+
 def test_lowers_iota_to_parseable_linalg_mlir_module():
     program = hir_from_source("iota 10")
     lowered = MLIRLowering().lower_program(program)
@@ -167,6 +205,33 @@ def test_lowers_rank_3_scalar_map_over_array_literal():
     assert "arith.addi" in lowered.text
 
 
+def test_lowers_rank_0_primitive_section_map():
+    lowered = MLIRLowering().lower_program(hir_from_source("map (* 2.0) 3.0"))
+
+    assert "func.func @main() -> f32" in lowered.text
+    assert "linalg.generic" not in lowered.text
+    assert "arith.mulf" in lowered.text
+    assert "return %" in lowered.text
+
+
+def test_lowers_rank_0_lifted_lambda_map():
+    lowered = MLIRLowering().lower_program(hir_from_source("map (\\x -> x + 1) 3"))
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert "linalg.generic" not in lowered.text
+    assert "arith.addi" in lowered.text
+    assert "return %" in lowered.text
+
+
+def test_lowers_rank_0_comparison_lambda_map_with_let():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source("let x = 3 in map (\\y -> y < 5) x")
+    )
+
+    assert "func.func @main() -> i1" in lowered.text
+    assert "arith.cmpi slt" in lowered.text
+
+
 def test_lowers_lifted_lambda_map_over_iota():
     program = hir_from_source("map (\\x -> x * 2.0) (iota 10)")
     lowered = MLIRLowering().lower_program(program)
@@ -197,6 +262,58 @@ def test_lowers_lifted_comparison_lambda_map_over_iota():
     assert "arith.cmpi slt" in lowered.text
 
 
+def test_lowers_nested_scalar_maps_over_iota():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source("map (* 3) (map (* 2) (iota 10))")
+    )
+
+    assert "func.func @main() -> tensor<10xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 3
+    assert lowered.text.count("arith.muli") == 2
+
+
+def test_lowers_nested_lifted_lambda_map_over_array_literal():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source("let xs = [1, 2, 3] in map (\\x -> x + 1) (map (* 2) xs)")
+    )
+
+    assert "func.func @main() -> tensor<3xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.muli" in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_vector_cell_map_over_rank_2_array():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source(
+            "let xs = [[1.0, 2.0], [3.0, 4.0]] in "
+            "map (\\row -> fold (+) 0.0 row) xs"
+        )
+    )
+
+    assert "func.func @main() -> tensor<2xf32>" in lowered.text
+    assert "linalg.fill" in lowered.text
+    assert "affine_map<(d0, d1) -> (d0, d1)>" in lowered.text
+    assert "affine_map<(d0, d1) -> (d0)>" in lowered.text
+    assert 'iterator_types = ["parallel", "reduction"]' in lowered.text
+    assert "arith.addf" in lowered.text
+
+
+def test_lowers_vector_cell_map_over_rank_3_array():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source(
+            "let xs = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]] in "
+            "map (\\row -> fold (+) 0 row) xs"
+        )
+    )
+
+    assert "func.func @main() -> tensor<2x2xi32>" in lowered.text
+    assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
+    assert "affine_map<(d0, d1, d2) -> (d0, d1)>" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel", "reduction"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
 def test_lowers_fold_over_iota():
     program = hir_from_source("fold (+) 0 (iota 10)")
     lowered = MLIRLowering().lower_program(program)
@@ -219,6 +336,35 @@ def test_lowers_fold_over_array_literal():
     assert "tensor.from_elements" in lowered.text
     assert 'iterator_types = ["reduction"]' in lowered.text
     assert "arith.addf" in lowered.text
+
+
+def test_lowers_fold_over_rank_2_array_literal():
+    program = hir_from_source(
+        "let init = [0, 0] in let xs = [[1, 2], [3, 4]] in fold (+) init xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2xi32>" in lowered.text
+    assert "affine_map<(d0, d1) -> (d0, d1)>" in lowered.text
+    assert "affine_map<(d0, d1) -> (d1)>" in lowered.text
+    assert 'iterator_types = ["reduction", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+    assert "tensor.extract" not in lowered.text
+
+
+def test_lowers_fold_over_rank_3_array_literal():
+    program = hir_from_source(
+        "let init = [[0], [0]] in "
+        "let xs = [[[1], [2]], [[3], [4]]] in "
+        "fold (+) init xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x1xi32>" in lowered.text
+    assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
+    assert "affine_map<(d0, d1, d2) -> (d1, d2)>" in lowered.text
+    assert 'iterator_types = ["reduction", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
 
 
 def test_lowers_fold_over_mapped_iota_milestone_shape():
@@ -262,10 +408,10 @@ def test_lowers_let_bound_iota_fold():
     assert "arith.addi" in lowered.text
 
 
-def test_non_iota_map_lowering_is_deferred():
+def test_non_rank_1_cell_map_lowering_is_deferred():
     program = hir_from_source(
-        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
+        "let xs = [[[1], [2]], [[3], [4]]] in map (\\matrix -> fold (+) [0] matrix) xs"
     )
 
-    with pytest.raises(RemoraLoweringError, match="scalar-cell"):
+    with pytest.raises(RemoraLoweringError, match="rank-1 cell maps"):
         MLIRLowering().lower_program(program)

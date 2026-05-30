@@ -25,9 +25,11 @@ initial Phase 5 MLIR lowering spike:
   value aliases such as `let xs = iota 10 in map (* 2.0) xs`.
 - Textual MLIR lowering for static array literals using `tensor.from_elements`,
   including rank-1, rank-2, and rank-3 examples.
-- Scalar elementwise maps over static array literals now lower for rank-1
-  through rank-3, using identity affine maps with one parallel iterator per
-  dimension.
+- Scalar elementwise maps now lower for rank-0 scalar inputs, rank-1 maps over
+  `iota`, and rank-1 through rank-3 maps over static array literals. Ranked
+  maps use identity affine maps with one parallel iterator per dimension.
+- Nested scalar maps lower for the current direct tensor input subset, including
+  map chains over `iota` and static array literals.
 - Standalone scalar literals and primitive scalar expressions lower to
   parse-validated MLIR, including integer and float arithmetic, `/`, numeric
   comparisons, boolean `&&`/`||`, and explicit `int` to `float` casts.
@@ -223,15 +225,23 @@ Deferred defunctionalization work:
   `HIRMap` over a direct `HIRIota` array when the callable is a primitive
   operator section with a literal bound operand or a lifted unary `HIRFunction`
   from defunctionalization.
-- Scalar `HIRFold` lowers when its input is a direct `HIRIota` or a direct
-  scalar `HIRMap` over `HIRIota`, and when the fold callable is a primitive
-  operator function.
-- Scalar `HIRMap` lowers over direct `HIRIota` or direct static `HIRArrayLit`
-  inputs for scalar-cell maps only.
-- `HIRLet` is not lowered as an MLIR SSA binding yet. The current lowerer first
-  inlines simple HIR let bindings and then lowers the resulting expression. This
-  supports local `let` and top-level value definitions whose values are in the
-  current lowering subset.
+- `HIRFold` lowers for rank-1 scalar reductions and rank-2/rank-3 array-cell
+  reductions over the outermost dimension when the fold callable is a primitive
+  operator function. Rank-2/rank-3 folds use one reduction iterator followed by
+  parallel iterators for the remaining result dimensions.
+- Scalar `HIRMap` lowers over rank-0 scalar inputs, direct `HIRIota`, direct
+  static `HIRArrayLit`, and nested scalar `HIRMap` inputs for scalar-cell maps
+  only.
+- Cell `HIRMap` lowers for the current rank-1-cell reduction pattern, e.g.
+  `map (\row -> fold (+) 0 row) xs`, producing row/cell reductions over rank-2
+  and rank-3 inputs.
+- `_lower_let` lowers scalar `HIRLet` nodes through a small SSA environment.
+  Tensor lets still use the simple HIR inlining path until the lowerer has a
+  general tensor SSA value environment.
+- Scalar `HIRFunction` and `HIRCall` lower to `func.func private` and
+  `func.call` for manually constructed/static HIR functions. User-authored
+  top-level function definitions remain blocked in the typechecker because
+  annotations and monomorphization are deferred.
 - `type_to_mlir` covers scalar types, static ranked tensor types, and function
   type spelling for tests.
 - `MLIRLowering.lower_type` parses the textual type spelling into a real MLIR
@@ -250,6 +260,12 @@ Deferred defunctionalization work:
   `linalg.generic` operations: iota, scalar map, and scalar reduction. The fold
   uses `tensor.from_elements` for the scalar initial accumulator and
   `tensor.extract` to return the rank-0 tensor result as a scalar.
+- For array-cell folds such as `fold (+) [0, 0] [[1, 2], [3, 4]]`, lowering
+  emits a `linalg.generic` with an input identity map, an output map that drops
+  the outer reduction dimension, and `iterator_types = ["reduction", ...]`.
+- For cell maps whose body is a fold over each rank-1 cell, lowering initializes
+  the output with `linalg.fill` and emits a `linalg.generic` with parallel frame
+  iterators and one reduction iterator for the cell dimension.
 - Top-level value definition programs like `def xs = iota 10` followed by
   `map (* 2.0) xs` lower through the same let-inlining path.
 - Static array literals lower by flattening nested `HIRArrayLit` elements in
@@ -257,6 +273,8 @@ Deferred defunctionalization work:
 - Standalone `HIRLit`, `HIRCast`, and `HIRPrimOp` expressions lower through a
   small scalar-region emitter. The same emitter is used for simple lifted
   lambda bodies inside scalar maps.
+- Rank-0 `HIRMap` lowers as scalar function application inside `main`, not as
+  `linalg.generic`, because there is no frame iteration to materialize.
 - `_lower_prim_op` support currently covers all scalar primitive operations
   accepted by the typechecker: integer/float arithmetic, floating division,
   numeric comparisons, and boolean `and`/`or`.
@@ -272,11 +290,13 @@ Deferred MLIR lowering work:
 
 - Switch to dialect builders if/when the required generated bindings and their
   dependencies are stable in the project environment.
-- Lower maps over non-direct values, generalized folds, cell maps, and
-  standalone defunctionalized function calls.
-- Replace let inlining with real SSA environment lowering when lowering grows
-  beyond direct iota/map/fold slices.
-- Run MLIR verifier/pass manager checks beyond parse validation.
+- Lower generalized non-direct tensor values beyond the current nested
+  scalar-map subset, generalized array-cell fold callables beyond primitive
+  operators, and generalized cell maps beyond rank-1-cell fold bodies.
+- Replace tensor let inlining with real SSA environment lowering when lowering
+  grows beyond direct iota/map/fold slices.
+- Run `mlir-opt --verify-diagnostics` checks beyond parse validation once
+  `mlir-opt` is available in the development environment.
 
 ## Test Coverage So Far
 
@@ -308,11 +328,19 @@ Current tests cover:
 - Scalar MLIR lowering coverage for standalone literals, arithmetic, numeric
   comparisons, boolean operations, division, and explicit `int` to `float`
   casts.
+- Rank-0 scalar map coverage for primitive operator sections, lifted lambdas,
+  and let-bound scalar inputs.
 - Comparison-valued scalar maps over `iota` are covered to exercise bool tensor
   results from lifted lambdas.
+- Nested scalar map coverage for map chains over `iota` and static array
+  literals.
 - Fold lowering coverage for direct `iota` and the Phase 5 milestone-shaped
   `fold (+) 0.0 (map (* 2.0) (iota 10))` program.
+- Rank-2/rank-3 array-cell fold coverage over static literals.
+- Rank-2/rank-3 rank-1-cell map coverage for lifted row/cell reduction
+  lambdas.
 - Let/top-level value lowering coverage for iota aliases used by maps and folds.
+- Scalar let, scalar HIR function emission, and scalar HIR call coverage.
 - Static tensor literal coverage for rank-1 through rank-3 and scalar
   elementwise map coverage over rank-2/rank-3 literals.
 - Golden MLIR fixture coverage for the current parse-validated lowering output

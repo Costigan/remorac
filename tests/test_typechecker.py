@@ -102,6 +102,28 @@ def test_fold_on_vector_returns_scalar():
     assert typed.type == FLOAT
 
 
+def test_fold_on_matrix_returns_row_array():
+    typed = let_body(let_body(
+        infer("let init = [0, 0] in let xs = [[1, 2], [3, 4]] in fold (+) init xs")
+    ))
+    assert isinstance(typed, TypedFold)
+    assert typed.reduction_dim == StaticDim(2)
+    assert typed.type == ArrayType(INT, (StaticDim(2),))
+
+
+def test_fold_on_rank_3_returns_rank_2_array():
+    typed = let_body(let_body(
+        infer(
+            "let init = [[0], [0]] in "
+            "let xs = [[[1], [2]], [[3], [4]]] in "
+            "fold (+) init xs"
+        )
+    ))
+    assert isinstance(typed, TypedFold)
+    assert typed.reduction_dim == StaticDim(2)
+    assert typed.type == ArrayType(INT, (StaticDim(2), StaticDim(1)))
+
+
 def test_map_operator_section_over_iota_promotes_to_float_array():
     typed = infer("map (* 2.0) (iota 10)")
 

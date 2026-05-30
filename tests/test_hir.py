@@ -94,6 +94,22 @@ def test_lowers_fold_with_primitive_callable():
     assert fold.result_type == FLOAT
 
 
+def test_lowers_array_cell_fold_with_primitive_callable():
+    program = lower_program_source(
+        "let init = [0, 0] in let xs = [[1, 2], [3, 4]] in fold (+) init xs"
+    )
+
+    assert isinstance(program.main, HIRLet)
+    inner = program.main.body
+    assert isinstance(inner, HIRLet)
+    assert isinstance(inner.body, HIRFold)
+    fold = inner.body
+    assert fold.reduction_dim == StaticDim(2)
+    assert isinstance(fold.func, HIRPrimCallable)
+    assert fold.func.op == "+"
+    assert fold.result_type == ArrayType(INT, (StaticDim(2),))
+
+
 def test_lowers_operator_section_bound_argument():
     program = lower_program_source("map (* 2.0) (iota 10)")
 
