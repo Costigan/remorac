@@ -1,0 +1,24 @@
+[project]
+name = "remora"
+version = "0.0.0"
+description = "Remora Dense Core compiler prototype"
+readme = "docs/MLIR_IMPLEMENTATION_PLAN.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cuda-python",
+    "iree-compiler",
+    "lark",
+    "numpy",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
