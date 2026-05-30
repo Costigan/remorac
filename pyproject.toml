@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 remorac = "remora.cli:main"
+remora = "remora.repl:main"
 
 [dependency-groups]
 dev = [

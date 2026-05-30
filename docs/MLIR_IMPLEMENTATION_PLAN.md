@@ -2360,19 +2360,26 @@ main()
 
 #### 9.5 Tasks
 
-- [ ] Implement `ReplState` and `make_initial_state`
-- [ ] Implement CPU `compile_and_execute` for expressions using full-program recompilation
-- [ ] Implement `ReplSession.eval_input` dispatcher
-- [ ] Implement `_process_definition` (type-check, add to env, no execution)
-- [ ] Implement `_process_expression` (compile, run, display)
-- [ ] Implement `_collect_full_input` for multi-line continuation
-- [ ] Set up `readline` history
-- [ ] Implement all REPL commands (`:type`, `:debug`, `:target`, `:load`, `:reset`, `:help`)
-- [ ] Implement `_load_file`
+- [x] Implement `ReplState` and `make_initial_state`
+  - Current: CPU-only state stores accumulated value-definition source strings.
+- [x] Implement CPU `compile_and_execute` for expressions using full-program recompilation
+  - Current: expressions are evaluated through the interim typed-AST CPU evaluator using full temporary source programs. `:mlir` uses the compiler facade for MLIR inspection.
+- [x] Implement `ReplSession.eval_input` dispatcher
+- [x] Implement `_process_definition` (type-check, add to env, no execution)
+  - Current: top-level value definitions are supported; top-level function definitions are rejected as deferred.
+- [x] Implement `_process_expression` (compile, run, display)
+- [x] Implement `_collect_full_input` for multi-line continuation
+- [x] Set up `readline` history
+  - Current: enabled for interactive `remora`, disabled in tests.
+- [x] Implement all REPL commands (`:type`, `:debug`, `:target`, `:load`, `:reset`, `:help`)
+  - Current: `:mlir` is also implemented; non-CPU targets report a clear deferred message.
+- [x] Implement `_load_file`
+  - Current: loads current one-line top-level value definitions and evaluates the body if present.
 - [ ] Add `gpu-nvidia` REPL target after the CUDA descriptor ABI is stable
 - [ ] Add compile caching only if measured REPL latency makes it necessary
-- [ ] Write `tests/test_repl.py`:
+- [x] Write `tests/test_repl.py`:
   - Define a function; check it appears in type env
+    - Current: top-level function definitions are deferred, so tests cover persistent value definitions and a clear function-definition deferral.
   - Evaluate a scalar expression; check result
   - Multi-line expression (two lines, parentheses)
   - `:type` command
@@ -2381,6 +2388,8 @@ main()
   - Error recovery: bad expression followed by correct one
 
 **Milestone M8**: `remora --target cpu` supports expression evaluation, top-level definitions, `:type`, `:load`, `:reset`, and error recovery for the prototype language subset. Dot-product examples can wait until the language subset includes the required rank-2 or zip/stdlib support.
+Current: `remora --target cpu` is registered and covered by tests for the
+implemented prototype language subset.
 
 ---
 

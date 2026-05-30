@@ -41,6 +41,9 @@ CPU-first Phase 7/8 usability slice:
   Core examples before the pinned MLIR CPU `ExecutionEngine` path exists.
 - `remorac` is registered as a console script with `--target cpu`, `--target
   mlir`, and `--target ptx`.
+- `remora` is registered as a CPU-only REPL console script with persistent
+  value definitions, `:type`, `:mlir`, `:load`, `:reset`, `:target`, and
+  `:help`.
 
 Full Remora ABI code generation, MLIR `ExecutionEngine` CPU execution, CUDA
 launch path, dynamic shapes, dynamic rank, or automatic differentiation has not
@@ -379,6 +382,34 @@ Deferred CPU/runtime work:
 - Add CUDA driver module-load and launch tests only after the Remora ABI kernel
   boundary is explicit.
 
+## REPL Decisions
+
+- `remora.repl` implements the first interactive shell as a thin CPU-only layer
+  over the current parser, typechecker, compiler facade, and interim evaluator.
+- Session state is stored as accumulated top-level value-definition source
+  strings. Each expression is evaluated by building a full temporary source
+  program from those definitions plus the current expression.
+- Top-level function definitions remain rejected in the REPL because function
+  annotation and monomorphization support are still deferred.
+- `:type` typechecks the expression in the current session context without
+  evaluating it.
+- `:mlir` lowers the expression in the current session context through the
+  compiler facade and prints validated MLIR when the current lowering subset
+  supports it.
+- `:load` loads top-level value definitions from a file and evaluates the file
+  body if present. This is intentionally simple and line-oriented for current
+  one-line `def` examples.
+- `:target` reports `cpu`; non-CPU targets are rejected until the descriptor ABI
+  and runtime launch path are ready.
+
+Deferred REPL work:
+
+- Support top-level function definitions after annotated/static function
+  checking exists.
+- Replace source-string session accumulation with typed environment/HIR state
+  if definitions become multi-line or more complex.
+- Add GPU target support only after the final Remora ABI execution path exists.
+
 ## Test Coverage So Far
 
 Current tests cover:
@@ -436,6 +467,10 @@ Current tests cover:
 - CPU runtime and CLI coverage for scalar evaluation, `iota`/`map`/`fold`,
   row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
   helpers, and `remorac` default CPU output.
+- REPL coverage for expression evaluation, persistent definitions, definitions
+  referencing earlier definitions, `:type`, `:mlir`, `:load`, `:reset`, target
+  diagnostics, error recovery, `:quit`, and the `remora --target cpu` entry
+  point.
 
 The latest full local test command was:
 
