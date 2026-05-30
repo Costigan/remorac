@@ -11,6 +11,9 @@ dependencies = [
     "numpy",
 ]
 
+[project.scripts]
+remorac = "remora.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",

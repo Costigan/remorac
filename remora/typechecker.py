@@ -146,6 +146,15 @@ class TypedLet:
     type: RemoraType
 
 
+@dataclass(frozen=True)
+class TypedIf:
+    expr: IfExpr
+    condition: TypedExpr
+    then_branch: TypedExpr
+    else_branch: TypedExpr
+    type: RemoraType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -158,6 +167,7 @@ TypedExpr: TypeAlias = (
     | TypedRightSection
     | TypedApp
     | TypedLet
+    | TypedIf
 )
 
 
@@ -207,6 +217,8 @@ class TypeChecker:
             size = eval_static_dim(expr.size, expr.loc)
             return TypedExprNode(expr, ArrayType(INT, (size,)))
         if isinstance(expr, LetExpr):
+            if isinstance(expr.value, LambdaExpr):
+                return self._infer_let_lambda(expr, env)
             typed_value = self.infer(expr.value, env)
             inner_env = env.extend(expr.name, typed_value.type)
             typed_body = self.infer(expr.body, inner_env)
@@ -217,7 +229,7 @@ class TypeChecker:
             then_branch = self.infer(expr.then_branch, env)
             else_branch = self.infer(expr.else_branch, env)
             self._require(then_branch.type, else_branch.type, expr.loc)
-            return TypedExprNode(expr, then_branch.type)
+            return TypedIf(expr, condition, then_branch, else_branch, then_branch.type)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -509,6 +521,42 @@ class TypeChecker:
                 definition.loc,
             )
         raise AssertionError(f"unknown definition type {type(definition).__name__}")
+
+    def _infer_let_lambda(self, expr: LetExpr, env: TypeEnv) -> TypedExpr:
+        if not isinstance(expr.value, LambdaExpr):
+            raise AssertionError("_infer_let_lambda expects a lambda value")
+        if not (
+            isinstance(expr.body, AppExpr)
+            and isinstance(expr.body.func, VarExpr)
+            and expr.body.func.name == expr.name
+        ):
+            raise RemoraTypeError(
+                "standalone lambda bindings are only supported for direct application",
+                expr.loc,
+            )
+        if len(expr.body.args) != len(expr.value.params):
+            raise RemoraTypeError("function arity mismatch", expr.body.loc)
+
+        typed_args = [self.infer(arg, env) for arg in expr.body.args]
+        param_types = tuple(arg.type for arg in typed_args)
+        inner_env = env
+        for name, param_type in zip(expr.value.params, param_types):
+            inner_env = inner_env.extend(name, param_type)
+        typed_lambda_body = self.infer(expr.value.body, inner_env)
+        func_type = FuncType(param_types, typed_lambda_body.type)
+        typed_lambda = TypedLambda(
+            expr.value,
+            list(zip(expr.value.params, param_types)),
+            typed_lambda_body,
+            func_type,
+        )
+        typed_body = TypedApp(
+            expr.body,
+            TypedExprNode(expr.body.func, func_type),
+            typed_args,
+            typed_lambda_body.type,
+        )
+        return TypedLet(expr, expr.name, typed_lambda, typed_body, typed_body.type)
 
     def _coerce(
         self, typed: TypedExpr, expected_type: RemoraType, loc

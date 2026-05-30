@@ -21,6 +21,7 @@ from remora.typechecker import (
     TypedExpr,
     TypedExprNode,
     TypedFold,
+    TypedIf,
     TypedLambda,
     TypedLeftSection,
     TypedLet,
@@ -242,6 +243,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             lower_expr(expr.body),
             expr.type,
         )
+
+    if isinstance(expr, TypedIf):
+        raise HIRLoweringError("conditional HIR lowering is deferred")
 
     if isinstance(expr, TypedExprNode):
         return _lower_typed_node(expr)

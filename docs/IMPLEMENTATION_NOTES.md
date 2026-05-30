@@ -6,8 +6,8 @@ the phase plan stays in `docs/MLIR_IMPLEMENTATION_PLAN.md`.
 
 ## Current Scope
 
-The implementation is currently limited to the Phase 0 foundation through an
-initial Phase 5 MLIR lowering spike:
+The implementation is currently limited to the Phase 0 foundation through a
+CPU-first Phase 7/8 usability slice:
 
 - Python package skeleton and dependency metadata.
 - Rank-0 through rank-3 external ABI descriptor structs.
@@ -33,9 +33,18 @@ initial Phase 5 MLIR lowering spike:
 - Standalone scalar literals and primitive scalar expressions lower to
   parse-validated MLIR, including integer and float arithmetic, `/`, numeric
   comparisons, boolean `&&`/`||`, and explicit `int` to `float` casts.
+- Phase 6 pipeline helpers can run an in-process validation pipeline, verify
+  emitted MLIR through `mlir-opt` or `iree-opt` when available, and use
+  `iree-compile` to produce CUDA PTX for current lowered modules.
+- `remora.compiler` exposes public source-to-MLIR and source-to-PTX helpers.
+- `remora.runtime` contains an interim typed-AST CPU evaluator for trying Dense
+  Core examples before the pinned MLIR CPU `ExecutionEngine` path exists.
+- `remorac` is registered as a console script with `--target cpu`, `--target
+  mlir`, and `--target ptx`.
 
-Full MLIR lowering, execution engine, CUDA launch path, dynamic shapes, dynamic
-rank, or automatic differentiation has not been implemented.
+Full Remora ABI code generation, MLIR `ExecutionEngine` CPU execution, CUDA
+launch path, dynamic shapes, dynamic rank, or automatic differentiation has not
+been implemented.
 
 ## Project and Tooling
 
@@ -97,6 +106,8 @@ Deferred ABI/runtime work:
   - `RightSectionExpr`
 - Newlines are significant only at the top-level program boundary so a
   definition body does not accidentally consume the following final expression.
+- A newline is allowed immediately after `in`, `then`, and `else` so checked-in
+  examples can use readable multi-line `let` and conditional forms.
 - Source locations currently store filename plus placeholder line/column `0`.
   Precise source spans are deferred.
 
@@ -130,6 +141,9 @@ Known parser limitation:
 - Numeric promotions are explicit in the typed tree with `TypedCast`.
 - Lambdas and operator sections are accepted only when checked against an
   expected function type, currently through `map` or `fold`.
+- There is one narrow local lambda exception for CPU examples:
+  `let f = \x -> body in f arg` is inferred from the direct application
+  argument type. General standalone lambda inference remains deferred.
 - `map` tries scalar cells first, then progressively larger suffix cell shapes.
   This supports scalar maps over rank-1/2/3 arrays and vector-cell maps such as
   row reductions.
@@ -148,7 +162,7 @@ Deferred typechecker work:
 
 - Function annotations and top-level function type inference/checking.
 - Type variables or a real bidirectional annotation story for standalone
-  lambdas.
+  lambdas beyond the direct local application pattern.
 - Compile-time constant folding for shape expressions.
 - `shape` and `rank` typing.
 - Index expression typing.
@@ -298,6 +312,73 @@ Deferred MLIR lowering work:
 - Run `mlir-opt --verify-diagnostics` checks beyond parse validation once
   `mlir-opt` is available in the development environment.
 
+## Pipeline and Codegen Decisions
+
+- `remora.pipeline` owns Phase 6 toolchain detection and pass-manager plumbing.
+  It checks `PATH` first and then the active Python environment's script
+  directory, so `.venv/bin/iree-opt` and `.venv/bin/iree-compile` are detected
+  even when the virtualenv is not activated in the shell.
+- The installed `iree-compiler` package exposes `iree.compiler.passmanager`,
+  and the validation pipeline `builtin.module(canonicalize,cse)` runs against
+  current lowered modules.
+- `mlir-opt` is not available on the current `PATH`, but `iree-opt` is
+  available in `.venv/bin`. `verify_module_text` uses `mlir-opt` when present
+  and otherwise uses `iree-opt --verify-diagnostics -`.
+- `remora.codegen.generate_ptx` uses `iree-compile` with the CUDA HAL backend
+  and `--iree-hal-dump-executable-files-to` to obtain emitted `.ptx` files.
+  This proves the current lowered MLIR can reach PTX with the installed IREE
+  toolchain.
+- The PTX produced today is an IREE HAL dispatch kernel. Its launch ABI is not
+  the final Remora external memref-descriptor ABI from `docs/ABI.md`; direct
+  CUDA launching remains a Phase 7/runtime integration task.
+- `KernelMeta` extraction is intentionally minimal and reflects only stable
+  facts in the generated PTX today: entry name, PTX parameter count, and
+  `.maxntid` block size. Input/output element types are left empty until the
+  final Remora kernel ABI is generated.
+- The CPU and NVIDIA pipeline strings from the plan are represented in code,
+  but the current IREE pass registry does not recognize at least
+  `one-shot-bufferize`. These builders raise `PipelineUnavailable` with the
+  underlying pass-manager diagnostic instead of failing opaquely.
+
+Deferred pipeline/codegen work:
+
+- Pin an LLVM/MLIR distribution that provides `mlir-opt`, `mlir-translate`,
+  `llc`, and the expected pass registry.
+- Validate and commit exact CPU and NVIDIA pipelines against that toolchain.
+- Replace the IREE HAL dispatch PTX path with a final direct-launch Remora ABI
+  path or add an adapter layer that makes the ABI boundary explicit.
+- Add CPU `ExecutionEngine` execution after the CPU lowering pipeline is pinned.
+
+## Compiler Facade and CPU Runtime Decisions
+
+- `remora.compiler.compile_source` is the public source-to-compiler-artifact
+  path. It parses, typechecks, lowers to HIR, defunctionalizes, lowers to MLIR,
+  runs the validation pipeline, and verifies textual MLIR when an external
+  verifier is available.
+- `compile_source_to_mlir` and `compile_source_to_ptx` provide small public
+  helpers for examples, CLI plumbing, and future tests.
+- The current CPU runtime is intentionally an interpreter over the typed AST,
+  not the final MLIR CPU backend. This lets users try examples now while the
+  standalone LLVM/MLIR CPU pipeline and `ExecutionEngine` remain unpinned.
+- CPU evaluation returns Python scalars or numpy arrays plus the checked Remora
+  type. Arrays use numpy dtypes matching the Dense Core scalar policy:
+  `int32`, `float32`, and `bool`.
+- The evaluator covers the checked-in examples: scalar arithmetic, conditionals,
+  top-level value definitions, `iota`, `map`, `fold`, nested maps, row
+  reductions, rank-2/rank-3 literals, operator sections, and the narrow direct
+  local lambda application pattern.
+- The `remorac` console script defaults to `--target cpu`, printing the
+  evaluated result. `--target mlir` prints validated MLIR and `--target ptx`
+  prints the current IREE-generated CUDA PTX.
+
+Deferred CPU/runtime work:
+
+- Replace or supplement the typed-AST evaluator with MLIR `ExecutionEngine`
+  execution once the CPU pipeline is pinned.
+- Add a REPL on top of the same CPU evaluation/display path.
+- Add CUDA driver module-load and launch tests only after the Remora ABI kernel
+  boundary is explicit.
+
 ## Test Coverage So Far
 
 Current tests cover:
@@ -346,11 +427,20 @@ Current tests cover:
 - Golden MLIR fixture coverage for the current parse-validated lowering output
   of `iota`, scalar map over `iota`, scalar map over a rank-2 literal, and
   scalar fold over a mapped `iota`.
+- Pipeline/codegen coverage for toolchain detection, validation-pipeline
+  pass-manager execution, direct `run_pipeline`, external verifier execution
+  when available, unavailable-pass diagnostics, CPU pipeline gating until the
+  toolchain is pinned, and CUDA PTX generation through `iree-compile` when
+  available. PTX tests cover both a simple map and the Phase 6 milestone
+  expression `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
+- CPU runtime and CLI coverage for scalar evaluation, `iota`/`map`/`fold`,
+  row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
+  helpers, and `remorac` default CPU output.
 
 The latest full local test command was:
 
 ```bash
-env UV_CACHE_DIR=/tmp/uv-cache uv run pytest
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest
 ```
 
 with all tests passing.
