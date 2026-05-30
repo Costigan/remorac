@@ -12,8 +12,8 @@ definition: "def" NAME params "=" expr -> func_def
 
 params: NAME+
 
-let_expr: "let" NAME "=" expr "in" expr
-if_expr: "if" expr "then" expr "else" expr
+let_expr: "let" NAME "=" expr "in" _NL? expr
+if_expr: "if" expr "then" _NL? expr "else" _NL? expr
 lambda_expr: LAMBDA NAME+ ARROW expr
 
 ?compose_expr: compose_expr COMPOSE or_expr -> compose_expr

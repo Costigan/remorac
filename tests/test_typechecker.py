@@ -6,6 +6,7 @@ from remora.typechecker import (
     TypedApp,
     TypedCast,
     TypedFold,
+    TypedIf,
     TypedLet,
     TypedMap,
     TypedRightSection,
@@ -157,6 +158,23 @@ def test_numeric_promotion_inserts_typed_cast():
     assert isinstance(typed.args[0], TypedCast)
     assert typed.args[0].from_type == INT
     assert typed.args[0].to_type == FLOAT
+
+
+def test_if_preserves_typed_branches():
+    typed = infer("if true then 1 else 2")
+
+    assert isinstance(typed, TypedIf)
+    assert typed.condition.type == BOOL
+    assert typed.then_branch.type == INT
+    assert typed.else_branch.type == INT
+
+
+def test_direct_local_lambda_application_typechecks():
+    typed = infer("let add1 = \\x -> x + 1 in add1 41")
+
+    assert isinstance(typed, TypedLet)
+    assert typed.value.type.result == INT
+    assert typed.body.type == INT
 
 
 def test_rank_4_result_is_rejected():
