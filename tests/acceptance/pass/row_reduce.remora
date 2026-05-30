@@ -1,0 +1,2 @@
+let xs = [[1.0, 2.0], [3.0, 4.0]] in
+map (\row -> fold (+) 0.0 row) xs

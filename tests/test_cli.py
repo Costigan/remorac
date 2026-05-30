@@ -68,6 +68,31 @@ def test_cli_target_ptx_alias(tmp_path, capsys):
     assert ".visible .entry" in output
 
 
+def test_cli_emit_mlir_for_top_level_function_direct_call(tmp_path, capsys):
+    source = write_source(tmp_path, "def add1 x = x + 1\nadd1 41")
+
+    assert main(["--emit-mlir", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "func.func @main() -> i32" in output
+
+
+def test_cli_emit_mlir_for_top_level_function_map(tmp_path, capsys):
+    source = write_source(tmp_path, "def double x = x * 2\nmap double (iota 4)")
+
+    assert main(["--emit-mlir", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "func.func @main() -> tensor<4xi32>" in output
+    assert "arith.muli" in output
+
+
+def test_cli_emit_ptx_for_top_level_function_map(tmp_path, capsys):
+    source = write_source(tmp_path, "def double x = x * 2\nmap double (iota 4)")
+
+    assert main(["--emit-ptx", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert ".visible .entry" in output
+
+
 def test_cli_cpu_runs_checked_in_examples(capsys):
     for path in sorted(Path("examples").glob("*.remora")):
         assert main([str(path)]) == 0, path

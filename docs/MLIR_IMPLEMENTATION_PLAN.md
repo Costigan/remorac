@@ -1407,7 +1407,7 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [ ] Implement `_lower_let` (introduce SSA value into env)
   - Partial: `_lower_let` exists and lowers scalar lets through an SSA environment. Tensor lets still use simple HIR inlining before textual emission.
 - [ ] Implement `_lower_function` for top-level HIR functions → `func.func`
-  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions now work in the CPU evaluator through typed static lambdas, but are not yet emitted as top-level HIR/MLIR functions.
+  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions reach MLIR for direct scalar calls and unary `map` callables through call-site typed static lambda specialization. General top-level HIR/MLIR function emission remains deferred.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
 - [x] Reject dynamic dimensions until Dense Core static-shape rank-0..3 programs execute end-to-end
 - [x] Write `tests/test_lowering.py`:
@@ -2746,34 +2746,39 @@ tests/acceptance/
 │   ├── slice_view.rem
 │   ├── dynamic_shape.rem
 │   └── dynamic_rank.rem
-└── manifest.toml
+└── manifest.json
 ```
 
-`manifest.toml` records expected behavior:
+`manifest.json` records expected behavior:
 
-```toml
-[[case]]
-path = "pass/rank2_map_scalar.rem"
-target = "cpu"
-expect_stdout = "[[2 4]\n [6 8]]"
-
-[[case]]
-path = "fail/rank4_rejected.rem"
-target = "typecheck"
-expect_diagnostic_contains = "rank limit exceeded in Dense Core"
+```json
+[
+  {
+    "path": "pass/rank3_map.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[[[1.5],\n  [2.5]],\n\n [[3.5],\n  [4.5]]]\n"
+  },
+  {
+    "path": "fail/rank4_rejected.remora",
+    "target": "cpu",
+    "expect_exit": 1,
+    "expect_stderr_contains": "rank limit exceeded in Dense Core"
+  }
+]
 ```
 
 Acceptance tests must run on CPU by default. GPU acceptance runs use the same cases but are gated by `REMORA_TEST_GPU=1`.
 
 Tasks:
 
-- [ ] Create `tests/acceptance/pass`, `tests/acceptance/fail`, and `tests/acceptance/deferred`
-- [ ] Create `tests/acceptance/manifest.toml`
-- [ ] Add `tests/test_acceptance.py` to load the manifest and run `remorac --target cpu`
+- [x] Create `tests/acceptance/pass`, `tests/acceptance/fail`, and `tests/acceptance/deferred`
+- [x] Create `tests/acceptance/manifest.json`
+- [x] Add `tests/test_acceptance.py` to load the manifest and run `remorac --target cpu`
 - [ ] Add GPU acceptance mode gated by `REMORA_TEST_GPU=1`
 - [ ] Mine Dense Core-compatible examples from the tutorial, Redex README, and Racket `module+ test` blocks
 - [ ] Preserve links to the source example in comments or manifest metadata when a case is derived from upstream material
-- [ ] Keep `deferred/` cases in the tree but do not fail CI for them until the corresponding feature phase is active
+- [x] Keep `deferred/` cases in the tree but do not fail CI for them until the corresponding feature phase is active
 
 #### 13.3 End-to-End Test Programs
 

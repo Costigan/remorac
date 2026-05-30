@@ -1,0 +1,2 @@
+def double x = x * 2
+map double (iota 4)

@@ -399,6 +399,23 @@ def test_lowers_top_level_value_definition_map():
     assert "arith.mulf" in lowered.text
 
 
+def test_lowers_top_level_function_direct_call_by_inlining_static_lambda():
+    program = hir_from_source("def add1 x = x + 1\nadd1 41")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_top_level_function_as_map_callable():
+    program = hir_from_source("def double x = x * 2\nmap double (iota 4)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<4xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.muli" in lowered.text
+
+
 def test_lowers_let_bound_iota_fold():
     program = hir_from_source("let xs = iota 10 in fold (+) 0 xs")
     lowered = MLIRLowering().lower_program(program)
