@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from remora.ast_nodes import BoolLit, FloatLit, IfExpr, IntLit, IotaExpr, VarExpr
+from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program
@@ -86,6 +86,8 @@ def format_value(value: object) -> str:
 
 
 def _bind_definition(definition: TypedDefinition, env: Env) -> None:
+    if isinstance(definition.definition, FuncDef):
+        return
     if definition.value is None:
         raise EvaluationError("function definitions are deferred")
     env[definition.definition.name] = _eval_expr(definition.value, env)

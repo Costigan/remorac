@@ -24,6 +24,20 @@ def test_repl_definition_can_reference_previous_definition():
     assert session.eval_input("y") == "42"
 
 
+def test_repl_persists_function_definition():
+    session = ReplSession()
+
+    assert session.eval_input("def add1 x = x + 1") == "Defined: add1 : <function>"
+    assert session.eval_input("add1 41") == "42"
+
+
+def test_repl_function_definition_can_be_used_in_map():
+    session = ReplSession()
+
+    assert session.eval_input("def double x = x * 2") == "Defined: double : <function>"
+    assert session.eval_input("map double (iota 4)") == "[0, 2, 4, 6]"
+
+
 def test_repl_type_command_uses_session_definitions():
     session = ReplSession()
     session.eval_input("def xs = iota 4")
@@ -71,10 +85,11 @@ def test_repl_load_file(tmp_path):
     assert session.eval_input("fold (+) 0.0 xs") == "6.0"
 
 
-def test_repl_reports_deferred_function_definition():
+def test_repl_reports_deferred_recursive_function_definition():
     session = ReplSession()
 
-    assert session.eval_input("def f x = x") == "Error: top-level function definitions are deferred"
+    assert session.eval_input("def f x = f x") == "Defined: f : <function>"
+    assert "recursive function definitions are deferred" in session.eval_input("f 1")
 
 
 def test_repl_error_recovery():

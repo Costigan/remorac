@@ -85,11 +85,20 @@ def test_cli_invalid_source_exits_one(tmp_path, capsys):
     assert "remorac: unbound variable 'missing'" in captured.err
 
 
-def test_cli_deferred_function_definition_exits_one(tmp_path, capsys):
+def test_cli_top_level_function_definition_runs_on_cpu(tmp_path, capsys):
     source = write_source(tmp_path, "def f x = x\nf 1")
 
+    assert main([str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "1"
+    assert captured.err == ""
+
+
+def test_cli_recursive_function_definition_exits_one(tmp_path, capsys):
+    source = write_source(tmp_path, "def f x = f x\nf 1")
+
     assert main([str(source)]) == 1
-    assert "function definition type inference" in capsys.readouterr().err
+    assert "recursive function definitions are deferred" in capsys.readouterr().err
 
 
 def test_cli_missing_file_exits_one(capsys):

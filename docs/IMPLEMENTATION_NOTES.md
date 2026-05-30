@@ -153,8 +153,11 @@ Known parser limitation:
 - `fold` currently supports scalar accumulator folds over rank-1 arrays. Array
   cell folds are explicitly deferred.
 - Top-level value definitions are supported.
-- General top-level function definition inference is deferred because the
-  language does not yet have annotations or monomorphization.
+- Top-level function definitions are supported when used as statically known
+  direct call targets or unary `map` callables. The typechecker specializes the
+  function body at the call site from the concrete argument types and represents
+  the callee as a typed static lambda. Recursive top-level functions are
+  rejected as deferred.
 - Typed array literals and top-level value definitions preserve their typed
   children so later HIR lowering does not need to re-run type inference.
 - Division operator functions and sections require numeric operands just like
@@ -163,7 +166,8 @@ Known parser limitation:
 
 Deferred typechecker work:
 
-- Function annotations and top-level function type inference/checking.
+- Function annotations and a general top-level function type inference story
+  beyond call-site specialization.
 - Type variables or a real bidirectional annotation story for standalone
   lambdas beyond the direct local application pattern.
 - Compile-time constant folding for shape expressions.
@@ -182,8 +186,9 @@ Deferred typechecker work:
   nested `HIRLet` nodes. No top-level storage model exists yet.
 - Programs with top-level value definitions but no body are rejected by HIR
   lowering instead of silently dropping the definitions.
-- Top-level function definitions remain deferred, so `HIRProgram.functions` is
-  currently empty in successful programs.
+- User-authored top-level function definitions do not yet lower into
+  `HIRFunction`s. CPU evaluation can execute them through typed static lambdas,
+  but MLIR lowering still treats full top-level function lowering as deferred.
 - `HIRMap` carries the frame shape and cell shape resolved by the typechecker.
   This is the key metadata the later linalg lowering will need.
 - `HIRFold` carries the outer reduction dimension resolved from the typed array.
@@ -257,8 +262,8 @@ Deferred defunctionalization work:
   general tensor SSA value environment.
 - Scalar `HIRFunction` and `HIRCall` lower to `func.func private` and
   `func.call` for manually constructed/static HIR functions. User-authored
-  top-level function definitions remain blocked in the typechecker because
-  annotations and monomorphization are deferred.
+  top-level function definitions are supported by the CPU evaluator at direct
+  call sites, but are not yet emitted as top-level HIR/MLIR functions.
 - `type_to_mlir` covers scalar types, static ranked tensor types, and function
   type spelling for tests.
 - `MLIRLowering.lower_type` parses the textual type spelling into a real MLIR
@@ -371,9 +376,10 @@ Deferred pipeline/codegen work:
   for float scalars and float arrays, and supports vectors, matrices, and
   rank-3 arrays through numpy rendering with Remora scalar formatting.
 - The evaluator covers the checked-in examples: scalar arithmetic, conditionals,
-  top-level value definitions, `iota`, `map`, `fold`, nested maps, row
-  reductions, rank-2/rank-3 literals, operator sections, and the narrow direct
-  local lambda application pattern.
+  top-level value definitions, direct top-level function calls, top-level
+  functions used as unary `map` callables, `iota`, `map`, `fold`, nested maps,
+  row reductions, rank-2/rank-3 literals, operator sections, and the narrow
+  direct local lambda application pattern.
 - The `remorac` console script defaults to `--target cpu`, printing the
   evaluated result. It also supports `--emit-ast`, `--emit-typed-ast`,
   `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus `--target mlir` and
@@ -393,23 +399,24 @@ Deferred CPU/runtime work:
 - Session state is stored as accumulated top-level value-definition source
   strings. Each expression is evaluated by building a full temporary source
   program from those definitions plus the current expression.
-- Top-level function definitions remain rejected in the REPL because function
-  annotation and monomorphization support are still deferred.
+- Top-level function definitions persist in the REPL and can be used by later
+  direct calls or as unary `map` callables. They are still specialized at use
+  sites, not generalized as first-class runtime function values.
 - `:type` typechecks the expression in the current session context without
   evaluating it.
 - `:mlir` lowers the expression in the current session context through the
   compiler facade and prints validated MLIR when the current lowering subset
   supports it.
-- `:load` loads top-level value definitions from a file and evaluates the file
-  body if present. This is intentionally simple and line-oriented for current
-  one-line `def` examples.
+- `:load` loads top-level value/function definitions from a file and evaluates
+  the file body if present. This is intentionally simple and line-oriented for
+  current one-line `def` examples.
 - `:target` reports `cpu`; non-CPU targets are rejected until the descriptor ABI
   and runtime launch path are ready.
 
 Deferred REPL work:
 
-- Support top-level function definitions after annotated/static function
-  checking exists.
+- Support annotated/generalized top-level function definitions after a real
+  function type story exists.
 - Replace source-string session accumulation with typed environment/HIR state
   if definitions become multi-line or more complex.
 - Add GPU target support only after the final Remora ABI execution path exists.
@@ -427,7 +434,8 @@ Current tests cover:
   and malformed syntax.
 - Typechecker coverage for scalar literals, rank-1/2/3 array literals, `iota`,
   scalar maps, row-reduction maps, vector folds, numeric casts, rank-4
-  rejection, the M2 milestone expression, and deferred function definitions.
+  rejection, the M2 milestone expression, direct top-level function calls,
+  top-level functions as map callables, and recursive-function deferral.
 - HIR coverage for `iota`, array literals, casts, scalar maps, vector-cell map
   shape metadata, folds, operator sections, top-level value definitions, and the
   M2 milestone expression.
@@ -468,17 +476,19 @@ Current tests cover:
   toolchain is pinned, and CUDA PTX generation through `iree-compile` when
   available. PTX tests cover both a simple map and the Phase 6 milestone
   expression `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
-- CPU runtime and CLI coverage for scalar evaluation, `iota`/`map`/`fold`,
+- CPU runtime and CLI coverage for scalar evaluation, direct top-level function
+  calls, top-level functions as map callables, `iota`/`map`/`fold`,
   row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
   helpers, `remorac` CPU output over every checked-in example, CLI emit flags,
-  MLIR/PTX target aliases, missing files, invalid sources, and deferred
-  top-level function diagnostics.
+  MLIR/PTX target aliases, missing files, invalid sources, and recursive
+  function diagnostics.
 - Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
   and CLI boolean output.
-- REPL coverage for expression evaluation, persistent definitions, definitions
-  referencing earlier definitions, `:type`, `:mlir`, `:load`, `:reset`, target
-  diagnostics, error recovery, `:quit`, and the `remora --target cpu` entry
-  point.
+- REPL coverage for expression evaluation, persistent value/function
+  definitions, definitions referencing earlier definitions, top-level functions
+  used in direct calls and maps, recursive-function diagnostics, `:type`,
+  `:mlir`, `:load`, `:reset`, target diagnostics, error recovery, `:quit`, and
+  the `remora --target cpu` entry point.
 
 The latest full local test command was:
 

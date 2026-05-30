@@ -57,7 +57,7 @@ class TypedProgram:
 class TypedDefinition:
     definition: Definition
     value: TypedExpr | None
-    type: RemoraType
+    type: RemoraType | None
 
 
 @dataclass(frozen=True)
@@ -103,7 +103,7 @@ class TypedFold:
 
 @dataclass(frozen=True)
 class TypedLambda:
-    expr: LambdaExpr
+    expr: LambdaExpr | FuncDef
     params: list[tuple[str, RemoraType]]
     body: TypedExpr
     type: FuncType
@@ -186,9 +186,19 @@ class TypeEnv:
 
 
 class TypeChecker:
+    def __init__(self) -> None:
+        self._functions: dict[str, FuncDef] = {}
+        self._active_functions: set[str] = set()
+
     def check_program(self, program: Program) -> TypedProgram:
         env = self._build_prelude_env()
         typed_definitions: list[TypedDefinition] = []
+        self._functions = {
+            definition.name: definition
+            for definition in program.definitions
+            if isinstance(definition, FuncDef)
+        }
+        self._active_functions = set()
 
         for definition in program.definitions:
             typed_definition, env = self._check_definition(definition, env)
@@ -280,6 +290,13 @@ class TypeChecker:
                 raise RemoraTypeError("right operator section must be unary")
             return self._check_right_section(expr, expected_type, env)
 
+        if isinstance(expr, VarExpr) and expr.name in self._functions:
+            return self._typed_top_level_function(
+                self._functions[expr.name],
+                expected_type,
+                env,
+            )
+
         typed = self.infer(expr, env)
         self._require(typed.type, expected_type, expr.loc)
         return typed
@@ -307,6 +324,8 @@ class TypeChecker:
     def _infer_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
         if isinstance(expr.func, VarExpr) and expr.func.name in _INFIX_OPERATORS:
             return self._infer_primitive_app(expr, env)
+        if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
+            return self._infer_top_level_function_app(expr, env)
 
         typed_func = self.infer(expr.func, env)
         if not isinstance(typed_func.type, FuncType):
@@ -446,6 +465,16 @@ class TypeChecker:
             body = self.infer(expr.body, inner_env)
             return FuncType((cell_type,), body.type)
 
+        if isinstance(expr, VarExpr) and expr.name in self._functions:
+            function = self._functions[expr.name]
+            if len(function.params) != 1:
+                raise RemoraTypeError("map expects a unary callable", expr.loc)
+            return self._infer_top_level_function_type(
+                function,
+                (cell_type,),
+                env,
+            )
+
         typed = self.infer(expr, env)
         if not isinstance(typed.type, FuncType) or len(typed.type.params) != 1:
             raise RemoraTypeError("map expects a unary callable", expr.loc)
@@ -516,11 +545,74 @@ class TypeChecker:
                 definition.name, typed_value.type
             )
         if isinstance(definition, FuncDef):
-            raise RemoraTypeError(
-                "function definition type inference requires annotations and is deferred",
-                definition.loc,
-            )
+            self._functions[definition.name] = definition
+            return TypedDefinition(definition, None, None), env
         raise AssertionError(f"unknown definition type {type(definition).__name__}")
+
+    def _infer_top_level_function_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
+        function = self._functions[expr.func.name]
+        if len(expr.args) != len(function.params):
+            raise RemoraTypeError("function arity mismatch", expr.loc)
+        typed_args = [self.infer(arg, env) for arg in expr.args]
+        func_type = self._infer_top_level_function_type(
+            function,
+            tuple(arg.type for arg in typed_args),
+            env,
+        )
+        typed_func = self._typed_top_level_function(function, func_type, env)
+        typed_args = [
+            self._coerce(arg, param_type, expr.loc)
+            for arg, param_type in zip(typed_args, func_type.params)
+        ]
+        return TypedApp(expr, typed_func, typed_args, func_type.result)
+
+    def _infer_top_level_function_type(
+        self,
+        function: FuncDef,
+        param_types: tuple[RemoraType, ...],
+        env: TypeEnv,
+    ) -> FuncType:
+        if len(function.params) != len(param_types):
+            raise RemoraTypeError("function arity mismatch", function.loc)
+        typed_func = self._typed_top_level_function(
+            function,
+            FuncType(param_types, INT),
+            env,
+            infer_result=True,
+        )
+        return typed_func.type
+
+    def _typed_top_level_function(
+        self,
+        function: FuncDef,
+        func_type: FuncType,
+        env: TypeEnv,
+        *,
+        infer_result: bool = False,
+    ) -> TypedLambda:
+        if function.name in self._active_functions:
+            raise RemoraTypeError("recursive function definitions are deferred", function.loc)
+        self._active_functions.add(function.name)
+        try:
+            inner_env = env
+            for name, param_type in zip(function.params, func_type.params):
+                inner_env = inner_env.extend(name, param_type)
+            typed_body = self.infer(function.body, inner_env)
+            if infer_result:
+                result_type = typed_body.type
+                typed_result = typed_body
+            else:
+                typed_result = self._coerce(typed_body, func_type.result, function.loc)
+                result_type = func_type.result
+            inferred_type = FuncType(func_type.params, result_type)
+            return TypedLambda(
+                function,
+                list(zip(function.params, func_type.params)),
+                typed_result,
+                inferred_type,
+            )
+        finally:
+            self._active_functions.remove(function.name)
 
     def _infer_let_lambda(self, expr: LetExpr, env: TypeEnv) -> TypedExpr:
         if not isinstance(expr.value, LambdaExpr):
