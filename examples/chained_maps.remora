@@ -1,0 +1,4 @@
+-- Compose transforms by nesting maps
+let xs = iota 6 in
+map (\x -> (x * 2) + 1) (map (\y -> y + 1) xs)
+

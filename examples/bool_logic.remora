@@ -1,0 +1,3 @@
+-- Boolean logic and comparison
+(1 < 2) && (2 < 3)
+

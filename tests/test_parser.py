@@ -10,6 +10,7 @@ from remora.ast_nodes import (
     IfExpr,
     IntLit,
     IotaExpr,
+    IndexExpr,
     LambdaExpr,
     LeftSectionExpr,
     LetExpr,
@@ -137,6 +138,15 @@ def test_repl_input_prefers_definition_then_expression():
 
     assert isinstance(definition, ValDef)
     assert isinstance(expression, VarExpr)
+
+
+def test_array_literal_after_atom_currently_parses_as_index():
+    expr = parse_expr("xs [1]")
+
+    assert isinstance(expr, IndexExpr)
+    assert isinstance(expr.array, VarExpr)
+    assert expr.array.name == "xs"
+    assert [index.value for index in expr.indices] == [1]
 
 
 def test_malformed_syntax_errors():

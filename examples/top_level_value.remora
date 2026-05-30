@@ -1,0 +1,4 @@
+-- Top-level value definition followed by a final expression
+def xs = iota 4
+map (* 2.0) xs
+

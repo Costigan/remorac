@@ -413,10 +413,13 @@ class TypeChecker:
         if isinstance(expr, (LeftSectionExpr, RightSectionExpr)):
             section_arg = expr.arg
             typed_arg = self.infer(section_arg, env)
-            if expr.op == "/" or typed_arg.type == FLOAT or cell_type == FLOAT:
+            if expr.op == "/":
+                self._require_numeric(cell_type, expr.loc)
+                self._require_numeric(typed_arg.type, expr.loc)
                 return FuncType((cell_type,), FLOAT)
-            if cell_type == INT and typed_arg.type == INT:
-                return FuncType((cell_type,), INT)
+            if expr.op in {"+", "-", "*"}:
+                result_type = common_numeric_type(cell_type, typed_arg.type)
+                return FuncType((cell_type,), result_type)
             raise RemoraTypeError("operator section expects numeric operands", expr.loc)
 
         if isinstance(expr, OperatorFuncExpr):
@@ -445,6 +448,8 @@ class TypeChecker:
             result = common_numeric_type(params[0], params[1])
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
+            self._require_numeric(params[0], expr.loc)
+            self._require_numeric(params[1], expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
@@ -459,6 +464,8 @@ class TypeChecker:
             result = common_numeric_type(expected_arg_type, typed_arg.type)
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
+            self._require_numeric(expected_arg_type, expr.loc)
+            self._require_numeric(typed_arg.type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} section is deferred", expr.loc)
@@ -473,6 +480,8 @@ class TypeChecker:
             result = common_numeric_type(typed_arg.type, expected_arg_type)
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
+            self._require_numeric(typed_arg.type, expr.loc)
+            self._require_numeric(expected_arg_type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} section is deferred", expr.loc)
@@ -513,6 +522,10 @@ class TypeChecker:
     def _require(self, actual: RemoraType, expected: RemoraType, loc) -> None:
         if actual != expected:
             raise RemoraTypeError(f"expected {expected}, got {actual}", loc)
+
+    def _require_numeric(self, value_type: RemoraType, loc) -> None:
+        if not is_numeric(value_type):
+            raise RemoraTypeError(f"expected numeric type, got {value_type}", loc)
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()

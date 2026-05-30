@@ -1,0 +1,3 @@
+-- Lift a scalar callable across a rank-1 array
+map (* 2.0) (iota 10)
+

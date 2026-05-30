@@ -9,6 +9,7 @@ def test_python_package_imports():
     import remora.defunc
     import remora.errors
     import remora.hir
+    import remora.lowering
     import remora.runtime
     import remora.typechecker
     import remora.types

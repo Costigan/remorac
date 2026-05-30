@@ -177,6 +177,10 @@ class HIRLoweringError(RemoraError):
 def lower_to_hir(program: TypedProgram) -> HIRProgram:
     main = program.body
     if main is None:
+        if program.definitions:
+            raise HIRLoweringError(
+                "definition-only programs cannot be lowered to HIR without a body"
+            )
         return HIRProgram([], None, None)
 
     lowered_main = lower_expr(main)

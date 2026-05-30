@@ -139,3 +139,16 @@ def test_element_strides_and_offset_for_sliced_numpy_view():
     assert descriptor.offset == 7
     assert (descriptor.size0, descriptor.size1) == (3, 3)
     assert (descriptor.stride0, descriptor.stride1) == (5, 1)
+
+
+def test_element_strides_and_offset_for_negative_stride_numpy_view():
+    array = np.arange(6, dtype=np.float32)
+    view = array[::-1]
+
+    descriptor = make_numpy_memref_descriptor(view)
+
+    assert descriptor.allocated == array.ctypes.data
+    assert descriptor.aligned == array.ctypes.data
+    assert descriptor.offset == 5
+    assert descriptor.size0 == 6
+    assert descriptor.stride0 == -1
