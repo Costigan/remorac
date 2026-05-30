@@ -1,0 +1,2424 @@
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+Under consideration for publication in J. Functional Programming
+
+1
+
+arXiv:1907.00509v1 [cs.PL] 1 Jul 2019
+
+The Semantics of Rank Polymorphism
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+Northeastern University
+
+Abstract
+Iverson’s APL and its descendants (such as J, K and FISh) are examples of the family of “rankpolymorphic” programming languages. The principal control mechanism of such languages is the
+general lifting of functions that operate on arrays of rank (or dimension) r to operate on arrays of any
+higher rank r′ > r. We present a core, functional language, Remora, that captures this mechanism,
+and develop both a formal, dynamic semantics for the language, and an accompanying static, rankpolymorphic type system for the language. Critically, the static semantics captures the shape-based
+lifting mechanism of the language. We establish the usual progress and preservation properties for
+the type system, showing that it is sound, which means that “array shape” errors cannot occur at
+run time in a well-typed program. Our type system uses dependent types, including an existential
+type abstraction which permits programs to operate on arrays whose shape or rank is computed
+dynamically; however, it is restricted enough to permit static type checking.
+The rank-polymorphic computational paradigm is unusual in that the types of arguments affect
+the dynamic execution of the program—they are what drive the rank-polymorphic distribution of a
+function across arrays of higher rank. To highlight this property, we additionally present a dynamic
+semantics for a partially erased variant of the fully-typed language and show that a computation
+performed with a fully-typed term stays in lock step with the computation performed with its partially
+erased term. The residual types thus precisely characterise the type information that is needed by the
+dynamic semantics, a property useful for the (eventual) construction of efficient compilers for rankpolymorphic languages.
+
+1 Introduction
+The essence of the rank-polymorphic programming model is implicitly treating all operations as aggregate operations, usable on arrays with arbitrarily many dimensions. The
+model was first introduced by Iverson with the language APL (Iverson, 1962). Over time,
+Iverson continued to develop this programming model, making it gradually more flexible,
+eventually leading to the creation of J (Jsoftware, Inc., n.d.) as a successor to APL. The
+boon APL offered programmers was a notation without loops or recursion: Programs
+would automatically follow a control-flow structure appropriate for the data being consumed. The nature of the implicit iteration structure could be modified using second-order
+operators, such as folding, scanning, or operating over a moving window. These secondorder operators would directly reveal all loop-carried data dependences.
+In this sense, other languages demanded that unnecessary work be put into both compilers and user programs. The programmer would be expected to write the program’s iteration
+structure explicitly; in many languages this entails describing a particular serial encoding
+
+ZU064-05-FPR
+
+paper
+
+2
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+of what is fundamentally parallelizable computation. The compiler must then perform
+intricate static analysis to see past the programmer’s overspecified iteration schedule.
+The design of APL earned a Turing award for Iverson (Iverson, 1980) as well as a
+mention in an earlier Turing lecture (Backus, 1978), praising it for showing the basis of
+a solution to the “ven Neumann bottleneck.” However APL’s subsequent development
+proceded largely in isolation from mainstream programming-language research. The APL
+family of languages painted itself into a corner with design decisions such as requiring
+functions to take only one or two arguments and making parsing dependent on values
+assigned at run time. As a result, APL compilers were forced to support only a subset of
+the language (such as Budd’s compiler (Budd, 1988)) or to operate on small sections of
+code, alternating between executing each line of the program and compiling the next one
+(Johnston, 1979). What we gain from the rank-polymorphic programming model’s natural
+friendliness to parallelism, we can easily lose by continually interrupting the program to
+return control to a line-at-a-time compiler. Limiting the compiler to operating over a narrow
+window of code can also eliminate opportunities for code transformations like fusion,
+forcing unnecessary materialization of large arrays.
+The tragedy of rank-polymorphic programming does not end at forgone opportunities for
+performance. Despite the convenience of rank polymorphism for writing array-processing
+code—a common task in many application domains—APL and its close descendants do
+not see widespread use. There is enough desire for implicitly aggregate computation to
+support user communities for systems such as NumPy (Oliphant, 2006) and MATLAB
+(Mathworks, 1992), which do not follow as principled or as flexible a rule for matching
+functions with aggregate arguments1. However, programmers are driven away from APL
+itself by features such as obtuse syntax, restrictions on function arity, poor support for
+naming things, and a limited universe of atomic data to populate the arrays (Abrams, 1975).
+Our goal is to study rank polymorphism itself without getting bogged down by APL’s
+other baggage. A formal semantics of rank polymorphism is the essential groundwork
+for understanding how rank-polymorphic programs ought to behave, how they should be
+compiled, and how they can be safely transformed to reduce execution cost. To that end, we
+develop Remora, a language which integrates rank polymorphism with typed λ -calculus.
+A key problem impeding static compilation of rank-polymorphic programs is identifying
+the implicit iteration structure at each function application. Even without obscuring the
+programming model with the idiosyncratic special case behavior APL accreted, rank polymorphism itself has seemed “too dynamic” for good static compilation due to having its
+control structure derived from computed data. The old style of line-at-a-time compilation
+relied on inspecting functions and data at run time to decide what loop structure to emit.
+Remora’s answer to the problem of finding the iteration space is a type system which
+describes the shapes of arrays and thereby identifies the implicit iteration space for each
+function application. In order for types to provide enough detail about array shapes, we
+use a restricted form of dependent typing, in the style of Dependent ML (Xi, 1998). In
+Dependent ML, types are not parameterized over arbitrary program terms but over a much
+1
+
+For example, operations which already expect aggregate data—for example if the programmer
+writes a function to compute the norm of a vector or the determinant of a matrix—do not always
+lift easily to consume even higher-dimensional arguments
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+3
+
+more restricted language. For Remora, our language of type indices consists of natural
+numbers, describing individual dimensions, and sequences of natural numbers, describing
+array shapes.
+Past work on applying dependent types to computing with arrays has focused on ensuring the safety of accessing individual array elements (Xi & Pfenning, 1998; Trojahner & Grelck, 2009).
+Bounds checking array indices is essential in a programming model where extracting a single element is the only elimination form for arrays, but the rank-polymorphic programming
+model generally eschews this operation. Instead, arrays are consumed whole, and function
+application itself serves as the elimination form for arrays.
+In Remora, a function’s type describes the shapes of the expected argument arrays, called
+the “cells,” and the type of the atomic data inside the array. The typing rule for function
+application is responsible for identifying the “frame” shape, i.e., the iteration structure
+derived from the non-cell dimensions. Type soundness means that the type system produces
+more than a safety guarantee: conclusions it draws about the iteration structure can be
+used to correctly compile the program. Our type system is flexible enough to express
+polymorphism over the cell shape, such as a determinant function that can operate on
+square matrix cells of any size. It can also handle functions whose output shape is not
+determined by input shape alone, such as reading a vector of unknown size from user input
+or generating an array of caller-specified shape.
+We begin with an overview of the rank-polymorphic programming model, written as a
+programming tutorial for an untyped variant of Remora. After developing the intuition for
+rank polymorphism, we present a formal description of Remora’s core language. This includes Remora’s abstract syntax, the language of type indices with its associated theory, the
+static semantics which identifies array shapes and iteration spaces, a type-driven dynamic
+semantics, and a type-soundness theorem linking the static and dynamic semantics. Since
+our formal presentation is intrinsically typed, we also include an algorithm for partial type
+erasure, to characterize which type-level information is truly necessary to keep at run time.
+A bisimulation argument connects the dynamic semantics of explicitly-typed Remora to
+that of erased Remora.
+2 Formalism
+We present a formal description of Core Remora, which describes the control-flow mechanism used for computing on arrays. While the nested-vector shorthand used earlier is
+convenient for human use, this formalism explicitly distinguishes atoms from arrays.
+The basic design goal for the language of types and indices is to describe the program’s
+control structure, for a compiler’s benefit. This requires a detailed description of array
+shapes. Knowing only the number of axes an array has is insufficient because good mapping from source to hardware—e.g., whether to emit vector instructions, invoke a GPGPU
+kernel, or fork separate parallel threads—depends more on the actual sizes of individual
+axes than on how many there are. We use indexed types, in the style of Dependent ML:
+rather than allowing types to be parameterized over arbitrary terms, they are parameterized over a limited language of type indices. Remora’s index language consists of natural
+numbers, representing individual dimensions, and sequences of naturals, representing array
+shapes (or fragments of shapes). So the type of an array has the form (Arr τ ι ), where
+
+ZU064-05-FPR
+
+paper
+
+4
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+τ identifies the type of the array’s atoms, and ι describes the array’s shape. This includes
+enough detail for the type system to describe how the function and argument arrays align
+in function application. It also grants the ability to statically detect arrays that cannot be
+properly aligned.
+Fixed-size computation, requiring every function to exactly specify its argument and
+result sizes, is far too restrictive for practical use. Programmers should not have to write a
+separate vector-mean function for every possible length of vector their programs might
+use. So the index language must permit variables, and the type language must allow universal quantification. This is phrased as a dependent product: (Pi ((x γ ) . . . ) τ ). Each
+x is marked with its sort γ , which specifies whether x ranges over individual dimensions
+(γ = Dim) or sequences (γ = Shape). Now we can give a type to vector-mean:
+(Pi ((n Dim))
+(-> ((Arr Float (Shp n)))
+(Arr Float (Shp))))
+This function will lift to operate on higher-rank arrays of Floats, effectively behaving as
+a minor-axis mean function. Having Shape variables in addition to Dim variables allows
+us to type a major-axis mean function as well:
+(Pi ((c Shape) (n Dim))
+(-> ((Arr Float (++ (Shp n) c)))
+(Arr Float c)))
+Combined with parametric polymorphism, where type variables can be quantified separately over the kinds Atom and Array, we now have a lot of flexibility in describing a
+function’s behavior. For example, append stitches two arrays together along their major
+axis. This requires that the (n − 1)-dimensional pieces of each n-dimensional array have
+the same type (i.e., they must share the same Atom-kinded type variable), but we must
+introduce separate index variables (of sort Dim) for the arguments’ major axes. The type
+we give to append is
+(Pi ((c Shape) (m Dim) (n Dim))
+(Forall ((a Atom))
+(-> ((Arr a (++ (Shp m) c))
+(Arr a (++ (Shp n) c)))
+(Arr a (++ (Shp (+ m n)) c)))))
+We have index variables m and n to stand for each argument’s first dimension and c to
+denote the rest of their shapes. Quantifying over the type variable a allows append to work
+independent of the type of atoms its arguments contain. Our result type’s first dimension is
+the sum of the arguments’ first dimensions, but it has the same “remainder” shape c.
+Quantifying over Array types is a convenience—it is not strictly necessary. Concrete
+Array-kinded types must be of the form (Arr τ ι ), so polymorphic types of the form
+(Forall ((x Array)) τ ) could be rewritten with fresh variables xs and xa as
+(Pi ((xs Shape))
+(Forall ((xa Atom))
+τ[x 7→ (Arr xa xs )]))
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+5
+
+Even having escaped the confines of fixed-size computation, we so far only have functions whose result shape depends solely on its arguments’ shapes. Common utility functions such as iota and filter have result shapes which depend on the actual run-time data
+they receive. We can solve this limitation using existential quantification. A dependent sum
+type, (Sigma ((x γ ) . . . ) τ ), conceptually represents a tuple containing indices whose
+respective sorts are γ . . . and an array whose type τ may depend on those indices. This is the
+type-level description of a box, the atomic wrapper around an arbitrary array. Such types
+can encode arrays whose dimensions are not all known. For example, (Sigma ((n Dim))
+(Arr Int (Shp n))) can describe any vector of integers without giving its specific
+length. Note that the type still requires the underlying array to have rank 1. No scalar
+or matrix or higher-ranked array can fit the pattern specified by (Arr Int (Shp n)), the
+dependent sum’s body. Use of dependent sums offers a lot of freedom in stating what
+shape information is known precisely and what is hidden. At one extreme, (Sigma ((s
+Shape)) (Arr Int s)) could contain an array of absolutely any shape. We can also
+write more detailed descriptions, e.g., floating-point matrices with exactly three rows and
+at least two columns:
+(Sigma ((c Dim))
+(Arr Float
+(Shp 3 (+ 2 c))))
+Quantifying over shapes allows us to describe arrays where only specific axes are known,
+such as boolean arrays whose leading axis has length 10:
+(Sigma ((s Shape))
+(Arr Bool
+(++ (Shp 10) s)))
+Typing boxes as dependent sums also permits controlled access to ragged arrays, which
+are typed as arrays of boxes. Consider a vector of 20 strings of varying lengths:
+(Arr (Sigma ((len Dim))
+(Arr Char (Shp len)))
+(Shp 20))
+Any function written to operate on a box of the appropriate type, in this case containing
+Char vectors of completely unknown length, can be safely lifted to operate on this vector
+of strings. Separating the lifting over the outer dimensions from the lifting over inner,
+existentially hidden dimensions reflects an important consideration for code generation:
+ragged dimensions in a type identify when implicit parallelism is irregular, in contrast
+with the strictly regular parallelism offered in box-free code. Raggedness is not restricted
+to the minor axis because a box’s type can still specify some exact dimensions, as in
+(Arr (Sigma ((l Dim))
+(Arr Char (Shp l 80)))
+(Shp 20))
+Here we have a vector of 20 documents, each of which is a character array containing an
+unknown number of 80-character lines.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+6
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+e ∈ Expr ::=
+x
+| (array (n . . . ) a . . . )
+| (array (n . . . ) τ )
+| (frame (n . . . ) e . . . )
+| (frame (n . . . ) e . . . )
+| (e f ea . . . )
+| (t-app e τ . . . )
+| (i-app e ι . . . )
+| (unbox (xi . . . xe es ) eb )
+v ∈ Val ::= x | (array (n . . . ) v . . . )
+a ∈ Atom ::=
+b
+| o
+| (λ ((x τ ) . . . ) e)
+| (Tλ ((x k) . . . ) v)
+| (Iλ ((x γ ) . . . ) v)
+| (box ι . . . e τ )
+v ∈ Atval ::= b | o | (λ ((x τ ) . . . ) e) | (Tλ ((x k) . . . ) v)
+| (Iλ ((x γ ) . . . ) v) | (box ι . . . v τ )
+τ ∈ Type ::=
+x
+| B
+| (Arr τ ι )
+| (-> (τ . . . ) τ ′ )
+| (Forall ((x k) . . . ) τ )
+| (Pi ((x γ ) . . . ) τ )
+| (Sigma ((x γ ) . . . ) τ )
+k ∈ Kind ::= Array | Atom
+ι ∈ Idx ::=
+x
+| n
+| (Shp ι . . . )
+| (+ ι . . . )
+| (++ ι . . . )
+γ ∈ Sort ::= Shape | Dim
+o ∈ Op ::= + | - | * | / | append | reduce | iota | ...
+f ∈ Func ::= o | e
+t ∈ Term ::= a | (λ ((x τ ) . . . ) e)
+
+Expressions
+Variable reference
+Array, containing atoms
+Empty array, with its atom type
+Frame, containing array cells
+Empty frame, with its cell type
+Term application
+Type application
+Index application
+Let-binding box contents
+Values
+Atoms
+Base value
+Primitive operator
+Term abstraction
+Type abstraction
+Index abstraction
+Boxed array
+Atomic values
+Types
+Type variable
+Base type
+Array
+Function
+Universal
+Dependent product
+Dependent sum
+Kinds
+Type indices
+Type variable
+Single dimension
+Sequence of dimensions)
+Adding dimensions
+Appending shapes
+Index sorts
+Primitive operators
+Functions
+Terms
+
+Fig. 1. Core Remora grammar
+2.1 Syntax
+The grammar for Core Remora is given in Figure 1. Term-level syntax is divided into
+atoms, noted as a, and expressions, noted as e. Expressions produce arrays, which contain
+atoms. For the most part, atom terms perform only trivial computation. This rule applies
+to base values, noted as b; primitive operators, noted as o; and λ -abstractions, which
+may abstract over terms, types, and type indices. As an exception, a box gives an atomic
+view of an array of any shape and may therefore perform any computation to compute its
+contents. A box hides part of its contents’ shape, using a dependent sum. It existentially
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+7
+
+quantifies type indices, but an explicit type annotation is required. A box built from the
+index 3 and a 3 × 3 matrix could be meant, for example, as an unspecified-length vector containing 3-vectors, with type (Sigma ((n Dim)) (Arr Int (Shp n 3))) or as
+a square matrix of unspecified size, with type (Sigma ((n Dim)) (Arr Int (Shp n
+n))) (Sigma ((n Dim)) (Arr Int (Shp n n)));.
+An array can be written as a literal, with its shape and individual atoms listed directly. It
+can also be written in nested form as a frame containing
+  cells (its subexpressions) arranged
+in the specified shape. For example, the matrix 13 24 can be written as the literal
+(array (2 2) 1 2 3 4)
+or as a vector frame of vector literal cells:
+(frame (2) (array (2) 1 2) (array (2) 3 4))
+The frame notation allows construction of arrays from unevaluated cells. An empty array
+(i.e., one with a zero in its shape) must be written with the type its elements are meant to
+have. An empty vector of integers is a different value than an empty vector of booleans,
+and they inhabit different types.
+Term, type, and index abstractions can be applied to zero or more expressions, types, or
+indices. The body of the abstraction must itself be an expression, i.e., all functions produce
+arrays as their results.
+Consuming a box let-binds its index- and term-level contents. Suppose we have M, a
+boxed square matrix of unspecified size. Unboxing M as in (unbox (l a M) e) lets us use
+the index variable l and term variable a within e, the body.
+Types include base types (noted as B), functions, arrays, universal types, and dependent
+products and sums. Universals specify the kind of each type argument, and dependent
+products and sums specify the sort of each index argument. Types are classified as either
+Atom or Array. Type indices are naturals and sequences of naturals, with addition and
+appending as the only operators. They are classified into sorts, Dim and Shape.
+The grammar in Figure 1 does not require any specific set of primitive operators, base
+types, and base values. An example collection of array-manipulation primitives and their
+types is given in Figure 2. For readability, we elide the enclosing Pi and Forall forms.
+Most of these primitives perform some operation along the argument’s major axis. For
+example, head extracts the first scalar of a vector, the first row of a matrix, etc.This means
+that the argument shape must have one dimension more than the result shape, and that
+extra dimension must be nonzero. This is expressed in the type of head by giving the
+argument shape (++ (+ 1 d) s), i.e., a single dimension which is 1 plus any arbitrary
+natural followed by any arbitrary sequence of naturals. In taking one scalar from a 3-vector,
+we would instantiate d as the dimension 2 and s as the empty shape (Shp). If we want to
+extract the first plane of a 5 × 6 × 7 array, we use 4 for d and (Shp 6 7) for s.
+Since these operations work along the major axis, we can use other axes instead by
+instantiating them differently. Suppose mtx is the matrix (array (3 2) 0 1 2 3 4 5),
+which has type (Arr Num (Shp 3 2)). Then (t-app (i-app head 2 (Shp 2)) Num)
+is a function which extracts the first row of a (1 + 2) × 2 (i.e., 3 × 2) matrix. So ((t-app
+(i-app head 2 (Shp 2)) Num) mtx) evaluates to (array (2) 0 1). Instead, consider (t-app (i-app head 1 (Shp)) Num). This is a function with input type (Arr
+
+ZU064-05-FPR
+
+paper
+
+8
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+Num (Shp 2)) and output type (Arr Num (Shp)). It extracts the first scalar of a 2vector. When applied to mtx, this function lifts to extract the first scalar from each 2-vector,
+gathering the results as (frame (3) (array () 0) (array () 2) (array () 4)).
+Evaluation proceeds, reducing this to (array (3) 0 2 4), the first column of mtx.
+Several primitives must return boxed arrays because the type system cannot keep track of
+enough information to fully describe the result shape. As an extreme example, read-nums
+reads a vector of numbers from user input, and there is no way of knowing until run
+time how long a vector the user will enter. In other cases, the necessity of boxing comes
+from a limit on the type system’s expressive power. The ravel function produces a vector
+whose atoms are all those of the argument array, laid out in row-major order. The length
+of the ravel of some array is fully determined by that array’s shape: it is the product
+of all of its dimensions. However the undecidability of Peano arithmetic would interfere
+with type checking (not to mention future efforts on type inference). Since “product of all
+dimensions” is not expressible in Presburger arithmetic, we instead have ravel return a
+boxed vector.
+Boxing is not limited to vectors. For example, filter uses a vector of booleans to
+decide which parts of an array to retain. Since the number of true entries in that vector
+is unknown, the size of the result’s major axis is also unknown. The resulting Sigma
+type existentially quantifies only that one dimension, and leaves the remaining dimensions
+externally visible.
+The iota functions and their variants , described in Figure 3, form a useful case study on
+what invariants can be expressed in Remora’s type system. These functions produce arrays
+whose atoms are successive natural numbers
+ starting from 0, such as (array (2 3) 0 1
+
+2 3 4 5), representing the matrix 03 14 25 . The argument to iota is a vector of numbers
+specifying the result array’s shape. Since this vector can be dynamically computed, we
+cannot give any specific shape for iota’s return type. Instead, iota must return a box
+with existentially quantified shape. Recall that boxing arrays allows functions with datadependent result shape to lift safely, since applying iota to (array (2 2) 3 3 4 4)
+must produce a 3 × 3 matrix and a 4 × 4 matrix as its two result cells.
+Variants on iota allow the programmer to communicate more detailed knowledge to
+the type system. When the result is meant to be a vector, iota/v takes that vector’s length
+as the argument. The resulting box is typed as a vector of unknown length rather than an
+array of completely unknown shape. Knowing that we have a vector of numbers rather than
+any arbitrary array means, for example, that summing the box’s contents with reduce is
+certain to produce a scalar. We can therefore type the following function as consuming and
+producing non-boxed scalar numbers:
+
+(λ ((n (Arr Num (Shp))))
+(unbox (len nums ((array () iota/v) n))
+((t-app (i-app (array () reduce) len (Shp)) Num)
++
+((t-app (i-app (array () append) 1 len (Shp)) Num)
+(array () 0)
+nums))))
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+Function
+
+Type
+
+head, tail
+
+(-> ((Arr t (++ (Shp (+ 1 d)) s)))
+(Arr t s))
+
+behead, curtail
+
+(-> ((Arr t (++ (Shp (+ 1 d)) s)))
+(Arr t (++ (Shp d) s)))
+
+length
+shape, ravel
+
+(-> ((Arr t (++ (Shp d) s)))
+(Arr Num (Shp)))
+(-> ((Arr t s))
+(Arr (Sigma ((d Dim)) (Arr Num (Shp d)))
+(Shp)))
+
+append
+
+(-> ((Arr t (++ (Shp m) s))
+(Arr t (++ (Shp n) s)))
+(Arr t (++ (Shp (+ m n)) s)))
+
+reverse
+
+(-> ((Arr t (++ (Shp d) s)))
+(Arr t (++ (Shp d) s)))
+
+rotate
+
+(-> ((Arr t (++ (Shp d) s))
+(Arr Num (Shp)))
+(Arr t (++ (Shp d) s)))
+
+fold
+
+(-> ((Arr (-> ((Arr t s) T) T) (Shp))
+T
+(Arr t (++ (Shp d) s)))
+T)
+
+reduce
+
+(-> ((Arr (-> ((Arr t s) (Arr t s))
+(Arr t s))
+(Shp))
+(Arr t (++ (Shp (+ 1 d)) s)))
+(Arr t s))
+
+scan
+
+filter
+
+read-nums
+
+(-> ((Arr (-> ((Arr u r) (Arr t s)) (Arr u r)) (Shp))
+(Arr u r)
+(Arr t (++ (Shp d) s)))
+(Arr u (++ (Shp d) r)))
+(-> ((Arr Bool d)
+(Arr t (++ (Shp d) s)))
+(Arr (Sigma ((k Dim)) (Arr t (++ (Shp k) s))) (Shp)))
+(-> () (Arr (Sigma ((k Dim)) (Arr Num (Shp k))) (Shp)))
+
+iota
+
+(-> ((Arr Num (Shp d)))
+(Arr (Sigma ((s Shape)) (Arr Num s)) (Shp)))
+
+reshape
+
+(-> ((Arr Num (Shp d))
+(Arr t r))
+(Arr (Sigma ((s Shape)) (Arr Num s)) (Shp)))
+
+Fig. 2. Common array-manipulation primitive operations and their Remora types
+
+9
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+10
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+Function
+
+Type
+
+iota
+
+(-> ((Arr Num (Shp d)))
+(Arr (Sigma ((s Shape)) (Arr Num s)) (Shp)))
+
+iota/v
+
+(-> ((Arr Num (Shp)))
+(Arr (Sigma ((d Dim)) (Arr t (Shp d))) (Shp)))
+
+iota/s
+
+(Pi ((s Shape))
+(-> () (Arr Num s)))
+
+iota/w
+
+(-> ((Arr t s))
+(Arr Num s))
+
+Fig. 3. Types for iota and its variants
+In a more programmer-friendly surface language, with automatic instantiation of polymorphic functions2 and conversion of bare atoms to scalar arrays, this might be written as:
+(λ ((n (Arr Num (Shp))))
+(unbox (len nums (iota/v n))
+(reduce + (append [0] nums))))
+Alternatively, the programmer might prefer to use iota/s to pass the desired result
+shape as a type index rather than as a term-level vector. In that case, there is no need to
+box the result array. In the automatic-instantiation shorthand, iota/s may be stylistically
+awkward, calling for the variant iota/w, which takes an extra array argument as a “shape
+witness” rather than instantiating at a shape index. Producing a number array whose shape
+matches some existing array xs could then be written as (iota/w xs) instead of ((i-app
+iota/s shape-of-xs)).
+The reshape function behaves similarly to iota, except that the atoms in the result
+array are drawn from the second argument, repeating them cyclically if necessary. So
+using reshape with the shape specification (array (2) 3 2) and the vector (array
+(5) 1 2 3 4 5) produces the 3 × 2 matrix (array (3 2) 1 2 3 4 5 1). Like iota,
+reshape benefits from alternative ways for the programmer to specify the result shape.
+2.2 Theory of type indices
+Type indices, given in program syntax as ι , represent individual dimensions, taken from N,
+and array shapes, taken from the free monoid on N. The theory of the free monoid on N
+includes as axioms the associativity of adding naturals and appending sequences as well as
+unique identity elements for addition (zero) and appending (the scalar shape, ):
+0+i = i+0 = i
+(i + j) + k = i + ( j + k)
+ ++ a = a ++  = a
+2
+
+This inference problem is beyond the scope of this paper.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+11
+
+The Semantic Foundations of Rank Polymorphism
+a
+
+b
+
+c
+
+d
+w
+
+Fig. 4. Overlap axiom, visualized: w is the overlapping portion of a and d.
+(a ++ b) ++ c = a ++ (b ++ c)
+As the free monoid, it also follows an equidivisibility rule which states that if two
+uses of the append operator give the same result, there is some completing subsequence,
+representing the overlap between each use’s larger argument (demonstrated in Figure 4):
+a ++ b = c ++ d =⇒ ∃w. (a ++ w = c ∧ w ++ d = b) ∨ (c ++ w = a ∧ w ++ b = d)
+A free monoid (on any set of generators) also has a homomorphism to the monoid
+formed by N under addition, with the property that only the free monoid’s identity element
+can be mapped to 0. This can be axiomatized with one additional function symbol L:
+L(a) = 0 =⇒ a = 
+L(a ++ b) = L(a) + L(b)
+Using equidivisibility and the homomorphism to the additive N monoid, we can define a
+· for prefix subtraction: a −
+· b = c iff b ++ c = a. For example, [3, 4, 5, 6] −
+·
+partial operator −
+· [4] is undefined.
+[3, 4] = [5, 6], whereas [3, 4, 5, 6] −
+Type checking only requires a very restricted fragment of this theory. Pairs of indices are
+only checked for equality in isolation from each other, and no information about an index
+(other than its sort) is given in the program. So the check is for the validity of a single
+equality—no connectives or quantifiers needed. This fragment can be decided efficiently
+by comparing indices written in canonical form. Two Dims which are equal must simplify
+to sums with the same constant component and the same coefficient on corresponding
+variables. For example,
+(+ x y 5 x) = (+ (+ x x) 5 y)
+is valid because both simplify to 2x + y + 5, whereas
+(+ q 5 y) = (+ (+ x x) 5 y)
+is false for any interpretation which does not assign q to twice the value assigned to x (and
+thus is not valid).
+To decide the validity of an equality on Shapes (i.e., sequences of naturals), we can
+again test by conversion to a canonical form: a sequence is written out as the concatenation
+of single Dims and Shape variables. Sorting rules guarantee that the individual elements of
+a sequence are natural numbers, and associativity permits nested appends to be collapsed
+away. Thus the index
+(++ (Shp 2 (+ x 5 x)) (++ d (Shp 3)))
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+12
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+canonicalizes to
+(++ (Shp 2) (Shp (+ x x 5)) d (Shp 3))
+To show that this process does produce a canonical form, consider two shapes in this
+form which differ, and focus on the leftmost differing position in their respective lists of
+appended components. If they are syntactically different singleton shapes—their respective
+contents are two different canonicalized naturals—then an assignment under which those
+naturals differ will also make the full shapes differ at this position. If one is a singleton
+(Shp ι ) and the other a variable s (of sort Shape), then an interpretation which assigns
+the variables in ι such that its components sum to n may also assign s to be the shape
+(Shp (+ n 1)). Again, an interpretation forces the shapes to be unequal. Finally, if this
+position has variables s and t, choose an interpretation mapping s to (Shp 1) and t to
+(Shp 2) to produce unequal interpretations of the whole shapes.
+Although type checking itself only requires this canonicalization process, constraintbased type inference would call for a more sophisticated solver due to the use of existential
+variables for choosing pieces of an index.
+In order to describe when arguments’ shapes are compatible, it is useful to impose a
+lattice structure on the universe of shapes. The lattice is built with the order ⊑ meaning
+that one shape is a prefix of another; a ⊤ is added to represent the join of incompatible
+shapes (we already have ⊥ = , as the empty shape is a prefix of every shape). For shapes
+s0 and s1 , we
+Ghave s0 ⊔ s1 6= ⊤ if and only if s0 ⊑ s1 or s1 ⊑ s0 . Generalizing to arbitrary
+finite joins, {s . . . } =
+6 ⊤ implies that the shapes s . . . are totally ordered, and the lattice
+structure means the shapes’ join is one of the shapes themselves.
+2.3 Static Semantics
+Typing Core Remora uses a three-part environment structure: Θ is a partial function mapping index variables to sorts; ∆ maps type variables to their kinds; and Γ maps term
+variables to their types. The stratification of Dependent ML-style types allows indices to
+be checked using only the sort environment and types using only the sort and kind environments. Following the definition of each judgment form, we give a handful of lemmas which
+will be needed for a type soundness argument in Subsection 2.5. The well-formedness
+judgments each come with a lemma stating that the judgment gives a unique result to each
+well-formed term and that unique result is preserved by substituting well-formed assignments for free variables. When we show type soundness for Remora, these results will be
+needed to prove the preservation lemma. Uniqueness of typing is particularly important
+for Remora, where the implicit iteration in function application (including index and type
+abstractions) is driven by the types ascribed to the function and argument expressions.
+Well-defined program behavior relies on having a unique decomposition of each array into
+a frame of cells.
+2.3.1 Sorting
+Figure 5 defines the sorting judgment, Θ ⊢ ι :: γ , which states that in sort environment
+Θ, the index ι has sort γ . Natural number literals have sort Dim. A sequence of indices is
+a Shape, provided that every element of the sequence is a Dim. Addition is used on Dim
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+13
+
+The Semantic Foundations of Rank Polymorphism
+Θ ⊢ ι :: γ
+n∈N
+Θ ⊢ n :: Dim
+
+S-NAT
+
+(x :: γ ) ∈ Θ
+Θ ⊢ x :: γ
+
+Θ ⊢ ι j :: Dim for each j
+S-P LUS
+Θ ⊢ (+ ι . . . ) :: Dim
+
+Θ ⊢ ι j :: Dim for each j
+
+S-VAR
+
+Θ ⊢ (Shp ι . . . ) :: Shape
+
+S-S HAPE
+
+Θ ⊢ ι j :: Shape for each j
+S-A PPEND
+Θ ⊢ (++ ι . . . ) :: Shape
+
+Fig. 5. Sorting rules
+arguments to produce a Dim. Shape arguments may be appended, to form another Shape.
+Variables may be bound at either sort, but they can only be introduced into the environment
+by index abstraction and unboxing terms—the index language itself has no binding forms.
+We give two results about the well-behaved nature of the sorting rules: No index inhabits
+both sorts (in the same environment), and replacing an index’s variables with appropriatelysorted indices does not change the sort.
+Lemma 2.1 (Uniqueness of sorting)
+If Θ ⊢ ι :: γ and Θ ⊢ ι :: γ ′ , then γ = γ ′ .
+Proof
+No non-variable index form is compatible with multiple sorting rules, so they can only have
+whichever sort their one compatible rule concludes. It remains to show that uniqueness
+holds for variables. Since Θ is a well-defined partial function, mapping variables to sorts,
+Θ(x) can only have one value. If Θ(x) = γ and Θ(x) = γ ′ , γ = γ ′ .
+Lemma 2.2 (Preservation of sorts under index substitution)
+If Θ, x :: γx ⊢ ι :: γ and Θ ⊢ ιx :: γx then Θ ⊢ ι[x 7→ ιx ] :: γ .
+Proof
+This is straightforward induction on the original sort derivation.
+2.3.2 Kinding
+Kinding rules are given in figure 6. The Array kind is only ascribed to types built by the
+array type constructor and type variables bound at that kind. The array type constructor
+requires as its arguments an Atom type and a Shape index. Base types are fundamental,
+non-aggregate types, such as Float or Bool, so they are Atoms. Function types have kind
+Atom, but their input and output types must be Arrays. This reflects the rule that application
+is performed on arrays, and the function produces an array result. Similarly, universal types
+and dependent products, describing type and index abstractions, must have an Array as
+their body, while they themselves are Atoms. This rules out types whose inhabitants would
+have to be syntactically illegal due to containing expressions instead of atoms as their
+bodies. Since boxes present arrays as atoms, dependent sum types also have an Array body
+and are kinded as Atoms. A universal type adds bindings for its quantified type variables to
+∆. Dependent products and sums do the same for their index variables in Θ.
+As with sorting of indices, we expect a well-kinded type to inhabit only a single kind
+(fixing a particular environment). The kinding system should also allow free index or
+
+ZU064-05-FPR
+
+paper
+
+14
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+Θ; ∆ ⊢ τ :: k
+
+(x :: k) ∈ ∆
+K-VAR
+Θ; ∆ ⊢ x :: k
+
+Θ; ∆ ⊢ B :: Atom
+
+K-BASE
+
+Θ; ∆, x :: k . . . ⊢ τ :: Array
+K-U NIV
+Θ; ∆ ⊢ (Forall ((x k) . . . ) τ ) :: Atom
+
+Θ; ∆ ⊢ τ j :: Array for each j
+Θ; ∆ ⊢ τ ′ :: Array
+K-F UN
+Θ; ∆ ⊢ (-> (τ . . . ) τ ′ ) :: Atom
+Θ, x :: γ . . . ; ∆ ⊢ τ :: Array
+K-P I
+Θ; ∆ ⊢ (Pi ((x γ ) . . . ) τ ) :: Atom
+
+Θ, x :: γ . . . ; ∆ ⊢ τ :: Array
+K-S IGMA
+Θ; ∆ ⊢ (Sigma ((x γ ) . . . ) τ ) :: Atom
+Θ ⊢ ι :: Shape
+Θ; ∆ ⊢ τ :: Atom
+K-A RRAY
+Θ; ∆ ⊢ (Arr τ ι ) :: Array
+
+K-A RRAY
+
+Fig. 6. Kinding rules
+type variables to be replaced with appropriately sorted or kinded indices or types without
+changing the original type’s kind.
+Lemma 2.3 (Uniqueness of kinding)
+If Θ; ∆ ⊢ τ :: k and Θ; ∆ ⊢ τ :: k′ , then k = k′ .
+Proof
+As with uniqueness of sorting, no non-variable type is compatible with multiple kinding
+rules. Since all kinding rules except for K-VAR ascribe a specific kind, the only remaining
+case is for type variables. The kind environment ∆ is a well-defined partial function, so
+∆(x) = k and ∆(x) = k′ imply k = k′ .
+Lemma 2.4 (Preservation of kinds under index substitution)
+If Θ, x :: γ ; ∆ ⊢ τ :: k and Θ ⊢ ι :: γ then Θ; ∆ ⊢ τ[x 7→ ιx ] :: k.
+Proof
+This is straightforward induction on the original kind derivation.
+Lemma 2.5 (Preservation of kinds under type substitution)
+If Θ; ∆, x :: kx ⊢ τ :: k and Θ; ∆ ⊢ τx :: kx then Θ; ∆ ⊢ τ[x 7→ τx ] :: k.
+Proof
+This is also provable by induction on the kind derivation for τ .
+2.3.3 Typing
+The typing rules in Figure 7 relate a full environment (Θ mapping index variables to sorts,
+∆ mapping type variables to kinds, and Γ mapping term variables to types), a term (whether
+an atom or an expression), and its type under that environment. Since an array type might
+have its shape described in multiple different ways, e.g., a vector of length 6 or a vector of
+length 1 + 5, the T-E QV rule makes reference to a type equivalence judgment (presented
+in full detail in §2.3.4) which reconciles such differences according to the algebraic theory
+of type indices (presented earlier in §2.2).
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+15
+
+The Semantic Foundations of Rank Polymorphism
+Θ; ∆; Γ ⊢ t : τ
+
+Θ; ∆; Γ ⊢ o : SJoK
+
+T-O P
+
+(x : τ ) ∈ Γ
+T-VAR
+Θ; ∆; Γ ⊢ x : τ
+
+Θ; ∆; Γ ⊢ a j : τ for each j
+Θ; ∆ ⊢ τ :: Atom
+Length Ja . . . K = ∏ n . . .
+Θ; ∆; Γ ⊢ (array (n . . . ) a . . . )
+: (Arr τ (Shp n . . . ))
+
+T-A RRAY
+
+Θ; ∆; Γ ⊢ e j : (Arr τ ι ) for each j
+Θ; ∆ ⊢ (Arr τ ι ) :: Array
+Length Je . . . K = ∏ n . . .
+T-F RAME
+Θ; ∆; Γ ⊢ (frame (n . . . ) e . . . )
+: (Arr τ (++ (Shp n . . . ) ι ))
+Θ; ∆; Γ, x : τ . . . ⊢ e : τ ′
+Θ; ∆ ⊢ τ :: Array for each j
+Θ; ∆; Γ ⊢ (λ ((x τ ) . . . ) e)
+: (-> (τ . . . ) τ ′ )
+
+Θ, x :: γ . . . ; ∆; Γ ⊢ v : τ
+Θ; ∆; Γ ⊢ (Iλ ((x γ ) . . . ) v)
+: (Pi ((x γ ) . . . ) τ )
+
+T-IL AM
+
+T-L AM
+
+Θ; ∆; Γ ⊢ t : τ ′
+τ∼
+= τ′
+T-E QV
+Θ; ∆; Γ ⊢ t : τ
+
+Θ; ∆ ⊢ τ :: Atom
+0 ∈ n ...
+Θ; ∆; Γ ⊢ (array (n . . . ) τ )
+: (Arr τ (Shp n . . . ))
+
+T-0A
+
+Θ; ∆ ⊢ τ :: Atom
+0 ∈ n ...
+Θ ⊢ ι :: Shape
+T-0F
+Θ; ∆; Γ ⊢ (frame (n . . . ) (Arr τ ι ))
+: (Arr τ (++ (Shp n . . . ) ι ))
+Θ; ∆, x :: k . . . ; Γ ⊢ v : τ
+Θ; ∆; Γ ⊢ (Tλ ((x k) . . . ) v)
+: (Forall ((x k) . . . ) τ )
+
+T-TL AM
+
+Θ ⊢ ι :: γ for each j
+Θ; ∆ ⊢ (Sigma ((x γ ) . . . ) τ ) :: Atom
+Θ; ∆; Γ ⊢ e : τ[x 7→ ι , . . . ]
+T-B OX
+Θ; ∆; Γ ⊢ (box ι . . . e (Sigma ((x γ ) . . . ) τ ))
+: (Sigma ((x γ ) . . . ) τ )
+
+Θ; ∆ ⊢ τ j :: k j for each j
+Θ; ∆; Γ ⊢ e : (Arr (Forall ((x k) . . . ) (Arr τu ιu )) ι f )
+T-TA PP
+Θ; ∆; Γ ⊢ (t-app e τ . . . ) : (Arr τu[x 7→ τ , . . . ] (++ ι f ιu ))
+Θ; ∆; Γ ⊢ e : (Arr (Pi ((x γ ) . . . ) (Arr τ p ι p )) ι f )
+Θ ⊢ ι j :: γ j for each j
+T-IA PP
+Θ; ∆; Γ ⊢ (i-app e ι . . . ) : (Arr τ p[x 7→ ι , . . . ] (++ ι f ι p[x 7→ ι , . . . ] ))
+Θ; ∆; Γ ⊢ es : (Arr (Sigma
+((x′i γ ) . . . ) τs ) ιs )
+
+Θ, xi :: γ . . . ; ∆; Γ, xe : τs x′i 7→ xi , . . . ⊢ eb : (Arr τb ιb )
+Θ; ∆ ⊢ (Arr τb ιb ) :: Array
+T-U NBOX
+Θ; ∆; Γ ⊢ (unbox (xi . . . xe es ) eb ) : (Arr τb (++ ιs ιb ))
+
+τ ′ ι ′ )) ι f )
+Θ; ∆; Γ ⊢ e f : (Arr (-> ((Arr τ ι ) . . . ) (Arr
+G
+ιp =
+ι f ιa . . .
+Θ; ∆; Γ ⊢ ea : (Arr τ (++ ιa ι )) . . .
+Θ; ∆; Γ ⊢ (e f ea . . . ) : (Arr τ ′ (++ ι p ι ′ ))
+
+T-U NBOX
+
+T-A PP
+
+Fig. 7. Typing rules
+The signature S , referenced in the T-O P rule, is a function mapping from primitive operators to their types. For example, SJ+K is (-> ((Arr Num (Shp)) (Arr Num (Shp)))
+(Arr Num (Shp))), meaning + is an operator which consumes two scalar numbers and
+produces one scalar number.
+Array literals and nested frames both include a length check: the number of atoms or
+cells must be equal to the product of the given dimensions. In the case of empty arrays,
+
+ZU064-05-FPR
+
+paper
+
+16
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+the length matching condition is fulfilled if and only if the array has a 0 as one of its
+dimensions. Term, type, and index abstractions all bind their arguments’ names in the
+appropriate environment.
+Typing function application starts by identifying the type of the expression in function
+position. It must be an array of functions, and the array’s entire shape ι f is treated as
+the function frame. The function input types, also arrays, specify the element type and
+cell shape for each argument. Each cell shape ι must be a suffix of the shape of the
+corresponding actual argument; the remainder ιa is the argument’s frame. The maximum of
+these frames under prefix ordering (where [2 3] ⊑ [2 3 2] but [2 3] 6⊑ [6 3 2]) is the principal
+frame ι p . That is, the function and argument arrays will all be lifted so as to have ι p as their
+frames when the program runs. Then ι p is used as the frame around the function’s output
+type to give the result type for this function application.
+Type and index application also require arrays in function position, but they can skip
+prefix comparison as type and index arguments do not come in arrays that must be split
+into frames of cells. Thus the function’s frame shape ι f passes through unaltered, and
+arguments are substituted into the body type τb to produce the resulting array’s element
+type.
+When constructing a box, a dependent-sum type annotation is provided. The box’s
+index components must match their declared sorts, and substituting them into the body
+of the dependent sum type must produce a type that matches the box’s array component.
+Unboxing requires that ebox , the expression being destructed, be a dependent sum. The
+unbox form names the sum’s index and array components and adds them to the sort and
+type environments when checking ebody . Although the index components are in scope
+while checking the body, information hidden by the existential is not permitted to leak
+out: The end result type τbody must be well-formed without relying on the extended sort
+environment. Unboxing a frame of boxes (scalars) produces a frame of result cells, similar
+to lifting function application.
+Anticipating a progress lemma, we prove a canonical-forms lemma for Remora’s typing
+rules. Following the atom/array distinction, we have separate lemmas for atoms and arrays.
+Although an atom can contain an array if that atom is a box, we avoid mutual dependence
+between the lemmas by not making any claim about the syntactic structure of the box’s
+contents.
+Lemma 2.6 (Canonical forms for atomic values)
+Let v be a well-typed atomic value, that is, ·; ·; · ⊢ v : τ .
+1. If τ is of the form (-> (τi . . . ) τo ),
+then v is of the form o or (λ ((x τi ) . . . ) e).
+2. If τ is of the form (Forall ((x k) . . . ) τu ),
+then v is of the form (Tλ ((xu k) . . . ) v).
+3. If τ is of the form (Pi ((x γ ) . . . ) τ p ),
+then v is of the form (Iλ ((x p γ ) . . . ) v).
+4. If τ is of the form (Sigma ((x γ ) . . . ) τb ),
+then v is of the form (box ι . . . vb (Sigma ((xb γ ) . . . ) τb′ )),
+with τ ∼
+= (Sigma ((xb γ ) . . . ) τb′ ).
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+17
+
+τ∼
+= τ′
+τ∼
+=τ
+
+TE QV-R EFL
+
+q
+y
+τ∼
+VALID ι ≡ ι ′
+= τ′
+TE QV-A RRAY
+(Arr τ ι ) ∼
+= (Arr τ ′ ι ′ )
+
+τi j ∼
+τo ∼
+= τo′
+= τi′ j for each j
+′
+∼ (-> (τ . . . ) τ ′ ) TE QV-F N
+(-> (τi . . . ) τo ) =
+i
+
+o
+
+
+
+
+
+with fresh x f . . .
+τ x 7→ x f , . . . ∼
+= τ ′ x′ 7→ x f , . . .
+TE QV-U NIV
+(Forall ((x k) . . . ) τ ) ∼
+= (Forall ((x′ k) . . . ) τ ′ )
+
+
+
+
+τ x 7→ x f , . . . ∼
+with fresh x f . . .
+= τ ′ x′ 7→ x f , . . .
+TE QV-P I
+(Pi ((x γ ) . . . ) τ ) ∼
+= (Pi ((x′ γ ) . . . ) τ ′ )
+
+
+
+
+with fresh x f . . .
+τ x 7→ x f , . . . ∼
+= τ ′ x′ 7→ x f , . . .
+TE QV-S IGMA
+∼
+(Sigma ((x γ ) . . . ) τ ) = (Sigma ((x′ γ ) . . . ) τ ′ )
+
+Fig. 8. Type equivalence
+5. If τ is of the form B,
+then v is of the form b.
+Proof
+The type derivation may end with T-E QV, so we consider the subderivation prior to all
+final T-E QV instances. We then examine which typing rules can ascribe a type of the right
+form and the identify what form the term must take to match those rule.
+Lemma 2.7 (Canonical forms for arrays)
+Let v be a well-typed value, that is, ·; ·; · ⊢ v : τ ,
+1. If τ is of the form (Arr (-> (τi . . . ) τo ) ι ),
+then v is of the form (array (n . . . ) f . . . ).
+2. If τ is of the form (Arr (Forall ((x k) . . . ) τu ) ι ),
+then v is of the form (array (n . . . ) (Tλ ((xu k) . . . ) vu ) . . . ).
+3. If τ is of the form (Arr (Pi ((x γ ) . . . ) τ p ) ι ),
+then v is of the form (array (n . . . ) (Iλ ((x p γ ) . . . ) vu ) . . . ).
+4. If τ is of the form (Arr (Sigma ((x γ ) . . . ) τb ) ι ),
+then v is of the form (array (n . . . ) (box ι . . . vb (Sigma ((xb γ ) . . . ) τb )) . . . ),
+with τ ∼
+= (Sigma ((xb γ ) . . . ) τb′ ).
+5. If τ is of the form (Arr B ι ),
+then v is of the form (array (n . . . ) b . . . ),
+with ·; ·; · ⊢ b : B for each of b . . . .
+Proof
+This proceeds like the proof for Lemma 2.6.
+2.3.4 Type equivalence
+Remora’s typing rules rely on a type-equivalence relation defined in Figure 8. The equivalence relation is essentially α -equivalence augmented with a check as to whether array
+
+ZU064-05-FPR
+
+paper
+
+18
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+shapes are guaranteed to be equal. We expect the relation ∼
+= actually to be an equivalence
+relation, i.e., reflexive, symmetric, and transitive. Only reflexivity has its own inference
+rule, so we now show symmetry and transitivity.
+Lemma 2.8 (Symmetry of ∼
+=)
+If τ ∼
+= τ ′ , then τ ′ ∼
+= τ.
+Proof
+This follows via straightforward induction on the derivation of τ0 ∼
+= τ1 .
+Lemma 2.9 (Transitivity of ∼
+=)
+If τ0 ∼
+= τ1 and τ1 ∼
+= τ2 , then τ0 ∼
+= τ2 .
+Proof
+This follows from induction on the derivations of τ0 ∼
+= τ1 and τ1 ∼
+= τ2 . Since both derivations τ1 , the structure of the equivalence rules prohibits the derivations from ending with
+different rules (other than TE QV-R EFL, which passes that structural requirement on to its
+premises).
+Theorem 2.1
+∼
+= is an equivalence relation.
+A type-equivalence relation should not cross kind boundaries. Violation of this principle
+would allow use of T-E QV to ascribe an ill-kinded type to a well-typed term. It follows
+directly from inspection of the equivalence rules that they will not relate an Atom with an
+Array, but correct use of type and index variables remains to be proven. To that end, we
+show that two equivalent types will be ascribed the same kind by the same environment.
+Lemma 2.10
+If Θ; ∆ ⊢ τ :: k and τ ∼
+= τ ′ , then Θ; ∆ ⊢ τ ′ :: k.
+Proof
+This result is proven induction on the derivation of τ ∼
+= τ ′ . In each case, the induction
+hypothesis converts a kind derivation for some fragment of τ into a kind derivation for a
+corresponding fragment of τ ′ (and similar for index fragments).
+We also expect type equivalence to be well-behaved under substitution. Ultimately,
+substituting equivalent types or indices into equivalent types ought to produce equivalent
+types. Proving that result by induction on derivation of equivalence is straightforward
+except for the R EFL case.
+Lemma 2.11
+If VALID Jι ≡ ι ′ K, then for any index variable x, τ[x 7→ ι ] ∼
+= τ[x 7→ ι ′ ].
+Proof
+This is provable using induction on the structure of τ . Only the case for arrays makes direct
+use of ι and ι ′ ; the other cases simply use the induction hypothesis to prove the premises
+of the derivation of τ[x 7→ ι ] ∼
+= τ[x 7→ ι ′ ].
+Lemma 2.12
+If τx ∼
+= τx′ , then for any type variable x, τ[x 7→ τx ] ∼
+= τ[x 7→ τx′ ].
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+19
+
+Proof
+We use induction on the structure of τ . The cases for universals, dependent products, and
+dependent sums require instantiating the induction hypothesis with a substitution of fresh
+type variables x f . . . . For example, when τ = (Forall ((xu k) . . . ) τu ), the induction
+hypothesis promises the equivalence of τu after substituting in x f . . . for xu . . . and also τx
+or τx′ for x.
+Theorem 2.2
+If τ ∼
+= τ ′ and τx ∼
+= τx′ , then for any type variable x, τ[x 7→ τx ] ∼
+= τ ′[x 7→ τx′ ].
+Proof
+We use induction on the derivation of τ ∼
+= τ ′ . In each case, the induction hypothesis
+provides equivalence derivations for corresponding fragments of τ[x 7→ τx ] and τ ′[x 7→ τx′ ],
+which can then be used to prove the substituted types themselves equivalent.
+Having defined the typing judgment and the type-equivalence relation on which it builds,
+we can now prove the usual results about typing in Remora. The T-E QV rule can allow
+many types to be ascribed to a single term, but we will prove that an environment and term
+can only map to a single equivalence class.
+Theorem 2.3 (Uniqueness of typing, up to equivalence)
+If Θ; ∆; Γ ⊢ t : τ and Θ; ∆; Γ ⊢ t : τ ′ , then τ ∼
+= τ ′.
+Proof
+This can be proven by induction on t, showing that all derivations of Θ; ∆; Γ ⊢ t : τ ′ must
+end with the same non-T-E QV rule (chosen according to the structure of t) followed by 0
+or more T-E QV instances, which keeps the result in the same equivalence class as τ .
+We also require guarantees about substitution in terms: replacing an index variable with
+an appropriately-sorted index, a type variable with an appropriately-kinded type, or a term
+variable with an appropriately-typed expression should not change the type of the original
+term. If substitution turns a term t with type τ into t′ with type τ ′ , where τ ∼
+= τ ′ , we can add
+′
+a T-E QV at the end of the new type derivation to conclude t has type τ . As such, we do
+not need to include an “up to equivalence” caveat when stating the preservation of typing
+lemmas.
+Lemma 2.13 (Preservation of types under index substitution)
+If Θ, x :: γ ; ∆; Γ ⊢ t : τ and Θ ⊢ ι :: γ then Θ; ∆; Γ[x 7→ ιx ] ⊢ t[x 7→ ιx ] : τ[x 7→ ιx ].
+Proof
+This is straightforward induction on the derivation of Θ, x :: γ ; ∆; Γ ⊢ t : τ .
+Lemma 2.14 (Preservation of types under type substitution)
+If Θ; ∆, x :: k; Γ ⊢ t : τ and Θ; ∆ ⊢ τx :: k then Θ; ∆; Γ[x 7→ τx ] ⊢ t[x 7→ τx ] : τ[x 7→ τx ].
+Proof
+This is straightforward induction on the derivation of Θ; ∆, x :: k; Γ ⊢ t : τ .
+Lemma 2.15 (Preservation of types under term substitution)
+If Θ; ∆; Γ, x : τx ⊢ t : τ and Θ; ∆; Γ ⊢ ex : τx then Θ; ∆; Γ ⊢ t[x 7→ ex ] : τ .
+
+ZU064-05-FPR
+
+paper
+
+20
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+Proof
+We use induction on the derivation of Θ; ∆; Γ, x : τx ⊢ t : τ .
+We call an environment well-formed, noted as Θ; ∆ ⊢ Γ, if for every binding x : τ ∈ Γ,
+we can derive Θ; ∆ ⊢ τ :: Array. This is the expected case, rather than permitting τ to have
+kind Atom, because a lone variable is an expression and ought to stand for an array value.
+When we show that the typing judgment only ascribes types of the appropriate kind,
+the case for the T-E QV rule relies on the earlier lemma that the type equivalence relation
+respects kinding, i.e., two equivalent types will have the same kind when checked in the
+same environment.
+Theorem 2.4 (Ascription of well-kinded types)
+Given Θ; ∆; Γ ⊢ t : τ where Θ; ∆ ⊢ Γ:
+• If t is an expression, then Θ; ∆ ⊢ τ :: Array
+• If t is an atom, then Θ; ∆ ⊢ τ :: Atom
+Proof
+This follows from induction on the derivation of Θ; ∆; Γ ⊢ t : τ . It is not sufficient to
+point out that each typing rule ascribes a type whose form matches the appropriate kind.
+Elimination-form cases call for a little extra work. For U NBOX, the kind check on the
+result type is necessary to ensure that existentially quantified variables do not leak out.
+The A PP case must ensure that index variables in the ascribed type actually appear in the
+environment. This is guaranteed because the principal frame is always chosen to be one of
+the function- or argument-position frames.
+2.4 Dynamic Semantics
+In the dynamic semantics for Remora, the way function application is lifted to work on
+aggregate data depends on the types of the function and argument terms. Consulting type
+information avoids a “hole” in the semantics of untyped array-oriented code, where a frame
+whose shape includes a 0 dimension evaluates to an array with indeterminate shape—
+there are no concrete cells whose shape can be used to determine the overall shape of the
+resulting array. Instead, the function’s type tells us the shape of the resulting cells, even
+when there are zero such cells.
+The small-step operational semantics, given in Figure 10, assumes every atom or expression has been tagged with its type. For example, β -reduction requires that each atom
+in the function position array have input types τ . . . and that the argument arrays’ types also
+match τ . . . . This matching is still subject to the type equivalence rules described in §2.3,
+e.g., a function tagged as having input type (Array Int (++ (Shp 3) (Shp 4))) can
+be applied to an argument tagged with type (Array Int (Shp 3 4)). Because every
+term now has type annotations attached, we drop the “empty” array and frame syntactic
+forms. Their replacements use the standard array and frame syntax with an empty list of
+atoms or cells, and the atom or cell type is implied by the expression’s type annotation.
+Several list-processing metafunctions are used in defining the reduction rules. These
+metafunctions are defined in Figure 9. Splitn turns a list into a list of lists, made up of the
+consecutive length-n pieces of the original list. For example, Split3 J(1 2 3 4 5 6)K is
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+21
+
+Splitn J(a1 , . . . , am )K = ((a1 , . . . , an ), (an+1 , . . . , a2n ), . . . , (am−n+1 , . . . , am ))
+
+Repn J(a1 , . . . , am )K = (a1,1 , . . . , a1,n , . . . , am,1 , . . . , am,n ) where ai, j = ai
+q
+y
+Concat ((a1,1 , . . . , a1,n ), . . . , (am,1 , . . . , am,n )) = (a1,1 , . . . , a1,n , . . . , am,1 , . . . , am,n )
+Transpose((a1,1 , . . . , a1,n ), . . . , (am,1 , . . . , am,n )) = ((a1,1 , . . . , am,1 ), . . . , (an,1 , . . . , am,n ))
+
+Fig. 9. List-processing metafunctions
+((1 2 3) (4 5 6)). Concat flattens a list of lists into a single list, effectively reversing
+a Split. Repn constructs a new list by repeating each element of the original list n times.
+Rep2 J(0 1)K is (0 0 1 1). Used on nested lists, the inner lists are treated atomically:
+Rep2 J((1 2 3) (4 5 6))K is ((1 2 3) (1 2 3) (4 5 6) (4 5 6)). Transpose takes
+a list of lists, where the inner lists all have the same length, and produces a new list of lists
+whose ith element contains the ith elements of each original inner list.
+The reduction rules themselves are given in Figure 10. Remora’s function application
+is split into stages for replicating cells to make frame shapes match (lift), mapping the
+functions to corresponding argument cells (map), and gathering the result cells back into
+an array (collapse).
+Performing a lift step identifies the function array’s frame, the sequence [n f . . . ], and
+each argument’s frame, [na . . . ]. Then the sequence [n p . . . ] is chosen to be the largest frame
+according to prefix ordering. We require that at least one function or argument frame be
+different from the principal frame—otherwise, a map step would be appropriate instead.
+Each argument’s cell size nac is the product of the dimensions [nin . . . ] of the function’s
+input type at that position; the function array’s cell size is always 1. The number of replicas
+needed for each cell (nfe for the function and nfa for each argument) is determined by
+multiplying the dimensions that must be added to each corresponding frame to produce
+the principal frame, i.e., the principal frame minus whatever prefix was already present
+in the original array’s shape. Given these numbers, we split each array’s atom list into its
+cells, replicate those cells to match the new array shapes, and then concatenate each array’s
+replicated cells to produce the new function and argument arrays. Type annotations on the
+individual arrays update to reflect their new shapes, but the application form’s type remains
+unchanged.
+A map step is possible when every piece of a function application has the same frame
+shape. Then the application becomes a frame of application forms, which themselves all
+have scalar principal frame. This requires breaking each argument array’s atom list into its
+individual cells’ atom lists, then transposing to match the first cell of each argument with
+the first function, the second cell of each argument with the second function, and so on.
+When function application has a scalar in function position, and every argument array matches the function’s corresponding input type, then we can β -reduce or δ -reduce.
+β -reduction performs conventional λ -calculus substitution. The δ rule uses a family of
+metafunctions, each associated with a primitive operator. No frame construct is necessary
+in either result, as this is the degenerate case of function lifting—the principal frame is
+scalar.
+Applying type and index abstractions is handled by the tβ and iβ rules. The application
+frame is the shape of the array of type or index abstractions, since there are no argument
+
+ZU064-05-FPR
+
+paper
+
+22
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+arrays. Every Tλ or Iλ is applied to the full list of type or index arguments. Substitution
+into the body of each abstraction should be read as affecting type annotations as well as
+subterms: if we are replacing the type variable T with Int, then x(Array T (Shp 3)) becomes
+x(Array Int (Shp 3)) .
+Once a frame has every one of its cells reduced to an array literal, the nested representation can be merged into a single literal. In the case where one of n . . . is 0, there will
+be no cells to examine to determine the cell dimensions n′ . . . , so this information is taken
+from the type annotation on the frame form. The type annotation itself passes through
+unchanged. The atom lists from the cells are concatenated to produce the collapased array’s
+atom list.
+Destructing a box with an unbox form behaves like a conventional let. The result is the
+body e, where the index variables xi . . . are replaced with the box’s indices ι . . . , and the
+term variable xe is replaced with the contained array v.
+
+2.5 Type Soundness
+The value of a type soundness theorem for Remora is not only assurance that well-typed
+programs do not suffer from shape-mismatching errors. It also ensures that the types ascribed to program terms accurately describe the shapes of the data those terms compute.
+That is the guarantee that justifies a compiler’s use of the type system as a static analysis
+for array shape.
+With supporting lemmas, such as canonical forms and substitution, already taken care
+of, we now establish progress and preservation lemmas. Since we have not committed to a
+collection of primitive operators that are all total functions, the progress lemma acknowledges the possibility of non-shape errors, such as division by zero. However, we do assume
+that any value returned by a primitive operator inhabits that operator’s output type.
+Lemma 2.16 (Progress)
+Given an expression e such that ·; ·; · ⊢ e : τ , one of the following holds:
+• e is a value v
+• There exists e′ such that e 7→ e′
+• e is E [((array () o) v . . . )] where o is a partial function applied to appropriatelytyped values outside its domain.
+Proof
+We use induction on the derivation of ·; ·; · ⊢ e : τ . We consider only cases for typing rules
+which apply to expressions (as opposed to atoms). Since we do not reduce under a binder,
+our assumed type derivation ensures that the reducible subexpression of e is also typable
+using an empty environment.
+An array form which is not already a value must have some non-value atom. That atom
+must itself contain a non-value expression, with its own type derivation. So the induction
+hypothesis implies that it can take a reduction step or is a mis-applied primitive operator.
+Similar reasoning applies to frame forms: either we have a collapse redex, or some cell
+subexpression in the frame can make progress.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+23
+
+((array (n f . . . ) v f . . . )(Arr (-> ((Arr τi (Shp ni ... )) ... ) τo ) (Shp n f ... ))
+(array (na . . . ni . . . ) va . . . )(Arr τi (Shp na ... ni ... )) . . . )
+7→lift
+((array (n p . . . )r
+q
+q
+yyz (Arr (-> ((Arr τ (Shp n ... )) ... ) τ ) (Shp n ... ))
+i
+i
+o
+p
+Concat Repnfe Split1 v f . . .
+)
+(array (n p . . . nqi . . .) q
+yy
+Concat Repnae Splitnac Jva . . . K )(Arr τi (Shp n p ... ni ... )) . . . )
+where
+
+Not all of n f . . . , (na . . . ) . . . are equal
+
+Gq
+
+y
+np . . .
+∏
+
+np . . . =
+n f . . . (na . . . ) . . .
+nfe =
+∏ nf ...
+
+
+np . . .
+∏
+...
+nac . . . =
+nae . . . =
+∏ (ni . . . ) . . .
+∏ (na . . . )
+((array (n f . . . ) v f . . . )(Arr (-> ((Arr τi (Shp ni ... )) ... ) τo ) (Shp n f ... ))
+(array (n f . . . ni . . . ) va . . . )(Arr τi (Shp n f ... ni ... )) . . . )
+7→map
+(frame (n f . . . )
+((array () v f )(Arr (-> ((Arr τi (Shp ni ... )) ... ) τo ) (Shp))
+(array (ni . . . ) vc . . . )(Arr τi (Shp ni ... )) . . . )τo . . . )
+where
+nc . . . = (∏ ni . . . ) .q. .
+y
+((vc . . . )q. . . ) . .y. = Transpose Splitnc Jva . . . K . . .
+Length n f . . .
+> 0
+((array () (λ ((x τ ) . . . ) e)) vτ . . . )
+7→β e[x 7→ vτ , . . . ]
+(t-app (array (n . . . ) (Tλ ((x k) . . . ) e) . . . ) τ . . . )
+7→tβ (frame (n . . . ) e[x 7→ τ , . . . ] . . . )
+(i-app (array (n . . . ) (Iλ ((x γ ) . . . ) e) . . . ) ι . . . )
+7→iβ (frame (n . . . ) e[x 7→ ι , . . . ] . . . )
+′
+
+(frame (n . . . ) (array (n′ . . . ) v . . . ) . . . )(Arr τ (Shp n ... n ... ))
+′
+7→collapse (array (n . . . n′ . . . ) Concat J(v . . . ) . . . K)(Arr τ (Shp n ... n ... ))
+(unbox (xi . . . xe (array (ns . . . ) (box ι . . . v τ ) . . . )) e)
+7→unbox (frame (ns . . . ) e[xi 7→ ι , . . . , xe 7→ v])
+
+Fig. 10. Dynamic semantics for Remora
+
+An unbox form can either make progress in the box position (via the induction hypothesis) or take an unbox step. Similarly, a type or index applications can make progress in
+function position or take tβ or iβ step.
+The function application case splits into subcases depending on whether the function
+and argument arrays are fully reduced and if so what their frame shapes are. If they are all
+
+ZU064-05-FPR
+
+paper
+
+24
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+value forms, we have all scalar frames (a β or δ redex) or all identical non-scalar frames (a
+map redex), or non-identical prefix-compatible frames (a lift redex). Prefix-incompatible
+frames are ruled out by the type derivation.
+Lemma 2.17 (Preservation)
+Let Θ, ∆, Γ be a well-formed environment, i.e., Θ; ∆ ⊢ Γ. If Θ; ∆; Γ ⊢ e : τ and e 7→ e′ then
+Θ; ∆; Γ ⊢ e′ : τ .
+Proof
+We use induction on the derivation of ·; ·; · ⊢ e : τ . An array form which can take a
+reduction step must contain a reducible subexpression. Many typing rules give rise to
+subcases where the e itself is not a redex but contains some subexpression er which steps
+to e′r . In these situations, the typing derivation for er is included in that for e, so replacing
+that subderivation with one for e′r (deriving the same type, according to the induction
+hypothesis) produces a derivation of ·; ·; · ⊢ e′ : τ .
+The remaining nontrivial subcases each correspond to particular reduction rules. As in
+proving Progress, the T-A PP case is split into subcases based on the function and argument
+frames. When frames are non-identical but prefix-compatible, the resulting lift reduction
+produces an application form with the same principal frame and thus the same result type.
+When we have identical non-scalar frames, the map reduction produces a frame form
+whose frame shape is equal to the application form’s principal frame and whose cell shape
+and atom type is the same as the function’s return shape and atom type. This gives it
+a type equivalent to that of the map redex. With a scalar principal frame, we have a δ
+redex (trivial) or β redex (follows from Lemma 2.15, preservation of types under term
+substitution). Reasoning for type and index application forms is similar (via Lemma 2.13
+and Lemma 2.14 respectively). A reducible unbox form also substitutes a value in for a
+variable which is intended to have the same type, so Lemma 2.15 again ensures the result
+type is τ .
+Theorem 2.5 (Type soundness)
+If ·; ·; · ⊢ e : τ , then either e diverges, there exists v such that e 7→∗ v and ·; ·; · ⊢ v : τ ,
+or there exist partial function o and appropriately-typed arguments v . . . such that e 7→∗
+E [((array () o) v . . . )].
+Proof
+We argue coinductively using the sequence of reduction steps from e. For any well-typed
+e, Progress (Lemma 2.16) implies that either e has the form v, e has the form E[((array
+() o) v . . . )], or e 7→ e′ . In the first case, the reduction sequence terminates in a value,
+so we have e 7→∗ v. Furthermore, Preservation (Lemma 2.17) implies that ·; ·; · ⊢ v : τ In the
+second case, the reduction sequence terminates in a mis-applied primitive operator. In the
+third case, Preservation implies that ·; ·; · ⊢ e′ : τ .
+3 Type Erasure
+The dynamic semantics given in Section 2 relies on ubiquitous type annotations in order
+to determine how function application will proceed or how a frame of sub-arrays should
+collapse to a single array. While the possible case of constructing a frame with no actual
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+25
+
+result cells whose shape can be inspected can only be resolved by consulting a type annotation, the types themselves contain more information than is strictly needed. For example, it
+does not matter whether we are collapsing an empty frame of functions, an empty frame of
+integers, or an empty frame of boxes. The result shape is the same, regardless of the type of
+the atoms contained within the cells. All we truly need is the resulting shape (alternatively,
+the result cells’ shape). Similarly, evaluating a function application requires knowing the
+expected cell shapes for the arguments, but it could, in principle, be done without knowing
+anything about their atoms. Function application is still tagged with a result shape, again
+to head off issues arising from mapping over an empty frame.
+In a type-erased version of Remora, we only need the term and index levels—the syntactic class of types is discarded. The syntax for erased Remora is given in Figure 11. Note
+that the grammar of type indices from Figure 1 is still in use here, although expressions,
+atoms, and their corresponding function and value-form subsets are now replaced with
+type-erased versions.
+Evaluation in erased Remora proceeds similarly to explicit Remora. A function-application
+form has a principal frame chosen to be the largest of the function and argument frames,
+and a lift reduction replicates the function and argument arrays’ atoms to bring all of
+the frames into agreement. The argument frames themselves are identified based on the
+individual argument positions’ cell-shape annotations, rather than by inspecting a type
+annotation on the array in function position. A map reduction turns an application form
+where all pieces have the same frame into a frame form, where the end-result shape
+matches the result shape tag on the original application. Index application also maps over
+an array of index functions, producing a frame of substituted function bodies. Since the
+type level has been eliminated, there are no tλ and t-app forms and no need for a t β
+reduction rule.
+The translation from explicit Remora to erased Remora consists of three erasure funcd AJ·K : Atom → Atom,
+[ and T J·K : Type → Index. These functions
+tions: EJ·K : Expr → Expr,
+are defined in Figure 13.
+d given in Figure 14, which is not needed for definWe also define CJ·K : Ctxt → Ctxt,
+ing the erased form of an explicit Remora program but is useful for demonstrating their
+equivalence.
+Types in explicit Remora are turned into indices in erased Remora. These indices are
+the dynamic residue of types, in the same sense that term-level values are dynamic, though
+the are still subject to a static discipline which governs their values and their relation to
+the array values they describe. Array types become just the shapes used to construct them,
+whereas functions, universals, dependent sums and products, and base types become the
+“scalar” shape. Extracting the index components of all types means that type variables can
+be turned into index variables, which will stand for the index component of whatever type
+the variable originally stood for. This translation captures exactly the information that a
+frame form needs in the event that there are no cells. By extension, the term and index
+application forms also get the bookkeeping information needed by the frames they will
+eventually become.
+For example, consider a function term whose type is (-> (s (Arr t (Shp))) (Arr
+t (Shp k))), where s, t, and k are bound as Array, Atom, and Dim respectively. This
+function produces a vector of some statically uncertain length containing atoms of uncer-
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+26
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+d ::=
+b
+e ∈ Expr
+|
+|
+|
+|
+|
+[ ::=
+b
+a ∈ Atom
+
+x
+(array (n . . . ) b
+a ... )
+e ... )
+(frame ι b
+(b
+e f (b
+ea ιa ) . . . ιr )
+(i-app b
+e f ιa . . . ιr )
+(unbox (xi . . . xe b
+es ) beb ιb )
+
+b
+| bf
+| (Iλ (x . . . ) b
+v)
+| (box ι . . . b
+e)
+bf ∈ F
+[
+unc ::=
+| o
+e)
+| (λ (x . . . ) b
+c ::=
+b
+v ∈ Val
+x
+| (array (n . . . ) b
+v ... )
+[ ::=
+b
+v ∈ Atval
+b
+| bf
+| (Iλ (x . . . ) b
+v)
+| (box ι . . . b
+v)
+b ∈ Ctxt
+d ::=
+E
+
+b b
+a ... )
+| (array (n . . . ) b
+v . . . (box ι . . . E)
+b
+| (frame ι b
+v ... E b
+e ... )
+b (b
+| (E
+ea ιa ) . . . ιr )
+b ιa ) (b
+| (b
+e f (b
+va ιa ) . . . (E
+ea ιa ) . . . ιr )
+b ιa . . . ιr )
+| (i-app E
+b b
+| (unbox (xi . . . xe E)
+eb ιb )
+b ιb )
+| (unbox (xi . . . xe b
+vs ) E
+bt ∈ T[
+erm ::= b
+e | b
+a
+
+Type-erased expressions
+Variable reference
+Array, containing atoms
+Frame, containing sub-arrays
+Term application
+Index application
+Let-binding box contents
+Type-erased atoms
+Base value
+Function
+Index abstraction
+Boxed array
+Type-erased functions
+Primitive operator
+Term abstraction
+Type-erased values
+
+Type-erased atomic values
+
+Type-erased evaluation contexts
+
+Type-erased terms
+
+Fig. 11. Abstract syntax for type-erased Remora
+
+tain type. When we apply this function, the explicitly typed application form describes the
+resulting array’s type. If our arguments are a single s and a n × 4 matrix of numbers, with n
+also bound as a Dim, the principal frame shape is (Shp n 4). So we will have result type
+(Arr Num (Shp n 4 k)). Type-erasing the application form must still preserve enough
+information to produce an array of the correct shape, even if n turns out to be 0, leaving us
+with no result cells whose shape we can inspect. However, the dynamic semantics does not
+rely on knowing that the result array contains Nums. The binders for index variables n and
+k, which must be either Iλ or unbox, are still present in the type-erased program, since the
+indices they eventually bind to those variables will affect the program’s semantics. The Tλ s
+which bind s and t turn into Iλ s, though the variable t is never used in the type-erased
+program. If any type argument was bound to s in the original program, we replace it with
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+27
+
+((array (n f . . . ) b
+vf ...)
+((array (na . . . ni . . . ) b
+va . . . ) (Shp ni . . . )) . . .
+ιr )
+7→lift
+r
+q
+q
+yyz
+vf ...
+)
+((array (n p . . . ) Concat Repnfe Split1 b
+q
+q
+q
+yyy
+((array (n p . . . ni . . . ) Concat Repnae Splitnac b
+va . . .
+) (Shp ni . . . )) . . .
+ιr )
+where
+
+Not all of n f . . . , (na . . . ) . . . are equal
+
+Gq
+
+y
+np . . .
+∏
+
+np . . . =
+n f . . . (na . . . ) . . .
+nfe =
+∏ nf ...
+
+
+np . . .
+∏
+nae . . . =
+...
+nac . . . =
+∏ (ni . . . ) . . .
+∏ (na . . . )
+((array (n f . . . ) b
+vf ...)
+((array (n f . . . ni . . . ) b
+va . . . ) (Shp ni . . . )) . . .
+ιr )
+7→map
+(frame ιr
+((array () b
+v f ) ((array (ni . . . ) b
+vc . . . ) (Shp ni . . . )) ιc ) . . . )
+where
+nc . . . = (∏ ni . . . ) .q. .
+y
+((vc . . . )q. . . ) . .y. = Transpose Splitnc Jva . . . K . . .
+Length n f . . .
+> 0
+
+· (Shp n f . . . ) . . .
+ιc . . . =
+ιr −
+e)) ((array (ni . . . ) bv) (Shp ni . . . )) . . . ιr )
+((array () (λ (x . . . ) b
+7→β be[x 7→ b
+v, . . . ]
+(i-app (array (n f . . . ) (iλ (x . . . ) b
+e) . . . ) ιa . . . ιr )
+7→iβ (frame ιr b
+e[x 7→ ιa , . . . ] . . . )
+(frame (Shp n . . . ) (array (n′ . . . ) v . . . ) . . . )
+7→collapse (array (n . . . n′ . . . ) Concat J(v . . . ) . . . K)
+(unbox (xi . . . xe (array (ns . . . ) (box ι . . . bv))) be ιb )
+7→unbox (frame (++ (Shp ns . . . ) ιb ) e[xi 7→ ι , . . . , xe 7→ b
+v])
+
+Fig. 12. Dynamic semantics for erased Remora
+its shape. All occurrences of s from the original program now stand for an array shape
+rather than a full array type.
+We develop a bisimulation argument to show that the behavior of an explicitly typed
+term matches the behavior of its erased form. We define the space S of machine states to
+be the sum of the set of well-typed explicit Remora terms and the set of their type-erased
+\T , where ExprT = {e ∈ Expr|·; ·; · ⊢ e : τ } and Expr
+\T =
+forms. That is, S = ExprT ⊎ Expr
+{EJeK |e ∈ ExprT }. Transitions in the machine match the explicit and erased languages’
+respective 7→ relations. We also define the “erasure equivalence” relation ∼
+=E on machine
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+28
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+EJ(array (n . . . ) a . . . )τr K = (array (n . . . ) AJaK . . . )
+
+EJ(frame (n . . . ) e . . . )τr K = (frame (T Jτr K ) EJeK . . . )
+z
+q y
+(Arr (-> (τi ... ) τo ) ι f )
+E (e f
+ea . . . )τr = (E e f (EJea K T Jτi K ) . . . T Jτr K )
+q
+y
+q y
+E (t-app e f τa . . . )τr = (i-app E e f T Jτa K . . . T Jτr K )
+q
+y
+q y
+E (i-app e f ιa . . . )τr = (i-app E e f ιa . . . T Jτr K )
+q
+y
+E (unbox (xi . . . xe es ) eτbb ) = (unbox (xi . . . xe EJes K ) EJeb K T Jτb K )
+r
+
+AJoK = o
+AJbK = b
+AJ(λ ((x τ ) . . . ) e)K = (λ (x . . . ) EJeK )
+AJ(Tλ ((x k) . . . ) v)K = (Iλ (x . . . ) EJvK )
+AJ(Iλ ((x γ ) . . . ) v)K = (Iλ (x . . . ) EJvK )
+AJ(box ι . . . e τ )K = (box ι . . . EJeK )
+
+T JxK = x
+
+T J(Arr τ ι )K = ι
+
+T Jτ K = (Shp)
+
+RJaK = AJaK
+
+otherwise
+
+RJeK = EJeK
+
+Fig. 13. Type erasure for Remora
+states as the equivalence closure of the relation imposed by EJ·K. Before we show that ∼
+=E
+is a bisimulation, several intermediate results are needed.
+First, the bisimulation proof will in one case need to reach deep into an expression to
+find the next redex. A compositionality property of the erasure rule will make it possible
+to reason about the redex and its reduced form separately from the evaluation context in
+which it is embedded.
+Lemma 3.1 (Erasure in context)
+Given an evaluation context E and expression e, where E[e] is well-typed, EJE[e]K =
+CJEK[EJeK].
+Proof
+This follows from straightforward induction on E.
+We will also rely on a series of lemmas showing that substitution commutes with erasure.
+Lemma 3.2
+RJt[x 7→ EJex K]K = RJtK[x 7→ EJex K]
+Proof
+This is straightforward induction on t.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+CJK = 
+CJ(array (n . . . ) v . . . (box ι . . . E τ ) a . . . )K
+= (array (n . . . ) AJvK . . . (box ι . . . CJEK ) AJaK . . . )
+CJ(frame (n . . . ) v . . . E e . . . )τr K
+
+= (frame (T Jτr K ) EJvK . . . CJEK EJeK . . . )
+z
+r
+C (E(Arr (-> (τi ... ) τo ) ι f ) ea . . . )τr
+= (CJEK (EJea K T Jτi K ) . . . T Jτr K )
+r
+z
+(Arr (-> (τ1 ... τ2 τ3 ... ) τo ) ι f )
+C (e f
+v1 . . . E e3 . . . )τr
+q y
+= (E e f (EJva K T Jτ1 K ) . . . (CJEK T Jτ2 K ) (EJe3 K T Jτ3 K ) . . . )
+
+CJ(t-app E τa . . . )τr K
+
+= (i-app CJEK T Jτa K . . . T Jτr K )
+
+CJ(i-app E ιa . . . )τr K
+
+= (i-app CJEK ιa . . . T Jτr K )
+
+CJ(unbox (xi . . . xe E) eb )K
+
+= (unbox (xi . . . xe CJEK ) EJeb K )
+
+Fig. 14. Type-erasing Remora evaluation contexts
+Lemma 3.3
+T Jτ[x 7→ τx ]K = T Jτ K[x 7→ T Jτx K]
+Proof
+This is straightforward induction on τ .
+Lemma 3.4
+RJt[x 7→ τx ]K = RJtK[x 7→ T Jτx K]
+Proof
+This is straightforward induction on t.
+Lemma 3.5
+T Jτ[x 7→ ιx ]K = T Jτ K[x 7→ ιx ]
+Proof
+This is straightforward induction on τ .
+Lemma 3.6
+RJt[x 7→ ιx ]K = RJtK[x 7→ ιx ]
+Proof
+This is straightforward induction on t.
+Lemma 3.7 (Values erase to values)
+For any well-typed term t,
+• If t has the form v, then RJtK has the form b
+v
+
+29
+
+ZU064-05-FPR
+
+paper
+
+30
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+• If t has the form v, then RJtK has the form bv
+
+Proof
+We use induction on t. The only nontrivial cases are box and array forms, which may be
+values or may contain incomplete computation. The contents of a box value must itself be
+a value, which the induction hypothesis implies will erase to a value. Similarly, an array
+value contains only atomic values, which erase to atomic values.
+Lemma 3.8 (Lockstep)
+For any well-typed e, one of the following holds:
+• e has the form v, and EJeK has the form b
+v
+′
+′
+• e 7→ e , and EJeK 7→ EJe K
+• e 67→, and EJeK 67→
+Proof
+We prove this by induction on e.
+We rely on Lemma 3.1 (erasure in context) when e is a redex er within an evaluation
+context E other than . If er 67→ because we have a mis-applied primitive operator, then the
+same is true for EJer K, so EJeK is also an evaluation context around a mis-applied primitive
+operator. Otherwise, er 7→ e′r , and the induction hypothesis implies that EJer K 7→ EJe′r K. So
+EJeK 7→ EJe′ K, the erased context filled with e′r .
+Values are handled by Lemma 3.7. For the remaining cases—redexes—straightforward
+symbol pushing shows that erased Remora’s reduction rules follow those of Remora.
+Since we have a deterministic operational semantics for both explicitly typed Remora
+and type-erased Remora, the lockstep lemma also works in reverse. If an erased term takes
+an evaluation step, its preimage cannot be a value form or stuck state. The preimage must
+therefore step to some result expression, which itself erases to the same result. Similarly,
+a value form or stuck state in erased Remora cannot have a preimage which takes an
+evaluation step.
+Corollary 3.1 (Reverse lockstep)
+If EJeK 7→ EJe′ K, then for any e′′ such that e 7→ e′′ , we have e′ ∼
+=E e′′ , and at least one such
+′′
+e exists. If EJeK 67→, then e 67→.
+\T , where ExprT =
+Recall our relation ∼
+=E on the set of machine states S = ExprT ⊎ Expr
+\T is the
+{e ∈ Expr|·; ·; · ⊢ e : τ }, i.e.the set of well-typed explicitly-typed terms, and Expr
+image of ExprT under type erasure. ∼
+=E is the equivalence closure of the relation given by
+the erasure function EJ·K. That is, ∼
+=E is the least relation which relates two states s and w
+iff any of the following hold:
+1. s ∈ ExprT and EJsK = w (erasure proper)
+2. s =α w (reflexivity)
+3. w ∼
+=E s (symmetry)
+4. s ∼
+=E w (transitivity)
+=E s′ and s′ ∼
+Expanding the erasure relation based on EJ·K to include both symmetry and transitivity relates any two explicitly typed expressions which produce α -equivalent erased terms. A ∼
+=E
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+31
+
+equivalence class consists of a single erased Remora expression and all of its preimages.
+There can be only one erased Remora expression because type erasure is a well-defined
+function (i.e., no single explicitly typed expression can erase to multiple different results).
+Formally, every ∼
+=E equivalence class must have the form
+{be} ⊎ {e ∈ Expr | EJeK = b
+e}
+Theorem 3.1
+∼
+=E is a bisimulation. That is, for any states s, w ∈ S if s ∼
+=E w, either (s 7→ u ∧ w 7→ v ∧ u ∼
+=E
+v) or (s 67→ ∧w 67→).
+Proof
+d each related term
+There are four cases to consider, depending on which of Expr or Expr
+is drawn from, but we can merge the two cases where s and w are drawn from different
+languages.
+d and w ∈ Expr, or vice versa: Then s is the sole type-erased expression in its
+s ∈ Expr
+equivalence class, and EJwK = s (or vice versa). Our proof obligation is exactly the lockstep
+lemma (Lemma 3.8).
+d Since each equivalence class contains only one type-erased expression, s = w.
+s, w ∈ Expr:
+They must therefore have the same reduction behavior.
+s, w ∈ Expr: If s 67→, then the lockstep lemma implies EJsK = EJwK 67→. Then by reverse
+lockstep, w 67→ as well. On the other hand, if s 7→ s′ , then EJsK = EJwK 7→ EJs′ K. Lockstep
+implies EJwK 7→ EJw′ K. Since Erased Remora has deterministic operational semantics,
+EJs′ K = EJw′ K (they are both the result of taking an evaluation step from the same expression). Therefore, all of their preimages, including s′ and w′ are erasure-equivalent, i.e.,
+s′ ∼
+=E w′ .
+4 Related Work
+Rank polymorphism originally appeared in APL (Iverson, 1962), which Iverson designed
+as a form of mathematical notation, with the APL interpreter serving to eliminate the semantic ambiguity found in conventional notation (Iverson, 1980). At first, APL only lifted
+scalar functions to operate on aggregate data via pointwise application, either on a scalar
+argument and an aggregate argument or on two aggregates of identical shape. Subsequent
+development introduced the notion of function rank, the number of dimensions a function
+expects its argument to have. This generalized the scalar function lifting, e.g., allowing a
+vector-mean function to produce a vector of results when given a matrix argument, and
+it introduced the “frame of cells” view of aggregate arguments where pointwise lifting
+generalizes to cellwise lifting. The next generalization step was to loosen the rule on frame
+shape compatibility. In J (Jsoftware, Inc., n.d.), which Iverson created as a successor to
+APL, a function can be applied to two arguments of differing frames as long as one frame—
+viewed as a sequence of dimensions—is a prefix of the other. This was a conscious design
+
+ZU064-05-FPR
+
+paper
+
+32
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+decision on Iverson’s part: prefix agreement was chosen over suffix agreement because it
+fit better with APL’s emphasis on operating along arrays’ major axes (Hui, 1995).
+FISh also made implicit aggregate lifting part of the semantics of function application,
+and its static semantics resolves the shapes of all arrays (Jay, 1998). A conventional type
+judgment describes the elements of arrays computed by a FISh program, and a second
+judgment ascribes a shape to each array. In FISh’s metatheory, the shape of a function is
+a function on shapes. Thus a function application’s shape can be calculated statically by
+applying the shape function to the arguments’ shapes.
+As elegant as this model is in a first-order language, it is incompatible with first-class
+functions. When functions appear in arrays which are themselves applied to arguments,
+the shape must describe the layout of of that collection of functions, not just the functions’
+own behavior. In Remora, a function which checks whether a point in R3 is near the
+origin might have the type (-> ((Arr Float (Shp 3))) (Arr Bool (Shp))). FISh
+considers this function’s shape to be the function on a singleton domain (containing only
+[3]) which returns the empty vector. However, Remora expressions produce array data,
+even in function position. A function array near-origin? containing only that function
+has its own “first-order” shape (Shp), independent of any function on shapes summarizing
+its behavior.
+In resolving all shapes statically, FISh is also too restrictive to permit shapes determined
+from run-time data. Functions like iota and filter cannot exist, nor can the ragged
+data which would result from lifting them. By characterizing functions with restricted
+dependent types, Remora escapes both of these limitations.
+ZPL is a data-parallel language which was designed to live within a larger language with
+a more general parallelism mode (Lin & Snyder, 1994). Its programming model is based on
+an explicit map operation over programmer-specified index space within an array. Several
+built-in operators modify an index space, such as shifting a section along some dimension,
+adding a new dimension by broadcasting, or slicing out a particular sub-array. The set
+of built in operators is constructed to make communication cost implications clear to the
+programmer (Chamberlain et al., 1998).
+NESL uses a nested-vector data model, rather than the rank-polymorphic regular-array
+model (Blelloch, 1995). Programs map operations over vectors using a comprehension
+notation. Since a vector’s elements may themselves be vectors with widely varying lengths,
+NESL’s main performance trick is turning irregular nested vectors into a flat internal representation. After flattening, NESL can evenly distribute the computation workload by
+splitting at places that user code doe not consider not sub-vector boundaries.
+The goal of isolating the cell-level portion of a program has also led to some domainspecific languages, targeting specific varieties of regular aggregate data. Halide is a language designed for writing image processing pipelines (Ragan-Kelley et al., 2012). The
+iteration space is the set of pixels in an image. A Halide programmer writes code describing
+how an individual pixel should be handled (or a cluster of pixels for stencil computation),
+and then in a separate portion of the program, the programmer describes how the iteration
+space ought to be traversed. Since the program does not intermingle loop-nest control code
+with loop-body computation code, it is easier for a maintainer to tune for performance by
+adjusting the iteration schedule.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+33
+
+Diderot is a programming language specifically aimed at processing medical images
+(Chiw et al., 2012). The universe of data consists of tensor fields, intended as functions
+on the continuous domain Rn , rather than any particular discrete index space. Diderot
+offers pointwise arithmetic on tensors and a collection of common operations such as outer
+product and transposition. Aggregate lifting appears again, albeit in a smaller form, with
+some operations on tensor fields.
+HorseIR uses implicit lifting over arrays as an intermediate representation for SQL
+queries (Chen et al., 2018). HorseIR is lower-level than APL itself, serving as a threeaddress IR with vector instructions, and the IR itself is designed to ease loop fusion. In
+contrast with APL, all HorseIR arrays are vectors—there are no higher-rank arrays, and
+scalars are represented as unit-length vectors. There is also a list datatype for handling
+heterogeneous aggregate data, such as one row of a database table.
+Our type system’s use of restricted dependent types is inspired by Dependent ML (Xi, 1998).
+While Dependent ML is designed with the expectation that the index language has a fully
+decidable theory, Remora’s index language does not (Durnev, 1995). In subsequent work,
+Dependent ML also focused on ensuring safety of array index accesses, using singleton and range types to ensure that numbers used for indexing fell within arrays’ bounds
+(Xi & Pfenning, 1998).
+Others have applied established type system machinery to an APL-like computation
+model. Thatte’s coercion semantics (Thatte, 1991) uses a form subtyping in which scalar
+types are subtypes of aggregates, and aggregate types in certain situations are subtypes of
+higher-dimensional aggregates. The subtyping rules emit coercions which invoke functions
+such as map and replicate, automatically adapting scalar functions to aggregate data.
+However, the restrictions on treating aggregate types as subtypes of larger aggregates
+prohibit lifting for functions which expect non-scalar input (i.e., those whose expected
+rank is greater than zero) and lifting to unequal frame shapes (e.g., vector-matrix addition).
+Gibbons’s embedding of in an extended Haskell (Gibbons, 2016) extensively uses typelevel programming and defines much of the rank-polymorphic lifting machinery in terms
+of transposition.
+Single Assignment C (SAC) is a variant of C without mutation (Scholz, 2003). The
+primary iteration mechanism in SAC is the with loop, in which the programmer describes a traversal of the index space and builds an output array an element at a time.
+The lack of mutation pushes the programmer to avoid writing loop-carried dependence,
+much like in the rank-polymorphic model. Translation of well-behaved APL programs
+to SAC tends to be straightforward (Grelck & Scholz, 1998), though the resulting loop
+structure is somewhat specific to the function being lifted. A SAC variant called Qube
+introduces a Dependent ML-style type system to ensure the safety of indexed array element
+accesses (Trojahner & Grelck, 2009). Qube retains SAC’s with loop-based programming
+model—relying on range types in contrast to APL’s and Remora’s implicitly lifted function
+application semantics—and due to its C roots, it does not support first-class functions to
+the extent of permitting arrays to appear in function position.
+Since the syntactic structure of a line of APL code, in particular the meaning of the
+juxtaposition of two terms, depends on the meanings of names which appear in the code,
+standard APL does not admit a fully static parsing algorithm. Due to this and other idiosyn-
+
+ZU064-05-FPR
+
+paper
+
+34
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+cratic warts, past efforts to compile APL have typically targetted large but well-behaved
+subsets of the language.
+A prominent exception is the APL\3000 compiler, which could produce machine code
+for individual statements and used interpretation to manage inter-statement control flow
+(Johnston, 1979). This allowed some intraprocedural optimization, such as fold-unfold
+and map-map fusion3 (Abrams, 1970), analogous to deforestation which arose in mainstream functional languages (Burstall & Darlington, 1977; Wadler, 1984). It also ensured
+that names’ dynamic meanings would be available by the time execution reached any
+statement which used them.
+Weiss and Saal instead applied interprocedural data-flow analysis to resolve the syntactic
+classes of variable names in APL code (Weiss & Saal, 1981). This analysis is not complete
+for APL itself due to the possibility that reassignment of a variable name will change how
+some line of code parses. However, the authors found that real-world code did not make use
+of the full freedom to manipulate the syntactic structure of an APL program by dynamically
+reassigning variables, suggesting that this is a misfeature which can be discarded for little
+cost. However, the common line-at-a-time compilation style used in other work also served
+to ensure that by the time execution reaches a line of code, its variable names, and thus their
+syntactic classes, could be resolved.
+Budd describes a compiler for an APL variant in which the ambiguity in parsing is
+avoided by declaring identifiers before use and name resolution is simplified by adopting
+lexical scope. (Budd, 1988).
+APEX parallelizes an APL dialect with restrictions on many APL features deemed
+incompatible with compilation (such as producing a string representation of an arbitrary
+function) or not strictly necessary for practical use (such as GOTO) (Bernecky, 1999). APEX’s
+shape compatibility rules for implicit aggregate lifting are less permissive than APL, e.g.,
+prohibiting most cases of vector-matrix addition. Instead, both arguments must have the
+same rank or at least one argument passed to a scalar-consuming function be a scalar or
+singleton vector.
+A more recent line of work has focused on intermediate representations of array programs, such as the Typed Array Intermediate Language, which makes aggregate operations explicit using an each primitive operator (Elsman & Dybdal, 2014). The type system
+tracks arrays’ ranks, which provides enough information to recognize when an each call
+is needed, but it is not meant to ensure that lifting a function application has a welldefined result (i.e., shape incompatibility is still possible). L0 plots out a loop fusion
+strategy inspired by control flow graph reduction (Henriksen & Oancea, 2013). The L0
+compiler splits array programs into kernels of fused aggregate operations based on the
+applicability of T2 graph reductions (merging nodes X and Y if X is Y ’s sole predecessor)
+to the program’s data flow graph.
+
+3
+
+In the APL community, these transformations are respectively referred to as “beating” (imagine a
+metronome producing a stream of beats) and “dragging along” (amassing a chain of delayed scalar
+operations to apply in a single loop body).
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+35
+
+5 Conclusion
+While APL and its descendant languages have attracted a devoted userbase, there has been
+little cross talk between the array-language community and the broader programming
+language research community. Much of the analysis opportunity taken for granted by
+lambda calculists has been unavailable in APL—despite the many implementations, such
+languages lacked formal semantics amenable to proofs. Meanwhile, implementations of
+rank-polymorphic languages have struggled with compilation due to control structure that
+is “too dynamic,” depending on run-time data to determine the structure of a loop nest.
+Developing Remora’s semantics kills two birds with one stone: Formally stated reduction rules describe the results expected from the implicit, data-driven control structure, and
+typing rules give enough information about array shapes to identify that control structure
+statically. This necessarily entails recognizing programs which cannot have such a control
+structure due to incompatible array shapes—this is not what we set out to do but a benefit
+realized by pursuing a larger goal. By casting the aggregate lifting as an extension to λ calculus’s function application semantics, we escape from APL’s limitation on function
+arity and can treat functions as first-class values.
+There are two things to look for in evaluating a type system. We want to know the
+conclusions drawn by type checking reflect reality, which is handled by a conventional
+type soundness theorem. We also want to be sure that the types convey the information we
+seek. In Remora’s case, that information is the iteration structure implicit in each function
+application. The typing rule for function application (and similarly, the rules for type and
+index application) produces a static characterization of that implicit iteration structure.
+Our type erasure can be seen as a compilation pass which moves the decision about how
+to break arguments into cells from the function’s type into the application term. While our
+primary purpose in presenting type erasure is to point out type-level information which
+is not truly needed at run time, it also serves to make the control structure one step more
+explicit. Arguments’ full shapes—available both at erasure time and later by inspecting
+argument terms—suffice to determine the arguments’ frames, the last puzzle piece needed
+to turn Remora’s implicit iteration structure into explicit calls to map and replicate
+functions. Our intention for future work is to demonstrate use of that shape information
+for fully static compilation of Remora code.
+
+References
+Abrams, Philip S. (1975). What’s wrong with APL? Pages 1–8 of: Proceedings of Seventh
+International Conference on APL. APL ’75. New York, NY, USA: ACM.
+Abrams, Philip Samuel. (1970). An apl machine. Ph.D. thesis, Stanford, CA, USA. AAI7022146.
+Backus, John. (1978). Can programming be liberated from the Von Neumann style?: A functional
+style and its algebra of programs. Commun. ACM, 21(8), 613–641.
+Bernecky, Robert. (1999). APEX, the APL parallel executor. M.Phil. thesis, National Library of
+Canada= Bibliothèque nationale du Canada.
+Blelloch, Guy. (1995). NESL: A nested data-parallel language (version 3.1). Tech. rept.
+Budd, Timothy. (1988). An APL compiler. Springer-Verlag.
+Burstall, R. M., & Darlington, John. (1977). A transformation system for developing recursive
+programs. J. acm, 24(1), 44–67.
+
+ZU064-05-FPR
+
+paper
+
+36
+
+2 July 2019
+
+1:24
+
+Justin Slepak, Olin Shivers and Panagiotis Manolios
+
+Chamberlain, B., Choi, S., Lewis, E., Lin, C., Snyder, L., & Weathersby, W. (1998). ZPL’s
+WYSIWYG performance model. Pages 50– of: Proceedings of the High-Level Parallel
+Programming Models and Supportive Environments. HIPS ’98. Washington, DC, USA: IEEE
+Computer Society.
+Chen, Hanfeng, D&#39;silva, Joseph Vinish, Chen, Hongji, Kemme, Bettina, & Hendren, Laurie.
+(2018). Horseir: Bringing array programming languages together with database query processing.
+Pages 37–49 of: Proceedings of the 14th ACM SIGPLAN International Symposium on Dynamic
+Languages. DLS 2018. New York, NY, USA: ACM.
+Chiw, Charisee, Kindlmann, Gordon, Reppy, John, Samuels, Lamont, & Seltzer, Nick. (2012).
+Diderot: A parallel DSL for image analysis and visualization. Pages 111–120 of: Proceedings
+of the 33rd ACM SIGPLAN Conference on Programming Language Design and Implementation.
+PLDI ’12. New York, NY, USA: ACM.
+Durnev, Valery G. (1995). Undecidability of the positive ∀∃3 -theory of a free semigroup. Siberian
+mathematical journal, 36(5), 917–929.
+Elsman, Martin, & Dybdal, Martin. (2014). Compiling a subset of APL into a typed intermediate
+language. Pages 101:101–101:106 of: Proceedings of ACM SIGPLAN International Workshop on
+Libraries, Languages, and Compilers for Array Programming. ARRAY’14. New York, NY, USA:
+ACM.
+Gibbons, Jeremy. (2016). APLicative programming with naperian functors (extended abstract).
+Pages 13–14 of: Proceedings of the 1st International Workshop on Type-Driven Development.
+TyDe 2016. New York, NY, USA: ACM.
+Grelck, Clemens, & Scholz, Sven-Bodo. (1998). Accelerating APL programs with SAC. vol. 29.
+New York, NY, USA: ACM.
+Henriksen, Troels, & Oancea, Cosmin Eugen. (2013). A t2 graph-reduction approach to fusion. Pages
+47–58 of: Proceedings of the 2Nd ACM SIGPLAN Workshop on Functional High-performance
+Computing. FHPC ’13. New York, NY, USA: ACM.
+Hui, Roger K. W. (1995). Rank and uniformity. SIGAPL APL quote quad, 25(4), 83–90.
+Iverson, Kenneth E. (1962). A programming language. New York, NY, USA: John Wiley & Sons,
+Inc.
+Iverson, Kenneth E. (1980). Notation as a tool of thought. Commun. ACM, 23(8), 444–465.
+Jay, C. B. (1998). The FISh language definition. Tech. rept.
+Johnston, Ronald L. (1979). The dynamic incremental compiler of APL\3000. Pages 82–87 of:
+Proceedings of the International Conference on APL: Part 1. APL ’79. New York, NY, USA:
+ACM.
+Jsoftware, Inc. Jsoftware: High-performance development platform.
+Lin, Calvin, & Snyder, Lawrence. (1994). ZPL: An array sublanguage. Pages 96–114 of: Proceedings
+of the 6th International Workshop on Languages and Compilers for Parallel Computing. London,
+UK, UK: Springer-Verlag.
+Mathworks, Inc. (1992). Matlab, user’s guide. Natick, MA.
+Oliphant, Travis E. 2006 (12). Guide to numpy. Trelgol Publishing USA.
+Ragan-Kelley, Jonathan, Adams, Andrew, Paris, Sylvain, Levoy, Marc, Amarasinghe, Saman, &
+Durand, Frédo. (2012). Decoupling algorithms from schedules for easy optimization of image
+processing pipelines. Acm trans. graph., 31(4), 32:1–32:12.
+Scholz, Sven-Bodo. (2003). Single assignment C: efficient support for high-level array operations in
+a functional setting. J. funct. program., 13(6), 1005–1059.
+Thatte, Satish. (1991). A type system for implicit scaling. Sci. comput. program., 17(1-3), 217–245.
+Trojahner, Kai, & Grelck, Clemens. (2009). Dependently typed array programs don’t go wrong.
+Journal of logic and algebraic programming, 78(7), 643–664.
+
+ZU064-05-FPR
+
+paper
+
+2 July 2019
+
+1:24
+
+The Semantic Foundations of Rank Polymorphism
+
+37
+
+Wadler, Philip. (1984). Listlessness is better than laziness: Lazy evaluation and garbage collection at
+compile-time. Pages 45–52 of: Proceedings of the 1984 ACM Symposium on LISP and Functional
+Programming. LFP ’84. New York, NY, USA: ACM.
+Weiss, Zvi, & Saal, Harry J. (1981). Compile time syntax analysis of APL programs. Pages 313–320
+of: Proceedings of the International Conference on APL. APL ’81. New York, NY, USA: ACM.
+Xi, Hongwei. (1998). Dependent types in practical programming. Ph.D. thesis, Pittsburgh, PA, USA.
+AAI9918624.
+Xi, Hongwei, & Pfenning, Frank. (1998). Eliminating array bound checking through dependent
+types. Pages 249–257 of: Proceedings of the ACM SIGPLAN 1998 Conference on Programming
+Language Design and Implementation. PLDI ’98. New York, NY, USA: ACM.
+
+
