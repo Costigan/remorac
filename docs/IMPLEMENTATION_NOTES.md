@@ -186,9 +186,11 @@ Deferred typechecker work:
   nested `HIRLet` nodes. No top-level storage model exists yet.
 - Programs with top-level value definitions but no body are rejected by HIR
   lowering instead of silently dropping the definitions.
-- User-authored top-level function definitions do not yet lower into
-  `HIRFunction`s. CPU evaluation can execute them through typed static lambdas,
-  but MLIR lowering still treats full top-level function lowering as deferred.
+- User-authored top-level function definitions lower for the current static
+  subset by specializing them at direct use sites as typed static lambdas. Direct
+  scalar calls inline through `HIRLet`; unary `map` callables go through the
+  existing lambda-lifting path. Full top-level `HIRFunction` generation remains
+  deferred.
 - `HIRMap` carries the frame shape and cell shape resolved by the typechecker.
   This is the key metadata the later linalg lowering will need.
 - `HIRFold` carries the outer reduction dimension resolved from the typed array.
@@ -262,8 +264,9 @@ Deferred defunctionalization work:
   general tensor SSA value environment.
 - Scalar `HIRFunction` and `HIRCall` lower to `func.func private` and
   `func.call` for manually constructed/static HIR functions. User-authored
-  top-level function definitions are supported by the CPU evaluator at direct
-  call sites, but are not yet emitted as top-level HIR/MLIR functions.
+  top-level function definitions also reach MLIR for the current direct-call and
+  unary-map subset via call-site static lambda specialization, not by emitting
+  general top-level HIR/MLIR functions.
 - `type_to_mlir` covers scalar types, static ranked tensor types, and function
   type spelling for tests.
 - `MLIRLowering.lower_type` parses the textual type spelling into a real MLIR
@@ -470,6 +473,8 @@ Current tests cover:
 - Golden MLIR fixture coverage for the current parse-validated lowering output
   of `iota`, scalar map over `iota`, scalar map over a rank-2 literal, and
   scalar fold over a mapped `iota`.
+- MLIR lowering coverage for static top-level function direct calls and
+  top-level functions used as unary `map` callables.
 - Pipeline/codegen coverage for toolchain detection, validation-pipeline
   pass-manager execution, direct `run_pipeline`, external verifier execution
   when available, unavailable-pass diagnostics, CPU pipeline gating until the
@@ -480,8 +485,8 @@ Current tests cover:
   calls, top-level functions as map callables, `iota`/`map`/`fold`,
   row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
   helpers, `remorac` CPU output over every checked-in example, CLI emit flags,
-  MLIR/PTX target aliases, missing files, invalid sources, and recursive
-  function diagnostics.
+  MLIR/PTX target aliases, MLIR/PTX output for top-level function maps, missing
+  files, invalid sources, and recursive function diagnostics.
 - Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
   and CLI boolean output.
 - REPL coverage for expression evaluation, persistent value/function
@@ -489,6 +494,11 @@ Current tests cover:
   used in direct calls and maps, recursive-function diagnostics, `:type`,
   `:mlir`, `:load`, `:reset`, target diagnostics, error recovery, `:quit`, and
   the `remora --target cpu` entry point.
+- Acceptance coverage under `tests/acceptance/` for CPU-facing pass/fail cases:
+  scalar arithmetic, top-level function calls, top-level functions used in
+  maps, row reductions, rank-3 maps, recursive-function diagnostics, and rank-4
+  rejection. Deferred examples are checked into `tests/acceptance/deferred/`
+  but intentionally excluded from the manifest.
 
 The latest full local test command was:
 

@@ -186,6 +186,8 @@ def lower_to_hir(program: TypedProgram) -> HIRProgram:
 
     lowered_main = lower_expr(main)
     for definition in reversed(program.definitions):
+        if definition.value is None:
+            continue
         lowered_main = _wrap_value_definition(definition, lowered_main)
 
     return HIRProgram([], lowered_main, program.type)
@@ -230,6 +232,8 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
                 [lower_expr(arg) for arg in expr.args],
                 expr.type,
             )
+        if isinstance(expr.func, TypedLambda):
+            return _inline_lambda_call(expr.func, expr.args, expr.type)
         func_name = _typed_node_var_name(expr.func)
         if func_name is None:
             raise HIRLoweringError("only direct calls are supported in HIR lowering")
@@ -310,6 +314,19 @@ def _wrap_value_definition(definition: TypedDefinition, body: HIRExpr) -> HIRExp
         body,
         body_result_type(body),
     )
+
+
+def _inline_lambda_call(
+    function: TypedLambda,
+    args: list[TypedExpr],
+    result_type: RemoraType,
+) -> HIRExpr:
+    if len(function.params) != len(args):
+        raise HIRLoweringError("function arity mismatch in HIR lowering")
+    body = lower_expr(function.body)
+    for (name, param_type), arg in reversed(list(zip(function.params, args))):
+        body = HIRLet(name, param_type, lower_expr(arg), body, result_type)
+    return body
 
 
 def body_result_type(expr: HIRExpr) -> RemoraType:

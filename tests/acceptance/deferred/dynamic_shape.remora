@@ -1,0 +1,3 @@
+-- Deferred until static-rank dynamic dimensions exist.
+def f n = iota n
+f 10
