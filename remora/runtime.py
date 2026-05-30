@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from remora.ast_nodes import BoolLit, FloatLit, IfExpr, IntLit, IotaExpr, VarExpr
+from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program
 from remora.typechecker import (
@@ -67,9 +68,20 @@ def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
 
 def format_value(value: object) -> str:
     if isinstance(value, np.ndarray):
-        return np.array2string(value, separator=", ")
+        if value.dtype == np.bool_:
+            return format_result(value, ArrayType(BOOL, tuple(StaticDim(size) for size in value.shape)))
+        if np.issubdtype(value.dtype, np.integer):
+            return format_result(value, ArrayType(INT, tuple(StaticDim(size) for size in value.shape)))
+        if np.issubdtype(value.dtype, np.floating):
+            return format_result(value, ArrayType(FLOAT, tuple(StaticDim(size) for size in value.shape)))
     if isinstance(value, np.generic):
-        return repr(value.item())
+        value = value.item()
+    if isinstance(value, bool):
+        return format_result(value, BOOL)
+    if isinstance(value, int):
+        return format_result(value, INT)
+    if isinstance(value, float):
+        return format_result(value, FLOAT)
     return repr(value)
 
 

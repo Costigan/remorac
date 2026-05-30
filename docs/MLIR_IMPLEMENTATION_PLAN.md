@@ -2058,13 +2058,18 @@ def format_result(data: np.ndarray | float | int, ty: RemoraType) -> str:
 #### 8.4 AOT Tasks
 
 - [ ] Implement `bin/remorac` with all flags
-- [ ] Implement `format_result` for scalars, vectors, matrices, and higher-rank arrays
+  - Current: the `remorac` console script supports `--target cpu`, `--target mlir`, and `--target ptx`; the broader debug/output flag set is deferred.
+- [x] Implement `format_result` for scalars, vectors, matrices, and higher-rank arrays
+  - Current: `remora.display.format_result` handles int/float/bool scalars and rank-1 through rank-3 arrays with Remora-style scalar spelling.
 - [ ] Implement error handling with source-location-annotated messages
 - [ ] Add `--output` flag: write PTX + a thin Python launcher script
 - [ ] End-to-end test: `remorac tests/programs/tensor3_scale.rem` prints the expected rank-3 tensor
 - [ ] End-to-end test: `remorac --target cpu tests/programs/vector_scale.rem` works without GPU
 
 **Milestone M7**: generated programs execute through the shared executor API on CPU and NVIDIA.
+Current: output formatting is shared by the interim CPU evaluator, `remorac`,
+and the REPL. The final shared executor API is still deferred until the MLIR CPU
+or direct Remora ABI execution path exists.
 
 ---
 

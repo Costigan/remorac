@@ -13,7 +13,7 @@ def test_repl_persists_value_definition():
     session = ReplSession()
 
     assert session.eval_input("def xs = iota 4") == "Defined: xs : int[4]"
-    assert session.eval_input("map (* 2.0) xs") == "[0., 2., 4., 6.]"
+    assert session.eval_input("map (* 2.0) xs") == "[0.0, 2.0, 4.0, 6.0]"
 
 
 def test_repl_definition_can_reference_previous_definition():
@@ -67,7 +67,7 @@ def test_repl_load_file(tmp_path):
     source.write_text("def xs = iota 4\nmap (* 2.0) xs", encoding="utf-8")
     session = ReplSession()
 
-    assert session.eval_input(f":load {source}") == "Defined: xs : int[4]\n[0., 2., 4., 6.]"
+    assert session.eval_input(f":load {source}") == "Defined: xs : int[4]\n[0.0, 2.0, 4.0, 6.0]"
     assert session.eval_input("fold (+) 0.0 xs") == "6.0"
 
 

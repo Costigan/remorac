@@ -9,9 +9,10 @@ from lark import LarkError
 
 from remora.ast_nodes import FuncDef, ValDef
 from remora.compiler import compile_source_to_mlir
+from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program, parse_repl_input
-from remora.runtime import evaluate_source, format_value
+from remora.runtime import evaluate_source
 from remora.typechecker import TypeChecker
 
 
@@ -70,7 +71,7 @@ class ReplSession:
     def _process_expression(self, source: str) -> str:
         program_source = _program_source(self.state.definition_sources, source)
         result = evaluate_source(program_source)
-        return format_value(result.value)
+        return format_result(result.value, result.type)
 
     def _handle_command(self, command: str) -> str:
         parts = command.split(None, 1)
@@ -138,7 +139,7 @@ class ReplSession:
             messages.append(message)
         if program.body is not None:
             result = evaluate_source(_program_source(self.state.definition_sources, _body_source(source)))
-            messages.append(format_value(result.value))
+            messages.append(format_result(result.value, result.type))
         return "\n".join(messages) if messages else "Loaded."
 
     def _collect_full_input(self, first_line: str) -> str:

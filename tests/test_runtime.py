@@ -4,7 +4,9 @@ import numpy as np
 
 from remora.cli import main
 from remora.compiler import compile_source_to_mlir, compile_source_to_ptx
+from remora.display import format_result
 from remora.runtime import evaluate_source, format_value
+from remora.types import BOOL
 
 
 def test_cpu_evaluates_scalar_expression():
@@ -62,3 +64,20 @@ def test_cli_cpu_target_prints_result(tmp_path, capsys):
 
 def test_format_value_for_arrays():
     assert format_value(np.array([1, 2], dtype=np.int32)) == "[1, 2]"
+
+
+def test_cli_cpu_target_prints_remora_bool(tmp_path, capsys):
+    source_file = tmp_path / "prog.remora"
+    source_file.write_text("(1 < 2) && (2 < 3)", encoding="utf-8")
+
+    exit_code = main([str(source_file)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.strip() == "true"
+
+
+def test_runtime_result_can_use_shared_display():
+    result = evaluate_source("true")
+
+    assert format_result(result.value, BOOL) == "true"
