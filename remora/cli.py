@@ -8,8 +8,9 @@ import sys
 
 from remora.codegen import CodegenUnavailable
 from remora.compiler import compile_source_to_mlir, compile_source_to_ptx
+from remora.display import format_result
 from remora.errors import RemoraError
-from remora.runtime import evaluate_source, format_value
+from remora.runtime import evaluate_source
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         source = args.file.read_text(encoding="utf-8")
         if args.target == "cpu":
             result = evaluate_source(source)
-            print(format_value(result.value))
+            print(format_result(result.value, result.type))
             return 0
         if args.target == "mlir":
             print(compile_source_to_mlir(source))

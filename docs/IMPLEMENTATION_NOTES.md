@@ -366,6 +366,10 @@ Deferred pipeline/codegen work:
 - CPU evaluation returns Python scalars or numpy arrays plus the checked Remora
   type. Arrays use numpy dtypes matching the Dense Core scalar policy:
   `int32`, `float32`, and `bool`.
+- `remora.display.format_result` is the shared result formatter for `remorac`
+  and the REPL. It prints booleans as `true`/`false`, preserves a decimal point
+  for float scalars and float arrays, and supports vectors, matrices, and
+  rank-3 arrays through numpy rendering with Remora scalar formatting.
 - The evaluator covers the checked-in examples: scalar arithmetic, conditionals,
   top-level value definitions, `iota`, `map`, `fold`, nested maps, row
   reductions, rank-2/rank-3 literals, operator sections, and the narrow direct
@@ -378,7 +382,6 @@ Deferred CPU/runtime work:
 
 - Replace or supplement the typed-AST evaluator with MLIR `ExecutionEngine`
   execution once the CPU pipeline is pinned.
-- Add a REPL on top of the same CPU evaluation/display path.
 - Add CUDA driver module-load and launch tests only after the Remora ABI kernel
   boundary is explicit.
 
@@ -467,6 +470,8 @@ Current tests cover:
 - CPU runtime and CLI coverage for scalar evaluation, `iota`/`map`/`fold`,
   row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
   helpers, and `remorac` default CPU output.
+- Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
+  and CLI boolean output.
 - REPL coverage for expression evaluation, persistent definitions, definitions
   referencing earlier definitions, `:type`, `:mlir`, `:load`, `:reset`, target
   diagnostics, error recovery, `:quit`, and the `remora --target cpu` entry
