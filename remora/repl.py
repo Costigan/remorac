@@ -59,13 +59,12 @@ class ReplSession:
             return f"Error: {exc}"
 
     def _process_definition(self, source: str, definition: FuncDef | ValDef) -> str:
-        if isinstance(definition, FuncDef):
-            return "Error: top-level function definitions are deferred"
-
         candidate_definitions = [*self.state.definition_sources, source]
         program_source = _program_source(candidate_definitions, "0")
         typed = TypeChecker().check_program(parse_program(program_source, "<repl>"))
         self.state.definition_sources.append(source)
+        if isinstance(definition, FuncDef):
+            return f"Defined: {definition.name} : <function>"
         return f"Defined: {definition.name} : {typed.definitions[-1].type}"
 
     def _process_expression(self, source: str) -> str:

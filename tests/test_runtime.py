@@ -32,6 +32,18 @@ def test_cpu_evaluates_row_reduction_map():
     np.testing.assert_array_equal(result.value, np.array([3, 7], dtype=np.float32))
 
 
+def test_cpu_evaluates_top_level_function_call():
+    result = evaluate_source("def add1 x = x + 1\nadd1 41")
+
+    assert result.value == 42
+
+
+def test_cpu_evaluates_top_level_function_in_map():
+    result = evaluate_source("def double x = x * 2\nmap double (iota 4)")
+
+    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
 def test_cpu_evaluates_all_checked_in_examples():
     for path in sorted(Path("examples").glob("*.remora")):
         result = evaluate_source(path.read_text(encoding="utf-8"))

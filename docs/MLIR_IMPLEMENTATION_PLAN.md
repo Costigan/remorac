@@ -935,7 +935,7 @@ class TypedMap:
 - [x] Implement explicit numeric promotion and `TypedCast`
 - [x] Enforce Dense Core rank limit: rank 0 through rank 3 only
 - [ ] Implement `TypeChecker.check` for full programs including top-level definitions
-  - Partial: top-level value definitions are supported; top-level function definition inference/checking is deferred until annotations/monomorphization.
+  - Partial: top-level value definitions are supported. Top-level function definitions are supported for statically known direct calls and unary `map` callables by specializing the function body at the call site from concrete argument types. Recursive functions, generalized annotations, and dynamic function values remain deferred.
 - [ ] Implement `_build_prelude_env()` for built-in functions (+, *, etc.)
 - [x] Write `tests/test_typechecker.py`:
   - Scalar literal typing
@@ -1407,7 +1407,7 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [ ] Implement `_lower_let` (introduce SSA value into env)
   - Partial: `_lower_let` exists and lowers scalar lets through an SSA environment. Tensor lets still use simple HIR inlining before textual emission.
 - [ ] Implement `_lower_function` for top-level HIR functions → `func.func`
-  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions are still blocked by earlier deferred typechecker annotations/monomorphization.
+  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions now work in the CPU evaluator through typed static lambdas, but are not yet emitted as top-level HIR/MLIR functions.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
 - [x] Reject dynamic dimensions until Dense Core static-shape rank-0..3 programs execute end-to-end
 - [x] Write `tests/test_lowering.py`:
@@ -2374,7 +2374,7 @@ main()
   - Current: expressions are evaluated through the interim typed-AST CPU evaluator using full temporary source programs. `:mlir` uses the compiler facade for MLIR inspection.
 - [x] Implement `ReplSession.eval_input` dispatcher
 - [x] Implement `_process_definition` (type-check, add to env, no execution)
-  - Current: top-level value definitions are supported; top-level function definitions are rejected as deferred.
+  - Current: top-level value and function definitions are supported for the CPU evaluator. Function definitions are persisted as source and specialized at direct use sites.
 - [x] Implement `_process_expression` (compile, run, display)
 - [x] Implement `_collect_full_input` for multi-line continuation
 - [x] Set up `readline` history
@@ -2382,12 +2382,12 @@ main()
 - [x] Implement all REPL commands (`:type`, `:debug`, `:target`, `:load`, `:reset`, `:help`)
   - Current: `:mlir` is also implemented; non-CPU targets report a clear deferred message.
 - [x] Implement `_load_file`
-  - Current: loads current one-line top-level value definitions and evaluates the body if present.
+  - Current: loads current one-line top-level value/function definitions and evaluates the body if present.
 - [ ] Add `gpu-nvidia` REPL target after the CUDA descriptor ABI is stable
 - [ ] Add compile caching only if measured REPL latency makes it necessary
 - [x] Write `tests/test_repl.py`:
   - Define a function; check it appears in type env
-    - Current: top-level function definitions are deferred, so tests cover persistent value definitions and a clear function-definition deferral.
+    - Current: tests cover persistent top-level function definitions, direct calls, function use as a `map` callable, and recursive-function deferral.
   - Evaluate a scalar expression; check result
   - Multi-line expression (two lines, parentheses)
   - `:type` command

@@ -196,8 +196,24 @@ def test_program_with_value_definition_typechecks():
     assert typed.type == ArrayType(FLOAT, (StaticDim(4),))
 
 
-def test_function_definition_inference_is_deferred():
+def test_top_level_function_definition_typechecks_at_direct_call_site():
     program = parse_program("def f x = x\nf 1")
+    typed = TypeChecker().check_program(program)
 
-    with pytest.raises(RemoraTypeError, match="function definition"):
+    assert typed.type == INT
+    assert isinstance(typed.body, TypedApp)
+    assert typed.definitions[0].type is None
+
+
+def test_top_level_function_definition_can_be_used_as_map_callable():
+    program = parse_program("def double x = x * 2\nmap double (iota 4)")
+    typed = TypeChecker().check_program(program)
+
+    assert typed.type == ArrayType(INT, (StaticDim(4),))
+
+
+def test_recursive_function_definition_is_deferred():
+    program = parse_program("def f x = f x\nf 1")
+
+    with pytest.raises(RemoraTypeError, match="recursive"):
         TypeChecker().check_program(program)
