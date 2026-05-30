@@ -394,7 +394,7 @@ class TypeChecker:
 
         element_type = typed_array.type.drop_outer(1)
         if isinstance(element_type, ArrayType):
-            raise RemoraTypeError("array-cell folds are deferred", expr.loc)
+            self._require(typed_init.type, element_type, expr.loc)
 
         expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
@@ -445,7 +445,7 @@ class TypeChecker:
     ) -> TypedExpr:
         params = expected_type.params
         if expr.op in {"+", "-", "*"}:
-            result = common_numeric_type(params[0], params[1])
+            result = self._common_fold_operator_type(params[0], params[1], expr.loc)
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
             self._require_numeric(params[0], expr.loc)
@@ -526,6 +526,22 @@ class TypeChecker:
     def _require_numeric(self, value_type: RemoraType, loc) -> None:
         if not is_numeric(value_type):
             raise RemoraTypeError(f"expected numeric type, got {value_type}", loc)
+
+    def _common_fold_operator_type(
+        self,
+        left: RemoraType,
+        right: RemoraType,
+        loc,
+    ) -> RemoraType:
+        if isinstance(left, ArrayType) or isinstance(right, ArrayType):
+            if not isinstance(left, ArrayType) or not isinstance(right, ArrayType):
+                raise RemoraTypeError(f"expected matching array operands, got {left} and {right}", loc)
+            if left != right:
+                raise RemoraTypeError(f"expected matching array operands, got {left} and {right}", loc)
+            if not is_numeric(left.element):
+                raise RemoraTypeError(f"expected numeric array elements, got {left.element}", loc)
+            return left
+        return common_numeric_type(left, right)
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()

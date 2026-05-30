@@ -1396,30 +1396,41 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [x] Implement `lower_type` for all `RemoraType` variants
 - [ ] Validate exact MLIR Python builder patterns for `tensor.empty`, `linalg.generic`, `linalg.index`, `tensor.extract`, and `func.func` against checked-in golden MLIR fixtures
   - Partial: checked-in fixtures now validate the current textual, parse-checked MLIR output for `iota`, scalar maps, rank-2 literal maps, and map-then-fold programs. Python builder pattern validation remains deferred until the dialect builder dependencies are stable.
-- [ ] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
-  - Partial: textual MLIR lowering supports rank-1 scalar maps directly over `iota` and rank-1 through rank-3 scalar maps over static array literals for primitive sections and simple lifted lambdas.
+- [x] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
 - [ ] Implement `_lower_map_cell` for static frame/cell maps whose total result rank is <= 3
-- [ ] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
-  - Partial: textual MLIR lowering supports scalar rank-1 folds over direct `iota`, static rank-1 array literals, and direct scalar maps over `iota`.
+  - Partial: textual MLIR lowering supports the rank-1-cell reduction pattern over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred.
+- [x] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
 - [x] Implement `_lower_prim_op` for all scalar operations
 - [x] Implement `_lower_cast` for explicit numeric promotions
 - [x] Implement `_lower_iota`
-- [ ] Implement `_lower_function_call` (dispatches to function body or named call)
+- [x] Implement `_lower_function_call` (dispatches to function body or named call)
 - [ ] Implement `_lower_let` (introduce SSA value into env)
-  - Partial: current MLIR lowering inlines simple HIR let/value bindings before textual emission; it does not yet introduce a real SSA value environment.
+  - Partial: `_lower_let` exists and lowers scalar lets through an SSA environment. Tensor lets still use simple HIR inlining before textual emission.
 - [ ] Implement `_lower_function` for top-level HIR functions → `func.func`
+  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions are still blocked by earlier deferred typechecker annotations/monomorphization.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
 - [x] Reject dynamic dimensions until Dense Core static-shape rank-0..3 programs execute end-to-end
 - [x] Write `tests/test_lowering.py`:
   - Check generated MLIR text for `map (\x -> x * 2.0) (iota 10)` contains the expected `iota` and scalar-map `linalg.generic` operations
   - Check rank-2 and rank-3 scalar maps produce the expected number of parallel iterators
+  - Check rank-0 scalar maps over scalar inputs lower as scalar function application
+  - Check nested scalar map chains over `iota` and static array literals
   - Check a vector-cell map over a rank-2 array splits frame and cell dimensions correctly
+  - Check rank-2/rank-3 outermost folds over array cells
+  - Check rank-2/rank-3 rank-1-cell maps whose lifted lambda body is a fold
+  - Check scalar let SSA lowering and scalar HIR function calls
   - Check fold generates `iterator_types = ["reduction"]`
   - Check iota generates `linalg.index`
   - Check current textual MLIR output against checked-in golden fixtures
   - Check standalone scalar literals, primitive operations, numeric comparisons, boolean operations, division, and explicit numeric casts
 
 **Milestone M4**: `lower_program(hir)` for rank-1, rank-2, and rank-3 scalar maps plus `fold (+) 0.0 (map (* 2.0) (iota 10))` produces valid MLIR that passes `mlir-opt --verify-diagnostics`.
+
+Current status: the generated textual MLIR is parse-validated through
+`iree.compiler.ir.Module.parse` and covered by golden fixtures/tests. The
+`mlir-opt --verify-diagnostics` command is not available on the current PATH,
+so external verifier round-tripping remains an environment setup task before
+Phase 6 pipeline validation.
 
 ---
 
