@@ -1,0 +1,81 @@
+program: _NL? top_level? _NL?
+top_level: definition (_NL definition)* (_NL expr)?
+         | expr
+
+?expr: let_expr
+     | if_expr
+     | lambda_expr
+     | compose_expr
+
+definition: "def" NAME params "=" expr -> func_def
+          | "def" NAME "=" expr        -> val_def
+
+params: NAME+
+
+let_expr: "let" NAME "=" expr "in" expr
+if_expr: "if" expr "then" expr "else" expr
+lambda_expr: LAMBDA NAME+ ARROW expr
+
+?compose_expr: compose_expr COMPOSE or_expr -> compose_expr
+             | or_expr
+
+?or_expr: or_expr OR and_expr -> binary_expr
+        | and_expr
+
+?and_expr: and_expr AND compare_expr -> binary_expr
+         | compare_expr
+
+?compare_expr: compare_expr COMP_OP add_expr -> binary_expr
+             | add_expr
+
+?add_expr: add_expr ADD_OP mul_expr -> binary_expr
+         | mul_expr
+
+?mul_expr: mul_expr MUL_OP app_expr -> binary_expr
+         | app_expr
+
+?app_expr: app_expr atom             -> application
+         | "map" callable atom       -> map_expr
+         | "fold" callable atom atom -> fold_expr
+         | "iota" atom               -> iota_expr
+         | "shape" atom              -> shape_expr
+         | "rank" atom               -> rank_expr
+         | atom
+
+?callable: atom
+         | "(" infix_op ")"      -> operator_func
+         | "(" infix_op atom ")" -> left_section
+         | "(" atom infix_op ")" -> right_section
+
+?infix_op: COMP_OP
+         | AND
+         | OR
+         | ADD_OP
+         | MUL_OP
+
+?atom: primary index_suffix*
+?primary: "(" expr ")"                 -> paren
+        | "[" [expr ("," expr)*] "]"   -> array_lit
+        | FLOAT                         -> float_lit
+        | INT                           -> int_lit
+        | BOOL                          -> bool_lit
+        | NAME                          -> var
+
+index_suffix: "[" expr ("," expr)* "]"
+
+BOOL.2: "true" | "false"
+LAMBDA: "\\" | "lambda" | "λ"
+ARROW: "->" | "→"
+COMPOSE: "∘"
+OR: "||"
+AND: "&&"
+COMP_OP: "<=" | "<" | "==" | "!="
+ADD_OP: "+" | "-"
+MUL_OP: "*" | "/"
+INT: /-?[0-9]+/
+FLOAT: /-?([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)/
+NAME: /[a-zA-Z_][a-zA-Z0-9_']*/
+_NL: /(\r?\n)+/
+
+%ignore /[ \t\f\r]+/
+%ignore /--[^\n]*/

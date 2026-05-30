@@ -2918,14 +2918,22 @@ Phase 0 (Infrastructure)
                                                                     Phase 13 (Tests)
 ```
 
-### 10.2 Testing Strategy Per Phase
+### 10.2 Implementation Notes Maintenance
+
+Keep `docs/IMPLEMENTATION_NOTES.md` up to date during implementation. Every phase
+or meaningful design change must update that file in the same change set as the
+code/tests. Record concrete implementation decisions, deviations from this plan,
+known limitations, and deferred work. Do not leave important decisions only in
+chat history, commit messages, or local memory.
+
+### 10.3 Testing Strategy Per Phase
 
 - **Always implement tests alongside the code** — do not defer testing.
 - After each phase, run `pytest` on all existing tests before moving on.
 - Use `--target cpu` during Phases 1–6 to avoid needing a GPU for development.
 - Add a GPU test suite gated by `REMORA_TEST_GPU=1` environment variable.
 
-### 10.3 Debugging Tools
+### 10.4 Debugging Tools
 
 During development, the following are invaluable:
 
