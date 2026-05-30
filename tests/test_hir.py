@@ -1,7 +1,10 @@
+import pytest
+
 from remora.hir import (
     HIRArrayLit,
     HIRCast,
     HIRFold,
+    HIRLoweringError,
     HIRIota,
     HIRLambda,
     HIRLet,
@@ -111,6 +114,13 @@ def test_lowers_top_level_value_definitions_as_lets():
     assert isinstance(program.main.body, HIRMap)
     assert isinstance(program.main.body.array, HIRVar)
     assert program.main.body.array.name == "xs"
+
+
+def test_definition_only_program_is_rejected_by_hir_lowering():
+    typed = TypeChecker().check_program(parse_program("def xs = iota 4"))
+
+    with pytest.raises(HIRLoweringError, match="definition-only"):
+        lower_to_hir(typed)
 
 
 def test_lowers_m2_milestone_expression():

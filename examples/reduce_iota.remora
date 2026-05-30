@@ -1,0 +1,3 @@
+-- Reduce a vector to a scalar
+fold (+) 0.0 (iota 10)
+

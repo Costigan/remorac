@@ -1,0 +1,4 @@
+-- A rank-3 array transformed cell-wise
+let xs = [[[1.0], [2.0]], [[3.0], [4.0]]] in
+map (\x -> x + 0.5) xs
+

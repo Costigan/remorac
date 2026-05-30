@@ -6,8 +6,8 @@ the phase plan stays in `docs/MLIR_IMPLEMENTATION_PLAN.md`.
 
 ## Current Scope
 
-The implementation is currently limited to the Phase 0 through Phase 4
-foundation:
+The implementation is currently limited to the Phase 0 foundation through an
+initial Phase 5 MLIR lowering spike:
 
 - Python package skeleton and dependency metadata.
 - Rank-0 through rank-3 external ABI descriptor structs.
@@ -16,9 +16,24 @@ foundation:
   `let`, `if`, primitive operators, `map`, and `fold`.
 - HIR definitions and typed-AST-to-HIR lowering for the accepted typed subset.
 - Defunctionalization for inline non-capturing lambdas used by `map`/`fold`.
+- Textual MLIR lowering for `iota`, primitive scalar section maps directly over
+  `iota`, and simple lifted scalar lambda maps directly over `iota`, validated
+  by parsing through `iree.compiler.ir`.
+- Textual MLIR lowering for scalar `fold` over direct `iota` and over a direct
+  scalar map of `iota`.
+- Simple `HIRLet` inlining before MLIR emission, enough for local and top-level
+  value aliases such as `let xs = iota 10 in map (* 2.0) xs`.
+- Textual MLIR lowering for static array literals using `tensor.from_elements`,
+  including rank-1, rank-2, and rank-3 examples.
+- Scalar elementwise maps over static array literals now lower for rank-1
+  through rank-3, using identity affine maps with one parallel iterator per
+  dimension.
+- Standalone scalar literals and primitive scalar expressions lower to
+  parse-validated MLIR, including integer and float arithmetic, `/`, numeric
+  comparisons, boolean `&&`/`||`, and explicit `int` to `float` casts.
 
-No MLIR lowering, execution engine, CUDA launch path, dynamic shapes, dynamic
-rank, or automatic differentiation has been implemented.
+Full MLIR lowering, execution engine, CUDA launch path, dynamic shapes, dynamic
+rank, or automatic differentiation has not been implemented.
 
 ## Project and Tooling
 
@@ -123,6 +138,9 @@ Known parser limitation:
   language does not yet have annotations or monomorphization.
 - Typed array literals and top-level value definitions preserve their typed
   children so later HIR lowering does not need to re-run type inference.
+- Division operator functions and sections require numeric operands just like
+  ordinary division expressions. Regression tests cover bool operands for both
+  `map` sections and `fold (/)`.
 
 Deferred typechecker work:
 
@@ -143,6 +161,8 @@ Deferred typechecker work:
 - `lower_to_hir` lowers a `TypedProgram` into an `HIRProgram`.
 - Top-level value definitions are lowered by wrapping the main expression in
   nested `HIRLet` nodes. No top-level storage model exists yet.
+- Programs with top-level value definitions but no body are rejected by HIR
+  lowering instead of silently dropping the definitions.
 - Top-level function definitions remain deferred, so `HIRProgram.functions` is
   currently empty in successful programs.
 - `HIRMap` carries the frame shape and cell shape resolved by the typechecker.
@@ -188,6 +208,76 @@ Deferred defunctionalization work:
   real type checking.
 - Dynamic dispatch tags/closure structs remain out of Dense Core scope.
 
+## MLIR Lowering Decisions
+
+- `remora.lowering` provides the first Phase 5 lowering spike.
+- The installed `iree-compiler` package exposes `iree.compiler.ir`, core type
+  parsing, module parsing, and several dialect modules.
+- A top-level `mlir` Python package is not installed in this environment.
+- Importing `iree.compiler.dialects.linalg` currently fails because PyYAML is
+  not installed. The project has not added PyYAML just to use generated Python
+  builders.
+- Because of that API shape, the first lowering slice emits textual MLIR and
+  immediately validates it with `iree.compiler.ir.Module.parse`.
+- The current lowering supports `HIRIota` as the program body and scalar
+  `HIRMap` over a direct `HIRIota` array when the callable is a primitive
+  operator section with a literal bound operand or a lifted unary `HIRFunction`
+  from defunctionalization.
+- Scalar `HIRFold` lowers when its input is a direct `HIRIota` or a direct
+  scalar `HIRMap` over `HIRIota`, and when the fold callable is a primitive
+  operator function.
+- Scalar `HIRMap` lowers over direct `HIRIota` or direct static `HIRArrayLit`
+  inputs for scalar-cell maps only.
+- `HIRLet` is not lowered as an MLIR SSA binding yet. The current lowerer first
+  inlines simple HIR let bindings and then lowers the resulting expression. This
+  supports local `let` and top-level value definitions whose values are in the
+  current lowering subset.
+- `type_to_mlir` covers scalar types, static ranked tensor types, and function
+  type spelling for tests.
+- `MLIRLowering.lower_type` parses the textual type spelling into a real MLIR
+  type object.
+- `MLIRLowering.lower_program` emits a `func.func @main` containing
+  `tensor.empty`, `linalg.generic`, `linalg.index`, `arith.index_cast`, and
+  `linalg.yield` for `iota`.
+- For `map (* 2.0) (iota 10)`, lowering emits two `linalg.generic` operations:
+  one for `iota`, then one scalar elementwise map using explicit `arith.sitofp`,
+  `arith.constant`, and `arith.mulf`.
+- For `map (\x -> x * 2.0) (iota 10)` and `map (\x -> x * x) (iota 10)`,
+  defunctionalized lifted functions are currently inlined into the map
+  `linalg.generic` body. Separate MLIR `func.func` emission for lifted functions
+  is deferred.
+- For `fold (+) 0.0 (map (* 2.0) (iota 10))`, lowering emits three
+  `linalg.generic` operations: iota, scalar map, and scalar reduction. The fold
+  uses `tensor.from_elements` for the scalar initial accumulator and
+  `tensor.extract` to return the rank-0 tensor result as a scalar.
+- Top-level value definition programs like `def xs = iota 10` followed by
+  `map (* 2.0) xs` lower through the same let-inlining path.
+- Static array literals lower by flattening nested `HIRArrayLit` elements in
+  row-major order and emitting scalar constants followed by `tensor.from_elements`.
+- Standalone `HIRLit`, `HIRCast`, and `HIRPrimOp` expressions lower through a
+  small scalar-region emitter. The same emitter is used for simple lifted
+  lambda bodies inside scalar maps.
+- `_lower_prim_op` support currently covers all scalar primitive operations
+  accepted by the typechecker: integer/float arithmetic, floating division,
+  numeric comparisons, and boolean `and`/`or`.
+- Boolean constants are emitted in a form the parser accepts and canonicalizes
+  back to `arith.constant true`/`false` in printed MLIR.
+- The current textual MLIR output is locked down with checked-in golden
+  fixtures under `tests/golden_mlir/` for the implemented `iota`, scalar map,
+  rank-2 literal map, and map-then-fold slices. These fixtures validate the
+  current parse-checked textual lowering path, not generated Python builder
+  APIs.
+
+Deferred MLIR lowering work:
+
+- Switch to dialect builders if/when the required generated bindings and their
+  dependencies are stable in the project environment.
+- Lower maps over non-direct values, generalized folds, cell maps, and
+  standalone defunctionalized function calls.
+- Replace let inlining with real SSA environment lowering when lowering grows
+  beyond direct iota/map/fold slices.
+- Run MLIR verifier/pass manager checks beyond parse validation.
+
 ## Test Coverage So Far
 
 Current tests cover:
@@ -205,9 +295,29 @@ Current tests cover:
 - HIR coverage for `iota`, array literals, casts, scalar maps, vector-cell map
   shape metadata, folds, operator sections, top-level value definitions, and the
   M2 milestone expression.
+- Regression coverage for division callable operand validation, right operator
+  sections, negative-stride numpy views, the current array-literal/index parse
+  behavior, and definition-only HIR rejection.
 - Defunctionalization coverage for inline lambda lifting, primitive callables,
   named static function references, operator sections, and rejection of captured
   lambdas.
+- Initial MLIR lowering coverage for type spelling/parsing, `iota` textual MLIR
+  parse validation, primitive scalar section maps over direct `iota`, and
+  simple lifted scalar lambda maps over direct `iota`, plus explicit deferral of
+  unsupported lowering cases.
+- Scalar MLIR lowering coverage for standalone literals, arithmetic, numeric
+  comparisons, boolean operations, division, and explicit `int` to `float`
+  casts.
+- Comparison-valued scalar maps over `iota` are covered to exercise bool tensor
+  results from lifted lambdas.
+- Fold lowering coverage for direct `iota` and the Phase 5 milestone-shaped
+  `fold (+) 0.0 (map (* 2.0) (iota 10))` program.
+- Let/top-level value lowering coverage for iota aliases used by maps and folds.
+- Static tensor literal coverage for rank-1 through rank-3 and scalar
+  elementwise map coverage over rank-2/rank-3 literals.
+- Golden MLIR fixture coverage for the current parse-validated lowering output
+  of `iota`, scalar map over `iota`, scalar map over a rank-2 literal, and
+  scalar fold over a mapped `iota`.
 
 The latest full local test command was:
 

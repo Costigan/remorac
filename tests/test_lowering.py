@@ -1,0 +1,271 @@
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+from remora.defunc import defunctionalize
+from remora.hir import lower_to_hir
+from remora.lowering import MLIRLowering, RemoraLoweringError, type_to_mlir
+from remora.parser import parse_program
+from remora.typechecker import TypeChecker
+from remora.types import BOOL, FLOAT, INT, ArrayType, FuncType, StaticDim
+
+
+GOLDEN_DIR = Path(__file__).parent / "golden_mlir"
+
+GOLDEN_CASES = {
+    "iota_rank1.mlir": "iota 10",
+    "map_iota_scale.mlir": "map (* 2.0) (iota 10)",
+    "map_rank2_literal_scale.mlir": (
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (* 2.0) xs"
+    ),
+    "fold_map_iota_scale.mlir": "fold (+) 0.0 (map (* 2.0) (iota 10))",
+}
+
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("iree") is None,
+    reason="IREE compiler MLIR bindings are not installed",
+)
+
+
+def hir_from_source(source: str):
+    typed = TypeChecker().check_program(parse_program(source))
+    return defunctionalize(lower_to_hir(typed))
+
+
+@pytest.mark.parametrize(("fixture_name", "source"), GOLDEN_CASES.items())
+def test_lowering_matches_golden_mlir_fixtures(fixture_name: str, source: str):
+    lowered = MLIRLowering().lower_program(hir_from_source(source))
+
+    assert lowered.text.rstrip() + "\n" == (GOLDEN_DIR / fixture_name).read_text()
+
+
+def test_type_to_mlir_scalars_arrays_and_functions():
+    assert type_to_mlir(INT) == "i32"
+    assert type_to_mlir(FLOAT) == "f32"
+    assert type_to_mlir(BOOL) == "i1"
+    assert type_to_mlir(ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))) == (
+        "tensor<2x3xf32>"
+    )
+    assert type_to_mlir(FuncType((INT,), FLOAT)) == "(i32) -> f32"
+
+
+def test_lower_type_returns_parseable_mlir_types():
+    lowering = MLIRLowering()
+
+    assert str(lowering.lower_type(INT)) == "i32"
+    assert str(lowering.lower_type(ArrayType(INT, (StaticDim(10),)))) == "tensor<10xi32>"
+
+
+@pytest.mark.parametrize(
+    ("source", "return_type", "expected_op"),
+    [
+        ("1 + 2", "i32", "arith.addi"),
+        ("1 + 2.0", "f32", "arith.addf"),
+        ("4 / 2", "f32", "arith.divf"),
+        ("1 < 2", "i1", "arith.cmpi slt"),
+        ("1.0 <= 2.0", "i1", "arith.cmpf ole"),
+        ("true && false", "i1", "arith.andi"),
+        ("true || false", "i1", "arith.ori"),
+    ],
+)
+def test_lowers_scalar_primitive_expressions(source: str, return_type: str, expected_op: str):
+    program = hir_from_source(source)
+    lowered = MLIRLowering().lower_program(program)
+
+    assert f"func.func @main() -> {return_type}" in lowered.text
+    assert expected_op in lowered.text
+    assert f"return %" in lowered.text
+    assert f": {return_type}" in lowered.text
+
+
+@pytest.mark.parametrize(
+    ("source", "return_type", "constant"),
+    [
+        ("42", "i32", "arith.constant 42 : i32"),
+        ("3.5", "f32", "arith.constant 3.500000e+00 : f32"),
+        ("true", "i1", "arith.constant true"),
+    ],
+)
+def test_lowers_scalar_literals(source: str, return_type: str, constant: str):
+    lowered = MLIRLowering().lower_program(hir_from_source(source))
+
+    assert f"func.func @main() -> {return_type}" in lowered.text
+    assert constant in lowered.text
+    assert f": {return_type}" in lowered.text
+
+
+def test_lowers_iota_to_parseable_linalg_mlir_module():
+    program = hir_from_source("iota 10")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xi32>" in lowered.text
+    assert "tensor.empty() : tensor<10xi32>" in lowered.text
+    assert "linalg.generic" in lowered.text
+    assert 'iterator_types = ["parallel"]' in lowered.text
+    assert "linalg.index 0 : index" in lowered.text
+    assert "arith.index_cast" in lowered.text
+    assert "return %" in lowered.text
+    assert ": tensor<10xi32>" in lowered.text
+
+
+def test_lowers_rank_1_array_literal():
+    program = hir_from_source("[1, 2, 3]")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<3xi32>" in lowered.text
+    assert "tensor.from_elements" in lowered.text
+    assert "arith.constant 1 : i32" in lowered.text
+    assert "arith.constant 3 : i32" in lowered.text
+
+
+def test_lowers_rank_2_and_rank_3_array_literals():
+    rank2 = MLIRLowering().lower_program(hir_from_source("[[1.0, 2.0], [3.0, 4.0]]"))
+    rank3 = MLIRLowering().lower_program(hir_from_source("[[[1], [2]], [[3], [4]]]"))
+
+    assert "func.func @main() -> tensor<2x2xf32>" in rank2.text
+    assert "tensor.from_elements" in rank2.text
+    assert "func.func @main() -> tensor<2x2x1xi32>" in rank3.text
+    assert "tensor.from_elements" in rank3.text
+
+
+def test_lowers_primitive_section_map_over_iota():
+    program = hir_from_source("map (* 2.0) (iota 10)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xf32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "tensor.empty() : tensor<10xi32>" in lowered.text
+    assert "tensor.empty() : tensor<10xf32>" in lowered.text
+    assert "arith.sitofp" in lowered.text
+    assert "arith.constant 2.000000e+00 : f32" in lowered.text
+    assert "arith.mulf" in lowered.text
+    assert "return %" in lowered.text
+    assert ": tensor<10xf32>" in lowered.text
+
+
+def test_lowers_rank_2_scalar_map_over_array_literal():
+    program = hir_from_source(
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (* 2.0) xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x2xf32>" in lowered.text
+    assert "affine_map<(d0, d1) -> (d0, d1)>" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel"]' in lowered.text
+    assert "arith.mulf" in lowered.text
+
+
+def test_lowers_rank_3_scalar_map_over_array_literal():
+    program = hir_from_source("let xs = [[[1], [2]], [[3], [4]]] in map (\\x -> x + 1) xs")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x2x1xi32>" in lowered.text
+    assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_lifted_lambda_map_over_iota():
+    program = hir_from_source("map (\\x -> x * 2.0) (iota 10)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xf32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.sitofp" in lowered.text
+    assert "arith.constant 2.000000e+00 : f32" in lowered.text
+    assert "arith.mulf" in lowered.text
+
+
+def test_lowers_lifted_integer_lambda_map_over_iota():
+    program = hir_from_source("map (\\x -> x * x) (iota 10)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.muli" in lowered.text
+    assert "arith.sitofp" not in lowered.text
+
+
+def test_lowers_lifted_comparison_lambda_map_over_iota():
+    program = hir_from_source("map (\\x -> x < 5) (iota 10)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xi1>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.cmpi slt" in lowered.text
+
+
+def test_lowers_fold_over_iota():
+    program = hir_from_source("fold (+) 0 (iota 10)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert 'iterator_types = ["reduction"]' in lowered.text
+    assert "tensor.from_elements" in lowered.text
+    assert "arith.addi" in lowered.text
+    assert "tensor.extract" in lowered.text
+    assert "return %" in lowered.text
+    assert ": i32" in lowered.text
+
+
+def test_lowers_fold_over_array_literal():
+    program = hir_from_source("let xs = [1.0, 2.0, 3.0] in fold (+) 0.0 xs")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> f32" in lowered.text
+    assert "tensor.from_elements" in lowered.text
+    assert 'iterator_types = ["reduction"]' in lowered.text
+    assert "arith.addf" in lowered.text
+
+
+def test_lowers_fold_over_mapped_iota_milestone_shape():
+    program = hir_from_source("fold (+) 0.0 (map (* 2.0) (iota 10))")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> f32" in lowered.text
+    assert lowered.text.count("linalg.generic") == 3
+    assert lowered.text.count('iterator_types = ["parallel"]') == 2
+    assert 'iterator_types = ["reduction"]' in lowered.text
+    assert "arith.sitofp" in lowered.text
+    assert "arith.mulf" in lowered.text
+    assert "arith.addf" in lowered.text
+    assert "tensor.extract" in lowered.text
+
+
+def test_lowers_let_bound_iota_map():
+    program = hir_from_source("let xs = iota 10 in map (* 2.0) xs")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xf32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.mulf" in lowered.text
+
+
+def test_lowers_top_level_value_definition_map():
+    program = hir_from_source("def xs = iota 10\nmap (* 2.0) xs")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<10xf32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 2
+    assert "arith.mulf" in lowered.text
+
+
+def test_lowers_let_bound_iota_fold():
+    program = hir_from_source("let xs = iota 10 in fold (+) 0 xs")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert 'iterator_types = ["reduction"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_non_iota_map_lowering_is_deferred():
+    program = hir_from_source(
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
+    )
+
+    with pytest.raises(RemoraLoweringError, match="scalar-cell"):
+        MLIRLowering().lower_program(program)

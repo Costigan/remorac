@@ -1,0 +1,4 @@
+-- Scalar conditionals combined with arithmetic
+let x = 5 in
+if x < 10 then x * 2 else x - 2
+

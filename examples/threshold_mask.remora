@@ -1,0 +1,4 @@
+-- Build a boolean mask from a numeric vector
+let xs = iota 8 in
+map (\x -> x < 4) xs
+

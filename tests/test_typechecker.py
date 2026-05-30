@@ -1,7 +1,15 @@
 import pytest
 
 from remora.parser import parse_expr, parse_program
-from remora.typechecker import TypeChecker, TypedApp, TypedCast, TypedFold, TypedLet, TypedMap
+from remora.typechecker import (
+    TypeChecker,
+    TypedApp,
+    TypedCast,
+    TypedFold,
+    TypedLet,
+    TypedMap,
+    TypedRightSection,
+)
 from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
 
 
@@ -99,6 +107,24 @@ def test_map_operator_section_over_iota_promotes_to_float_array():
 
     assert isinstance(typed, TypedMap)
     assert typed.type == ArrayType(FLOAT, (StaticDim(10),))
+
+
+def test_map_right_operator_section_typechecks():
+    typed = infer("map (2.0 *) (iota 10)")
+
+    assert isinstance(typed, TypedMap)
+    assert isinstance(typed.func, TypedRightSection)
+    assert typed.type == ArrayType(FLOAT, (StaticDim(10),))
+
+
+def test_division_operator_section_rejects_bool_operand():
+    with pytest.raises(RemoraTypeError, match="numeric"):
+        infer("let xs = [true, false] in map (/ true) xs")
+
+
+def test_division_operator_func_rejects_bool_fold_operand():
+    with pytest.raises(RemoraTypeError, match="numeric"):
+        infer("let xs = [true, false] in fold (/) 0.0 xs")
 
 
 def test_numeric_promotion_inserts_typed_cast():

@@ -1,0 +1,3 @@
+-- Conditional expression over scalar values
+if 1 < 2 then 42 else 0
+
