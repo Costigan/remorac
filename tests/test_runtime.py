@@ -24,6 +24,16 @@ def test_cpu_evaluates_iota_map_and_fold():
     assert folded.value == 45.0
 
 
+def test_cpu_evaluates_static_shape_and_rank():
+    shape = evaluate_source("shape [[1, 2], [3, 4]]")
+    rank = evaluate_source("rank [[1, 2], [3, 4]]")
+    scalar_shape = evaluate_source("shape 42")
+
+    np.testing.assert_array_equal(shape.value, np.array([2, 2], dtype=np.int32))
+    assert rank.value == 2
+    np.testing.assert_array_equal(scalar_shape.value, np.array([], dtype=np.int32))
+
+
 def test_cpu_evaluates_row_reduction_map():
     source = "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
 
@@ -72,6 +82,17 @@ def test_cli_cpu_target_prints_result(tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.strip() == "45.0"
+
+
+def test_cli_cpu_target_prints_shape(tmp_path, capsys):
+    source_file = tmp_path / "prog.remora"
+    source_file.write_text("shape [[1, 2], [3, 4]]", encoding="utf-8")
+
+    exit_code = main([str(source_file)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.strip() == "[2, 2]"
 
 
 def test_format_value_for_arrays():

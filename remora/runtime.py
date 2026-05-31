@@ -27,7 +27,9 @@ from remora.typechecker import (
     TypedMap,
     TypedOperatorFunc,
     TypedProgram,
+    TypedRank,
     TypedRightSection,
+    TypedShape,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, StaticDim
 
@@ -115,6 +117,15 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         for item in array:
             acc = callable_value(acc, item)
         return _coerce_runtime_value(acc, expr.type)
+
+    if isinstance(expr, TypedShape):
+        return np.array(
+            [dim.value for dim in _shape_dims(expr.array.type)],
+            dtype=np.int32,
+        )
+
+    if isinstance(expr, TypedRank):
+        return int(expr.array.type.rank)
 
     if isinstance(expr, TypedLambda):
         return _lambda_callable(expr, env)
@@ -269,6 +280,14 @@ def _coerce_runtime_value(value: Value, value_type: RemoraType) -> Value:
             tuple(dim.value for dim in value_type.shape)
         )
     return value
+
+
+def _shape_dims(value_type: RemoraType) -> tuple[StaticDim, ...]:
+    if isinstance(value_type, ArrayType):
+        return value_type.shape
+    if isinstance(value_type, ScalarType):
+        return ()
+    raise EvaluationError("shape/rank of function values is deferred")
 
 
 def _cast_scalar(value: Value, value_type: ScalarType) -> Value:

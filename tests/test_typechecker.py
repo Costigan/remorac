@@ -9,7 +9,9 @@ from remora.typechecker import (
     TypedIf,
     TypedLet,
     TypedMap,
+    TypedRank,
     TypedRightSection,
+    TypedShape,
 )
 from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
 
@@ -61,6 +63,27 @@ def test_iota_has_static_rank_1_int_array_type():
     typed = infer("iota 10")
 
     assert typed.type == ArrayType(INT, (StaticDim(10),))
+
+
+def test_shape_expression_typechecks_from_static_array_type():
+    typed = infer("shape [[1, 2], [3, 4]]")
+
+    assert isinstance(typed, TypedShape)
+    assert typed.type == ArrayType(INT, (StaticDim(2),))
+
+
+def test_shape_of_scalar_typechecks_as_empty_int_vector():
+    typed = infer("shape 42")
+
+    assert isinstance(typed, TypedShape)
+    assert typed.type == ArrayType(INT, (StaticDim(0),))
+
+
+def test_rank_expression_typechecks_as_int():
+    typed = infer("rank [[1, 2], [3, 4]]")
+
+    assert isinstance(typed, TypedRank)
+    assert typed.type == INT
 
 
 def test_map_scalar_lambda_over_rank_1_array_promotes_result():

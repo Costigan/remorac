@@ -35,6 +35,28 @@ def test_lowers_iota():
     assert program.return_type == ArrayType(INT, (StaticDim(10),))
 
 
+def test_lowers_shape_and_rank_to_static_constants():
+    shape_program = lower_program_source("shape [[1, 2], [3, 4]]")
+    rank_program = lower_program_source("rank [[1, 2], [3, 4]]")
+    scalar_shape_program = lower_program_source("shape 42")
+
+    assert isinstance(shape_program.main, HIRArrayLit)
+    assert [
+        element.value
+        for element in shape_program.main.elements
+        if isinstance(element, HIRLit)
+    ] == [2, 2]
+    assert shape_program.return_type == ArrayType(INT, (StaticDim(2),))
+
+    assert isinstance(rank_program.main, HIRLit)
+    assert rank_program.main.value == 2
+    assert rank_program.return_type == INT
+
+    assert isinstance(scalar_shape_program.main, HIRArrayLit)
+    assert scalar_shape_program.main.elements == []
+    assert scalar_shape_program.return_type == ArrayType(INT, (StaticDim(0),))
+
+
 def test_lowers_array_literal_with_typed_elements():
     program = lower_program_source("[1, 2, 3]")
 

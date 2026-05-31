@@ -23,7 +23,9 @@ from remora.ast_nodes import (
     MapExpr,
     OperatorFuncExpr,
     Program,
+    RankExpr,
     RightSectionExpr,
+    ShapeExpr,
     ValDef,
     VarExpr,
 )
@@ -102,6 +104,20 @@ class TypedFold:
 
 
 @dataclass(frozen=True)
+class TypedShape:
+    expr: ShapeExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedRank:
+    expr: RankExpr
+    array: TypedExpr
+    type: ScalarType
+
+
+@dataclass(frozen=True)
 class TypedLambda:
     expr: LambdaExpr | FuncDef
     params: list[tuple[str, RemoraType]]
@@ -161,6 +177,8 @@ TypedExpr: TypeAlias = (
     | TypedArray
     | TypedMap
     | TypedFold
+    | TypedShape
+    | TypedRank
     | TypedLambda
     | TypedOperatorFunc
     | TypedLeftSection
@@ -226,6 +244,18 @@ class TypeChecker:
         if isinstance(expr, IotaExpr):
             size = eval_static_dim(expr.size, expr.loc)
             return TypedExprNode(expr, ArrayType(INT, (size,)))
+        if isinstance(expr, ShapeExpr):
+            typed_array = self.infer(expr.array, env)
+            self._require_shape_operand(typed_array.type, "shape", expr.loc)
+            return TypedShape(
+                expr,
+                typed_array,
+                ArrayType(INT, (StaticDim(typed_array.type.rank),)),
+            )
+        if isinstance(expr, RankExpr):
+            typed_array = self.infer(expr.array, env)
+            self._require_shape_operand(typed_array.type, "rank", expr.loc)
+            return TypedRank(expr, typed_array, INT)
         if isinstance(expr, LetExpr):
             if isinstance(expr.value, LambdaExpr):
                 return self._infer_let_lambda(expr, env)
@@ -662,6 +692,12 @@ class TypeChecker:
     def _require(self, actual: RemoraType, expected: RemoraType, loc) -> None:
         if actual != expected:
             raise RemoraTypeError(f"expected {expected}, got {actual}", loc)
+
+    def _require_shape_operand(
+        self, value_type: RemoraType, operator: str, loc
+    ) -> None:
+        if isinstance(value_type, FuncType):
+            raise RemoraTypeError(f"{operator} of function values is deferred", loc)
 
     def _require_numeric(self, value_type: RemoraType, loc) -> None:
         if not is_numeric(value_type):

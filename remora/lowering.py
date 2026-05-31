@@ -646,6 +646,13 @@ def _lower_tensor_input(
         result_type = type_to_mlir(node.result_type)
         element_type = type_to_mlir(node.result_type.element)
         flat = _flatten_array_literal(node)
+        if not flat:
+            return (
+                f"    %{prefix} = tensor.empty() : {result_type}",
+                f"%{prefix}",
+                result_type,
+                element_type,
+            )
         lines = []
         names = []
         for index, literal in enumerate(flat):
