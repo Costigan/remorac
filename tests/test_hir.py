@@ -4,6 +4,7 @@ from remora.hir import (
     HIRArrayLit,
     HIRCast,
     HIRFold,
+    HIRIndex,
     HIRLoweringError,
     HIRIota,
     HIRLambda,
@@ -55,6 +56,19 @@ def test_lowers_shape_and_rank_to_static_constants():
     assert isinstance(scalar_shape_program.main, HIRArrayLit)
     assert scalar_shape_program.main.elements == []
     assert scalar_shape_program.return_type == ArrayType(INT, (StaticDim(0),))
+
+
+def test_lowers_index_expression():
+    program = lower_program_source("[[1, 2], [3, 4]][1, 0]")
+
+    assert isinstance(program.main, HIRIndex)
+    assert isinstance(program.main.array, HIRArrayLit)
+    assert [
+        index.value
+        for index in program.main.indices
+        if isinstance(index, HIRLit)
+    ] == [1, 0]
+    assert program.return_type == INT
 
 
 def test_lowers_array_literal_with_typed_elements():

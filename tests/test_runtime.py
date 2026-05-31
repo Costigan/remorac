@@ -34,6 +34,18 @@ def test_cpu_evaluates_static_shape_and_rank():
     np.testing.assert_array_equal(scalar_shape.value, np.array([], dtype=np.int32))
 
 
+def test_cpu_evaluates_indexing():
+    scalar = evaluate_source("[[1, 2], [3, 4]][1, 0]")
+    row = evaluate_source("[[1, 2], [3, 4]][0]")
+    iota_item = evaluate_source("(iota 10)[3]")
+    let_item = evaluate_source("let xs = [[1, 2], [3, 4]] in xs[0, 1]")
+
+    assert scalar.value == 3
+    np.testing.assert_array_equal(row.value, np.array([1, 2], dtype=np.int32))
+    assert iota_item.value == 3
+    assert let_item.value == 2
+
+
 def test_cpu_evaluates_row_reduction_map():
     source = "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
 

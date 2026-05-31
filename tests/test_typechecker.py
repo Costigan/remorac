@@ -7,6 +7,7 @@ from remora.typechecker import (
     TypedCast,
     TypedFold,
     TypedIf,
+    TypedIndex,
     TypedLet,
     TypedMap,
     TypedRank,
@@ -84,6 +85,26 @@ def test_rank_expression_typechecks_as_int():
 
     assert isinstance(typed, TypedRank)
     assert typed.type == INT
+
+
+def test_index_expression_typechecks_for_full_and_partial_indices():
+    scalar = infer("[[1, 2], [3, 4]][1, 0]")
+    row = infer("[[1, 2], [3, 4]][1]")
+
+    assert isinstance(scalar, TypedIndex)
+    assert scalar.type == INT
+    assert isinstance(row, TypedIndex)
+    assert row.type == ArrayType(INT, (StaticDim(2),))
+
+
+def test_index_expression_rejects_non_int_indices():
+    with pytest.raises(RemoraTypeError, match="expected int"):
+        infer("[[1, 2], [3, 4]][1.0]")
+
+
+def test_index_expression_rejects_too_many_indices():
+    with pytest.raises(RemoraTypeError, match="too many indices"):
+        infer("[1, 2][0, 0]")
 
 
 def test_map_scalar_lambda_over_rank_1_array_promotes_result():

@@ -22,6 +22,7 @@ from remora.typechecker import (
     TypedExprNode,
     TypedFold,
     TypedIf,
+    TypedIndex,
     TypedLambda,
     TypedLeftSection,
     TypedLet,
@@ -125,6 +126,13 @@ class HIRPrimOp:
 
 
 @dataclass(frozen=True)
+class HIRIndex:
+    array: HIRExpr
+    indices: list[HIRExpr]
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
 class HIRIota:
     size: StaticDim
     result_type: ArrayType
@@ -163,6 +171,7 @@ HIRExpr: TypeAlias = (
     | HIRCall
     | HIRLambda
     | HIRPrimOp
+    | HIRIndex
     | HIRIota
     | HIRCast
     | HIRArrayLit
@@ -228,6 +237,13 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedRank):
         return HIRLit(expr.array.type.rank, INT)
+
+    if isinstance(expr, TypedIndex):
+        return HIRIndex(
+            lower_expr(expr.array),
+            [lower_expr(index) for index in expr.indices],
+            expr.type,
+        )
 
     if isinstance(expr, TypedLambda):
         return HIRLambda(
@@ -352,6 +368,8 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRLambda):
         return expr.result_type
     if isinstance(expr, HIRPrimOp):
+        return expr.result_type
+    if isinstance(expr, HIRIndex):
         return expr.result_type
     if isinstance(expr, HIRIota):
         return expr.result_type

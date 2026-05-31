@@ -19,6 +19,7 @@ from remora.hir import (
     HIRExpr,
     HIRFold,
     HIRFunction,
+    HIRIndex,
     HIRIota,
     HIRLit,
     HIRLet,
@@ -65,6 +66,7 @@ class MLIRLowering:
                 HIRPrimOp,
                 HIRLet,
                 HIRCall,
+                HIRIndex,
                 HIRIota,
                 HIRArrayLit,
                 HIRMap,
@@ -72,7 +74,7 @@ class MLIRLowering:
             ),
         ):
             raise RemoraLoweringError(
-                "only scalar expressions, scalar lets/calls, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
+                "only scalar expressions, scalar lets/calls, full-rank indexing, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
             )
 
         text = _lower_main_module(main, functions)
@@ -162,6 +164,12 @@ def _inline_lets(expr: HIRExpr | None, env: dict[str, HIRExpr] | None = None) ->
         if any(arg is None for arg in args):
             raise RemoraLoweringError("primitive operands cannot be empty")
         return HIRPrimOp(expr.op, args, expr.result_type)  # type: ignore[arg-type]
+    if isinstance(expr, HIRIndex):
+        array = _inline_lets(expr.array, env)
+        indices = [_inline_lets(index, env) for index in expr.indices]
+        if array is None or any(index is None for index in indices):
+            raise RemoraLoweringError("index operands cannot be empty")
+        return HIRIndex(array, indices, expr.result_type)  # type: ignore[arg-type]
     if isinstance(expr, HIRCast):
         value = _inline_lets(expr.value, env)
         if value is None:
@@ -206,11 +214,13 @@ def _inline_callable(callable_: object, env: dict[str, HIRExpr]) -> object:
 
 
 def _lower_main_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIota | HIRArrayLit | HIRMap | HIRFold,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall)):
         return _lower_scalar_module(node, functions)
+    if isinstance(node, HIRIndex):
+        return _lower_index_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):
@@ -286,6 +296,41 @@ def _lower_array_literal_module(node: HIRArrayLit) -> str:
   func.func @main() -> {result_type} {{
 {code}
     return {name} : {result_type}
+  }}
+}}"""
+
+
+def _lower_index_module(node: HIRIndex, functions: dict[str, HIRFunction]) -> str:
+    if not isinstance(node.result_type, ScalarType):
+        raise RemoraLoweringError("only full-rank scalar indexing lowers to MLIR so far")
+    array_type = _expr_result_type(node.array)
+    if not isinstance(array_type, ArrayType):
+        raise RemoraLoweringError("indexing expects a tensor input")
+    if len(node.indices) != array_type.rank:
+        raise RemoraLoweringError("partial indexing lowering is deferred")
+
+    array_code, array_value, array_mlir_type, _element_type = _lower_tensor_input(
+        node.array,
+        "idx_in",
+        functions,
+    )
+    result_type = type_to_mlir(node.result_type)
+    index_lines: list[str] = []
+    index_names: list[str] = []
+    for position, index in enumerate(node.indices):
+        if not isinstance(index, HIRLit) or index.type != INT:
+            raise RemoraLoweringError("only literal integer indices lower to MLIR so far")
+        name = f"%idx_{position}"
+        index_names.append(name)
+        index_lines.append(f"    {name} = arith.constant {index.value} : index")
+    indices = ", ".join(index_names)
+    index_body = "\n".join(index_lines)
+    return f"""module {{
+  func.func @main() -> {result_type} {{
+{array_code}
+{index_body}
+    %result = tensor.extract {array_value}[{indices}] : {array_mlir_type}
+    return %result : {result_type}
   }}
 }}"""
 
@@ -701,6 +746,8 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRCast):
         return expr.result_type
     if isinstance(expr, HIRPrimOp):
+        return expr.result_type
+    if isinstance(expr, HIRIndex):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 

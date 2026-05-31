@@ -184,6 +184,22 @@ def test_lowers_static_shape_and_rank():
     assert "tensor.empty() : tensor<0xi32>" in scalar_shape.text
 
 
+def test_lowers_full_rank_indexing_to_tensor_extract():
+    literal = MLIRLowering().lower_program(hir_from_source("[[1, 2], [3, 4]][1, 0]"))
+    iota = MLIRLowering().lower_program(hir_from_source("(iota 10)[3]"))
+
+    assert "func.func @main() -> i32" in literal.text
+    assert "tensor.from_elements" in literal.text
+    assert "arith.constant 1 : index" in literal.text
+    assert "arith.constant 0 : index" in literal.text
+    assert "tensor.extract" in literal.text
+
+    assert "func.func @main() -> i32" in iota.text
+    assert "tensor.empty() : tensor<10xi32>" in iota.text
+    assert "arith.constant 3 : index" in iota.text
+    assert "tensor.extract" in iota.text
+
+
 def test_lowers_primitive_section_map_over_iota():
     program = hir_from_source("map (* 2.0) (iota 10)")
     lowered = MLIRLowering().lower_program(program)
