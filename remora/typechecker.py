@@ -88,10 +88,14 @@ class TypedArray:
 class TypedMap:
     expr: MapExpr
     func: TypedExpr
-    array: TypedExpr
+    arrays: list[TypedExpr]
     frame_shape: tuple[DimExpr, ...]
     cell_shape: tuple[DimExpr, ...]
     type: RemoraType
+
+    @property
+    def array(self) -> TypedExpr:
+        return self.arrays[0]
 
 
 @dataclass(frozen=True)
@@ -450,6 +454,10 @@ class TypeChecker:
         raise RemoraTypeError(f"unknown primitive operator '{op}'", expr.loc)
 
     def _infer_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
+        if len(expr.arrays) == 2:
+            return self._infer_binary_map(expr, env)
+        if len(expr.arrays) != 1:
+            raise RemoraTypeError("map currently supports one or two arrays", expr.loc)
         typed_array = self.infer(expr.array, env)
         candidates = self._cell_type_candidates(typed_array.type)
         errors: list[Exception] = []
@@ -465,7 +473,7 @@ class TypeChecker:
                 return TypedMap(
                     expr,
                     typed_func,
-                    typed_array,
+                    [typed_array],
                     frame_shape,
                     cell_shape,
                     result_type,
@@ -474,6 +482,93 @@ class TypeChecker:
                 errors.append(exc)
 
         raise RemoraTypeError(f"could not type-check map callable: {errors[-1]}", expr.loc)
+
+    def _infer_binary_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
+        left = self.infer(expr.arrays[0], env)
+        right = self.infer(expr.arrays[1], env)
+        left_cell, frame_shape = self._scalar_cell_and_frame(left.type, expr.loc)
+        right_cell, right_frame = self._scalar_cell_and_frame(right.type, expr.loc)
+        if frame_shape != right_frame:
+            raise RemoraTypeError(
+                f"binary map expects matching shapes, got {left.type} and {right.type}",
+                expr.loc,
+            )
+
+        func_type = self._infer_binary_map_callable_type(
+            expr.func,
+            left_cell,
+            right_cell,
+            env,
+        )
+        typed_func = self.check_callable(expr.func, func_type, env)
+        result_type = func_type.result
+        if frame_shape:
+            if isinstance(result_type, FuncType):
+                raise RemoraTypeError("function-valued map results are deferred", expr.loc)
+            if isinstance(result_type, ArrayType):
+                raise RemoraTypeError("binary map over array-valued cells is deferred", expr.loc)
+            result_type = ArrayType(result_type, frame_shape)
+        return TypedMap(expr, typed_func, [left, right], frame_shape, (), result_type)
+
+    def _scalar_cell_and_frame(
+        self, value_type: RemoraType, loc
+    ) -> tuple[ScalarType, tuple[DimExpr, ...]]:
+        if isinstance(value_type, ScalarType):
+            return value_type, ()
+        if isinstance(value_type, ArrayType):
+            return value_type.element, value_type.shape
+        raise RemoraTypeError("map over function values is deferred", loc)
+
+    def _infer_binary_map_callable_type(
+        self,
+        expr: Expr,
+        left_cell: ScalarType,
+        right_cell: ScalarType,
+        env: TypeEnv,
+    ) -> FuncType:
+        if isinstance(expr, OperatorFuncExpr):
+            if expr.op in {"+", "-", "*"}:
+                result = common_numeric_type(left_cell, right_cell)
+                return FuncType((result, result), result)
+            if expr.op == "/":
+                self._require_numeric(left_cell, expr.loc)
+                self._require_numeric(right_cell, expr.loc)
+                return FuncType((FLOAT, FLOAT), FLOAT)
+            if expr.op in {"<", "<=", "==", "!="}:
+                result = common_numeric_type(left_cell, right_cell)
+                return FuncType((result, result), BOOL)
+            if expr.op in {"&&", "||"}:
+                self._require(left_cell, BOOL, expr.loc)
+                self._require(right_cell, BOOL, expr.loc)
+                return FuncType((BOOL, BOOL), BOOL)
+            raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
+
+        if isinstance(expr, LambdaExpr):
+            if len(expr.params) != 2:
+                raise RemoraTypeError("binary map expects a binary callable", expr.loc)
+            inner_env = env.extend(expr.params[0], left_cell).extend(
+                expr.params[1],
+                right_cell,
+            )
+            body = self.infer(expr.body, inner_env)
+            return FuncType((left_cell, right_cell), body.type)
+
+        if isinstance(expr, VarExpr) and expr.name in self._functions:
+            function = self._functions[expr.name]
+            if len(function.params) != 2:
+                raise RemoraTypeError("binary map expects a binary callable", expr.loc)
+            return self._infer_top_level_function_type(
+                function,
+                (left_cell, right_cell),
+                env,
+            )
+
+        typed = self.infer(expr, env)
+        if not isinstance(typed.type, FuncType) or len(typed.type.params) != 2:
+            raise RemoraTypeError("binary map expects a binary callable", expr.loc)
+        self._require(typed.type.params[0], left_cell, expr.loc)
+        self._require(typed.type.params[1], right_cell, expr.loc)
+        return typed.type
 
     def _infer_fold(self, expr: FoldExpr, env: TypeEnv) -> TypedFold:
         typed_init = self.infer(expr.init, env)

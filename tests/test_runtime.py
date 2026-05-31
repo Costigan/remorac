@@ -28,10 +28,28 @@ def test_cpu_evaluates_prelude_functions():
     summed = evaluate_source("sum (iota 10)")
     product = evaluate_source("let xs = [2.0, 3.0, 4.0] in product xs")
     scaled = evaluate_source("scale 2.0 (iota 4)")
+    dot = evaluate_source(
+        "let xs = [1.0, 2.0, 3.0] in "
+        "let ys = [4.0, 5.0, 6.0] in "
+        "dot xs ys"
+    )
 
     assert summed.value == 45.0
     assert product.value == 24.0
     np.testing.assert_array_equal(scaled.value, np.array([0, 2, 4, 6], dtype=np.float32))
+    assert dot.value == 32.0
+
+
+def test_cpu_evaluates_binary_map():
+    result = evaluate_source(
+        "let xs = [1, 2, 3] in let ys = [4, 5, 6] in map (*) xs ys"
+    )
+    lambda_result = evaluate_source(
+        "let xs = [1, 2] in let ys = [3, 4] in map (\\x y -> x + y) xs ys"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([4, 10, 18], dtype=np.int32))
+    np.testing.assert_array_equal(lambda_result.value, np.array([4, 6], dtype=np.int32))
 
 
 def test_cpu_evaluates_static_shape_and_rank():

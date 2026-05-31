@@ -68,8 +68,12 @@ class AppExpr:
 @dataclass(frozen=True)
 class MapExpr:
     func: Expr
-    array: Expr
+    arrays: list[Expr]
     loc: SourceLoc
+
+    @property
+    def array(self) -> Expr:
+        return self.arrays[0]
 
 
 @dataclass(frozen=True)

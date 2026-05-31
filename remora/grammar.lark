@@ -35,6 +35,7 @@ lambda_expr: LAMBDA NAME+ ARROW expr
          | app_expr
 
 ?app_expr: app_expr atom             -> application
+         | "map" callable atom atom  -> map_expr
          | "map" callable atom       -> map_expr
          | "fold" callable atom atom -> fold_expr
          | "iota" atom               -> iota_expr

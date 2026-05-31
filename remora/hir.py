@@ -73,8 +73,12 @@ class HIRMap:
     frame_shape: tuple[DimExpr, ...]
     cell_shape: tuple[DimExpr, ...]
     func: HIRCallable
-    array: HIRExpr
+    arrays: list[HIRExpr]
     result_type: RemoraType
+
+    @property
+    def array(self) -> HIRExpr:
+        return self.arrays[0]
 
 
 @dataclass(frozen=True)
@@ -216,7 +220,7 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.frame_shape,
             expr.cell_shape,
             lower_callable(expr.func),
-            lower_expr(expr.array),
+            [lower_expr(array) for array in expr.arrays],
             expr.type,
         )
 

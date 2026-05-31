@@ -160,6 +160,10 @@ Known parser limitation:
 - `map` tries scalar cells first, then progressively larger suffix cell shapes.
   This supports scalar maps over rank-1/2/3 arrays and vector-cell maps such as
   row reductions.
+- Binary `map` is supported for scalar cells over two scalar values or two
+  arrays with identical static shapes. This is the compiler-shaped CPU path used
+  by the starter `dot` prelude helper. Mixed array/scalar binary maps and
+  array-valued binary map cells are deferred.
 - `fold` currently supports scalar accumulator folds over rank-1 arrays. Array
   cell folds are explicitly deferred.
 - Top-level value definitions are supported.
@@ -269,6 +273,8 @@ Deferred defunctionalization work:
 - Scalar `HIRMap` lowers over rank-0 scalar inputs, direct `HIRIota`, direct
   static `HIRArrayLit`, and nested scalar `HIRMap` inputs for scalar-cell maps
   only.
+- Binary `HIRMap` is represented in HIR but explicitly rejected by MLIR lowering
+  for now, so CPU `dot` support does not silently lower as a unary map.
 - Cell `HIRMap` lowers for the current rank-1-cell reduction pattern, e.g.
   `map (\row -> fold (+) 0 row) xs`, producing row/cell reductions over rank-2
   and rank-3 inputs.
@@ -336,6 +342,8 @@ Deferred MLIR lowering work:
 - Lower generalized non-direct tensor values beyond the current nested
   scalar-map subset, generalized array-cell fold callables beyond primitive
   operators, and generalized cell maps beyond rank-1-cell fold bodies.
+- Lower binary scalar-cell maps to multi-input `linalg.generic`, then lower
+  prelude `dot` through MLIR instead of CPU-only typed-AST evaluation.
 - Lower partial indexing to `tensor.extract_slice` or another array-cell
   representation. Dynamic index expression lowering is also deferred.
 - Replace tensor let inlining with real SSA environment lowering when lowering
@@ -406,9 +414,9 @@ Deferred pipeline/codegen work:
   row reductions, rank-2/rank-3 literals, operator sections, and the narrow
   direct local lambda application pattern.
 - `stdlib/prelude.rem` now contains the supported starter subset: `add`, `sub`,
-  `mul`, `div`, `sum`, `product`, and `scale`. These are loaded automatically
-  by the compiler facade and CPU evaluator; the REPL initializes and resets its
-  session definitions with the same prelude definitions.
+  `mul`, `div`, `sum`, `product`, `scale`, and `dot`. These are loaded
+  automatically by the compiler facade and CPU evaluator; the REPL initializes
+  and resets its session definitions with the same prelude definitions.
 - The `remorac` console script defaults to `--target cpu`, printing the
   evaluated result. It also supports `--emit-ast`, `--emit-typed-ast`,
   `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus `--target mlir` and

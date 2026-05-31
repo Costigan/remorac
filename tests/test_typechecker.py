@@ -127,6 +127,30 @@ def test_map_scalar_lambda_over_rank_2_and_rank_3_arrays():
     assert rank3.type == ArrayType(INT, (StaticDim(2), StaticDim(2), StaticDim(1)))
 
 
+def test_binary_map_operator_over_matching_vectors():
+    typed = let_body(let_body(
+        infer("let xs = [1, 2] in let ys = [3, 4] in map (*) xs ys")
+    ))
+
+    assert isinstance(typed, TypedMap)
+    assert typed.type == ArrayType(INT, (StaticDim(2),))
+    assert len(typed.arrays) == 2
+
+
+def test_binary_map_lambda_over_matching_vectors():
+    typed = let_body(let_body(
+        infer("let xs = [1, 2] in let ys = [3, 4] in map (\\x y -> x + y) xs ys")
+    ))
+
+    assert isinstance(typed, TypedMap)
+    assert typed.type == ArrayType(INT, (StaticDim(2),))
+
+
+def test_binary_map_rejects_mismatched_shapes():
+    with pytest.raises(RemoraTypeError, match="matching shapes"):
+        infer("let xs = [1, 2] in let ys = [3, 4, 5] in map (*) xs ys")
+
+
 def test_map_vector_lambda_using_fold_returns_frame_type():
     typed = let_body(
         infer(
