@@ -24,6 +24,16 @@ def test_cpu_evaluates_iota_map_and_fold():
     assert folded.value == 45.0
 
 
+def test_cpu_evaluates_prelude_functions():
+    summed = evaluate_source("sum (iota 10)")
+    product = evaluate_source("let xs = [2.0, 3.0, 4.0] in product xs")
+    scaled = evaluate_source("scale 2.0 (iota 4)")
+
+    assert summed.value == 45.0
+    assert product.value == 24.0
+    np.testing.assert_array_equal(scaled.value, np.array([0, 2, 4, 6], dtype=np.float32))
+
+
 def test_cpu_evaluates_static_shape_and_rank():
     shape = evaluate_source("shape [[1, 2], [3, 4]]")
     rank = evaluate_source("rank [[1, 2], [3, 4]]")
@@ -76,6 +86,14 @@ def test_compiler_facade_emits_mlir():
     mlir = compile_source_to_mlir("map (* 2) (iota 4)")
 
     assert "func.func @main() -> tensor<4xi32>" in mlir
+
+
+def test_compiler_facade_emits_mlir_for_prelude_sum():
+    mlir = compile_source_to_mlir("sum (iota 10)")
+
+    assert "func.func @main() -> f32" in mlir
+    assert "linalg.generic" in mlir
+    assert "arith.addf" in mlir
 
 
 def test_compiler_facade_emits_ptx():

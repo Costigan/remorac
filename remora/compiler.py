@@ -10,6 +10,7 @@ from remora.hir import HIRProgram, lower_to_hir
 from remora.lowering import MLIRLowering
 from remora.parser import parse_program
 from remora.pipeline import run_validation_pipeline, verify_module_text
+from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypedProgram
 from remora.types import RemoraType
 
@@ -34,8 +35,14 @@ class PTXArtifact:
     kernels: list[KernelMeta]
 
 
-def compile_source(source: str, *, verify: bool = True) -> CompilerArtifact:
-    typed = TypeChecker().check_program(parse_program(source))
+def compile_source(
+    source: str,
+    *,
+    verify: bool = True,
+    include_prelude: bool = True,
+) -> CompilerArtifact:
+    program_source = with_prelude(source) if include_prelude else source
+    typed = TypeChecker().check_program(parse_program(program_source))
     hir = defunctionalize(lower_to_hir(typed))
     mlir_module = MLIRLowering().lower_program(hir).module
     if verify:
@@ -50,11 +57,29 @@ def compile_source(source: str, *, verify: bool = True) -> CompilerArtifact:
     )
 
 
-def compile_source_to_mlir(source: str, *, verify: bool = True) -> str:
-    return compile_source(source, verify=verify).mlir_text
+def compile_source_to_mlir(
+    source: str,
+    *,
+    verify: bool = True,
+    include_prelude: bool = True,
+) -> str:
+    return compile_source(
+        source,
+        verify=verify,
+        include_prelude=include_prelude,
+    ).mlir_text
 
 
-def compile_source_to_ptx(source: str, *, verify: bool = True) -> PTXArtifact:
-    artifact = compile_source(source, verify=verify)
+def compile_source_to_ptx(
+    source: str,
+    *,
+    verify: bool = True,
+    include_prelude: bool = True,
+) -> PTXArtifact:
+    artifact = compile_source(
+        source,
+        verify=verify,
+        include_prelude=include_prelude,
+    )
     ptx_text, kernels = generate_ptx(artifact.mlir_module)
     return PTXArtifact(artifact, ptx_text, kernels)

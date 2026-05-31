@@ -14,6 +14,7 @@ from remora.display import format_result
 from remora.errors import RemoraError
 from remora.hir import lower_to_hir
 from remora.parser import parse_program
+from remora.prelude import with_prelude
 from remora.runtime import evaluate_source
 from remora.typechecker import TypeChecker
 
@@ -44,10 +45,10 @@ def main(argv: list[str] | None = None) -> int:
             print(pformat(parse_program(source, str(args.file))))
             return 0
         if args.emit_typed_ast:
-            print(pformat(TypeChecker().check_program(parse_program(source, str(args.file)))))
+            print(pformat(TypeChecker().check_program(parse_program(with_prelude(source), str(args.file)))))
             return 0
         if args.emit_hir:
-            typed = TypeChecker().check_program(parse_program(source, str(args.file)))
+            typed = TypeChecker().check_program(parse_program(with_prelude(source), str(args.file)))
             print(pformat(defunctionalize(lower_to_hir(typed))))
             return 0
         if args.emit_mlir:

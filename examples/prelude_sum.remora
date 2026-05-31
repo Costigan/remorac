@@ -1,0 +1,2 @@
+-- Starter prelude reduction
+sum (iota 10)

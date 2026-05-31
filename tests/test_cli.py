@@ -68,6 +68,15 @@ def test_cli_target_ptx_alias(tmp_path, capsys):
     assert ".visible .entry" in output
 
 
+def test_cli_loads_prelude_for_cpu_target(tmp_path, capsys):
+    source = write_source(tmp_path, "sum (iota 10)")
+
+    assert main([str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "45.0"
+    assert captured.err == ""
+
+
 def test_cli_emit_mlir_for_top_level_function_direct_call(tmp_path, capsys):
     source = write_source(tmp_path, "def add1 x = x + 1\nadd1 41")
 

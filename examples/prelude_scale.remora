@@ -1,0 +1,2 @@
+-- Starter prelude scaling helper
+scale 2.0 (iota 5)

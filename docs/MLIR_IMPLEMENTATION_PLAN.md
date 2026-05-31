@@ -2384,7 +2384,7 @@ main()
 - [x] Set up `readline` history
   - Current: enabled for interactive `remora`, disabled in tests.
 - [x] Implement all REPL commands (`:type`, `:debug`, `:target`, `:load`, `:reset`, `:help`)
-  - Current: `:mlir` is also implemented; non-CPU targets report a clear deferred message.
+  - Current: `:mlir`, `:prelude`, and `:defs` are also implemented; non-CPU targets report a clear deferred message.
 - [x] Implement `_load_file`
   - Current: loads current one-line top-level value/function definitions and evaluates the body if present.
 - [ ] Add `gpu-nvidia` REPL target after the CUDA descriptor ABI is stable
@@ -2480,7 +2480,10 @@ def _build_prelude_env() -> TypeEnv:
 
 #### 10.4 Tasks
 
-- [ ] Write `stdlib/prelude.rem` with combinators listed above
+- [x] Write `stdlib/prelude.rem` with currently supported starter combinators
+  - Current: `add`, `sub`, `mul`, `div`, `sum`, `product`, and `scale` are
+    implemented. The broader planned prelude remains deferred until the
+    language supports the required forms.
 - [x] Implement `iota` lowering in `lowering.py`
 - [x] Implement static Dense Core `shape` / `rank` lowering
   - Current: HIR turns both operations into constants from type metadata.
@@ -2493,8 +2496,14 @@ def _build_prelude_env() -> TypeEnv:
     tensor-producing expressions such as `iota` and static array literals.
     CPU evaluation also supports partial indexing; partial MLIR lowering and
     dynamic index lowering remain deferred.
-- [ ] Load prelude automatically in `TypeChecker.__init__` / startup
+- [x] Load prelude automatically in compiler/runtime/REPL startup paths
+  - Current: source composition injects the prelude for `remorac`, compiler
+    facade calls, and CPU evaluation. The REPL initializes and resets its
+    persisted definition list with the same prelude definitions.
 - [ ] Test prelude functions end-to-end: `sum (iota 10)` → `45`, `dot [1,2,3] [4,5,6]` → `32`
+  - Partial: `sum (iota 10)` is covered by runtime, CLI, REPL, compiler, and
+    acceptance tests. `dot` remains deferred until `zip`/multi-input mapping is
+    designed.
 
 ---
 
