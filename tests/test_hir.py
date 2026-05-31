@@ -105,6 +105,22 @@ def test_lowers_scalar_map_with_lambda():
     assert map_node.func.body.op == "*f"
 
 
+def test_lowers_binary_map_shape_metadata():
+    program = lower_program_source(
+        "let xs = [1, 2] in let ys = [3, 4] in map (*) xs ys"
+    )
+
+    assert isinstance(program.main, HIRLet)
+    inner = program.main.body
+    assert isinstance(inner, HIRLet)
+    assert isinstance(inner.body, HIRMap)
+    map_node = inner.body
+    assert len(map_node.arrays) == 2
+    assert map_node.frame_shape == (StaticDim(2),)
+    assert map_node.cell_shape == ()
+    assert map_node.result_type == ArrayType(INT, (StaticDim(2),))
+
+
 def test_lowers_vector_cell_map_shape_metadata():
     program = lower_program_source(
         "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"

@@ -464,3 +464,10 @@ def test_non_rank_1_cell_map_lowering_is_deferred():
 
     with pytest.raises(RemoraLoweringError, match="rank-1 cell maps"):
         MLIRLowering().lower_program(program)
+
+
+def test_binary_map_mlir_lowering_is_deferred():
+    program = hir_from_source("let xs = [1, 2] in let ys = [3, 4] in map (*) xs ys")
+
+    with pytest.raises(RemoraLoweringError, match="binary map"):
+        MLIRLowering().lower_program(program)

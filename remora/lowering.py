@@ -137,16 +137,16 @@ def _inline_lets(expr: HIRExpr | None, env: dict[str, HIRExpr] | None = None) ->
     if isinstance(expr, HIRVar):
         return env.get(expr.name, expr)
     if isinstance(expr, HIRMap):
-        array = _inline_lets(expr.array, env)
-        if array is None:
+        arrays = [_inline_lets(array, env) for array in expr.arrays]
+        if any(array is None for array in arrays):
             raise RemoraLoweringError("map array cannot be empty")
         return HIRMap(
             expr.frame_shape,
             expr.cell_shape,
             _inline_callable(expr.func, env),
-            array,
+            arrays,
             expr.result_type,
-        )
+        )  # type: ignore[arg-type]
     if isinstance(expr, HIRFold):
         init = _inline_lets(expr.init, env)
         array = _inline_lets(expr.array, env)
@@ -227,6 +227,8 @@ def _lower_main_module(
         return _lower_array_literal_module(node)
     if isinstance(node, HIRFold):
         return _lower_fold_module(node, functions)
+    if len(node.arrays) != 1:
+        raise RemoraLoweringError("binary map MLIR lowering is deferred")
     if not isinstance(node.result_type, ArrayType):
         return _lower_scalar_map_module(node, functions)
     return _lower_iota_scalar_map_module(node, functions)

@@ -56,6 +56,13 @@
     "expect_stdout": "45.0\n"
   },
   {
+    "name": "dot_product",
+    "path": "pass/dot_product.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "32.0\n"
+  },
+  {
     "name": "recursive_function",
     "path": "fail/recursive_function.remora",
     "target": "cpu",

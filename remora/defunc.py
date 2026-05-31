@@ -56,7 +56,7 @@ class _Defunctionalizer:
                 expr.frame_shape,
                 expr.cell_shape,
                 self._rewrite_callable(expr.func),
-                self._rewrite_expr(expr.array),
+                [self._rewrite_expr(array) for array in expr.arrays],
                 expr.result_type,
             )
         if isinstance(expr, HIRFold):
@@ -158,7 +158,9 @@ def _free_vars(expr: HIRExpr) -> set[str]:
     if isinstance(expr, HIRLet):
         return _free_vars(expr.value) | (_free_vars(expr.body) - {expr.name})
     if isinstance(expr, HIRMap):
-        return _free_vars_callable(expr.func) | _free_vars(expr.array)
+        return _free_vars_callable(expr.func) | set().union(
+            *(_free_vars(array) for array in expr.arrays)
+        )
     if isinstance(expr, HIRFold):
         return (
             _free_vars_callable(expr.func)

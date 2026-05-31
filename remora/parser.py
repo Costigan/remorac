@@ -105,7 +105,7 @@ class ASTBuilder(Transformer):
         return AppExpr(func, args, self._loc())
 
     def map_expr(self, items: list[Any]) -> MapExpr:
-        return MapExpr(items[0], items[1], self._loc())
+        return MapExpr(items[0], list(items[1:]), self._loc())
 
     def fold_expr(self, items: list[Any]) -> FoldExpr:
         return FoldExpr(items[0], items[1], items[2], self._loc())

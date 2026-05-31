@@ -62,6 +62,14 @@ def test_map_expression_with_operator_section():
     assert isinstance(expr.array, VarExpr)
 
 
+def test_binary_map_expression():
+    expr = parse_expr("map (*) xs ys")
+
+    assert isinstance(expr, MapExpr)
+    assert isinstance(expr.func, OperatorFuncExpr)
+    assert [array.name for array in expr.arrays if isinstance(array, VarExpr)] == ["xs", "ys"]
+
+
 def test_fold_expression():
     expr = parse_expr("fold (+) 0.0 xs")
 

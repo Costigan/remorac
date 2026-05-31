@@ -9,3 +9,4 @@ def div x y = x / y
 def sum xs = fold (+) 0.0 xs
 def product xs = fold (*) 1.0 xs
 def scale s xs = map (* s) xs
+def dot a b = sum (map (*) a b)

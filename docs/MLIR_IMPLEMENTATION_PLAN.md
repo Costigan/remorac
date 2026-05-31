@@ -429,6 +429,7 @@ compose_expr: compose_expr "∘" app_expr  -> compose
            | app_expr
 
 app_expr   : app_expr atom+              -> application
+           | "map"  callable atom atom   -> map_expr
            | "map"  callable atom        -> map_expr
            | "fold" atom atom atom       -> fold_expr
            | "iota" atom                 -> iota_expr
@@ -2481,9 +2482,9 @@ def _build_prelude_env() -> TypeEnv:
 #### 10.4 Tasks
 
 - [x] Write `stdlib/prelude.rem` with currently supported starter combinators
-  - Current: `add`, `sub`, `mul`, `div`, `sum`, `product`, and `scale` are
-    implemented. The broader planned prelude remains deferred until the
-    language supports the required forms.
+  - Current: `add`, `sub`, `mul`, `div`, `sum`, `product`, `scale`, and `dot`
+    are implemented for the CPU path. The broader planned prelude remains
+    deferred until the language supports the required forms.
 - [x] Implement `iota` lowering in `lowering.py`
 - [x] Implement static Dense Core `shape` / `rank` lowering
   - Current: HIR turns both operations into constants from type metadata.
@@ -2500,10 +2501,11 @@ def _build_prelude_env() -> TypeEnv:
   - Current: source composition injects the prelude for `remorac`, compiler
     facade calls, and CPU evaluation. The REPL initializes and resets its
     persisted definition list with the same prelude definitions.
-- [ ] Test prelude functions end-to-end: `sum (iota 10)` → `45`, `dot [1,2,3] [4,5,6]` → `32`
-  - Partial: `sum (iota 10)` is covered by runtime, CLI, REPL, compiler, and
-    acceptance tests. `dot` remains deferred until `zip`/multi-input mapping is
-    designed.
+- [x] Test prelude functions end-to-end: `sum (iota 10)` → `45`, dot product → `32`
+  - Current: `sum (iota 10)` is covered by runtime, CLI, REPL, compiler, and
+    acceptance tests. `dot` is covered on the CPU path using binary `map` and
+    let-bound vectors because adjacent array literals still conflict with index
+    suffix syntax. MLIR lowering for binary `map` remains deferred.
 
 ---
 

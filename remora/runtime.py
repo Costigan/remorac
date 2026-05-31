@@ -107,9 +107,9 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         return np.array(values, dtype=_numpy_dtype(expr.type.element))
 
     if isinstance(expr, TypedMap):
-        array = _eval_expr(expr.array, env)
+        arrays = [_eval_expr(array, env) for array in expr.arrays]
         callable_value = _eval_callable(expr.func, env)
-        return _map_value(callable_value, array, expr.cell_shape, expr.type)
+        return _map_value(callable_value, arrays, expr.cell_shape, expr.type)
 
     if isinstance(expr, TypedFold):
         array = _eval_expr(expr.array, env)
@@ -232,10 +232,15 @@ def _lambda_callable(expr: TypedLambda, env: Env) -> CallableValue:
 
 def _map_value(
     callable_value: CallableValue,
-    array: Value,
+    arrays: list[Value],
     cell_shape: tuple[StaticDim, ...],
     result_type: RemoraType,
 ) -> Value:
+    if len(arrays) == 2:
+        return _binary_map_value(callable_value, arrays[0], arrays[1], result_type)
+    if len(arrays) != 1:
+        raise EvaluationError("map currently supports one or two arrays")
+    array = arrays[0]
     if not isinstance(array, np.ndarray):
         return _coerce_runtime_value(callable_value(array), result_type)
 
@@ -251,6 +256,29 @@ def _map_value(
     values = [
         callable_value(array[index] if cell_rank else array[index].item())
         for index in np.ndindex(frame_shape)
+    ]
+    if isinstance(result_type, ArrayType):
+        return np.array(values, dtype=_numpy_dtype(result_type.element)).reshape(
+            tuple(dim.value for dim in result_type.shape)
+        )
+    return _coerce_runtime_value(values[0], result_type)
+
+
+def _binary_map_value(
+    callable_value: CallableValue,
+    left: Value,
+    right: Value,
+    result_type: RemoraType,
+) -> Value:
+    if not isinstance(left, np.ndarray) and not isinstance(right, np.ndarray):
+        return _coerce_runtime_value(callable_value(left, right), result_type)
+    if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
+        raise EvaluationError("binary map currently expects both operands to be arrays or scalars")
+    if left.shape != right.shape:
+        raise EvaluationError("binary map expects matching array shapes")
+    values = [
+        callable_value(left[index].item(), right[index].item())
+        for index in np.ndindex(left.shape)
     ]
     if isinstance(result_type, ArrayType):
         return np.array(values, dtype=_numpy_dtype(result_type.element)).reshape(

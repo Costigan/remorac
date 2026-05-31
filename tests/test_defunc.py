@@ -69,7 +69,7 @@ def test_named_function_reference_in_map_is_already_static():
             frame_shape=(StaticDim(4),),
             cell_shape=(),
             func=HIRVar("__double", func_type),
-            array=HIRVar("xs", ArrayType(FLOAT, (StaticDim(4),))),
+            arrays=[HIRVar("xs", ArrayType(FLOAT, (StaticDim(4),)))],
             result_type=ArrayType(FLOAT, (StaticDim(4),)),
         ),
         ArrayType(FLOAT, (StaticDim(4),)),
