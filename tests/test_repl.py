@@ -56,6 +56,13 @@ def test_repl_evaluates_shape_and_rank():
     assert session.eval_input("rank [[1, 2], [3, 4]]") == "2"
 
 
+def test_repl_evaluates_indexing():
+    session = ReplSession()
+
+    assert session.eval_input("[[1, 2], [3, 4]][1, 0]") == "3"
+    assert session.eval_input("[[1, 2], [3, 4]][0]") == "[1, 2]"
+
+
 def test_repl_accepts_multiline_expression():
     session = ReplSession()
 

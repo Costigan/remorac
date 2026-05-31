@@ -2488,7 +2488,11 @@ def _build_prelude_env() -> TypeEnv:
     `tensor.empty() : tensor<0xi32>`. Runtime-dependent `tensor.dim` lowering is
     deferred until dynamic dimensions exist.
 - [ ] Implement `transpose` lowering using `linalg.transpose` or swapped affine map
-- [ ] Implement array indexing lowering using `tensor.extract`
+- [x] Implement basic array indexing lowering using `tensor.extract`
+  - Current: full-rank indexing with literal integer indices lowers for
+    tensor-producing expressions such as `iota` and static array literals.
+    CPU evaluation also supports partial indexing; partial MLIR lowering and
+    dynamic index lowering remain deferred.
 - [ ] Load prelude automatically in `TypeChecker.__init__` / startup
 - [ ] Test prelude functions end-to-end: `sum (iota 10)` → `45`, `dot [1,2,3] [4,5,6]` → `32`
 

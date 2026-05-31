@@ -21,6 +21,7 @@ from remora.typechecker import (
     TypedExprNode,
     TypedFold,
     TypedIf,
+    TypedIndex,
     TypedLambda,
     TypedLeftSection,
     TypedLet,
@@ -126,6 +127,14 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedRank):
         return int(expr.array.type.rank)
+
+    if isinstance(expr, TypedIndex):
+        array = _eval_expr(expr.array, env)
+        indices = tuple(int(_eval_expr(index, env)) for index in expr.indices)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("indexing expects an array value")
+        value = array[indices]
+        return _coerce_runtime_value(value, expr.type)
 
     if isinstance(expr, TypedLambda):
         return _lambda_callable(expr, env)

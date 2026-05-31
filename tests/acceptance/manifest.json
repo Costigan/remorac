@@ -42,6 +42,13 @@
     "expect_stdout": "[2, 2]\n"
   },
   {
+    "name": "indexing",
+    "path": "pass/indexing.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "2\n"
+  },
+  {
     "name": "recursive_function",
     "path": "fail/recursive_function.remora",
     "target": "cpu",

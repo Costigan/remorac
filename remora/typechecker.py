@@ -15,6 +15,7 @@ from remora.ast_nodes import (
     FoldExpr,
     FuncDef,
     IfExpr,
+    IndexExpr,
     IntLit,
     IotaExpr,
     LambdaExpr,
@@ -118,6 +119,14 @@ class TypedRank:
 
 
 @dataclass(frozen=True)
+class TypedIndex:
+    expr: IndexExpr
+    array: TypedExpr
+    indices: list[TypedExpr]
+    type: RemoraType
+
+
+@dataclass(frozen=True)
 class TypedLambda:
     expr: LambdaExpr | FuncDef
     params: list[tuple[str, RemoraType]]
@@ -179,6 +188,7 @@ TypedExpr: TypeAlias = (
     | TypedFold
     | TypedShape
     | TypedRank
+    | TypedIndex
     | TypedLambda
     | TypedOperatorFunc
     | TypedLeftSection
@@ -256,6 +266,24 @@ class TypeChecker:
             typed_array = self.infer(expr.array, env)
             self._require_shape_operand(typed_array.type, "rank", expr.loc)
             return TypedRank(expr, typed_array, INT)
+        if isinstance(expr, IndexExpr):
+            typed_array = self.infer(expr.array, env)
+            if not isinstance(typed_array.type, ArrayType):
+                raise RemoraTypeError("indexing expects an array operand", expr.loc)
+            if len(expr.indices) > typed_array.type.rank:
+                raise RemoraTypeError(
+                    f"too many indices for rank-{typed_array.type.rank} array",
+                    expr.loc,
+                )
+            typed_indices = [self.infer(index, env) for index in expr.indices]
+            for typed_index in typed_indices:
+                self._require(typed_index.type, INT, expr.loc)
+            return TypedIndex(
+                expr,
+                typed_array,
+                typed_indices,
+                typed_array.type.drop_outer(len(typed_indices)),
+            )
         if isinstance(expr, LetExpr):
             if isinstance(expr.value, LambdaExpr):
                 return self._infer_let_lambda(expr, env)

@@ -13,6 +13,7 @@ from remora.hir import (
     HIRExpr,
     HIRFold,
     HIRFunction,
+    HIRIndex,
     HIRIota,
     HIRLambda,
     HIRLet,
@@ -93,6 +94,12 @@ class _Defunctionalizer:
                 self._rewrite_expr(expr.value),
                 expr.from_type,
                 expr.to_type,
+                expr.result_type,
+            )
+        if isinstance(expr, HIRIndex):
+            return HIRIndex(
+                self._rewrite_expr(expr.array),
+                [self._rewrite_expr(index) for index in expr.indices],
                 expr.result_type,
             )
         if isinstance(expr, HIRArrayLit):

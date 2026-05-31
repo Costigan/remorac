@@ -138,6 +138,9 @@ Known parser limitation:
 - `shape expr` and `rank expr` are static metadata operations in Dense Core.
   Function operands are rejected as deferred. For scalar operands, `rank`
   returns `0` and `shape` has type `int[0]`.
+- Array indexing is typed for static rank-1 through rank-3 arrays. Each index
+  must be `int`; full-rank indexing returns a scalar, and partial indexing
+  drops the indexed outer dimensions and returns the remaining array cell.
 - Primitive numeric behavior:
   - `int op int -> int` for `+`, `-`, `*`
   - mixed `int`/`float` promotes to `float`
@@ -174,7 +177,7 @@ Deferred typechecker work:
 - Type variables or a real bidirectional annotation story for standalone
   lambdas beyond the direct local application pattern.
 - Compile-time constant folding for shape expressions.
-- Index expression typing.
+- Static bounds checking for literal indices.
 - Composition typing.
 - Generalized array-cell folds.
 - Better diagnostic locations and source spans.
@@ -199,6 +202,8 @@ Deferred typechecker work:
 - `shape` and `rank` lower to constants from type metadata. `rank` becomes an
   `HIRLit`; `shape` becomes an `HIRArrayLit` containing static dimensions.
   Scalar shape lowers to an empty `int[0]` HIR array.
+- `HIRIndex` carries the lowered array expression, lowered index expressions,
+  and the type after dropping indexed outer dimensions.
 - Primitive scalar operations lower to `HIRPrimOp` with typed operation names
   like `+f`, `*i`, and comparison/bool suffixes.
 - Numeric promotions lower to explicit `HIRCast` nodes.
@@ -210,7 +215,7 @@ Deferred typechecker work:
 Deferred HIR work:
 
 - Top-level `HIRFunction` generation from checked function definitions.
-- HIR lowering for composition, indexing, and generalized conditionals.
+- HIR lowering for composition and generalized conditionals.
 - A richer primitive operation naming scheme may be needed before MLIR lowering
   for comparisons and bool operations.
 
@@ -302,6 +307,8 @@ Deferred defunctionalization work:
 - Static `shape` and `rank` expressions are already lowered by HIR to constants.
   Non-empty shapes use `tensor.from_elements`; scalar `shape` uses
   `tensor.empty() : tensor<0xi32>`.
+- Full-rank `HIRIndex` with literal integer indices lowers to `tensor.extract`
+  for tensor-producing expressions such as `iota` and static array literals.
 - Standalone `HIRLit`, `HIRCast`, and `HIRPrimOp` expressions lower through a
   small scalar-region emitter. The same emitter is used for simple lifted
   lambda bodies inside scalar maps.
@@ -325,6 +332,8 @@ Deferred MLIR lowering work:
 - Lower generalized non-direct tensor values beyond the current nested
   scalar-map subset, generalized array-cell fold callables beyond primitive
   operators, and generalized cell maps beyond rank-1-cell fold bodies.
+- Lower partial indexing to `tensor.extract_slice` or another array-cell
+  representation. Dynamic index expression lowering is also deferred.
 - Replace tensor let inlining with real SSA environment lowering when lowering
   grows beyond direct iota/map/fold slices.
 - Run `mlir-opt --verify-diagnostics` checks beyond parse validation once
