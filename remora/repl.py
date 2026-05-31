@@ -12,6 +12,7 @@ from remora.compiler import compile_source_to_mlir
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program, parse_repl_input
+from remora.prelude import prelude_definition_sources
 from remora.runtime import evaluate_source
 from remora.typechecker import TypeChecker
 
@@ -20,7 +21,7 @@ from remora.typechecker import TypeChecker
 class ReplState:
     target: str = "cpu"
     debug: bool = False
-    definition_sources: list[str] = field(default_factory=list)
+    definition_sources: list[str] = field(default_factory=prelude_definition_sources)
 
 
 def make_initial_state(target: str = "cpu") -> ReplState:
@@ -69,7 +70,7 @@ class ReplSession:
 
     def _process_expression(self, source: str) -> str:
         program_source = _program_source(self.state.definition_sources, source)
-        result = evaluate_source(program_source)
+        result = evaluate_source(program_source, include_prelude=False)
         return format_result(result.value, result.type)
 
     def _handle_command(self, command: str) -> str:
@@ -91,10 +92,14 @@ class ReplSession:
                 return self._type_command(arg)
             if name == ":mlir":
                 return self._mlir_command(arg)
+            if name == ":prelude":
+                return self._prelude_command()
+            if name == ":defs":
+                return self._defs_command()
             if name == ":load":
                 return self._load_file(arg)
             if name == ":reset":
-                self.state.definition_sources.clear()
+                self.state.definition_sources = prelude_definition_sources()
                 return "State reset."
             return f"Unknown command: {name}. Type :help for help."
         except RemoraError as exc:
@@ -120,7 +125,18 @@ class ReplSession:
     def _mlir_command(self, arg: str) -> str:
         if not arg:
             return "Usage: :mlir <expr>"
-        return compile_source_to_mlir(_program_source(self.state.definition_sources, arg))
+        return compile_source_to_mlir(
+            _program_source(self.state.definition_sources, arg),
+            include_prelude=False,
+        )
+
+    def _prelude_command(self) -> str:
+        return "\n".join(prelude_definition_sources())
+
+    def _defs_command(self) -> str:
+        prelude_count = len(prelude_definition_sources())
+        definitions = self.state.definition_sources[prelude_count:]
+        return "\n".join(definitions) if definitions else "No user definitions."
 
     def _load_file(self, arg: str) -> str:
         if not arg:
@@ -137,7 +153,10 @@ class ReplSession:
             message = self._process_definition(definition_source, item)
             messages.append(message)
         if program.body is not None:
-            result = evaluate_source(_program_source(self.state.definition_sources, _body_source(source)))
+            result = evaluate_source(
+                _program_source(self.state.definition_sources, _body_source(source)),
+                include_prelude=False,
+            )
             messages.append(format_result(result.value, result.type))
         return "\n".join(messages) if messages else "Loaded."
 
@@ -233,6 +252,8 @@ Remora REPL commands:
   :quit, :q      Exit the REPL
   :type <expr>   Show the inferred type of an expression
   :mlir <expr>   Print validated MLIR for an expression
+  :prelude       Show built-in prelude definitions
+  :defs          Show user definitions in this session
   :load <file>   Load definitions and evaluate the file body
   :reset         Clear accumulated definitions
   :target [cpu]  Show or set the current target

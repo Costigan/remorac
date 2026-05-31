@@ -38,6 +38,26 @@ def test_repl_function_definition_can_be_used_in_map():
     assert session.eval_input("map double (iota 4)") == "[0, 2, 4, 6]"
 
 
+def test_repl_loads_prelude_functions():
+    session = ReplSession()
+
+    assert session.eval_input("sum (iota 10)") == "45.0"
+    assert session.eval_input(":type scale 2.0 (iota 4)") == "scale 2.0 (iota 4) : float[4]"
+
+
+def test_repl_shows_prelude_and_user_definitions():
+    session = ReplSession()
+
+    prelude = session.eval_input(":prelude")
+    assert prelude is not None
+    assert "def sum xs = fold (+) 0.0 xs" in prelude
+    assert "def scale s xs = map (* s) xs" in prelude
+
+    assert session.eval_input(":defs") == "No user definitions."
+    assert session.eval_input("def xs = iota 4") == "Defined: xs : int[4]"
+    assert session.eval_input(":defs") == "def xs = iota 4"
+
+
 def test_repl_type_command_uses_session_definitions():
     session = ReplSession()
     session.eval_input("def xs = iota 4")
@@ -92,6 +112,7 @@ def test_repl_reset_clears_definitions():
 
     assert session.eval_input(":reset") == "State reset."
     assert session.eval_input("x").startswith("Error: unbound variable")
+    assert session.eval_input("sum (iota 4)") == "6.0"
 
 
 def test_repl_load_file(tmp_path):

@@ -1,0 +1,2 @@
+-- Static shape and rank inspection
+shape [[1, 2], [3, 4]]

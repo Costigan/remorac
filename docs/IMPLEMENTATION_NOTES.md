@@ -111,6 +111,10 @@ Deferred ABI/runtime work:
   definition body does not accidentally consume the following final expression.
 - A newline is allowed immediately after `in`, `then`, and `else` so checked-in
   examples can use readable multi-line `let` and conditional forms.
+- Prelude injection strips leading blank/comment-only lines from user source
+  before prepending definitions. This avoids creating a blank top-level
+  separator between the injected prelude definitions and a commented example
+  body.
 - Source locations currently store filename plus placeholder line/column `0`.
   Precise source spans are deferred.
 
@@ -401,6 +405,10 @@ Deferred pipeline/codegen work:
   functions used as unary `map` callables, `iota`, `map`, `fold`, nested maps,
   row reductions, rank-2/rank-3 literals, operator sections, and the narrow
   direct local lambda application pattern.
+- `stdlib/prelude.rem` now contains the supported starter subset: `add`, `sub`,
+  `mul`, `div`, `sum`, `product`, and `scale`. These are loaded automatically
+  by the compiler facade and CPU evaluator; the REPL initializes and resets its
+  session definitions with the same prelude definitions.
 - The `remorac` console script defaults to `--target cpu`, printing the
   evaluated result. It also supports `--emit-ast`, `--emit-typed-ast`,
   `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus `--target mlir` and
@@ -428,6 +436,8 @@ Deferred CPU/runtime work:
 - `:mlir` lowers the expression in the current session context through the
   compiler facade and prints validated MLIR when the current lowering subset
   supports it.
+- `:prelude` prints the starter prelude definitions currently injected into new
+  sessions. `:defs` prints only user-added definitions after the prelude.
 - `:load` loads top-level value/function definitions from a file and evaluates
   the file body if present. This is intentionally simple and line-oriented for
   current one-line `def` examples.
@@ -456,10 +466,12 @@ Current tests cover:
 - Typechecker coverage for scalar literals, rank-1/2/3 array literals, `iota`,
   scalar maps, row-reduction maps, vector folds, numeric casts, rank-4
   rejection, the M2 milestone expression, direct top-level function calls,
-  top-level functions as map callables, and recursive-function deferral.
+  top-level functions as map callables, static `shape`/`rank`, array indexing,
+  and recursive-function deferral.
 - HIR coverage for `iota`, array literals, casts, scalar maps, vector-cell map
   shape metadata, folds, operator sections, top-level value definitions, and the
-  M2 milestone expression.
+  M2 milestone expression. Static `shape`/`rank` and array indexing HIR lowering
+  are also covered.
 - Regression coverage for division callable operand validation, right operator
   sections, negative-stride numpy views, the current array-literal/index parse
   behavior, and definition-only HIR rejection.
@@ -492,7 +504,8 @@ Current tests cover:
   of `iota`, scalar map over `iota`, scalar map over a rank-2 literal, and
   scalar fold over a mapped `iota`.
 - MLIR lowering coverage for static top-level function direct calls and
-  top-level functions used as unary `map` callables.
+  top-level functions used as unary `map` callables. Static `shape`/`rank` and
+  full-rank literal indexing to `tensor.extract` are covered.
 - Pipeline/codegen coverage for toolchain detection, validation-pipeline
   pass-manager execution, direct `run_pipeline`, external verifier execution
   when available, unavailable-pass diagnostics, CPU pipeline gating until the
@@ -501,22 +514,25 @@ Current tests cover:
   expression `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
 - CPU runtime and CLI coverage for scalar evaluation, direct top-level function
   calls, top-level functions as map callables, `iota`/`map`/`fold`,
-  row-reduction maps, every checked-in example file, compiler facade MLIR/PTX
-  helpers, `remorac` CPU output over every checked-in example, CLI emit flags,
-  MLIR/PTX target aliases, MLIR/PTX output for top-level function maps, missing
-  files, invalid sources, and recursive function diagnostics.
+  row-reduction maps, static `shape`/`rank`, array indexing, prelude `sum`,
+  `product`, and `scale`, every checked-in example file, compiler facade
+  MLIR/PTX helpers, `remorac` CPU output over every checked-in example, CLI emit
+  flags, MLIR/PTX target aliases, MLIR/PTX output for top-level function maps,
+  missing files, invalid sources, and recursive function diagnostics.
 - Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
   and CLI boolean output.
 - REPL coverage for expression evaluation, persistent value/function
   definitions, definitions referencing earlier definitions, top-level functions
   used in direct calls and maps, recursive-function diagnostics, `:type`,
-  `:mlir`, `:load`, `:reset`, target diagnostics, error recovery, `:quit`, and
-  the `remora --target cpu` entry point.
+  `:mlir`, `:prelude`, `:defs`, `:load`, `:reset`, prelude availability across
+  reset, target diagnostics, error recovery, `:quit`, and the
+  `remora --target cpu` entry point.
 - Acceptance coverage under `tests/acceptance/` for CPU-facing pass/fail cases:
   scalar arithmetic, top-level function calls, top-level functions used in
-  maps, row reductions, rank-3 maps, recursive-function diagnostics, and rank-4
-  rejection. Deferred examples are checked into `tests/acceptance/deferred/`
-  but intentionally excluded from the manifest.
+  maps, row reductions, rank-3 maps, static `shape`, indexing, prelude `sum`,
+  recursive-function diagnostics, and rank-4 rejection. Deferred examples are
+  checked into `tests/acceptance/deferred/` but intentionally excluded from the
+  manifest.
 
 The latest full local test command was:
 

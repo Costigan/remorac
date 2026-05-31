@@ -49,6 +49,13 @@
     "expect_stdout": "2\n"
   },
   {
+    "name": "prelude_sum",
+    "path": "pass/prelude_sum.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "45.0\n"
+  },
+  {
     "name": "recursive_function",
     "path": "fail/recursive_function.remora",
     "target": "cpu",

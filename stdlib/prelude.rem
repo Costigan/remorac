@@ -1,0 +1,11 @@
+-- Dense Core starter prelude.
+-- Keep this file limited to helpers supported by the current static CPU path.
+
+def add x y = x + y
+def sub x y = x - y
+def mul x y = x * y
+def div x y = x / y
+
+def sum xs = fold (+) 0.0 xs
+def product xs = fold (*) 1.0 xs
+def scale s xs = map (* s) xs

@@ -11,6 +11,7 @@ from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExp
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program
+from remora.prelude import with_prelude
 from remora.typechecker import (
     TypeChecker,
     TypedApp,
@@ -54,8 +55,9 @@ Env = dict[str, Value]
 CallableValue = Callable[..., Value]
 
 
-def evaluate_source(source: str) -> EvaluationResult:
-    typed = TypeChecker().check_program(parse_program(source))
+def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationResult:
+    program_source = with_prelude(source) if include_prelude else source
+    typed = TypeChecker().check_program(parse_program(program_source))
     return evaluate_typed_program(typed)
 
 

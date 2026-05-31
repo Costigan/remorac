@@ -1,0 +1,2 @@
+-- Full-rank indexing
+let xs = [[1, 2], [3, 4]] in xs[1, 0]
