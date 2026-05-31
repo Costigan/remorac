@@ -28,7 +28,9 @@ from remora.typechecker import (
     TypedMap,
     TypedOperatorFunc,
     TypedProgram,
+    TypedRank,
     TypedRightSection,
+    TypedShape,
 )
 from remora.types import (
     BOOL,
@@ -218,6 +220,15 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.type,
         )
 
+    if isinstance(expr, TypedShape):
+        return HIRArrayLit(
+            [HIRLit(dim.value, INT) for dim in _shape_dims(expr.array.type)],
+            expr.type,
+        )
+
+    if isinstance(expr, TypedRank):
+        return HIRLit(expr.array.type.rank, INT)
+
     if isinstance(expr, TypedLambda):
         return HIRLambda(
             [HIRParam(name, param_type) for name, param_type in expr.params],
@@ -353,6 +364,14 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRLit):
         return expr.type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
+
+
+def _shape_dims(value_type: RemoraType) -> tuple[DimExpr, ...]:
+    if isinstance(value_type, ArrayType):
+        return value_type.shape
+    if isinstance(value_type, ScalarType):
+        return ()
+    raise HIRLoweringError("shape/rank of function values is deferred")
 
 
 def _typed_node_var_name(expr: TypedExpr) -> str | None:

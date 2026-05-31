@@ -135,6 +135,9 @@ Known parser limitation:
 - Array literals recursively enforce consistent element type and nested shape.
 - Empty array literals are rejected until explicit type annotations exist.
 - `iota n` has type `int[n]`.
+- `shape expr` and `rank expr` are static metadata operations in Dense Core.
+  Function operands are rejected as deferred. For scalar operands, `rank`
+  returns `0` and `shape` has type `int[0]`.
 - Primitive numeric behavior:
   - `int op int -> int` for `+`, `-`, `*`
   - mixed `int`/`float` promotes to `float`
@@ -171,7 +174,6 @@ Deferred typechecker work:
 - Type variables or a real bidirectional annotation story for standalone
   lambdas beyond the direct local application pattern.
 - Compile-time constant folding for shape expressions.
-- `shape` and `rank` typing.
 - Index expression typing.
 - Composition typing.
 - Generalized array-cell folds.
@@ -194,6 +196,9 @@ Deferred typechecker work:
 - `HIRMap` carries the frame shape and cell shape resolved by the typechecker.
   This is the key metadata the later linalg lowering will need.
 - `HIRFold` carries the outer reduction dimension resolved from the typed array.
+- `shape` and `rank` lower to constants from type metadata. `rank` becomes an
+  `HIRLit`; `shape` becomes an `HIRArrayLit` containing static dimensions.
+  Scalar shape lowers to an empty `int[0]` HIR array.
 - Primitive scalar operations lower to `HIRPrimOp` with typed operation names
   like `+f`, `*i`, and comparison/bool suffixes.
 - Numeric promotions lower to explicit `HIRCast` nodes.
@@ -205,8 +210,7 @@ Deferred typechecker work:
 Deferred HIR work:
 
 - Top-level `HIRFunction` generation from checked function definitions.
-- HIR lowering for `shape`, `rank`, composition, indexing, and generalized
-  conditionals.
+- HIR lowering for composition, indexing, and generalized conditionals.
 - A richer primitive operation naming scheme may be needed before MLIR lowering
   for comparisons and bool operations.
 
@@ -295,6 +299,9 @@ Deferred defunctionalization work:
   `map (* 2.0) xs` lower through the same let-inlining path.
 - Static array literals lower by flattening nested `HIRArrayLit` elements in
   row-major order and emitting scalar constants followed by `tensor.from_elements`.
+- Static `shape` and `rank` expressions are already lowered by HIR to constants.
+  Non-empty shapes use `tensor.from_elements`; scalar `shape` uses
+  `tensor.empty() : tensor<0xi32>`.
 - Standalone `HIRLit`, `HIRCast`, and `HIRPrimOp` expressions lower through a
   small scalar-region emitter. The same emitter is used for simple lifted
   lambda bodies inside scalar maps.
@@ -322,6 +329,8 @@ Deferred MLIR lowering work:
   grows beyond direct iota/map/fold slices.
 - Run `mlir-opt --verify-diagnostics` checks beyond parse validation once
   `mlir-opt` is available in the development environment.
+- Runtime-dependent `shape` lowering with `tensor.dim` remains deferred until
+  dynamic dimensions are introduced.
 
 ## Pipeline and Codegen Decisions
 

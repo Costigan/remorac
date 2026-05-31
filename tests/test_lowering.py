@@ -168,6 +168,22 @@ def test_lowers_rank_2_and_rank_3_array_literals():
     assert "tensor.from_elements" in rank3.text
 
 
+def test_lowers_static_shape_and_rank():
+    shape = MLIRLowering().lower_program(hir_from_source("shape [[1, 2], [3, 4]]"))
+    rank = MLIRLowering().lower_program(hir_from_source("rank [[1, 2], [3, 4]]"))
+    scalar_shape = MLIRLowering().lower_program(hir_from_source("shape 42"))
+
+    assert "func.func @main() -> tensor<2xi32>" in shape.text
+    assert "arith.constant 2 : i32" in shape.text
+    assert "tensor.from_elements" in shape.text
+
+    assert "func.func @main() -> i32" in rank.text
+    assert "arith.constant 2 : i32" in rank.text
+
+    assert "func.func @main() -> tensor<0xi32>" in scalar_shape.text
+    assert "tensor.empty() : tensor<0xi32>" in scalar_shape.text
+
+
 def test_lowers_primitive_section_map_over_iota():
     program = hir_from_source("map (* 2.0) (iota 10)")
     lowered = MLIRLowering().lower_program(program)

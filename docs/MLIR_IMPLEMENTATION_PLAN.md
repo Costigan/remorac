@@ -934,6 +934,10 @@ class TypedMap:
 - [x] Implement `TypeEnv`, `TypeChecker.infer`, and `TypeChecker.check` for bidirectional typing
 - [x] Implement explicit numeric promotion and `TypedCast`
 - [x] Enforce Dense Core rank limit: rank 0 through rank 3 only
+- [x] Implement static Dense Core `shape` / `rank` typing
+  - Current: `rank expr` returns `int`; `shape expr` returns `int[rank]`.
+    Scalar shape is represented as `int[0]`. Function operands are rejected as
+    deferred.
 - [ ] Implement `TypeChecker.check` for full programs including top-level definitions
   - Partial: top-level value definitions are supported. Top-level function definitions are supported for statically known direct calls and unary `map` callables by specializing the function body at the call site from concrete argument types. Recursive functions, generalized annotations, and dynamic function values remain deferred.
 - [ ] Implement `_build_prelude_env()` for built-in functions (+, *, etc.)
@@ -2477,8 +2481,12 @@ def _build_prelude_env() -> TypeEnv:
 #### 10.4 Tasks
 
 - [ ] Write `stdlib/prelude.rem` with combinators listed above
-- [ ] Implement `iota` lowering in `lowering.py`
-- [ ] Implement `shape` / `rank` lowering using `tensor.dim` and compile-time rank constant
+- [x] Implement `iota` lowering in `lowering.py`
+- [x] Implement static Dense Core `shape` / `rank` lowering
+  - Current: HIR turns both operations into constants from type metadata.
+    Non-empty shapes lower with `tensor.from_elements`; scalar shape lowers as
+    `tensor.empty() : tensor<0xi32>`. Runtime-dependent `tensor.dim` lowering is
+    deferred until dynamic dimensions exist.
 - [ ] Implement `transpose` lowering using `linalg.transpose` or swapped affine map
 - [ ] Implement array indexing lowering using `tensor.extract`
 - [ ] Load prelude automatically in `TypeChecker.__init__` / startup

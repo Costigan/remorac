@@ -45,6 +45,17 @@ def test_repl_type_command_uses_session_definitions():
     assert session.eval_input(":type map (* 2.0) xs") == "map (* 2.0) xs : float[4]"
 
 
+def test_repl_evaluates_shape_and_rank():
+    session = ReplSession()
+
+    assert (
+        session.eval_input(":type shape [[1, 2], [3, 4]]")
+        == "shape [[1, 2], [3, 4]] : int[2]"
+    )
+    assert session.eval_input("shape [[1, 2], [3, 4]]") == "[2, 2]"
+    assert session.eval_input("rank [[1, 2], [3, 4]]") == "2"
+
+
 def test_repl_accepts_multiline_expression():
     session = ReplSession()
 
