@@ -227,8 +227,12 @@ def _lower_main_module(
         return _lower_array_literal_module(node)
     if isinstance(node, HIRFold):
         return _lower_fold_module(node, functions)
+    if len(node.arrays) == 2:
+        if not node.cell_shape and not isinstance(node.result_type, ArrayType):
+            return _lower_scalar_map_binary_module(node, functions)
+        return _lower_binary_map_module(node, functions)
     if len(node.arrays) != 1:
-        raise RemoraLoweringError("binary map MLIR lowering is deferred")
+        raise RemoraLoweringError("only unary and binary map MLIR lowering is supported")
     if not isinstance(node.result_type, ArrayType):
         return _lower_scalar_map_module(node, functions)
     return _lower_iota_scalar_map_module(node, functions)
@@ -362,6 +366,36 @@ def _lower_scalar_map_module(node: HIRMap, functions: dict[str, HIRFunction]) ->
 }}"""
 
 
+def _lower_scalar_map_binary_module(node: HIRMap, functions: dict[str, HIRFunction]) -> str:
+    if node.frame_shape or node.cell_shape:
+        raise RemoraLoweringError("only rank-0 binary maps lower as scalar MLIR")
+    if len(node.arrays) != 2:
+        raise RemoraLoweringError("binary scalar map requires exactly two inputs")
+
+    result_type = type_to_mlir(node.result_type)
+    emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+    left = emitter.emit_expr(node.arrays[0], {})
+    right = emitter.emit_expr(node.arrays[1], {})
+    callable_lines, result_value = _lower_map_binary_callable_result(
+        node.func,
+        functions,
+        left_name=left.value,
+        left_type=left.type,
+        right_name=right.value,
+        right_type=right.type,
+        result_type=result_type,
+        next_temp=emitter.next_temp,
+    )
+    body = "\n".join([*emitter.lines, *callable_lines])
+
+    return f"""module {{
+  func.func @main() -> {result_type} {{
+{body}
+    return {result_value} : {result_type}
+  }}
+}}"""
+
+
 def _lower_functions(functions: dict[str, HIRFunction]) -> str:
     lowered = [_lower_function(function) for function in functions.values()]
     return "\n\n".join(lowered)
@@ -443,6 +477,56 @@ def _lower_iota_scalar_map_module(node: HIRMap, functions: dict[str, HIRFunction
       iterator_types = {iterators}
     }} ins({input_name} : {input_type}) outs(%map_empty : {result_type}) {{
     ^bb0(%in: {input_element_type}, %out: {result_element_type}):
+{op_lines}
+    }} -> {result_type}
+    return %mapped : {result_type}
+  }}
+}}"""
+
+
+def _lower_binary_map_module(node: HIRMap, functions: dict[str, HIRFunction]) -> str:
+    if node.cell_shape:
+        raise RemoraLoweringError("binary cell-map MLIR lowering is deferred")
+    if len(node.arrays) != 2:
+        raise RemoraLoweringError("binary map requires exactly two inputs")
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("ranked binary map lowering requires an array result")
+
+    left_code, left_name, left_type, left_element_type = _lower_tensor_input(
+        node.arrays[0],
+        "left",
+        functions,
+    )
+    right_code, right_name, right_type, right_element_type = _lower_tensor_input(
+        node.arrays[1],
+        "right",
+        functions,
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
+    rank = node.result_type.rank
+    identity = _identity_affine_map(rank)
+    iterators = _parallel_iterators(rank)
+    op_lines = _lower_map_binary_callable_body(
+        node.func,
+        functions,
+        left_name="%left_in",
+        left_type=left_element_type,
+        right_name="%right_in",
+        right_type=right_element_type,
+        result_type=result_element_type,
+    )
+
+    return f"""module {{
+  func.func @main() -> {result_type} {{
+{left_code}
+{right_code}
+    %map_empty = tensor.empty() : {result_type}
+    %mapped = linalg.generic {{
+      indexing_maps = [{identity}, {identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({left_name}, {right_name} : {left_type}, {right_type}) outs(%map_empty : {result_type}) {{
+    ^bb0(%left_in: {left_element_type}, %right_in: {right_element_type}, %out: {result_element_type}):
 {op_lines}
     }} -> {result_type}
     return %mapped : {result_type}
@@ -633,6 +717,10 @@ def _lower_fold_input(
             raise RemoraLoweringError("only scalar-cell map inputs lower to fold MLIR so far")
         if not isinstance(node.result_type, ArrayType):
             raise RemoraLoweringError("map fold input must have array type")
+        if len(node.arrays) == 2:
+            return _lower_binary_map_fold_input(node, functions, prefix)
+        if len(node.arrays) != 1:
+            raise RemoraLoweringError("only unary and binary scalar maps lower to fold MLIR so far")
 
         input_code, input_name, input_type, input_element_type = _lower_fold_input(
             node.array,
@@ -667,6 +755,53 @@ def _lower_fold_input(
         return code, mapped, map_type, map_element_type
 
     raise RemoraLoweringError("only folds over tensor literals, iota, or direct scalar maps lower to MLIR so far")
+
+
+def _lower_binary_map_fold_input(
+    node: HIRMap,
+    functions: dict[str, HIRFunction],
+    prefix: str,
+) -> tuple[str, str, str, str]:
+    left_code, left_name, left_type, left_element_type = _lower_fold_input(
+        node.arrays[0],
+        functions,
+        _join_prefix(prefix, "left"),
+    )
+    right_code, right_name, right_type, right_element_type = _lower_fold_input(
+        node.arrays[1],
+        functions,
+        _join_prefix(prefix, "right"),
+    )
+    map_type = type_to_mlir(node.result_type)
+    map_element_type = type_to_mlir(node.result_type.element)
+    rank = node.result_type.rank
+    identity = _identity_affine_map(rank)
+    iterators = _parallel_iterators(rank)
+    map_empty = f"%{_join_prefix(prefix, 'map_empty')}"
+    mapped = f"%{_join_prefix(prefix, 'mapped')}"
+    map_left = f"%{_join_prefix(prefix, 'map_left')}"
+    map_right = f"%{_join_prefix(prefix, 'map_right')}"
+    map_out = f"%{_join_prefix(prefix, 'map_out')}"
+    map_body = _lower_map_binary_callable_body(
+        node.func,
+        functions,
+        left_name=map_left,
+        left_type=left_element_type,
+        right_name=map_right,
+        right_type=right_element_type,
+        result_type=map_element_type,
+    )
+    code = f"""{left_code}
+{right_code}
+    {map_empty} = tensor.empty() : {map_type}
+    {mapped} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({left_name}, {right_name} : {left_type}, {right_type}) outs({map_empty} : {map_type}) {{
+    ^bb0({map_left}: {left_element_type}, {map_right}: {right_element_type}, {map_out}: {map_element_type}):
+{map_body}
+    }} -> {map_type}"""
+    return code, mapped, map_type, map_element_type
 
 
 def _lower_tensor_input(
@@ -867,6 +1002,98 @@ def _lower_map_callable_result(
         result_value = "%result_cast" if value.type != result_type else value.value
         return lines, result_value
     raise RemoraLoweringError("only primitive and lifted function map callables lower to MLIR so far")
+
+
+def _lower_map_binary_callable_body(
+    callable_: object,
+    functions: dict[str, HIRFunction],
+    left_name: str,
+    left_type: str,
+    right_name: str,
+    right_type: str,
+    result_type: str,
+) -> str:
+    lines, result_value = _lower_map_binary_callable_result(
+        callable_,
+        functions,
+        left_name=left_name,
+        left_type=left_type,
+        right_name=right_name,
+        right_type=right_type,
+        result_type=result_type,
+    )
+    lines.append(f"      linalg.yield {result_value} : {result_type}")
+    return "\n".join(lines)
+
+
+def _lower_map_binary_callable_result(
+    callable_: object,
+    functions: dict[str, HIRFunction],
+    left_name: str,
+    left_type: str,
+    right_name: str,
+    right_type: str,
+    result_type: str,
+    next_temp: int = 0,
+) -> tuple[list[str], str]:
+    if isinstance(callable_, HIRPrimCallable):
+        if callable_.left_arg is not None or callable_.right_arg is not None:
+            raise RemoraLoweringError("binary map operator sections are deferred")
+        return _lower_binary_primitive_callable_result(
+            callable_,
+            left_name=left_name,
+            left_type=left_type,
+            right_name=right_name,
+            right_type=right_type,
+            result_type=result_type,
+        )
+    if isinstance(callable_, HIRVar):
+        function = functions.get(callable_.name)
+        if function is None:
+            raise RemoraLoweringError(f"unknown map function {callable_.name}")
+        if len(function.params) != 2:
+            raise RemoraLoweringError("binary map functions must take two parameters")
+        emitter = _RegionEmitter(
+            input_name="",
+            input_type="",
+            next_temp=next_temp,
+            functions=functions,
+        )
+        value = emitter.emit_expr(
+            function.body,
+            {
+                function.params[0].name: _Operand(left_name, [], left_type),
+                function.params[1].name: _Operand(right_name, [], right_type),
+            },
+        )
+        lines = [
+            *emitter.lines,
+            *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
+        ]
+        result_value = "%result_cast" if value.type != result_type else value.value
+        return lines, result_value
+    raise RemoraLoweringError("only primitive and lifted function binary map callables lower to MLIR so far")
+
+
+def _lower_binary_primitive_callable_result(
+    callable_: HIRPrimCallable,
+    left_name: str,
+    left_type: str,
+    right_name: str,
+    right_type: str,
+    result_type: str,
+) -> tuple[list[str], str]:
+    left_lines = _cast_if_needed(left_name, left_type, result_type, "%left_cast")
+    right_lines = _cast_if_needed(right_name, right_type, result_type, "%right_cast")
+    left_value = "%left_cast" if left_lines else left_name
+    right_value = "%right_cast" if right_lines else right_name
+    op = _arith_op(callable_.op, result_type)
+    lines = [
+        *left_lines,
+        *right_lines,
+        f"      %result = {op} {left_value}, {right_value} : {result_type}",
+    ]
+    return lines, "%result"
 
 
 def _lower_primitive_callable_body(

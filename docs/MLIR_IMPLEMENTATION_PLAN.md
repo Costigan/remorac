@@ -491,7 +491,7 @@ NAME       : /[a-zA-Z_][a-zA-Z0-9_']*/
 %ignore /--[^\n]*/   // line comments
 ```
 
-**Implementation note**: Standard infix operators (`+`, `*`, etc.) are parsed through a precedence-climbing layer or a Pratt parser. Operator sections such as `(*)`, `(* 2.0)`, and `(2.0 *)` are explicit grammar forms so examples like `map (* 2.0) xs` are valid unary maps, not accidental binary `map` syntax. Binary zipping maps such as `map (*) a b` are out of scope until `zip` or multi-input `linalg.generic` lowering is implemented.
+**Implementation note**: Standard infix operators (`+`, `*`, etc.) are parsed through a precedence-climbing layer or a Pratt parser. Operator sections such as `(*)`, `(* 2.0)`, and `(2.0 *)` are explicit grammar forms so examples like `map (* 2.0) xs` are valid unary maps, not accidental binary `map` syntax. Binary scalar-cell maps such as `map (*) a b` are supported for the Dense Core static rank-0 through rank-3 subset and lower to multi-input `linalg.generic` for ranked arrays.
 
 The parser exposes separate entry points:
 
@@ -1425,22 +1425,23 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 
 - [x] Implement `MLIRLowering` class with context and module setup
 - [x] Implement `lower_type` for all `RemoraType` variants
-- [ ] Validate exact MLIR Python builder patterns for `tensor.empty`, `linalg.generic`, `linalg.index`, `tensor.extract`, and `func.func` against checked-in golden MLIR fixtures
-  - Partial: checked-in fixtures now validate the current textual, parse-checked MLIR output for `iota`, scalar maps, rank-2 literal maps, and map-then-fold programs. Python builder pattern validation remains deferred until the dialect builder dependencies are stable.
+- [x] Validate current textual MLIR output against checked-in golden MLIR fixtures
+  - Current: checked-in fixtures validate the parse-checked MLIR output for `iota`, scalar maps, rank-2 literal maps, and map-then-fold programs.
+  - Deferred to Phase 6/backend lockdown: exact MLIR Python builder patterns for `tensor.empty`, `linalg.generic`, `linalg.index`, `tensor.extract`, and `func.func` after the standalone MLIR toolchain is pinned.
 - [x] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
-- [ ] Implement `_lower_map_binary_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise binary maps
-  - Required next: lower `map (*) xs ys` to a multi-input `linalg.generic` with one identity indexing map per input and one identity output map. This unblocks MLIR lowering for the current prelude `dot` implementation.
-- [ ] Implement `_lower_map_cell` for static frame/cell maps whose total result rank is <= 3
-  - Partial: textual MLIR lowering supports the rank-1-cell reduction pattern over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred.
+- [x] Implement `_lower_map_binary_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise binary maps
+  - Current: `map (*) xs ys` lowers to a multi-input `linalg.generic` with one identity indexing map per input and one identity output map. Prelude `dot` lowers through binary map plus fold.
+- [x] Implement `_lower_map_cell` for the current static rank-1-cell reduction pattern whose total result rank is <= 3
+  - Current: textual MLIR lowering supports rank-1-cell reduction maps over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred until after compiled CPU execution is in place.
 - [x] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
 - [x] Implement `_lower_prim_op` for all scalar operations
 - [x] Implement `_lower_cast` for explicit numeric promotions
 - [x] Implement `_lower_iota`
 - [x] Implement `_lower_function_call` (dispatches to function body or named call)
-- [ ] Implement `_lower_let` (introduce SSA value into env)
-  - Partial: `_lower_let` exists and lowers scalar lets through an SSA environment. Tensor lets still use simple HIR inlining before textual emission.
-- [ ] Implement `_lower_function` for top-level HIR functions → `func.func`
-  - Partial: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions reach MLIR for direct scalar calls and unary `map` callables through call-site typed static lambda specialization. General top-level HIR/MLIR function emission remains deferred.
+- [x] Implement `_lower_let` (introduce SSA value into env)
+  - Current: `_lower_let` lowers scalar lets through an SSA environment. Tensor lets still use simple HIR inlining before textual emission.
+- [x] Implement `_lower_function` for scalar HIR functions → `func.func`
+  - Current: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions reach MLIR for direct scalar calls and unary/binary `map` callables through call-site typed static lambda specialization. General array-parameter top-level HIR/MLIR function emission remains deferred.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
 - [x] Reject dynamic dimensions until Dense Core static-shape rank-0..3 programs execute end-to-end
 - [x] Write `tests/test_lowering.py`:
@@ -1468,6 +1469,10 @@ so external verifier round-tripping remains an environment setup task before
 Phase 6 pipeline validation.
 
 **Milestone M4.5**: binary scalar-cell maps and `dot` lower to parse-validated MLIR. `let xs = [1,2,3] in let ys = [4,5,6] in map (*) xs ys` must emit a two-input `linalg.generic`, and the prelude dot-product example must lower to binary map plus fold without using the typed-AST evaluator.
+
+Current status: M4.5 is complete for the Dense Core textual-lowering slice.
+Rank-0 through rank-3 binary scalar maps are covered by tests, and prelude
+`dot` lowers to parse-validated MLIR as binary map plus fold.
 
 ---
 
@@ -2584,7 +2589,7 @@ def _build_prelude_env() -> TypeEnv:
   - Current: `sum (iota 10)` is covered by runtime, CLI, REPL, compiler, and
     acceptance tests. `dot` is covered on the CPU path using binary `map` and
     let-bound vectors because adjacent array literals still conflict with index
-    suffix syntax. MLIR lowering for binary `map` remains deferred.
+    suffix syntax. MLIR lowering for binary `map` is covered by Phase 5 tests.
 
 ---
 
@@ -2831,7 +2836,8 @@ tests/acceptance/
 │   ├── vector_cell_map_rows.rem
 │   ├── nested_map.rem
 │   ├── static_lambda.rem
-│   └── static_hof_param.rem
+│   ├── static_hof_param.rem
+│   └── dot_product.rem
 ├── fail/
 │   ├── ragged_array.rem
 │   ├── rank4_rejected.rem
@@ -2842,7 +2848,6 @@ tests/acceptance/
 │   ├── map_cell_rank_mismatch.rem
 │   └── unbound_variable.rem
 ├── deferred/
-│   ├── dot_product.rem
 │   ├── matrix_multiply.rem
 │   ├── transpose_view.rem
 │   ├── slice_view.rem
