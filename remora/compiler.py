@@ -40,11 +40,15 @@ def compile_source(
     *,
     verify: bool = True,
     include_prelude: bool = True,
+    export_output_descriptor: bool = False,
 ) -> CompilerArtifact:
     program_source = with_prelude(source) if include_prelude else source
     typed = TypeChecker().check_program(parse_program(program_source))
     hir = defunctionalize(lower_to_hir(typed))
-    mlir_module = MLIRLowering().lower_program(hir).module
+    mlir_module = MLIRLowering().lower_program(
+        hir,
+        export_output_descriptor=export_output_descriptor,
+    ).module
     if verify:
         run_validation_pipeline(mlir_module)
         verify_module_text(str(mlir_module))
@@ -67,6 +71,7 @@ def compile_source_to_mlir(
         source,
         verify=verify,
         include_prelude=include_prelude,
+        export_output_descriptor=False,
     ).mlir_text
 
 
@@ -80,6 +85,7 @@ def compile_source_to_ptx(
         source,
         verify=verify,
         include_prelude=include_prelude,
+        export_output_descriptor=False,
     )
     ptx_text, kernels = generate_ptx(artifact.mlir_module)
     return PTXArtifact(artifact, ptx_text, kernels)

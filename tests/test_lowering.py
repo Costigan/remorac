@@ -547,3 +547,26 @@ def test_lowers_prelude_dot_as_binary_map_plus_fold():
     assert 'iterator_types = ["reduction"]' in mlir
     assert "arith.mulf" in mlir
     assert "arith.addf" in mlir
+
+
+def test_lowers_scalar_output_descriptor_export():
+    program = hir_from_source("1 + 2.0")
+    lowered = MLIRLowering().lower_program(program, export_output_descriptor=True)
+
+    assert "func.func @remora_main_out(%arg0: memref<f32>) attributes {llvm.emit_c_interface}" in lowered.text
+    assert "call @main() : () -> f32" in lowered.text
+    assert "memref.store %0, %arg0[] : memref<f32>" in lowered.text
+
+
+def test_lowers_ranked_output_descriptor_export_with_strided_stores():
+    program = hir_from_source("map (* 2.0) (iota 4)")
+    lowered = MLIRLowering().lower_program(program, export_output_descriptor=True)
+
+    assert (
+        "func.func @remora_main_out(%arg0: memref<4xf32, strided<[?], offset: ?>>) "
+        "attributes {llvm.emit_c_interface}" in lowered.text
+    )
+    assert "call @main() : () -> tensor<4xf32>" in lowered.text
+    assert "scf.for" in lowered.text
+    assert "tensor.extract" in lowered.text
+    assert "memref.store" in lowered.text

@@ -99,6 +99,19 @@ def test_cpu_executor_writes_into_explicit_output_descriptor():
     np.testing.assert_array_equal(output, np.array([0, 2, 4, 6, 8], dtype=np.float32))
 
 
+def test_cpu_executor_writes_into_strided_output_descriptor_view():
+    artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")
+    backing = np.full((5, 2), -1.0, dtype=np.float32)
+    output = backing[:, 0]
+    try:
+        CPUExecutor(artifact).execute_main_into(output)
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(output, np.array([0, 2, 4, 6, 8], dtype=np.float32))
+    np.testing.assert_array_equal(backing[:, 1], np.full((5,), -1.0, dtype=np.float32))
+
+
 def test_cpu_executor_writes_scalar_matrix_and_rank3_output_descriptors():
     scalar_artifact = CPUExecutor.compile_source("1 + 2.0")
     matrix_artifact = CPUExecutor.compile_source(
