@@ -96,9 +96,8 @@ def generate_direct_remora_ptx(
 ) -> tuple[str, list[KernelMeta]]:
     """Generate direct Remora ABI PTX for the current narrow GPU slice.
 
-    Supported today: one rank-1 through rank-3 `float32` input, one matching
-    `float32` output, and a primitive unary map section with a literal float
-    constant.
+    Supported today: rank-1 through rank-3 `float32` unary maps with a literal
+    float section constant, and binary maps over two matching `float32` inputs.
     """
     name = kernel_name or f"remora_{function.name}"
     map_kernel = _direct_f32_map_kernel(function)
@@ -108,7 +107,7 @@ def generate_direct_remora_ptx(
             name=name,
             grid_dims=1,
             block_size=block_size,
-            num_inputs=1,
+            num_inputs=map_kernel.num_inputs,
             num_outputs=1,
             input_elem_types=["f32"],
             output_elem_types=["f32"],
@@ -153,52 +152,59 @@ def _count_ptx_params(ptx_entry_text: str) -> int:
 @dataclass(frozen=True)
 class _F32MapOperation:
     op: str
-    constant: float
-    constant_side: str
+    constant: float | None = None
+    constant_side: str | None = None
 
 
 @dataclass(frozen=True)
 class _F32MapKernel:
     shape: tuple[int, ...]
     operation: _F32MapOperation
+    num_inputs: int
 
 
 def _direct_f32_map_kernel(function: HIRFunction) -> _F32MapKernel:
-    if len(function.params) != 1:
-        raise CodegenUnavailable("direct PTX currently supports one input descriptor")
-    param = function.params[0]
-    if not (
-        isinstance(param.type, ArrayType)
-        and param.type.element == FLOAT
-        and 1 <= param.type.rank <= 3
-    ):
-        raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 f32 inputs only")
+    if len(function.params) not in (1, 2):
+        raise CodegenUnavailable("direct PTX currently supports one or two input descriptors")
+    input_types: list[ArrayType] = []
+    for param in function.params:
+        if not (
+            isinstance(param.type, ArrayType)
+            and param.type.element == FLOAT
+            and 1 <= param.type.rank <= 3
+        ):
+            raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 f32 inputs only")
+        input_types.append(param.type)
     if not (
         isinstance(function.return_type, ArrayType)
         and function.return_type.element == FLOAT
         and 1 <= function.return_type.rank <= 3
     ):
         raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 f32 outputs only")
-    if param.type.shape != function.return_type.shape:
+    if any(input_type.shape != function.return_type.shape for input_type in input_types):
         raise CodegenUnavailable("direct PTX input and output shapes must match")
     if not (
         isinstance(function.body, HIRMap)
-        and len(function.body.arrays) == 1
-        and isinstance(function.body.arrays[0], HIRVar)
-        and function.body.arrays[0].name == param.name
+        and len(function.body.arrays) == len(function.params)
+        and all(isinstance(array, HIRVar) for array in function.body.arrays)
+        and [array.name for array in function.body.arrays] == [param.name for param in function.params]
         and isinstance(function.body.func, HIRPrimCallable)
     ):
-        raise CodegenUnavailable("direct PTX currently supports unary primitive maps only")
+        raise CodegenUnavailable("direct PTX currently supports primitive maps over function parameters only")
 
     callable_ = function.body.func
-    operation: _F32MapOperation
-    if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
-        operation = _F32MapOperation(callable_.op, float(callable_.left_arg.value), "left")
-    elif isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
-        operation = _F32MapOperation(callable_.op, float(callable_.right_arg.value), "right")
+    if len(function.params) == 1:
+        if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
+            operation = _F32MapOperation(callable_.op, float(callable_.left_arg.value), "left")
+        elif isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
+            operation = _F32MapOperation(callable_.op, float(callable_.right_arg.value), "right")
+        else:
+            raise CodegenUnavailable("direct PTX unary map requires a literal f32 section constant")
+    elif callable_.left_arg is None and callable_.right_arg is None:
+        operation = _F32MapOperation(callable_.op)
     else:
-        raise CodegenUnavailable("direct PTX map requires a literal f32 section constant")
-    return _F32MapKernel(tuple(dim.value for dim in param.type.shape), operation)
+        raise CodegenUnavailable("direct PTX binary map does not support operator sections")
+    return _F32MapKernel(tuple(dim.value for dim in function.return_type.shape), operation, len(function.params))
 
 
 def _f32_map_ptx(
@@ -206,8 +212,11 @@ def _f32_map_ptx(
     kernel: _F32MapKernel,
     block_size: int,
 ) -> str:
-    op_line = _rank1_f32_ptx_op(kernel.operation)
-    index_lines = _f32_map_index_lines(kernel.shape)
+    if kernel.num_inputs == 2:
+        return _binary_f32_map_ptx(kernel_name, kernel, block_size)
+    op_line = _unary_f32_ptx_op(kernel.operation)
+    index_lines = _unary_f32_map_index_lines(kernel.shape)
+    constant = 0.0 if kernel.operation.constant is None else kernel.operation.constant
     return f""".version 6.0
 .target sm_50
 .address_size 64
@@ -241,7 +250,7 @@ def _f32_map_ptx(
     mul.lo.s64 %rd9, %rd8, 4;
     add.s64 %rd10, %rd5, %rd9;
     ld.global.f32 %f1, [%rd10];
-    mov.f32 %f2, {kernel.operation.constant:.8e};
+    mov.f32 %f2, {constant:.8e};
     {op_line}
 
     ld.u64 %rd11, [%rd2+8];
@@ -257,7 +266,7 @@ DONE:
 """
 
 
-def _f32_map_index_lines(shape: tuple[int, ...]) -> str:
+def _unary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
     if len(shape) == 1:
         return """    ld.u64 %rd4, [%rd1+24];
     ld.u64 %rd7, [%rd1+32];
@@ -303,7 +312,129 @@ def _f32_map_index_lines(shape: tuple[int, ...]) -> str:
     raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 maps only")
 
 
-def _rank1_f32_ptx_op(operation: _F32MapOperation) -> str:
+def _binary_f32_map_ptx(
+    kernel_name: str,
+    kernel: _F32MapKernel,
+    block_size: int,
+) -> str:
+    index_lines = _binary_f32_map_index_lines(kernel.shape)
+    op_line = _binary_f32_ptx_op(kernel.operation)
+    return f""".version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 input0_desc_param,
+    .param .u64 input1_desc_param,
+    .param .u64 output_desc_param
+)
+.maxntid {block_size}, 1, 1
+{{
+    .reg .pred %p;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<50>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd1, [input0_desc_param];
+    ld.param.u64 %rd2, [input1_desc_param];
+    ld.param.u64 %rd17, [output_desc_param];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.s64.s32 %rd3, %r4;
+
+{index_lines}
+    setp.ge.s64 %p, %rd3, %rd4;
+    @%p bra DONE;
+
+    ld.u64 %rd5, [%rd1+8];
+    ld.u64 %rd6, [%rd1+16];
+    add.s64 %rd8, %rd6, %rd20;
+    mul.lo.s64 %rd9, %rd8, 4;
+    add.s64 %rd10, %rd5, %rd9;
+    ld.global.f32 %f1, [%rd10];
+
+    ld.u64 %rd11, [%rd2+8];
+    ld.u64 %rd12, [%rd2+16];
+    add.s64 %rd14, %rd12, %rd21;
+    mul.lo.s64 %rd15, %rd14, 4;
+    add.s64 %rd16, %rd11, %rd15;
+    ld.global.f32 %f2, [%rd16];
+    {op_line}
+
+    ld.u64 %rd30, [%rd17+8];
+    ld.u64 %rd31, [%rd17+16];
+    add.s64 %rd32, %rd31, %rd22;
+    mul.lo.s64 %rd33, %rd32, 4;
+    add.s64 %rd34, %rd30, %rd33;
+    st.global.f32 [%rd34], %f3;
+
+DONE:
+    ret;
+}}
+"""
+
+
+def _binary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
+    if len(shape) == 1:
+        return """    ld.u64 %rd4, [%rd1+24];
+    ld.u64 %rd7, [%rd1+32];
+    ld.u64 %rd13, [%rd2+32];
+    ld.u64 %rd35, [%rd17+32];
+    mul.lo.s64 %rd20, %rd3, %rd7;
+    mul.lo.s64 %rd21, %rd3, %rd13;
+    mul.lo.s64 %rd22, %rd3, %rd35;"""
+    if len(shape) == 2:
+        return """    ld.u64 %rd23, [%rd1+24];
+    ld.u64 %rd24, [%rd1+32];
+    mul.lo.s64 %rd4, %rd23, %rd24;
+    div.u64 %rd25, %rd3, %rd24;
+    rem.u64 %rd26, %rd3, %rd24;
+    ld.u64 %rd7, [%rd1+40];
+    ld.u64 %rd27, [%rd1+48];
+    mul.lo.s64 %rd20, %rd25, %rd7;
+    mad.lo.s64 %rd20, %rd26, %rd27, %rd20;
+    ld.u64 %rd13, [%rd2+40];
+    ld.u64 %rd28, [%rd2+48];
+    mul.lo.s64 %rd21, %rd25, %rd13;
+    mad.lo.s64 %rd21, %rd26, %rd28, %rd21;
+    ld.u64 %rd35, [%rd17+40];
+    ld.u64 %rd36, [%rd17+48];
+    mul.lo.s64 %rd22, %rd25, %rd35;
+    mad.lo.s64 %rd22, %rd26, %rd36, %rd22;"""
+    if len(shape) == 3:
+        return """    ld.u64 %rd23, [%rd1+24];
+    ld.u64 %rd24, [%rd1+32];
+    ld.u64 %rd25, [%rd1+40];
+    mul.lo.s64 %rd26, %rd24, %rd25;
+    mul.lo.s64 %rd4, %rd23, %rd26;
+    div.u64 %rd27, %rd3, %rd26;
+    rem.u64 %rd28, %rd3, %rd26;
+    div.u64 %rd29, %rd28, %rd25;
+    rem.u64 %rd40, %rd28, %rd25;
+    ld.u64 %rd7, [%rd1+48];
+    ld.u64 %rd41, [%rd1+56];
+    ld.u64 %rd42, [%rd1+64];
+    mul.lo.s64 %rd20, %rd27, %rd7;
+    mad.lo.s64 %rd20, %rd29, %rd41, %rd20;
+    mad.lo.s64 %rd20, %rd40, %rd42, %rd20;
+    ld.u64 %rd13, [%rd2+48];
+    ld.u64 %rd43, [%rd2+56];
+    ld.u64 %rd44, [%rd2+64];
+    mul.lo.s64 %rd21, %rd27, %rd13;
+    mad.lo.s64 %rd21, %rd29, %rd43, %rd21;
+    mad.lo.s64 %rd21, %rd40, %rd44, %rd21;
+    ld.u64 %rd35, [%rd17+48];
+    ld.u64 %rd36, [%rd17+56];
+    ld.u64 %rd37, [%rd17+64];
+    mul.lo.s64 %rd22, %rd27, %rd35;
+    mad.lo.s64 %rd22, %rd29, %rd36, %rd22;
+    mad.lo.s64 %rd22, %rd40, %rd37, %rd22;"""
+    raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 maps only")
+
+
+def _unary_f32_ptx_op(operation: _F32MapOperation) -> str:
     if operation.op == "*":
         return "mul.rn.f32 %f3, %f1, %f2;"
     if operation.op == "+":
@@ -315,5 +446,17 @@ def _rank1_f32_ptx_op(operation: _F32MapOperation) -> str:
     if operation.op == "/":
         if operation.constant_side == "left":
             return "div.rn.f32 %f3, %f2, %f1;"
+        return "div.rn.f32 %f3, %f1, %f2;"
+    raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
+
+
+def _binary_f32_ptx_op(operation: _F32MapOperation) -> str:
+    if operation.op == "*":
+        return "mul.rn.f32 %f3, %f1, %f2;"
+    if operation.op == "+":
+        return "add.rn.f32 %f3, %f1, %f2;"
+    if operation.op == "-":
+        return "sub.rn.f32 %f3, %f1, %f2;"
+    if operation.op == "/":
         return "div.rn.f32 %f3, %f1, %f2;"
     raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")

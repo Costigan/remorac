@@ -189,6 +189,70 @@ def test_compile_function_source_to_direct_rank2_and_rank3_map_ptx():
     assert rank3_kernels[0].output_shape == (2, 3, 4)
 
 
+def test_compile_function_source_to_direct_binary_rank1_map_ptx():
+    ptx, kernels, artifact = compile_function_source_to_direct_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(4),)),
+            ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+        kernel_name="remora_add",
+    )
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_add" in ptx
+    assert ".param .u64 input0_desc_param" in ptx
+    assert ".param .u64 input1_desc_param" in ptx
+    assert ".param .u64 output_desc_param" in ptx
+    assert "add.rn.f32 %f3, %f1, %f2;" in ptx
+    assert kernels == [
+        KernelMeta(
+            name="remora_add",
+            grid_dims=1,
+            block_size=128,
+            num_inputs=2,
+            num_outputs=1,
+            input_elem_types=["f32"],
+            output_elem_types=["f32"],
+            output_shape=(4,),
+            output_dtype="float32",
+        )
+    ]
+
+
+def test_compile_function_source_to_direct_binary_rank2_and_rank3_map_ptx():
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ),
+        kernel_name="remora_add2d",
+    )
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),
+        ),
+        kernel_name="remora_add3d",
+    )
+
+    assert "mad.lo.s64 %rd21, %rd26, %rd28, %rd21;" in rank2_ptx
+    assert "mad.lo.s64 %rd22, %rd26, %rd36, %rd22;" in rank2_ptx
+    assert rank2_kernels[0].num_inputs == 2
+    assert rank2_kernels[0].output_shape == (2, 3)
+
+    assert "div.u64 %rd27, %rd3, %rd26;" in rank3_ptx
+    assert "mad.lo.s64 %rd21, %rd40, %rd44, %rd21;" in rank3_ptx
+    assert "mad.lo.s64 %rd22, %rd40, %rd37, %rd22;" in rank3_ptx
+    assert rank3_kernels[0].num_inputs == 2
+    assert rank3_kernels[0].output_shape == (2, 3, 4)
+
+
 def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     try:
         runtime = CUDARuntime()
