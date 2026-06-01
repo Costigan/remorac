@@ -171,15 +171,15 @@ Known parser limitation:
 - Only static non-negative integer dimensions are accepted.
 - `eval_static_dim` currently accepts integer literals only. Broader constant
   folding is deferred.
-- Rank is limited to 0 through 3. Rank-4 results raise a Dense Core rank-limit
-  error.
+- Rank is limited to 0 through `MAX_DENSE_RANK = 10`. Rank-11 results raise a
+  Dense Core rank-limit error.
 - Array literals recursively enforce consistent element type and nested shape.
 - Empty array literals are rejected until explicit type annotations exist.
 - `iota n` has type `int[n]`.
 - `shape expr` and `rank expr` are static metadata operations in Dense Core.
   Function operands are rejected as deferred. For scalar operands, `rank`
   returns `0` and `shape` has type `int[0]`.
-- Array indexing is typed for static rank-1 through rank-3 arrays. Each index
+- Array indexing is typed for static arrays up to rank 10. Each index
   must be `int`; full-rank indexing returns a scalar, and partial indexing
   drops the indexed outer dimensions and returns the remaining array cell.
 - Primitive numeric behavior:
@@ -571,9 +571,9 @@ Current tests cover:
 - Parser coverage for literals, arrays, lambdas, lets, `map`, `fold`, `iota`,
   application, definitions, nesting, infix precedence, conditionals, REPL input,
   and malformed syntax.
-- Typechecker coverage for scalar literals, rank-1/2/3 array literals, `iota`,
-  scalar maps, row-reduction maps, vector folds, numeric casts, rank-4
-  rejection, the M2 milestone expression, direct top-level function calls,
+- Typechecker coverage for scalar literals, rank-1/2/3 array literals, rank-4
+  and rank-10 array literals, `iota`, scalar maps, row-reduction maps, vector
+  folds, numeric casts, rank-11 rejection, the M2 milestone expression, direct top-level function calls,
   top-level functions as map callables, static `shape`/`rank`, array indexing,
   and recursive-function deferral.
 - HIR coverage for `iota`, array literals, casts, scalar maps, vector-cell map
@@ -645,7 +645,7 @@ Current tests cover:
 - Acceptance coverage under `tests/acceptance/` for CPU-facing pass/fail cases:
   scalar arithmetic, top-level function calls, top-level functions used in
   maps, row reductions, rank-3 maps, static `shape`, indexing, prelude `sum`,
-  dot product, recursive-function diagnostics, and rank-4 rejection. Deferred examples are
+  dot product, recursive-function diagnostics, and rank-11 rejection. Deferred examples are
   checked into `tests/acceptance/deferred/` but intentionally excluded from the
   manifest.
 

@@ -7,6 +7,7 @@ from typing import TypeAlias
 
 from remora.ast_nodes import Expr, IntLit, SourceLoc
 from remora.errors import RemoraError
+from remora.limits import MAX_DENSE_RANK
 
 
 @dataclass(frozen=True)
@@ -80,9 +81,6 @@ RemoraType: TypeAlias = ScalarType | ArrayType | FuncType
 FLOAT = ScalarType("float")
 INT = ScalarType("int")
 BOOL = ScalarType("bool")
-
-MAX_DENSE_RANK = 3
-
 
 class RemoraTypeError(RemoraError):
     """Raised when Dense Core type checking fails."""
