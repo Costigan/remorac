@@ -415,10 +415,12 @@ Deferred MLIR lowering work:
   count, and `.maxntid` block size. `KernelMeta` also has explicit
   `output_shape` and `output_dtype` fields for direct Remora ABI kernels.
 - `generate_direct_remora_ptx` is the first direct Remora ABI GPU codegen
-  slice. It emits hand-authored PTX for one rank-1 `float32` input descriptor,
-  one rank-1 `float32` output descriptor, and a primitive unary map with a
-  literal float section constant. This is a runtime/codegen vertical slice only;
-  it does not replace the planned `gpu.module` / NVVM lowering path.
+  slice. It emits hand-authored PTX for one rank-1 through rank-3 `float32`
+  input descriptor, one matching `float32` output descriptor, and a primitive
+  unary map with a literal float section constant. Rank-2/rank-3 kernels use
+  flattened CUDA indexing and descriptor strides. This is a runtime/codegen
+  vertical slice only; it does not replace the planned `gpu.module` / NVVM
+  lowering path.
 - The in-process IREE pass registry still does not recognize the standalone CPU
   lowering pipeline. That path raises `PipelineUnavailable`; the validated
   production-style path is the external standalone `mlir-opt-18` runner.

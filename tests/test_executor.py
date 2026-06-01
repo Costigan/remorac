@@ -161,6 +161,34 @@ def test_compile_function_source_to_direct_rank1_map_ptx():
     ]
 
 
+def test_compile_function_source_to_direct_rank2_and_rank3_map_ptx():
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+        kernel_name="remora_scale2d",
+    )
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),),
+        kernel_name="remora_scale3d",
+    )
+
+    assert ".visible .entry remora_scale2d" in rank2_ptx
+    assert "div.u64 %rd24, %rd3, %rd23;" in rank2_ptx
+    assert "rem.u64 %rd25, %rd3, %rd23;" in rank2_ptx
+    assert "mad.lo.s64 %rd20, %rd25, %rd26, %rd20;" in rank2_ptx
+    assert rank2_kernels[0].output_shape == (2, 3)
+
+    assert ".visible .entry remora_scale3d" in rank3_ptx
+    assert "mul.lo.s64 %rd25, %rd23, %rd24;" in rank3_ptx
+    assert "div.u64 %rd26, %rd3, %rd25;" in rank3_ptx
+    assert "rem.u64 %rd29, %rd27, %rd24;" in rank3_ptx
+    assert "mad.lo.s64 %rd20, %rd29, %rd31, %rd20;" in rank3_ptx
+    assert rank3_kernels[0].output_shape == (2, 3, 4)
+
+
 def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     try:
         runtime = CUDARuntime()
