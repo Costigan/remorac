@@ -1,0 +1,1 @@
+builtin.module(linalg-fuse-elementwise-ops,canonicalize,cse)

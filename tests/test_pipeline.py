@@ -8,13 +8,18 @@ from remora.codegen import CodegenUnavailable, generate_ptx
 from remora.lowering import MLIRLowering
 from remora.parser import parse_program
 from remora.pipeline import (
+    CPU_PIPELINE,
+    FUSION_PIPELINE,
     PipelineUnavailable,
     build_cpu_pipeline,
     build_pipeline,
     build_validation_pipeline,
     detect_toolchain,
+    run_cpu_pipeline_text,
+    run_fusion_pipeline_text,
     run_pipeline,
     run_validation_pipeline,
+    translate_mlir_to_llvmir,
     verify_module_text,
 )
 from remora.typechecker import TypeChecker
@@ -39,8 +44,11 @@ def test_detect_toolchain_reports_available_bindings_and_missing_external_verifi
     assert toolchain.has_external_verifier == (
         toolchain.mlir_opt is not None or toolchain.iree_opt is not None
     )
+    assert toolchain.has_standalone_mlir == (
+        toolchain.mlir_opt is not None and toolchain.mlir_translate is not None
+    )
     assert toolchain.has_ptx_toolchain == (
-        toolchain.llc is not None or toolchain.iree_compile is not None
+        toolchain.llc is not None and toolchain.ptxas is not None
     )
 
 
@@ -83,6 +91,42 @@ def test_cpu_pipeline_is_gated_until_toolchain_is_pinned():
         assert "not available" in str(exc)
     else:
         pytest.fail("CPU pipeline unexpectedly parsed; update Phase 6 validation tests")
+
+
+def test_standalone_cpu_pipeline_lowers_to_llvm_dialect_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_standalone_mlir:
+        pytest.skip("standalone MLIR tools are not available")
+
+    module = lowered_module("map (* 2.0) (iota 10)")
+
+    lowered = run_cpu_pipeline_text(str(module), toolchain=toolchain)
+    llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
+
+    assert "llvm.func @main" in lowered
+    assert "linalg.generic" not in lowered
+    assert "define {" in llvm_ir
+    assert "@main" in llvm_ir
+
+
+def test_standalone_fusion_pipeline_fuses_nested_scalar_map_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    module = lowered_module("map (* 3) (map (* 2) (iota 10))")
+
+    before = str(module)
+    after = run_fusion_pipeline_text(before, toolchain=toolchain)
+
+    assert before.count("linalg.generic") == 3
+    assert after.count("linalg.generic") == 1
+    assert "arith.muli" in after
+
+
+def test_pipeline_artifacts_match_code_constants():
+    assert "linalg-fuse-elementwise-ops" in FUSION_PIPELINE
+    assert "convert-to-llvm" in CPU_PIPELINE
 
 
 def test_generate_ptx_with_iree_cuda_backend_when_available():

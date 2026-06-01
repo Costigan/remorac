@@ -14,6 +14,7 @@ env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest
 Run focused suites:
 
 ```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest tests/test_execution.py
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest tests/test_runtime.py
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest tests/test_lowering.py
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest tests/test_acceptance.py
@@ -27,18 +28,25 @@ env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python -m compileall -q 
 
 ## Examples
 
-Run one example on the CPU-first interpreter path:
+Run examples on the compiled CPU path:
 
 ```bash
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/prelude_sum.remora
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/dot_product.remora
 ```
 
-Run every checked-in example:
+Some examples intentionally exercise syntax that is not lowered to compiled MLIR
+yet, such as scalar conditionals. Use the interpreter target for those:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac --target interp examples/conditional.remora
+```
+
+Run every checked-in example through the interpreter:
 
 ```bash
 for f in examples/*.remora; do
-  env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac "$f"
+  env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac --target interp "$f"
 done
 ```
 

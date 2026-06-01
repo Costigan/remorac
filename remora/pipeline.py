@@ -19,20 +19,15 @@ from remora.errors import RemoraError
 
 
 VALIDATION_PIPELINE = "builtin.module(canonicalize,cse)"
+FUSION_PIPELINE = "builtin.module(linalg-fuse-elementwise-ops,canonicalize,cse)"
 
 CPU_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
-        "linalg-generalize-named-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "buffer-deallocation-pipeline",
-        "lower-affine",
         "convert-linalg-to-loops",
         "convert-scf-to-cf",
-        "convert-arith-to-llvm",
-        "convert-math-to-llvm",
-        "convert-func-to-llvm",
-        "convert-index-to-llvm",
+        "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]
 ) + ")"
@@ -69,6 +64,7 @@ class PipelineUnavailable(RemoraError):
 @dataclass(frozen=True)
 class PipelineToolchain:
     mlir_opt: str | None
+    mlir_translate: str | None
     iree_opt: str | None
     iree_compile: str | None
     llc: str | None
@@ -80,20 +76,25 @@ class PipelineToolchain:
         return self.mlir_opt is not None or self.iree_opt is not None
 
     @property
+    def has_standalone_mlir(self) -> bool:
+        return self.mlir_opt is not None and self.mlir_translate is not None
+
+    @property
     def external_verifier(self) -> str | None:
         return self.mlir_opt or self.iree_opt
 
     @property
     def has_ptx_toolchain(self) -> bool:
-        return self.llc is not None or self.iree_compile is not None
+        return self.llc is not None and self.ptxas is not None
 
 
 def detect_toolchain() -> PipelineToolchain:
     return PipelineToolchain(
-        mlir_opt=_find_executable("mlir-opt"),
+        mlir_opt=_find_executable("mlir-opt", "mlir-opt-18"),
+        mlir_translate=_find_executable("mlir-translate", "mlir-translate-18"),
         iree_opt=_find_executable("iree-opt"),
         iree_compile=_find_executable("iree-compile"),
-        llc=_find_executable("llc"),
+        llc=_find_executable("llc", "llc-18"),
         ptxas=_find_executable("ptxas"),
         iree_passmanager=_module_available("iree.compiler.passmanager"),
     )
@@ -101,6 +102,10 @@ def detect_toolchain() -> PipelineToolchain:
 
 def build_validation_pipeline() -> Any:
     return build_pipeline(VALIDATION_PIPELINE)
+
+
+def build_fusion_pipeline() -> Any:
+    return build_pipeline(FUSION_PIPELINE)
 
 
 def build_cpu_pipeline() -> Any:
@@ -133,6 +138,71 @@ def run_validation_pipeline(module: Any, *, debug: bool = False) -> None:
     with module.context:
         pass_manager = build_validation_pipeline()
         run_pipeline(module, pass_manager, debug=debug)
+
+
+def run_external_pipeline_text(
+    mlir_text: str,
+    pipeline_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    toolchain = detect_toolchain() if toolchain is None else toolchain
+    if toolchain.mlir_opt is None:
+        raise PipelineUnavailable("mlir-opt is required for standalone MLIR pipeline validation")
+
+    result = subprocess.run(
+        [toolchain.mlir_opt, f"--pass-pipeline={pipeline_text}", "-"],
+        input=mlir_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise PipelineUnavailable(
+            f"standalone MLIR pipeline failed with {Path(toolchain.mlir_opt).name}: {stderr}"
+        )
+    return result.stdout
+
+
+def run_cpu_pipeline_text(
+    mlir_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    return run_external_pipeline_text(mlir_text, CPU_PIPELINE, toolchain=toolchain)
+
+
+def run_fusion_pipeline_text(
+    mlir_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    return run_external_pipeline_text(mlir_text, FUSION_PIPELINE, toolchain=toolchain)
+
+
+def translate_mlir_to_llvmir(
+    mlir_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    toolchain = detect_toolchain() if toolchain is None else toolchain
+    if toolchain.mlir_translate is None:
+        raise PipelineUnavailable("mlir-translate is required for LLVM IR translation")
+
+    result = subprocess.run(
+        [toolchain.mlir_translate, "--mlir-to-llvmir"],
+        input=mlir_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise PipelineUnavailable(
+            f"LLVM IR translation failed with {Path(toolchain.mlir_translate).name}: {stderr}"
+        )
+    return result.stdout
 
 
 def verify_module_text(mlir_text: str, toolchain: PipelineToolchain | None = None) -> None:
@@ -173,12 +243,13 @@ def _load_iree_passmanager() -> Any:
         ) from exc
 
 
-def _find_executable(name: str) -> str | None:
-    path = which(name)
-    if path is not None:
-        return path
+def _find_executable(*names: str) -> str | None:
+    for name in names:
+        path = which(name)
+        if path is not None:
+            return path
 
-    sibling = Path(sys.executable).parent / name
-    if sibling.is_file():
-        return str(sibling)
+        sibling = Path(sys.executable).parent / name
+        if sibling.is_file():
+            return str(sibling)
     return None
