@@ -303,17 +303,19 @@ Deferred defunctionalization work:
   `HIRMap` over a direct `HIRIota` array when the callable is a primitive
   operator section with a literal bound operand or a lifted unary `HIRFunction`
   from defunctionalization.
-- `HIRFold` lowers for rank-1 scalar reductions and rank-2/rank-3 array-cell
-  reductions over the outermost dimension when the fold callable is a primitive
-  operator function. Rank-2/rank-3 folds use one reduction iterator followed by
-  parallel iterators for the remaining result dimensions.
+- `HIRFold` lowers for rank-1 scalar reductions and array-cell reductions over
+  the outermost dimension when the fold callable is a primitive operator
+  function. Tests now cover a representative rank-4 array-cell fold above the
+  original rank-3 execution slice.
 - Scalar `HIRMap` lowers over rank-0 scalar inputs, direct `HIRIota`, direct
   static `HIRArrayLit`, and nested scalar `HIRMap` inputs for scalar-cell maps
   only.
-- Binary scalar-cell `HIRMap` lowers for rank-0 through rank-3 inputs. Ranked
-  binary maps emit a multi-input `linalg.generic` with one identity indexing map
-  for each input and one identity map for the output. Rank-0 binary maps lower
-  as scalar function application in `main`.
+- Binary scalar-cell `HIRMap` lowers for rank-0 through rank-3 inputs, with
+  representative rank-4 textual MLIR coverage proving the ranked builder is
+  parameterized above the original execution slice. Ranked binary maps emit a
+  multi-input `linalg.generic` with one identity indexing map for each input and
+  one identity map for the output. Rank-0 binary maps lower as scalar function
+  application in `main`.
 - Cell `HIRMap` lowers for the current rank-1-cell reduction pattern, e.g.
   `map (\row -> fold (+) 0 row) xs`, producing row/cell reductions over rank-2
   and rank-3 inputs.
@@ -504,6 +506,8 @@ Deferred CPU/runtime work:
   stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
+- Broaden compiled CPU rank-10 execution coverage beyond scalar-cell maps and
+  one rank-4 descriptor-input callable once more surface examples exist.
 
 ## CUDA Runtime Decisions
 
@@ -599,12 +603,14 @@ Current tests cover:
   results from lifted lambdas.
 - Nested scalar map coverage for map chains over `iota` and static array
   literals.
-- Binary scalar map coverage for rank-0 through rank-3 inputs, including
+- Binary scalar map coverage for rank-0 through rank-4 inputs, including
   primitive binary maps, lifted binary lambda maps, and prelude `dot` lowering
   as binary map plus fold.
+- Scalar map and array-literal lowering coverage includes rank-10 static arrays
+  to guard the `MAX_DENSE_RANK` path.
 - Fold lowering coverage for direct `iota` and the Phase 5 milestone-shaped
   `fold (+) 0.0 (map (* 2.0) (iota 10))` program.
-- Rank-2/rank-3 array-cell fold coverage over static literals.
+- Rank-2/rank-3/rank-4 array-cell fold coverage over static literals.
 - Rank-2/rank-3 rank-1-cell map coverage for lifted row/cell reduction
   lambdas.
 - Let/top-level value lowering coverage for iota aliases used by maps and folds.

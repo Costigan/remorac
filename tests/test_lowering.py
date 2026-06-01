@@ -45,6 +45,10 @@ def hir_from_source(source: str):
     return defunctionalize(lower_to_hir(typed))
 
 
+def nested_scalar_literal(rank: int, value: str = "1") -> str:
+    return "[" * rank + value + "]" * rank
+
+
 @pytest.mark.parametrize(("fixture_name", "source"), GOLDEN_CASES.items())
 def test_lowering_matches_golden_mlir_fixtures(fixture_name: str, source: str):
     lowered = MLIRLowering().lower_program(hir_from_source(source))
@@ -170,6 +174,19 @@ def test_lowers_rank_2_and_rank_3_array_literals():
     assert "tensor.from_elements" in rank3.text
 
 
+def test_lowers_rank_4_and_rank_10_array_literals():
+    rank4 = MLIRLowering().lower_program(hir_from_source(nested_scalar_literal(4)))
+    rank10 = MLIRLowering().lower_program(hir_from_source(nested_scalar_literal(10)))
+
+    assert "func.func @main() -> tensor<1x1x1x1xi32>" in rank4.text
+    assert "tensor.from_elements" in rank4.text
+    assert (
+        "func.func @main() -> tensor<1x1x1x1x1x1x1x1x1x1xi32>"
+        in rank10.text
+    )
+    assert "tensor.from_elements" in rank10.text
+
+
 def test_lowers_static_shape_and_rank():
     shape = MLIRLowering().lower_program(hir_from_source("shape [[1, 2], [3, 4]]"))
     rank = MLIRLowering().lower_program(hir_from_source("rank [[1, 2], [3, 4]]"))
@@ -236,6 +253,38 @@ def test_lowers_rank_3_scalar_map_over_array_literal():
     assert "func.func @main() -> tensor<2x2x1xi32>" in lowered.text
     assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
     assert 'iterator_types = ["parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_rank_4_scalar_map_over_array_literal():
+    program = hir_from_source(
+        f"let xs = {nested_scalar_literal(4)} in map (\\x -> x + 1) xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<1x1x1x1xi32>" in lowered.text
+    assert "affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_rank_10_scalar_map_over_array_literal():
+    program = hir_from_source(
+        f"let xs = {nested_scalar_literal(10)} in map (\\x -> x + 1) xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<1x1x1x1x1x1x1x1x1x1xi32>" in lowered.text
+    assert (
+        "affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> "
+        "(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9)>"
+        in lowered.text
+    )
+    assert (
+        'iterator_types = ["parallel", "parallel", "parallel", "parallel", '
+        '"parallel", "parallel", "parallel", "parallel", "parallel", "parallel"]'
+        in lowered.text
+    )
     assert "arith.addi" in lowered.text
 
 
@@ -401,6 +450,21 @@ def test_lowers_fold_over_rank_3_array_literal():
     assert "arith.addi" in lowered.text
 
 
+def test_lowers_fold_over_rank_4_array_literal():
+    program = hir_from_source(
+        f"let init = {nested_scalar_literal(3, '0')} in "
+        f"let xs = {nested_scalar_literal(4)} in "
+        "fold (+) init xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<1x1x1xi32>" in lowered.text
+    assert "affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>" in lowered.text
+    assert "affine_map<(d0, d1, d2, d3) -> (d1, d2, d3)>" in lowered.text
+    assert 'iterator_types = ["reduction", "parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
 def test_lowers_fold_over_mapped_iota_milestone_shape():
     program = hir_from_source("fold (+) 0.0 (map (* 2.0) (iota 10))")
     lowered = MLIRLowering().lower_program(program)
@@ -519,6 +583,21 @@ def test_lowers_rank_3_binary_scalar_map_over_array_literals():
     assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
     assert "indexing_maps = [#map, #map, #map]" in lowered.text
     assert 'iterator_types = ["parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_rank_4_binary_scalar_map_over_array_literals():
+    program = hir_from_source(
+        f"let xs = {nested_scalar_literal(4, '1')} in "
+        f"let ys = {nested_scalar_literal(4, '2')} in "
+        "map (+) xs ys"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<1x1x1x1xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 1
+    assert "affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel", "parallel", "parallel"]' in lowered.text
     assert "arith.addi" in lowered.text
 
 

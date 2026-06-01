@@ -27,6 +27,10 @@ def assert_compiled_matches_interpreter(source: str) -> None:
         assert compiled.value == interpreted.value
 
 
+def nested_scalar_literal(rank: int, value: str = "1") -> str:
+    return "[" * rank + value + "]" * rank
+
+
 def test_compiled_cpu_executes_scalar_expression():
     assert_compiled_matches_interpreter("1 + 2.0")
 
@@ -48,6 +52,24 @@ def test_compiled_cpu_executes_matrix_and_rank3_maps():
     np.testing.assert_array_equal(
         tensor3.value,
         np.array([[[2], [3]], [[4], [5]]], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_rank4_and_rank10_maps():
+    rank4 = evaluate_source_compiled(
+        f"let xs = {nested_scalar_literal(4)} in map (\\x -> x + 1) xs"
+    )
+    rank10 = evaluate_source_compiled(
+        f"let xs = {nested_scalar_literal(10)} in map (\\x -> x + 1) xs"
+    )
+
+    np.testing.assert_array_equal(
+        rank4.value,
+        np.full((1, 1, 1, 1), 2, dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        rank10.value,
+        np.full((1, 1, 1, 1, 1, 1, 1, 1, 1, 1), 2, dtype=np.int32),
     )
 
 
@@ -145,6 +167,19 @@ def test_cpu_executor_writes_scalar_matrix_and_rank3_output_descriptors():
     )
 
 
+def test_cpu_executor_writes_rank4_output_descriptor():
+    artifact = CPUExecutor.compile_source(
+        f"let xs = {nested_scalar_literal(4)} in map (\\x -> x + 1) xs"
+    )
+    output = np.empty((1, 1, 1, 1), dtype=np.int32)
+    try:
+        CPUExecutor(artifact).execute_main_into(output)
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(output, np.full((1, 1, 1, 1), 2, dtype=np.int32))
+
+
 def test_cpu_executor_rejects_output_descriptor_shape_and_dtype_mismatches():
     artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")
     executor = CPUExecutor(artifact)
@@ -234,6 +269,26 @@ def test_cpu_function_executor_runs_rank2_and_rank3_descriptor_input_maps():
         tensor3.value,
         np.array([[[2], [3]], [[4], [5]]], dtype=np.int32),
     )
+
+
+def test_cpu_function_executor_runs_rank4_descriptor_input_map():
+    param_type = ArrayType(
+        INT,
+        (StaticDim(1), StaticDim(1), StaticDim(1), StaticDim(1)),
+    )
+    artifact = CPUFunctionExecutor.compile_source(
+        "def inc xs = map (\\x -> x + 1) xs",
+        "inc",
+        (param_type,),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.ones((1, 1, 1, 1), dtype=np.int32)
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(result.value, np.full((1, 1, 1, 1), 2, dtype=np.int32))
 
 
 def test_cpu_function_executor_runs_binary_descriptor_input_map():
