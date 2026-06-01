@@ -74,6 +74,11 @@ def test_repl_evaluates_shape_and_rank():
     )
     assert session.eval_input("shape [[1, 2], [3, 4]]") == "[2, 2]"
     assert session.eval_input("rank [[1, 2], [3, 4]]") == "2"
+    assert (
+        session.eval_input("shape [[[[[[[[[[1]]]]]]]]]]")
+        == "[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]"
+    )
+    assert session.eval_input("rank [[[[[[[[[[1]]]]]]]]]]") == "10"
 
 
 def test_repl_evaluates_indexing():
@@ -81,6 +86,24 @@ def test_repl_evaluates_indexing():
 
     assert session.eval_input("[[1, 2], [3, 4]][1, 0]") == "3"
     assert session.eval_input("[[1, 2], [3, 4]][0]") == "[1, 2]"
+    assert (
+        session.eval_input(
+            "let xs = [[[[[[[[[[1]]]]]]]]]] in xs[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]"
+        )
+        == "1"
+    )
+
+
+def test_repl_displays_rank4_and_rank10_arrays():
+    session = ReplSession()
+
+    assert session.eval_input("let xs = [[[[1]]]] in map (\\x -> x + 1) xs") == "[[[[2]]]]"
+    assert (
+        session.eval_input(
+            "let xs = [[[[[[[[[[1]]]]]]]]]] in map (\\x -> x + 1) xs"
+        )
+        == "[[[[[[[[[[2]]]]]]]]]]"
+    )
 
 
 def test_repl_accepts_multiline_expression():

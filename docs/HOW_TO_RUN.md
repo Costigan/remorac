@@ -33,7 +33,18 @@ Run examples on the compiled CPU path:
 ```bash
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/prelude_sum.remora
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/dot_product.remora
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/rank4_map.remora
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/rank10_map.remora
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/rank10_shape.remora
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/rank10_rank.remora
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac examples/rank10_indexing.remora
 ```
+
+Dense Core's current static-rank target is rank 0 through rank 10. The compiled
+CPU path has representative rank-4 and rank-10 coverage for scalar-cell maps,
+static `shape`/`rank`, and full-rank indexing.
+The direct Remora ABI PTX slice is still narrower and currently supports
+rank-1 through rank-3 `float32` maps only.
 
 Some examples intentionally exercise syntax that is not lowered to compiled MLIR
 yet, such as scalar conditionals. Use the interpreter target for those:

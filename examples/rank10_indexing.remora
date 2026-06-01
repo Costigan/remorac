@@ -1,0 +1,2 @@
+-- Full-rank indexing at Dense Core's maximum rank
+let xs = [[[[[[[[[[1]]]]]]]]]] in xs[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]

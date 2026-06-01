@@ -506,8 +506,8 @@ Deferred CPU/runtime work:
   stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
-- Broaden compiled CPU rank-10 execution coverage beyond scalar-cell maps and
-  one rank-4 descriptor-input callable once more surface examples exist.
+- Broaden compiled CPU rank-10 execution coverage beyond scalar-cell maps once
+  higher-rank fold/cell-map surface examples exist.
 
 ## CUDA Runtime Decisions
 
@@ -635,25 +635,31 @@ Current tests cover:
   map-chain, vector sum, and dot, plus CPU pipeline compile-time thresholds.
 - CPU runtime and CLI coverage for scalar evaluation, direct top-level function
   calls, top-level functions as map callables, `iota`/`map`/`fold`,
-  row-reduction maps, static `shape`/`rank`, array indexing, prelude `sum`,
-  `product`, `scale`, and `dot`, every checked-in example file, compiler facade
-  MLIR/PTX helpers, `remorac` CPU output over every checked-in example, CLI emit
-  flags, MLIR/PTX target aliases, MLIR/PTX output for top-level function maps,
-  missing files, invalid sources, and recursive function diagnostics.
+  row-reduction maps, static `shape`/`rank` including rank-10 inspection,
+  array indexing including full-rank rank-10 indexing, prelude `sum`,
+  `product`, `scale`, and `dot`, every checked-in example file, compiler
+  facade MLIR/PTX helpers, `remorac` CPU output over every checked-in example,
+  CLI emit flags, MLIR/PTX target aliases, MLIR/PTX output for top-level
+  function maps, missing files, invalid sources, and recursive function
+  diagnostics.
 - Display coverage for int/float/bool scalars, vectors, matrices, rank-3 arrays,
-  and CLI boolean output.
+  compact rank-4/rank-10 arrays, and CLI boolean output. Higher-rank display
+  intentionally uses NumPy-style `array2string` formatting for now.
 - REPL coverage for expression evaluation, persistent value/function
   definitions, definitions referencing earlier definitions, top-level functions
-  used in direct calls and maps, recursive-function diagnostics, `:type`,
-  `:mlir`, `:prelude`, `:defs`, `:load`, `:reset`, prelude availability across
-  reset, target diagnostics, error recovery, `:quit`, and the
+  used in direct calls and maps, compact rank-4/rank-10 result display,
+  rank-10 `shape`/`rank`, rank-10 full indexing, recursive-function
+  diagnostics, `:type`, `:mlir`, `:prelude`, `:defs`, `:load`, `:reset`,
+  prelude availability across reset, target diagnostics, error recovery,
+  `:quit`, and the
   `remora --target cpu` entry point.
 - Acceptance coverage under `tests/acceptance/` for CPU-facing pass/fail cases:
   scalar arithmetic, top-level function calls, top-level functions used in
-  maps, row reductions, rank-3 maps, static `shape`, indexing, prelude `sum`,
-  dot product, recursive-function diagnostics, and rank-11 rejection. Deferred examples are
-  checked into `tests/acceptance/deferred/` but intentionally excluded from the
-  manifest.
+  maps, row reductions, rank-3/rank-4/rank-10 maps, static `shape`/`rank`
+  including rank-10 inspection, indexing including rank-10 full indexing,
+  prelude `sum`, dot product, recursive-function diagnostics, and rank-11
+  rejection. Deferred examples are checked into `tests/acceptance/deferred/`
+  but intentionally excluded from the manifest.
 
 The latest full local test command was:
 

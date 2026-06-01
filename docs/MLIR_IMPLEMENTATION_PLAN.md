@@ -2038,17 +2038,18 @@ class CPUExecutor:
     `remora_call` with `llvm.emit_c_interface`; the wrapper accepts
     rank-specialized input descriptors and an output descriptor.
   - Current tests cover rank-0 scalar inputs, rank-1 through rank-3 array
-    inputs, rank-4 unary descriptor-input maps, binary descriptor-input maps,
-    fold/dot-shaped reductions, strided numpy input/output views, and mismatch
-    diagnostics. ABI-only descriptor construction/unpacking coverage extends
-    through rank 10.
+    inputs, rank-4 and rank-10 unary descriptor-input maps, rank-1 and rank-10
+    binary descriptor-input maps, fold/dot-shaped reductions, strided numpy
+    input/output views, and mismatch diagnostics. ABI-only descriptor
+    construction/unpacking coverage also extends through rank 10.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
   - Current: `tests/test_execution.py` covers compiled CPU scalar execution,
     vector/matrix/rank-3/rank-4/rank-10 maps, vector sum, dot product, static
-    shape/rank, booleans, descriptor-output writes, descriptor-input callable
-    execution, and direct `CPUExecutor` artifact lifetime.
+    shape/rank including rank-10 inspection, full-rank rank-10 indexing,
+    booleans, descriptor-output writes, descriptor-input callable execution,
+    and direct `CPUExecutor` artifact lifetime.
   - Double all elements of `[1.0, 2.0, 3.0]` → `[2.0, 4.0, 6.0]`
   - Double all elements of a 2D matrix and a 3D tensor
   - Sum vector `[1.0, ..., 10.0]` → `55.0`
@@ -2661,9 +2662,10 @@ def _build_prelude_env() -> TypeEnv:
 - [ ] Implement `transpose` lowering using `linalg.transpose` or swapped affine map
 - [x] Implement basic array indexing lowering using `tensor.extract`
   - Current: full-rank indexing with literal integer indices lowers for
-    tensor-producing expressions such as `iota` and static array literals.
-    CPU evaluation also supports partial indexing; partial MLIR lowering and
-    dynamic index lowering remain deferred.
+    tensor-producing expressions such as `iota` and static array literals,
+    including a compact rank-10 compiled CPU case. CPU evaluation also supports
+    partial indexing; partial MLIR lowering and dynamic index lowering remain
+    deferred.
 - [x] Load prelude automatically in compiler/runtime/REPL startup paths
   - Current: source composition injects the prelude for `remorac`, compiler
     facade calls, and CPU evaluation. The REPL initializes and resets its

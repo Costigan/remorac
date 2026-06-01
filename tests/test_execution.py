@@ -31,6 +31,14 @@ def nested_scalar_literal(rank: int, value: str = "1") -> str:
     return "[" * rank + value + "]" * rank
 
 
+def unit_shape(rank: int) -> tuple[int, ...]:
+    return tuple(1 for _axis in range(rank))
+
+
+def unit_array_type(element, rank: int) -> ArrayType:
+    return ArrayType(element, tuple(StaticDim(1) for _axis in range(rank)))
+
+
 def test_compiled_cpu_executes_scalar_expression():
     assert_compiled_matches_interpreter("1 + 2.0")
 
@@ -99,6 +107,19 @@ def test_compiled_cpu_executes_bool_rank_and_empty_shape():
     assert boolean.value is True
     assert rank.value == 2
     np.testing.assert_array_equal(scalar_shape.value, np.array([], dtype=np.int32))
+
+
+def test_compiled_cpu_executes_rank10_shape_rank_and_indexing():
+    literal = nested_scalar_literal(10)
+    shape = evaluate_source_compiled(f"shape {literal}")
+    rank = evaluate_source_compiled(f"rank {literal}")
+    indexed = evaluate_source_compiled(
+        f"let xs = {literal} in xs[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]"
+    )
+
+    np.testing.assert_array_equal(shape.value, np.ones((10,), dtype=np.int32))
+    assert rank.value == 10
+    assert indexed.value == 1
 
 
 def test_cpu_executor_compile_source_keeps_artifact_until_closed():
@@ -291,6 +312,21 @@ def test_cpu_function_executor_runs_rank4_descriptor_input_map():
     np.testing.assert_array_equal(result.value, np.full((1, 1, 1, 1), 2, dtype=np.int32))
 
 
+def test_cpu_function_executor_runs_rank10_descriptor_input_map():
+    shape = unit_shape(10)
+    artifact = CPUFunctionExecutor.compile_source(
+        "def inc xs = map (\\x -> x + 1) xs",
+        "inc",
+        (unit_array_type(INT, 10),),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(np.ones(shape, dtype=np.int32))
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(result.value, np.full(shape, 2, dtype=np.int32))
+
+
 def test_cpu_function_executor_runs_binary_descriptor_input_map():
     artifact = CPUFunctionExecutor.compile_source(
         "def add xs ys = map (+) xs ys",
@@ -312,6 +348,27 @@ def test_cpu_function_executor_runs_binary_descriptor_input_map():
         result.value,
         np.array([11, 22, 33, 44], dtype=np.float32),
     )
+
+
+def test_cpu_function_executor_runs_rank10_binary_descriptor_input_map():
+    shape = unit_shape(10)
+    artifact = CPUFunctionExecutor.compile_source(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            unit_array_type(FLOAT, 10),
+            unit_array_type(FLOAT, 10),
+        ),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.full(shape, 1.5, dtype=np.float32),
+            np.full(shape, 2.5, dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(result.value, np.full(shape, 4.0, dtype=np.float32))
 
 
 def test_cpu_function_executor_runs_fold_and_dot_over_descriptor_inputs():

@@ -1,0 +1,2 @@
+-- Dense Core maximum static rank map on the compiled CPU path
+let xs = [[[[[[[[[[1]]]]]]]]]] in map (\x -> x + 1) xs
