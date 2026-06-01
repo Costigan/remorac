@@ -55,7 +55,12 @@ class MLIRLowering:
         with self.context, self.ir.Location.unknown(self.context):
             return self.ir.Type.parse(type_to_mlir(value_type), self.context)
 
-    def lower_program(self, program: HIRProgram) -> LoweredModule:
+    def lower_program(
+        self,
+        program: HIRProgram,
+        *,
+        export_output_descriptor: bool = False,
+    ) -> LoweredModule:
         functions = {function.name: function for function in program.functions}
         main = _prepare_main_expr(program.main)
         if not isinstance(
@@ -78,6 +83,10 @@ class MLIRLowering:
             )
 
         text = _lower_main_module(main, functions)
+        if export_output_descriptor:
+            if program.return_type is None:
+                raise RemoraLoweringError("output descriptor export requires a result type")
+            text = _add_output_descriptor_export(text, program.return_type)
         with self.context, self.ir.Location.unknown(self.context):
             module = self.ir.Module.parse(text)
         return LoweredModule(str(module), module)
@@ -236,6 +245,87 @@ def _lower_main_module(
     if not isinstance(node.result_type, ArrayType):
         return _lower_scalar_map_module(node, functions)
     return _lower_iota_scalar_map_module(node, functions)
+
+
+def _add_output_descriptor_export(mlir_text: str, return_type: RemoraType) -> str:
+    wrapper = _output_descriptor_export_function(return_type)
+    stripped = mlir_text.rstrip()
+    if not stripped.endswith("}"):
+        raise RemoraLoweringError("expected lowered MLIR module to end with '}'")
+    return f"{stripped[:-1]}{wrapper}\n}}"
+
+
+def _output_descriptor_export_function(return_type: RemoraType) -> str:
+    result_type = type_to_mlir(return_type)
+    memref_type = _output_memref_type(return_type)
+    lines = [
+        "",
+        f"  func.func @remora_main_out(%out: {memref_type}) attributes {{ llvm.emit_c_interface }} {{",
+        f"    %result = call @main() : () -> {result_type}",
+    ]
+    if isinstance(return_type, ScalarType):
+        lines.append(f"    memref.store %result, %out[] : {memref_type}")
+    elif isinstance(return_type, ArrayType):
+        lines.extend(_output_descriptor_store_lines(return_type, result_type, memref_type))
+    else:
+        raise RemoraLoweringError(f"cannot export output descriptor for type {return_type}")
+    lines.extend(
+        [
+            "    return",
+            "  }",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _output_memref_type(return_type: RemoraType) -> str:
+    if isinstance(return_type, ScalarType):
+        return f"memref<{type_to_mlir(return_type)}>"
+    if isinstance(return_type, ArrayType):
+        dims = "x".join(str(dim.value) for dim in return_type.shape)
+        element = type_to_mlir(return_type.element)
+        if dims:
+            strides = ", ".join("?" for _axis in range(return_type.rank))
+            return f"memref<{dims}x{element}, strided<[{strides}], offset: ?>>"
+        return f"memref<{element}>"
+    raise RemoraLoweringError(f"cannot lower output descriptor type {return_type}")
+
+
+def _output_descriptor_store_lines(
+    return_type: ArrayType,
+    result_type: str,
+    memref_type: str,
+) -> list[str]:
+    if return_type.rank == 0:
+        return [
+            f"    %value = tensor.extract %result[] : {result_type}",
+            f"    memref.store %value, %out[] : {memref_type}",
+        ]
+
+    lines = [
+        "    %c0 = arith.constant 0 : index",
+        "    %c1 = arith.constant 1 : index",
+    ]
+    for axis, dim in enumerate(return_type.shape):
+        lines.append(f"    %c{axis}_ub = arith.constant {dim.value} : index")
+    for axis in range(return_type.rank):
+        indent = "    " + "  " * axis
+        lines.append(
+            f"{indent}scf.for %i{axis} = %c0 to %c{axis}_ub step %c1 {{"
+        )
+
+    indices = ", ".join(f"%i{axis}" for axis in range(return_type.rank))
+    body_indent = "    " + "  " * return_type.rank
+    lines.extend(
+        [
+            f"{body_indent}%value = tensor.extract %result[{indices}] : {result_type}",
+            f"{body_indent}memref.store %value, %out[{indices}] : {memref_type}",
+        ]
+    )
+    for axis in reversed(range(return_type.rank)):
+        indent = "    " + "  " * axis
+        lines.append(f"{indent}}}")
+    return lines
 
 
 def _lower_scalar_module(
