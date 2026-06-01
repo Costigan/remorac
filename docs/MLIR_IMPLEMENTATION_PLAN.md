@@ -1778,6 +1778,11 @@ The MLIR lowering may use internal memref conventions, but the exported CUDA ker
 
 #### 7.1 CUDA Runtime Wrapper (`remora/runtime.py`)
 
+Current: implemented. `remora.runtime.CUDARuntime`, `CUDAModule`, and
+`CUDAKernel` wrap the CUDA Driver API through `cuda-python`. Descriptor
+arguments are copied to device memory and passed as descriptor pointers, matching
+the external ABI in `docs/ABI.md`.
+
 Using the `cuda-python` package (official NVIDIA Python bindings):
 
 ```python
@@ -1875,6 +1880,12 @@ class CUDAKernel:
 ```
 
 #### 7.2 High-Level Executor (`remora/executor.py`)
+
+Current: implemented for direct Remora ABI kernels. `RemoraExecutor` loads PTX,
+allocates/copies numpy inputs, builds rank-specialized descriptors for inputs
+and outputs, launches one kernel, synchronizes, copies the result back, and
+frees device buffers. This executor is intentionally not wired to IREE HAL PTX,
+because that PTX does not use the Remora descriptor ABI.
 
 ```python
 class RemoraExecutor:
@@ -1978,17 +1989,25 @@ class CPUExecutor:
 
 #### 7.4 Tasks
 
-- [ ] Implement `CUDARuntime`: init, alloc, free, H2D/D2H copy, synchronize
-- [ ] Implement `CUDAModule` and `CUDAKernel`
+- [x] Implement `CUDARuntime`: init, alloc, free, H2D/D2H copy, synchronize
+- [x] Implement `CUDAModule` and `CUDAKernel`
 - [x] Implement Remora memref descriptor structs with ctypes for rank-0, rank-1, rank-2, and rank-3 buffers
 - [x] Implement descriptor construction from numpy arrays and Remora view metadata, including byte-stride to element-stride conversion and nonzero offsets for future views
 - [x] Implement descriptor-to-numpy result unpacking for rank-0 through rank-3 CPU results
   - Current: `numpy_from_memref_descriptor` is retained as ABI infrastructure
     and covered by ABI tests. Compiled CPU execution now writes directly into
     numpy-backed output descriptors.
-- [ ] Implement `CUDAKernel.launch` with descriptor-aware ctypes argument packing
-- [ ] Implement `RemoraExecutor.execute` for a single kernel
-- [ ] Implement output shape computation from kernel metadata
+- [x] Implement `CUDAKernel.launch` with descriptor-aware ctypes argument packing
+  - Current: descriptor structs are copied to device memory before launch and
+    passed as kernel pointer arguments. Temporary descriptor allocations are
+    released after synchronization.
+- [x] Implement `RemoraExecutor.execute` for a single kernel
+  - Current: implemented for direct Remora ABI PTX kernels. IREE HAL dispatch
+    PTX remains inspection-only and is not launched through this executor.
+- [x] Implement output shape computation from kernel metadata
+  - Current: `KernelMeta.output_shape` and `KernelMeta.output_dtype` drive
+    output allocation; when omitted, the executor falls back to the first input
+    shape/dtype for simple elementwise kernels.
 - [x] Implement `CPUExecutor` for GPU-free compiled execution
   - Current: `CPUExecutor` lowers source to LLVM IR, emits an object with
     `llc-18`, links a temporary shared library with `gcc`/`cc`, and calls
@@ -1996,7 +2015,7 @@ class CPUExecutor:
     descriptor. Lowering emits `remora_main_out` as a native MLIR wrapper with
     a dynamic-strided output memref so descriptor offsets and strides are
     honored.
-  - Deferred: descriptor inputs and kernel metadata.
+  - Deferred: descriptor inputs for CPU-compiled functions.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
@@ -2008,13 +2027,22 @@ class CPUExecutor:
   - Sum vector `[1.0, ..., 10.0]` → `55.0`
   - Dot product `[1,2,3] · [4,5,6]` → `32.0`
   - Verify on CPU executor first, then GPU executor
-  - ABI tests in `tests/test_abi.py` launch tiny rank-0, rank-1, rank-2, and rank-3 kernels that read and write through descriptors
+  - CUDA runtime tests cover descriptor-aware argument packing without a GPU.
+  - A live CUDA rank-1 descriptor round-trip test runs when a CUDA driver/device
+    is available, and skips otherwise.
 
 **Milestone M6**: descriptor ABI tests pass for rank 0 through rank 3, and compiled CPU execution returns `[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]` for a `map (* 2.0)` program.
 Current: ABI descriptor tests pass, compiled CPU execution covers the acceptance
 subset, and `remorac --target cpu` defaults to compiled CPU execution. Compiled
 CPU output now flows through explicit rank-specialized descriptors via a native
-MLIR output wrapper. Input descriptors and kernel metadata remain deferred.
+MLIR output wrapper. CPU input descriptors for externally supplied arrays remain
+deferred.
+
+**Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
+Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
+PTX kernels with descriptor arguments. Generated Remora GPU kernels remain
+blocked on direct `gpu.module` lowering; IREE HAL PTX is intentionally not
+treated as a launchable Remora ABI artifact.
 
 ---
 
@@ -3072,7 +3100,7 @@ This table describes the practical state of the system after each phase. "User c
 | M5 | Pinned CPU/fusion pipelines complete | Validated CPU LLVM/MLIR and fusion pipelines plus toolchain documentation are committed; NVIDIA is documented as inspection-only until direct GPU lowering lands | `python tools/validate_mlir_toolchain.py && python tools/validate_mlir_pipeline.py` |
 | M5.5 | Fusion/performance gates | Map-chain, map-fold, and dot have MLIR fusion/kernel-count smoke tests | `pytest tests/test_fusion.py tests/test_performance_smoke.py` |
 | M6 | CPU compiled execution complete | Rank-0..3 descriptor ABI tests pass and `remorac --target cpu` runs acceptance cases through compiled code | `pytest tests/test_abi.py && pytest tests/test_execution.py` |
-| M6.5 | GPU runtime complete | CUDA descriptor launch path runs vector scale, vector sum, and dot on NVIDIA when available | `REMORA_TEST_GPU=1 pytest tests/test_execution.py -k gpu` |
+| M6.5 | GPU runtime infrastructure complete | CUDA descriptor launch packing and direct Remora ABI executor are implemented; a live rank-1 PTX descriptor round trip runs when NVIDIA is available | `pytest tests/test_cuda_runtime.py tests/test_executor.py` |
 | M7 | Shared execution/display complete | Generated programs run through the executor API and format scalar/vector/matrix/rank-3 results consistently | `pytest tests/test_execution.py` |
 | M8 | Early REPL | Interactive expression evaluation, definitions, `:type`, `:load`, `:reset`, and error recovery on CPU | `remora --target cpu` |
 | M9 | AOT vertical slice complete | `remorac` runs `fold (+) 0.0 (map (* 2.0) (iota 1000))` on CPU and NVIDIA | `remorac tests/programs/iota_map_fold.rem` |

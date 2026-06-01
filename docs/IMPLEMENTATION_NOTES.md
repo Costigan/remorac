@@ -408,12 +408,12 @@ Deferred MLIR lowering work:
   This proves the current lowered MLIR can reach PTX with the installed IREE
   toolchain.
 - The PTX produced today is an IREE HAL dispatch kernel. Its launch ABI is not
-  the final Remora external memref-descriptor ABI from `docs/ABI.md`; direct
-  CUDA launching remains a Phase 7/runtime integration task.
-- `KernelMeta` extraction is intentionally minimal and reflects only stable
-  facts in the generated PTX today: entry name, PTX parameter count, and
-  `.maxntid` block size. Input/output element types are left empty until the
-  final Remora kernel ABI is generated.
+  the final Remora external memref-descriptor ABI from `docs/ABI.md`; it remains
+  inspection-only and is not launched by `RemoraExecutor`.
+- `KernelMeta` extraction from IREE PTX is intentionally minimal and reflects
+  only stable facts in that generated PTX today: entry name, PTX parameter
+  count, and `.maxntid` block size. `KernelMeta` also has explicit
+  `output_shape` and `output_dtype` fields for direct Remora ABI kernels.
 - The in-process IREE pass registry still does not recognize the standalone CPU
   lowering pipeline. That path raises `PipelineUnavailable`; the validated
   production-style path is the external standalone `mlir-opt-18` runner.
@@ -476,12 +476,34 @@ Deferred pipeline/codegen work:
 
 Deferred CPU/runtime work:
 
-- Add descriptor inputs and kernel metadata so externally supplied arrays no
-  longer have to be embedded in the compiled source.
+- Add descriptor inputs so CPU-compiled functions can consume externally
+  supplied arrays instead of embedding all arrays in the compiled source.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
-- Add CUDA driver module-load and launch tests only after the Remora ABI kernel
-  boundary is explicit.
+
+## CUDA Runtime Decisions
+
+- `remora.runtime.CUDARuntime` wraps CUDA driver initialization, context
+  creation/destruction, PTX module loading, device allocation/free, host-device
+  copies, and synchronization.
+- `CUDAKernel.launch` accepts scalar arguments and rank-specialized Remora
+  descriptor structs. Descriptor structs are copied into temporary device
+  memory and the kernel receives device pointers to those descriptors.
+- `remora.executor.RemoraExecutor` is for direct Remora ABI PTX kernels only.
+  It is intentionally not wired to IREE HAL dispatch PTX.
+- `RemoraExecutor.execute` currently supports one output. It allocates device
+  input/output buffers, builds descriptor arguments, launches the kernel,
+  synchronizes, copies the output back, and frees device buffers.
+- CUDA tests cover descriptor-aware argument packing without a GPU. A live
+  rank-1 descriptor round-trip test is present and skips cleanly when no CUDA
+  driver/device is available.
+
+Deferred CUDA/runtime work:
+
+- Generate direct Remora `gpu.module` / `gpu.func` kernels instead of using
+  hand-authored PTX in runtime tests.
+- Add live CUDA descriptor round trips for rank 0, rank 2, and rank 3 once the
+  generated direct ABI GPU path exists.
 
 ## REPL Decisions
 

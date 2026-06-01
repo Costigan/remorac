@@ -8,7 +8,7 @@ from pathlib import Path
 from shutil import which
 import subprocess
 import tempfile
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -54,6 +54,10 @@ class RuntimeUnavailable(RemoraError):
     """Raised when a requested runtime target is unavailable."""
 
 
+class CUDAError(RuntimeUnavailable):
+    """Raised when CUDA driver setup, memory operations, or launch fails."""
+
+
 class EvaluationError(RemoraError):
     """Raised when CPU evaluation hits unsupported typed syntax."""
 
@@ -77,6 +81,256 @@ class CompiledCPUArtifact:
 Value = object
 Env = dict[str, Value]
 CallableValue = Callable[..., Value]
+
+
+def cuda_available() -> bool:
+    """Return whether the CUDA Python driver module can be imported."""
+    try:
+        _load_cuda_driver()
+    except RuntimeUnavailable:
+        return False
+    return True
+
+
+class CUDARuntime:
+    """Small CUDA Driver API wrapper for direct Remora ABI kernels."""
+
+    def __init__(self, device_idx: int = 0) -> None:
+        self._cuda = _load_cuda_driver()
+        self._ctx: Any | None = None
+        self._deferred_frees: list[int] = []
+        _cuda_check(self._cuda, self._cuda.cuInit(0), "cuInit failed")
+        self._device = _cuda_value(
+            self._cuda,
+            self._cuda.cuDeviceGet(device_idx),
+            "cuDeviceGet failed",
+        )
+        self._ctx = _cuda_value(
+            self._cuda,
+            self._cuda.cuCtxCreate(0, self._device),
+            "cuCtxCreate failed",
+        )
+
+    def load_ptx(self, ptx: str) -> "CUDAModule":
+        module = _cuda_value(
+            self._cuda,
+            self._cuda.cuModuleLoadData(ptx.encode("utf-8")),
+            "cuModuleLoadData failed",
+        )
+        return CUDAModule(module, self)
+
+    def alloc(self, nbytes: int) -> int:
+        if nbytes < 0:
+            raise CUDAError("cannot allocate a negative number of bytes")
+        ptr = _cuda_value(
+            self._cuda,
+            self._cuda.cuMemAlloc(int(nbytes)),
+            "cuMemAlloc failed",
+        )
+        return int(ptr)
+
+    def free(self, ptr: int) -> None:
+        _cuda_check(self._cuda, self._cuda.cuMemFree(int(ptr)), "cuMemFree failed")
+
+    def copy_host_to_device(self, host_array: np.ndarray, device_ptr: int) -> None:
+        array = np.asarray(host_array)
+        self.copy_host_bytes_to_device(int(array.ctypes.data), device_ptr, array.nbytes)
+
+    def copy_device_to_host(self, device_ptr: int, host_array: np.ndarray) -> None:
+        array = np.asarray(host_array)
+        _cuda_check(
+            self._cuda,
+            self._cuda.cuMemcpyDtoH(int(array.ctypes.data), int(device_ptr), array.nbytes),
+            "cuMemcpyDtoH failed",
+        )
+
+    def copy_host_bytes_to_device(self, host_address: int, device_ptr: int, nbytes: int) -> None:
+        _cuda_check(
+            self._cuda,
+            self._cuda.cuMemcpyHtoD(int(device_ptr), int(host_address), int(nbytes)),
+            "cuMemcpyHtoD failed",
+        )
+
+    def synchronize(self) -> None:
+        try:
+            _cuda_check(self._cuda, self._cuda.cuCtxSynchronize(), "cuCtxSynchronize failed")
+        finally:
+            self._free_deferred()
+
+    def close(self) -> None:
+        self._free_deferred()
+        if self._ctx is not None:
+            _cuda_check(self._cuda, self._cuda.cuCtxDestroy(self._ctx), "cuCtxDestroy failed")
+            self._ctx = None
+
+    def _defer_free(self, ptr: int) -> None:
+        self._deferred_frees.append(int(ptr))
+
+    def _free_deferred(self) -> None:
+        pending = self._deferred_frees
+        self._deferred_frees = []
+        for ptr in pending:
+            self.free(ptr)
+
+    def __enter__(self) -> "CUDARuntime":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class CUDAModule:
+    """Loaded CUDA module for direct Remora ABI kernels."""
+
+    def __init__(self, module: Any, runtime: CUDARuntime) -> None:
+        self._module = module
+        self._rt = runtime
+
+    def get_function(self, name: str) -> "CUDAKernel":
+        function = _cuda_value(
+            self._rt._cuda,
+            self._rt._cuda.cuModuleGetFunction(self._module, name.encode("utf-8")),
+            f"cuModuleGetFunction failed for {name}",
+        )
+        return CUDAKernel(function, self._rt)
+
+    def close(self) -> None:
+        if self._module is not None:
+            _cuda_check(
+                self._rt._cuda,
+                self._rt._cuda.cuModuleUnload(self._module),
+                "cuModuleUnload failed",
+            )
+            self._module = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class CUDAKernel:
+    """CUDA kernel launcher with Remora descriptor-aware argument packing."""
+
+    def __init__(self, function: Any, runtime: CUDARuntime) -> None:
+        self._function = function
+        self._rt = runtime
+
+    def launch(
+        self,
+        grid: tuple[int, int, int],
+        block: tuple[int, int, int],
+        args: list[object],
+        *,
+        shared_mem: int = 0,
+        stream: int = 0,
+    ) -> None:
+        packed_args, kernel_args = _pack_cuda_kernel_args(args, self._rt)
+        _cuda_check(
+            self._rt._cuda,
+            self._rt._cuda.cuLaunchKernel(
+                self._function,
+                int(grid[0]),
+                int(grid[1]),
+                int(grid[2]),
+                int(block[0]),
+                int(block[1]),
+                int(block[2]),
+                int(shared_mem),
+                stream,
+                kernel_args,
+                None,
+            ),
+            "cuLaunchKernel failed",
+        )
+        # Keep scalar ctypes values alive until after cuLaunchKernel returns.
+        _ = packed_args
+
+
+def _pack_cuda_kernel_args(
+    args: list[object],
+    runtime: CUDARuntime,
+) -> tuple[list[ctypes._SimpleCData | ctypes.Structure], ctypes.Array]:
+    packed_args: list[ctypes._SimpleCData | ctypes.Structure] = []
+    kernel_args = (ctypes.c_void_p * len(args))()
+    for index, arg in enumerate(args):
+        if isinstance(arg, ctypes.Structure):
+            descriptor_ptr = runtime.alloc(ctypes.sizeof(arg))
+            runtime.copy_host_bytes_to_device(
+                ctypes.addressof(arg),
+                descriptor_ptr,
+                ctypes.sizeof(arg),
+            )
+            runtime._defer_free(descriptor_ptr)
+            c_arg: ctypes._SimpleCData | ctypes.Structure = ctypes.c_uint64(descriptor_ptr)
+        elif isinstance(arg, bool):
+            c_arg = ctypes.c_bool(arg)
+        elif isinstance(arg, int):
+            c_arg = ctypes.c_uint64(arg)
+        elif isinstance(arg, float):
+            c_arg = ctypes.c_float(arg)
+        elif isinstance(arg, np.integer):
+            c_arg = ctypes.c_int64(int(arg))
+        elif isinstance(arg, np.floating):
+            c_arg = ctypes.c_float(float(arg))
+        else:
+            raise CUDAError(f"unsupported CUDA kernel argument type {type(arg).__name__}")
+        packed_args.append(c_arg)
+        kernel_args[index] = ctypes.cast(ctypes.byref(c_arg), ctypes.c_void_p)
+    return packed_args, kernel_args
+
+
+def _load_cuda_driver() -> Any:
+    try:
+        from cuda import cuda as cuda_driver
+
+        return cuda_driver
+    except Exception as first_exc:
+        try:
+            from cuda.bindings import driver as cuda_driver
+
+            return cuda_driver
+        except Exception as second_exc:
+            raise RuntimeUnavailable(
+                "cuda-python driver bindings are not available"
+            ) from second_exc
+
+
+def _cuda_success(cuda_driver: Any) -> Any:
+    try:
+        return cuda_driver.CUresult.CUDA_SUCCESS
+    except AttributeError:
+        return 0
+
+
+def _cuda_error_code(result: object) -> object:
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def _cuda_check(cuda_driver: Any, result: object, message: str) -> None:
+    error_code = _cuda_error_code(result)
+    if error_code != _cuda_success(cuda_driver):
+        raise CUDAError(f"{message}: {error_code}")
+
+
+def _cuda_value(cuda_driver: Any, result: object, message: str) -> Any:
+    if not isinstance(result, tuple):
+        _cuda_check(cuda_driver, result, message)
+        return None
+    _cuda_check(cuda_driver, result[0], message)
+    values = result[1:]
+    if len(values) == 1:
+        return values[0]
+    return values
 
 
 def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationResult:

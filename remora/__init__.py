@@ -9,9 +9,17 @@ from remora.abi import (
     make_memref_descriptor,
     make_numpy_memref_descriptor,
     memref_descriptor_type,
+    numpy_from_memref_descriptor,
 )
+from remora.executor import RemoraExecutor
+from remora.runtime import CUDAKernel, CUDAModule, CUDARuntime, CPUExecutor
 
 __all__ = [
+    "CUDAKernel",
+    "CUDAModule",
+    "CUDARuntime",
+    "CPUExecutor",
+    "RemoraExecutor",
     "RemoraMemRef0",
     "RemoraMemRef1",
     "RemoraMemRef2",
@@ -20,4 +28,5 @@ __all__ = [
     "make_memref_descriptor",
     "make_numpy_memref_descriptor",
     "memref_descriptor_type",
+    "numpy_from_memref_descriptor",
 ]
