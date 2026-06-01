@@ -2015,7 +2015,13 @@ class CPUExecutor:
     descriptor. Lowering emits `remora_main_out` as a native MLIR wrapper with
     a dynamic-strided output memref so descriptor offsets and strides are
     honored.
-  - Deferred: descriptor inputs for CPU-compiled functions.
+- [x] Implement descriptor-input CPU callable functions
+  - Current: `compile_function_source` and `CPUFunctionExecutor` compile named
+    top-level functions with explicit static parameter types. Lowering emits
+    `remora_call` with `llvm.emit_c_interface`; the wrapper accepts
+    rank-specialized input descriptors and an output descriptor.
+  - Current tests cover rank-0 scalar inputs, rank-1 array inputs, and strided
+    numpy input/output views.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
@@ -2035,8 +2041,9 @@ class CPUExecutor:
 Current: ABI descriptor tests pass, compiled CPU execution covers the acceptance
 subset, and `remorac --target cpu` defaults to compiled CPU execution. Compiled
 CPU output now flows through explicit rank-specialized descriptors via a native
-MLIR output wrapper. CPU input descriptors for externally supplied arrays remain
-deferred.
+MLIR output wrapper. Named top-level functions can also be compiled as CPU
+descriptor-input callables when the caller supplies explicit static parameter
+types.
 
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI

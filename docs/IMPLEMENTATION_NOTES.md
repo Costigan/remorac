@@ -448,6 +448,12 @@ Deferred pipeline/codegen work:
   internal tensor/scalar-returning `main` and stores into a rank-specialized,
   dynamic-strided output memref, so numpy views with non-unit strides are
   honored.
+- `compile_function_source` and `CPUFunctionExecutor` provide the first
+  descriptor-input CPU callable path for named top-level functions. Callers
+  supply explicit static parameter types, and lowering emits a native MLIR
+  `remora_call` wrapper that accepts input descriptors plus an output
+  descriptor. Rank-0 scalar descriptors, rank-1 array descriptors, and strided
+  numpy views are covered.
 - The typed-AST evaluator remains available as `--target interp` and as a test
   oracle for cases that have not been lowered to compiled MLIR yet.
 - CPU execution returns Python scalars or numpy arrays plus the checked Remora
@@ -476,8 +482,8 @@ Deferred pipeline/codegen work:
 
 Deferred CPU/runtime work:
 
-- Add descriptor inputs so CPU-compiled functions can consume externally
-  supplied arrays instead of embedding all arrays in the compiled source.
+- Broaden descriptor-input callable tests beyond rank-0 scalars and rank-1
+  arrays.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
 
