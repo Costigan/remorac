@@ -1434,11 +1434,13 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [x] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
 - [x] Implement `_lower_map_binary_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise binary maps
   - Current: `map (*) xs ys` lowers to a multi-input `linalg.generic` with one identity indexing map per input and one identity output map. Prelude `dot` lowers through binary map plus fold.
-- [ ] Generalize scalar and binary map lowering tests across ranks 4 through 10 without adding rank-specific branches
+- [x] Generalize scalar and binary map lowering tests across ranks 4 through 10 without adding rank-specific branches
+  - Current: rank-4 and rank-10 scalar maps and rank-4 binary maps parse-validate as textual MLIR.
 - [x] Implement `_lower_map_cell` for the current static rank-1-cell reduction pattern whose total result rank is <= 3
   - Current: textual MLIR lowering supports rank-1-cell reduction maps over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred until after compiled CPU execution is in place.
 - [x] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
-- [ ] Generalize fold lowering tests across representative ranks above 3
+- [x] Generalize fold lowering tests across representative ranks above 3
+  - Current: rank-4 outermost array-cell fold parse-validates as textual MLIR.
 - [x] Implement `_lower_prim_op` for all scalar operations
 - [x] Implement `_lower_cast` for explicit numeric promotions
 - [x] Implement `_lower_iota`
@@ -1449,7 +1451,7 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
   - Current: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions reach MLIR for direct scalar calls and unary/binary `map` callables through call-site typed static lambda specialization. General array-parameter top-level HIR/MLIR function emission remains deferred.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
 - [x] Reject dynamic dimensions until the initial Dense Core static-shape rank-0 through rank-3 programs execute end-to-end
-- [ ] Keep dynamic dimensions rejected while widening static-rank support to `MAX_RANK = 10`
+- [x] Keep dynamic dimensions rejected while widening static-rank support to `MAX_RANK = 10`
 - [x] Write `tests/test_lowering.py`:
   - Check generated MLIR text for `map (\x -> x * 2.0) (iota 10)` contains the expected `iota` and scalar-map `linalg.generic` operations
   - Check rank-2 and rank-3 scalar maps produce the expected number of parallel iterators
@@ -2036,16 +2038,17 @@ class CPUExecutor:
     `remora_call` with `llvm.emit_c_interface`; the wrapper accepts
     rank-specialized input descriptors and an output descriptor.
   - Current tests cover rank-0 scalar inputs, rank-1 through rank-3 array
-    inputs, binary descriptor-input maps, fold/dot-shaped reductions, strided
-    numpy input/output views, and mismatch diagnostics. ABI-only descriptor
-    construction/unpacking coverage extends through rank 10; compiled CPU
-    callable lowering above rank 3 remains follow-on work.
+    inputs, rank-4 unary descriptor-input maps, binary descriptor-input maps,
+    fold/dot-shaped reductions, strided numpy input/output views, and mismatch
+    diagnostics. ABI-only descriptor construction/unpacking coverage extends
+    through rank 10.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
   - Current: `tests/test_execution.py` covers compiled CPU scalar execution,
-    vector/matrix/rank-3 maps, vector sum, dot product, static shape/rank,
-    booleans, and direct `CPUExecutor` artifact lifetime.
+    vector/matrix/rank-3/rank-4/rank-10 maps, vector sum, dot product, static
+    shape/rank, booleans, descriptor-output writes, descriptor-input callable
+    execution, and direct `CPUExecutor` artifact lifetime.
   - Double all elements of `[1.0, 2.0, 3.0]` → `[2.0, 4.0, 6.0]`
   - Double all elements of a 2D matrix and a 3D tensor
   - Sum vector `[1.0, ..., 10.0]` → `55.0`
