@@ -5,7 +5,7 @@ import pytest
 
 from remora.runtime import CPUExecutor, CPUFunctionExecutor, evaluate_source, evaluate_source_compiled
 from remora.runtime import EvaluationError
-from remora.types import FLOAT, ArrayType, StaticDim
+from remora.types import FLOAT, INT, ArrayType, StaticDim
 
 
 pytestmark = pytest.mark.skipif(
@@ -202,3 +202,116 @@ def test_cpu_function_executor_honors_strided_descriptor_inputs_and_outputs():
 
     np.testing.assert_array_equal(output_view, np.array([0, 4, 8, 12, 16], dtype=np.float32))
     np.testing.assert_array_equal(backing_output[:, 0], np.full((5,), -1.0, dtype=np.float32))
+
+
+def test_cpu_function_executor_runs_rank2_and_rank3_descriptor_input_maps():
+    matrix_artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(2))),),
+    )
+    rank3_artifact = CPUFunctionExecutor.compile_source(
+        "def inc xs = map (\\x -> x + 1) xs",
+        "inc",
+        (ArrayType(INT, (StaticDim(2), StaticDim(2), StaticDim(1))),),
+    )
+    try:
+        matrix = CPUFunctionExecutor(matrix_artifact).execute(
+            np.array([[1, 2], [3, 4]], dtype=np.float32)
+        )
+        tensor3 = CPUFunctionExecutor(rank3_artifact).execute(
+            np.array([[[1], [2]], [[3], [4]]], dtype=np.int32)
+        )
+    finally:
+        matrix_artifact.close()
+        rank3_artifact.close()
+
+    np.testing.assert_array_equal(
+        matrix.value,
+        np.array([[2, 4], [6, 8]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        tensor3.value,
+        np.array([[[2], [3]], [[4], [5]]], dtype=np.int32),
+    )
+
+
+def test_cpu_function_executor_runs_binary_descriptor_input_map():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(4),)),
+            ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.array([1, 2, 3, 4], dtype=np.float32),
+            np.array([10, 20, 30, 40], dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([11, 22, 33, 44], dtype=np.float32),
+    )
+
+
+def test_cpu_function_executor_runs_fold_and_dot_over_descriptor_inputs():
+    sum_artifact = CPUFunctionExecutor.compile_source(
+        "def sumit xs = fold (+) 0.0 xs",
+        "sumit",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+    )
+    dot_artifact = CPUFunctionExecutor.compile_source(
+        "def dotit xs ys = dot xs ys",
+        "dotit",
+        (
+            ArrayType(FLOAT, (StaticDim(3),)),
+            ArrayType(FLOAT, (StaticDim(3),)),
+        ),
+    )
+    try:
+        summed = CPUFunctionExecutor(sum_artifact).execute(
+            np.array([1, 2, 3, 4], dtype=np.float32)
+        )
+        dotted = CPUFunctionExecutor(dot_artifact).execute(
+            np.array([1, 2, 3], dtype=np.float32),
+            np.array([4, 5, 6], dtype=np.float32),
+        )
+    finally:
+        sum_artifact.close()
+        dot_artifact.close()
+
+    assert summed.value == pytest.approx(10.0)
+    assert dotted.value == pytest.approx(32.0)
+
+
+def test_cpu_function_executor_rejects_input_and_output_mismatches():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(5),)),),
+    )
+    executor = CPUFunctionExecutor(artifact)
+    try:
+        with pytest.raises(EvaluationError, match="expects 1 inputs"):
+            executor.execute()
+        with pytest.raises(EvaluationError, match="input 0 shape mismatch"):
+            executor.execute(np.empty((4,), dtype=np.float32))
+        with pytest.raises(EvaluationError, match="input 0 dtype mismatch"):
+            executor.execute(np.empty((5,), dtype=np.int32))
+        with pytest.raises(EvaluationError, match="output shape mismatch"):
+            executor.execute_into(
+                np.empty((4,), dtype=np.float32),
+                np.empty((5,), dtype=np.float32),
+            )
+        with pytest.raises(EvaluationError, match="output dtype mismatch"):
+            executor.execute_into(
+                np.empty((5,), dtype=np.int32),
+                np.empty((5,), dtype=np.float32),
+            )
+    finally:
+        artifact.close()

@@ -21,6 +21,7 @@ from remora.hir import (
     HIRFunction,
     HIRIndex,
     HIRIota,
+    HIRLambda,
     HIRLit,
     HIRLet,
     HIRMap,
@@ -383,21 +384,66 @@ def _lower_descriptor_internal_function(function: HIRFunction, name: str) -> str
             raise RemoraLoweringError("lowered function result type mismatch")
         body = code
     elif isinstance(function.return_type, ScalarType):
-        emitter = _RegionEmitter(input_name="", input_type="")
-        value = emitter.emit_expr(function.body, scalar_env)
-        lines = [
-            *emitter.lines,
-            *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
-        ]
-        result_value = "%result_cast" if value.type != result_type else value.value
-        body = "\n".join(lines)
+        body, result_value = _lower_descriptor_scalar_result_body(
+            function.body,
+            result_type,
+            scalar_env,
+            tensor_env,
+        )
     else:
         raise RemoraLoweringError("descriptor-exported functions require scalar or array results")
 
     return f"""  func.func private @{name}({", ".join(arg_decls)}) -> {result_type} {{
 {body}
     return {result_value} : {result_type}
-  }}"""
+    }}"""
+
+
+def _lower_descriptor_scalar_result_body(
+    expr: HIRExpr,
+    result_type: str,
+    scalar_env: dict[str, "_Operand"],
+    tensor_env: TensorEnv,
+) -> tuple[str, str]:
+    expr = _inline_lets(expr)
+    if isinstance(expr, HIRFold):
+        input_code, input_name, input_type, input_element_type = _lower_fold_input(
+            expr.array,
+            {},
+            tensor_env=tensor_env,
+        )
+        init_value = _literal_value(expr.init, result_type) if isinstance(expr.init, HIRLit) else None
+        if init_value is None:
+            raise RemoraLoweringError("only literal fold initial values lower to MLIR so far")
+        fold_body = _lower_fold_callable_body(
+            expr.func,
+            input_name="%in",
+            input_type=input_element_type,
+            acc_name="%acc",
+            acc_type=result_type,
+            result_type=result_type,
+        )
+        body = f"""{input_code}
+    %init_scalar = arith.constant {init_value} : {result_type}
+    %init = tensor.from_elements %init_scalar : tensor<{result_type}>
+    %folded = linalg.generic {{
+      indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
+      iterator_types = [\"reduction\"]
+    }} ins({input_name} : {input_type}) outs(%init : tensor<{result_type}>) {{
+    ^bb0(%in: {input_element_type}, %acc: {result_type}):
+{fold_body}
+    }} -> tensor<{result_type}>
+    %extracted = tensor.extract %folded[] : tensor<{result_type}>"""
+        return body, "%extracted"
+
+    emitter = _RegionEmitter(input_name="", input_type="")
+    value = emitter.emit_expr(expr, scalar_env)
+    lines = [
+        *emitter.lines,
+        *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
+    ]
+    result_value = "%result_cast" if value.type != result_type else value.value
+    return "\n".join(lines), result_value
 
 
 def _lower_descriptor_export_wrapper(
@@ -1258,6 +1304,25 @@ def _lower_map_callable_result(
         ]
         result_value = "%result_cast" if value.type != result_type else value.value
         return lines, result_value
+    if isinstance(callable_, HIRLambda):
+        if len(callable_.params) != 1:
+            raise RemoraLoweringError("only unary lambda map functions lower to MLIR so far")
+        emitter = _RegionEmitter(
+            input_name=input_name,
+            input_type=input_type,
+            next_temp=next_temp,
+            functions=functions,
+        )
+        value = emitter.emit_expr(
+            callable_.body,
+            {callable_.params[0].name: _Operand(input_name, [], input_type)},
+        )
+        lines = [
+            *emitter.lines,
+            *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
+        ]
+        result_value = "%result_cast" if value.type != result_type else value.value
+        return lines, result_value
     raise RemoraLoweringError("only primitive and lifted function map callables lower to MLIR so far")
 
 
@@ -1321,6 +1386,28 @@ def _lower_map_binary_callable_result(
             {
                 function.params[0].name: _Operand(left_name, [], left_type),
                 function.params[1].name: _Operand(right_name, [], right_type),
+            },
+        )
+        lines = [
+            *emitter.lines,
+            *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
+        ]
+        result_value = "%result_cast" if value.type != result_type else value.value
+        return lines, result_value
+    if isinstance(callable_, HIRLambda):
+        if len(callable_.params) != 2:
+            raise RemoraLoweringError("binary map lambda functions must take two parameters")
+        emitter = _RegionEmitter(
+            input_name="",
+            input_type="",
+            next_temp=next_temp,
+            functions=functions,
+        )
+        value = emitter.emit_expr(
+            callable_.body,
+            {
+                callable_.params[0].name: _Operand(left_name, [], left_type),
+                callable_.params[1].name: _Operand(right_name, [], right_type),
             },
         )
         lines = [

@@ -1713,6 +1713,13 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.
 - [x] Implement `generate_ptx`
   - Current: `remora.codegen.generate_ptx` invokes `iree-compile` with the CUDA HAL backend and dumps generated `.ptx` files. The generated PTX is an IREE HAL dispatch kernel, not yet the final direct Remora ABI kernel. This is useful for inspection but does not satisfy the production GPU backend requirement.
+- [x] Implement first direct Remora ABI PTX codegen slice
+  - Current: `remora.codegen.generate_direct_remora_ptx` emits direct
+    descriptor-ABI PTX for a named rank-1 `float32` unary map function with a
+    literal float section constant. This feeds `RemoraExecutor` directly and is
+    separate from IREE HAL PTX.
+  - Deferred: replace the hand-authored PTX slice with `gpu.module` /
+    `gpu.func` lowering through the standalone NVIDIA pipeline.
 - [x] Implement `_extract_kernel_metadata` to collect kernel names and argument info
   - Current: metadata extraction records PTX entry name, PTX parameter count, and `.maxntid` block size. Final input/output element type metadata is deferred until the direct Remora kernel ABI path exists.
 - [x] Write `tests/test_pipeline.py`:
@@ -2020,8 +2027,9 @@ class CPUExecutor:
     top-level functions with explicit static parameter types. Lowering emits
     `remora_call` with `llvm.emit_c_interface`; the wrapper accepts
     rank-specialized input descriptors and an output descriptor.
-  - Current tests cover rank-0 scalar inputs, rank-1 array inputs, and strided
-    numpy input/output views.
+  - Current tests cover rank-0 scalar inputs, rank-1 through rank-3 array
+    inputs, binary descriptor-input maps, fold/dot-shaped reductions, strided
+    numpy input/output views, and mismatch diagnostics.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
@@ -2047,7 +2055,8 @@ types.
 
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
-PTX kernels with descriptor arguments. Generated Remora GPU kernels remain
+PTX kernels with descriptor arguments. The first generated direct Remora ABI PTX
+slice covers rank-1 `float32` unary maps. Broader generated GPU kernels remain
 blocked on direct `gpu.module` lowering; IREE HAL PTX is intentionally not
 treated as a launchable Remora ABI artifact.
 

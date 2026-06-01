@@ -414,6 +414,11 @@ Deferred MLIR lowering work:
   only stable facts in that generated PTX today: entry name, PTX parameter
   count, and `.maxntid` block size. `KernelMeta` also has explicit
   `output_shape` and `output_dtype` fields for direct Remora ABI kernels.
+- `generate_direct_remora_ptx` is the first direct Remora ABI GPU codegen
+  slice. It emits hand-authored PTX for one rank-1 `float32` input descriptor,
+  one rank-1 `float32` output descriptor, and a primitive unary map with a
+  literal float section constant. This is a runtime/codegen vertical slice only;
+  it does not replace the planned `gpu.module` / NVVM lowering path.
 - The in-process IREE pass registry still does not recognize the standalone CPU
   lowering pipeline. That path raises `PipelineUnavailable`; the validated
   production-style path is the external standalone `mlir-opt-18` runner.
@@ -423,8 +428,8 @@ Deferred pipeline/codegen work:
 - Install `ptxas` for standalone PTX assembly checks.
 - Lower Remora modules to explicit `gpu.module` / `gpu.func` kernels and
   validate a production NVIDIA NVVM pipeline against the descriptor ABI.
-- Replace the IREE HAL dispatch PTX path with a final direct-launch Remora ABI
-  path or add an adapter layer that makes the ABI boundary explicit.
+- Replace the narrow hand-authored direct PTX slice with MLIR-generated
+  `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR
   `ExecutionEngine` binding if/when compatible Python bindings are available.
 - Add native descriptor-input exports so compiled functions can consume
@@ -452,8 +457,9 @@ Deferred pipeline/codegen work:
   descriptor-input CPU callable path for named top-level functions. Callers
   supply explicit static parameter types, and lowering emits a native MLIR
   `remora_call` wrapper that accepts input descriptors plus an output
-  descriptor. Rank-0 scalar descriptors, rank-1 array descriptors, and strided
-  numpy views are covered.
+  descriptor. Tests cover rank-0 scalar descriptors, rank-1 through rank-3
+  array descriptors, binary descriptor-input maps, fold/dot-shaped reductions,
+  strided numpy input/output views, and shape/dtype mismatch diagnostics.
 - The typed-AST evaluator remains available as `--target interp` and as a test
   oracle for cases that have not been lowered to compiled MLIR yet.
 - CPU execution returns Python scalars or numpy arrays plus the checked Remora
@@ -482,8 +488,8 @@ Deferred pipeline/codegen work:
 
 Deferred CPU/runtime work:
 
-- Broaden descriptor-input callable tests beyond rank-0 scalars and rank-1
-  arrays.
+- Expose descriptor-input callable compilation through a documented CLI or
+  stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
 
