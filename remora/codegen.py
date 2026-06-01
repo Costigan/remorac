@@ -31,6 +31,8 @@ class KernelMeta:
     num_outputs: int
     input_elem_types: list[str]
     output_elem_types: list[str]
+    output_shape: tuple[int, ...] = ()
+    output_dtype: str | None = None
 
 
 def generate_ptx(
