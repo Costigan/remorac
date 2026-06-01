@@ -444,6 +444,10 @@ Deferred pipeline/codegen work:
 - Install `ptxas` for standalone PTX assembly checks.
 - Lower Remora modules to explicit `gpu.module` / `gpu.func` kernels and
   validate a production NVIDIA NVVM pipeline against the descriptor ABI.
+  The first parse-validated scaffold now lives in `remora.gpu_lowering` for a
+  rank-1 `float32` scale-map-shaped kernel with thread/block indexing, a bounds
+  guard, load, multiply, and store operations, but it is not wired to HIR
+  lowering, NVVM conversion, or runtime launch yet.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR
@@ -532,6 +536,8 @@ Deferred CUDA/runtime work:
 
 - Generate direct Remora `gpu.module` / `gpu.func` kernels instead of using
   hand-authored PTX in runtime tests.
+- Convert the current `remora.gpu_lowering` scaffold into real HIR-to-GPU
+  lowering and validate it through the standalone NVIDIA pipeline.
 - Add live CUDA descriptor round trips for rank 0, rank 2, and rank 3 once the
   generated direct ABI GPU path exists.
 
