@@ -28,6 +28,9 @@ CPU-first Phase 7/8 usability slice:
 - Scalar elementwise maps now lower for rank-0 scalar inputs, rank-1 maps over
   `iota`, and rank-1 through rank-3 maps over static array literals. Ranked
   maps use identity affine maps with one parallel iterator per dimension.
+- Binary scalar elementwise maps now lower for rank-0 through rank-3 inputs.
+  Ranked binary maps use multi-input `linalg.generic`; rank-0 binary maps lower
+  as scalar function application.
 - Nested scalar maps lower for the current direct tensor input subset, including
   map chains over `iota` and static array literals.
 - Standalone scalar literals and primitive scalar expressions lower to
@@ -61,8 +64,8 @@ been implemented.
 - CPU compiled execution comes before CUDA execution. The typed-AST evaluator
   is a reference/interpreter path; `remorac --target cpu` should eventually run
   compiled code through the rank-specialized descriptor ABI.
-- Binary scalar-cell maps are the next missing MLIR lowering feature because
-  they unblock prelude `dot` as binary map plus fold.
+- Binary scalar-cell maps now lower to MLIR and unblock prelude `dot` as binary
+  map plus fold.
 - Fusion, kernel-count, and smoke timing tests are now part of the vertical
   slice. They should land before broadening the language beyond Dense Core.
 
@@ -181,8 +184,8 @@ Known parser limitation:
   arrays with identical static shapes. This is the compiler-shaped CPU path used
   by the starter `dot` prelude helper. Mixed array/scalar binary maps and
   array-valued binary map cells are deferred.
-- `fold` currently supports scalar accumulator folds over rank-1 arrays. Array
-  cell folds are explicitly deferred.
+- `fold` supports scalar accumulator folds over rank-1 arrays and array-cell
+  folds over rank-2/rank-3 arrays for the primitive fold-callable subset.
 - Top-level value definitions are supported.
 - Top-level function definitions are supported when used as statically known
   direct call targets or unary `map` callables. The typechecker specializes the
@@ -290,8 +293,10 @@ Deferred defunctionalization work:
 - Scalar `HIRMap` lowers over rank-0 scalar inputs, direct `HIRIota`, direct
   static `HIRArrayLit`, and nested scalar `HIRMap` inputs for scalar-cell maps
   only.
-- Binary `HIRMap` is represented in HIR but explicitly rejected by MLIR lowering
-  for now, so CPU `dot` support does not silently lower as a unary map.
+- Binary scalar-cell `HIRMap` lowers for rank-0 through rank-3 inputs. Ranked
+  binary maps emit a multi-input `linalg.generic` with one identity indexing map
+  for each input and one identity map for the output. Rank-0 binary maps lower
+  as scalar function application in `main`.
 - Cell `HIRMap` lowers for the current rank-1-cell reduction pattern, e.g.
   `map (\row -> fold (+) 0 row) xs`, producing row/cell reductions over rank-2
   and rank-3 inputs.
@@ -321,6 +326,10 @@ Deferred defunctionalization work:
   `linalg.generic` operations: iota, scalar map, and scalar reduction. The fold
   uses `tensor.from_elements` for the scalar initial accumulator and
   `tensor.extract` to return the rank-0 tensor result as a scalar.
+- Prelude `dot` now lowers through MLIR as binary map plus fold. For
+  let-bound rank-1 vectors, the parse-validated MLIR contains one parallel
+  multi-input `linalg.generic` for multiplication and one reduction
+  `linalg.generic` for summation.
 - For array-cell folds such as `fold (+) [0, 0] [[1, 2], [3, 4]]`, lowering
   emits a `linalg.generic` with an input identity map, an output map that drops
   the outer reduction dimension, and `iterator_types = ["reduction", ...]`.
@@ -359,8 +368,6 @@ Deferred MLIR lowering work:
 - Lower generalized non-direct tensor values beyond the current nested
   scalar-map subset, generalized array-cell fold callables beyond primitive
   operators, and generalized cell maps beyond rank-1-cell fold bodies.
-- Lower binary scalar-cell maps to multi-input `linalg.generic`, then lower
-  prelude `dot` through MLIR instead of CPU-only typed-AST evaluation.
 - Lower partial indexing to `tensor.extract_slice` or another array-cell
   representation. Dynamic index expression lowering is also deferred.
 - Replace tensor let inlining with real SSA environment lowering when lowering
@@ -516,6 +523,9 @@ Current tests cover:
   results from lifted lambdas.
 - Nested scalar map coverage for map chains over `iota` and static array
   literals.
+- Binary scalar map coverage for rank-0 through rank-3 inputs, including
+  primitive binary maps, lifted binary lambda maps, and prelude `dot` lowering
+  as binary map plus fold.
 - Fold lowering coverage for direct `iota` and the Phase 5 milestone-shaped
   `fold (+) 0.0 (map (* 2.0) (iota 10))` program.
 - Rank-2/rank-3 array-cell fold coverage over static literals.
@@ -540,7 +550,7 @@ Current tests cover:
 - CPU runtime and CLI coverage for scalar evaluation, direct top-level function
   calls, top-level functions as map callables, `iota`/`map`/`fold`,
   row-reduction maps, static `shape`/`rank`, array indexing, prelude `sum`,
-  `product`, and `scale`, every checked-in example file, compiler facade
+  `product`, `scale`, and `dot`, every checked-in example file, compiler facade
   MLIR/PTX helpers, `remorac` CPU output over every checked-in example, CLI emit
   flags, MLIR/PTX target aliases, MLIR/PTX output for top-level function maps,
   missing files, invalid sources, and recursive function diagnostics.
@@ -555,7 +565,7 @@ Current tests cover:
 - Acceptance coverage under `tests/acceptance/` for CPU-facing pass/fail cases:
   scalar arithmetic, top-level function calls, top-level functions used in
   maps, row reductions, rank-3 maps, static `shape`, indexing, prelude `sum`,
-  recursive-function diagnostics, and rank-4 rejection. Deferred examples are
+  dot product, recursive-function diagnostics, and rank-4 rejection. Deferred examples are
   checked into `tests/acceptance/deferred/` but intentionally excluded from the
   manifest.
 

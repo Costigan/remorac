@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from remora.compiler import compile_source_to_mlir
 from remora.defunc import defunctionalize
 from remora.hir import (
     HIRCall,
@@ -466,8 +467,83 @@ def test_non_rank_1_cell_map_lowering_is_deferred():
         MLIRLowering().lower_program(program)
 
 
-def test_binary_map_mlir_lowering_is_deferred():
+def test_lowers_rank_1_binary_scalar_map_over_array_literals():
     program = hir_from_source("let xs = [1, 2] in let ys = [3, 4] in map (*) xs ys")
+    lowered = MLIRLowering().lower_program(program)
 
-    with pytest.raises(RemoraLoweringError, match="binary map"):
-        MLIRLowering().lower_program(program)
+    assert "func.func @main() -> tensor<2xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 1
+    assert "indexing_maps = [#map, #map, #map]" in lowered.text
+    assert 'iterator_types = ["parallel"]' in lowered.text
+    assert "ins(%from_elements, %from_elements_0 : tensor<2xi32>, tensor<2xi32>)" in lowered.text
+    assert "arith.muli" in lowered.text
+
+
+def test_lowers_rank_0_binary_scalar_map():
+    lowered = MLIRLowering().lower_program(hir_from_source("map (*) 2 3"))
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert "linalg.generic" not in lowered.text
+    assert "arith.muli" in lowered.text
+    assert "return %" in lowered.text
+
+
+def test_lowers_rank_2_binary_scalar_map_over_array_literals():
+    program = hir_from_source(
+        "let xs = [[1, 2], [3, 4]] in "
+        "let ys = [[5, 6], [7, 8]] in "
+        "map (+) xs ys"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x2xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 1
+    assert "affine_map<(d0, d1) -> (d0, d1)>" in lowered.text
+    assert "indexing_maps = [#map, #map, #map]" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel"]' in lowered.text
+    assert "tensor<2x2xi32>, tensor<2x2xi32>)" in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_rank_3_binary_scalar_map_over_array_literals():
+    program = hir_from_source(
+        "let xs = [[[1], [2]], [[3], [4]]] in "
+        "let ys = [[[5], [6]], [[7], [8]]] in "
+        "map (+) xs ys"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x2x1xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 1
+    assert "affine_map<(d0, d1, d2) -> (d0, d1, d2)>" in lowered.text
+    assert "indexing_maps = [#map, #map, #map]" in lowered.text
+    assert 'iterator_types = ["parallel", "parallel", "parallel"]' in lowered.text
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_binary_lifted_lambda_map_over_array_literals():
+    program = hir_from_source(
+        "let xs = [1, 2] in let ys = [3, 4] in map (\\x y -> x + y) xs ys"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 1
+    assert "arith.addi" in lowered.text
+
+
+def test_lowers_prelude_dot_as_binary_map_plus_fold():
+    mlir = compile_source_to_mlir(
+        "let xs = [1.0, 2.0, 3.0] in "
+        "let ys = [4.0, 5.0, 6.0] in "
+        "dot xs ys",
+        verify=False,
+    )
+
+    assert "func.func @main() -> f32" in mlir
+    assert mlir.count("linalg.generic") == 2
+    assert "indexing_maps = [#map, #map, #map]" in mlir
+    assert 'iterator_types = ["parallel"]' in mlir
+    assert 'iterator_types = ["reduction"]' in mlir
+    assert "arith.mulf" in mlir
+    assert "arith.addf" in mlir
