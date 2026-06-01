@@ -12,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from remora.abi import memref_descriptor_type
+from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_source
 from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
 from remora.display import format_result
@@ -134,8 +134,11 @@ class CPUExecutor:
         root = Path(temp_dir.name)
         ll_path = root / "module.ll"
         obj_path = root / "module.o"
+        shim_path = root / "remora_cpu_abi.c"
+        shim_obj_path = root / "remora_cpu_abi.o"
         so_path = root / "module.so"
         ll_path.write_text(llvm_ir, encoding="utf-8")
+        shim_path.write_text(_cpu_abi_shim_source(compiler_artifact.return_type), encoding="utf-8")
 
         llc = toolchain.llc
         if llc is None:
@@ -159,18 +162,43 @@ class CPUExecutor:
             temp_dir,
         )
         _run_checked(
-            [linker, "-shared", str(obj_path), "-o", str(so_path)],
+            [linker, "-fPIC", "-c", str(shim_path), "-o", str(shim_obj_path)],
+            "system compiler failed during CPU ABI shim compilation",
+            temp_dir,
+        )
+        _run_checked(
+            [linker, "-shared", str(obj_path), str(shim_obj_path), "-o", str(so_path)],
             "system linker failed during compiled CPU execution",
             temp_dir,
         )
         return CompiledCPUArtifact(so_path, temp_dir, compiler_artifact.return_type)
 
     def execute_main(self) -> EvaluationResult:
-        main = self._library.main
         return_type = self._artifact.return_type
-        main.restype = _ctypes_return_type(return_type)
-        raw_result = main()
-        return EvaluationResult(_ctypes_to_python_value(raw_result, return_type), return_type)
+        output = _empty_output_value(return_type)
+        self.execute_main_into(output)
+        if isinstance(return_type, ScalarType):
+            return EvaluationResult(output.item(), return_type)
+        return EvaluationResult(output, return_type)
+
+    def execute_main_into(self, output: np.ndarray) -> None:
+        output_type = self._artifact.return_type
+        expected_shape = _result_shape(output_type)
+        expected_dtype = _result_dtype(output_type)
+        if output.shape != expected_shape:
+            raise EvaluationError(
+                f"compiled CPU output shape mismatch: expected {expected_shape}, got {output.shape}"
+            )
+        if output.dtype != expected_dtype:
+            raise EvaluationError(
+                f"compiled CPU output dtype mismatch: expected {expected_dtype}, got {output.dtype}"
+            )
+
+        descriptor = make_numpy_memref_descriptor(output)
+        function = self._library.remora_main_out
+        function.argtypes = [ctypes.POINTER(type(descriptor))]
+        function.restype = None
+        function(ctypes.byref(descriptor))
 
 
 def _run_checked(
@@ -185,64 +213,99 @@ def _run_checked(
         raise RuntimeUnavailable(f"{message}: {stderr}")
 
 
-def _ctypes_return_type(value_type: RemoraType):
-    if value_type == INT:
-        return ctypes.c_int32
-    if value_type == FLOAT:
-        return ctypes.c_float
-    if value_type == BOOL:
-        return ctypes.c_bool
+def _empty_output_value(value_type: RemoraType) -> np.ndarray:
+    return np.empty(_result_shape(value_type), dtype=_result_dtype(value_type))
+
+
+def _result_shape(value_type: RemoraType) -> tuple[int, ...]:
+    if isinstance(value_type, ScalarType):
+        return ()
     if isinstance(value_type, ArrayType):
-        return memref_descriptor_type(value_type.rank)
+        return tuple(dim.value for dim in value_type.shape)
     raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
 
 
-def _ctypes_to_python_value(raw_result: object, value_type: RemoraType) -> object:
-    if value_type == INT:
-        return int(raw_result)
-    if value_type == FLOAT:
-        return float(raw_result)
-    if value_type == BOOL:
-        return bool(raw_result)
+def _result_dtype(value_type: RemoraType) -> np.dtype:
+    if isinstance(value_type, ScalarType):
+        return np.dtype(_numpy_dtype(value_type))
     if isinstance(value_type, ArrayType):
-        return _descriptor_to_numpy(raw_result, value_type)
+        return np.dtype(_numpy_dtype(value_type.element))
     raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
 
 
-def _descriptor_to_numpy(descriptor: object, value_type: ArrayType) -> np.ndarray:
-    dtype = _numpy_dtype(value_type.element)
-    shape = tuple(dim.value for dim in value_type.shape)
-    output = np.empty(shape, dtype=dtype)
-    if output.size == 0:
-        return output
+def _cpu_abi_shim_source(value_type: RemoraType) -> str:
+    c_type = _c_scalar_type(_result_scalar_type(value_type))
+    rank = 0 if isinstance(value_type, ScalarType) else value_type.rank
+    struct_defs = _c_memref_struct_defs()
+    if isinstance(value_type, ScalarType):
+        return f"""#include <stdbool.h>
+#include <stdint.h>
 
-    itemsize = np.dtype(dtype).itemsize
-    aligned = getattr(descriptor, "aligned")
-    if aligned is None:
-        raise RuntimeUnavailable("compiled CPU returned a null aligned pointer")
-    offset = int(getattr(descriptor, "offset"))
-    strides = tuple(int(getattr(descriptor, f"stride{axis}")) for axis in range(value_type.rank))
-    c_scalar = _ctypes_scalar_type(value_type.element)
-    base_address = int(aligned) + offset * itemsize
+{struct_defs}
 
-    if value_type.rank == 0:
-        return np.array(ctypes.cast(base_address, ctypes.POINTER(c_scalar)).contents.value, dtype=dtype)
+extern {c_type} main(void);
 
-    for index in np.ndindex(shape):
-        element_offset = sum(i * stride for i, stride in zip(index, strides))
-        address = base_address + element_offset * itemsize
-        output[index] = ctypes.cast(address, ctypes.POINTER(c_scalar)).contents.value
-    return output
+void remora_main_out(RemoraMemRef0 *out) {{
+  (({c_type} *)out->aligned)[out->offset] = main();
+}}
+"""
+
+    loop_code = _c_copy_loop(rank, c_type)
+    return f"""#include <stdbool.h>
+#include <stdint.h>
+
+{struct_defs}
+
+extern RemoraMemRef{rank} main(void);
+
+void remora_main_out(RemoraMemRef{rank} *out) {{
+  RemoraMemRef{rank} src = main();
+{loop_code}
+}}
+"""
 
 
-def _ctypes_scalar_type(value_type: ScalarType):
+def _result_scalar_type(value_type: RemoraType) -> ScalarType:
+    if isinstance(value_type, ScalarType):
+        return value_type
+    if isinstance(value_type, ArrayType):
+        return value_type.element
+    raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
+
+
+def _c_scalar_type(value_type: ScalarType) -> str:
     if value_type == INT:
-        return ctypes.c_int32
+        return "int32_t"
     if value_type == FLOAT:
-        return ctypes.c_float
+        return "float"
     if value_type == BOOL:
-        return ctypes.c_bool
+        return "bool"
     raise RuntimeUnavailable(f"compiled CPU element type {value_type} is not supported")
+
+
+def _c_memref_struct_defs() -> str:
+    return """typedef struct { void *allocated; void *aligned; int64_t offset; } RemoraMemRef0;
+typedef struct { void *allocated; void *aligned; int64_t offset; int64_t size0; int64_t stride0; } RemoraMemRef1;
+typedef struct { void *allocated; void *aligned; int64_t offset; int64_t size0; int64_t size1; int64_t stride0; int64_t stride1; } RemoraMemRef2;
+typedef struct { void *allocated; void *aligned; int64_t offset; int64_t size0; int64_t size1; int64_t size2; int64_t stride0; int64_t stride1; int64_t stride2; } RemoraMemRef3;"""
+
+
+def _c_copy_loop(rank: int, scalar_type: str) -> str:
+    if rank == 0:
+        return f"  (({scalar_type} *)out->aligned)[out->offset] = (({scalar_type} *)src.aligned)[src.offset];"
+    indent = "  "
+    lines: list[str] = []
+    for axis in range(rank):
+        lines.append(f"{indent * (axis + 1)}for (int64_t i{axis} = 0; i{axis} < out->size{axis}; ++i{axis}) {{")
+    src_terms = [f"i{axis} * src.stride{axis}" for axis in range(rank)]
+    out_terms = [f"i{axis} * out->stride{axis}" for axis in range(rank)]
+    src_index = "src.offset" + "".join(f" + {term}" for term in src_terms)
+    out_index = "out->offset" + "".join(f" + {term}" for term in out_terms)
+    body_indent = indent * (rank + 1)
+    lines.append(f"{body_indent}(({scalar_type} *)out->aligned)[{out_index}] = (({scalar_type} *)src.aligned)[{src_index}];")
+    for axis in reversed(range(rank)):
+        lines.append(f"{indent * (axis + 1)}}}")
+    return "\n".join(lines)
 
 
 def format_value(value: object) -> str:

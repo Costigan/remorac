@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from remora.runtime import CPUExecutor, evaluate_source, evaluate_source_compiled
+from remora.runtime import EvaluationError
 
 
 pytestmark = pytest.mark.skipif(
@@ -85,3 +86,58 @@ def test_cpu_executor_compile_source_keeps_artifact_until_closed():
         artifact.close()
 
     np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_cpu_executor_writes_into_explicit_output_descriptor():
+    artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")
+    output = np.empty((5,), dtype=np.float32)
+    try:
+        CPUExecutor(artifact).execute_main_into(output)
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(output, np.array([0, 2, 4, 6, 8], dtype=np.float32))
+
+
+def test_cpu_executor_writes_scalar_matrix_and_rank3_output_descriptors():
+    scalar_artifact = CPUExecutor.compile_source("1 + 2.0")
+    matrix_artifact = CPUExecutor.compile_source(
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (* 2.0) xs"
+    )
+    rank3_artifact = CPUExecutor.compile_source(
+        "let xs = [[[1], [2]], [[3], [4]]] in map (\\x -> x + 1) xs"
+    )
+    scalar_output = np.empty((), dtype=np.float32)
+    matrix_output = np.empty((2, 2), dtype=np.float32)
+    rank3_output = np.empty((2, 2, 1), dtype=np.int32)
+
+    try:
+        CPUExecutor(scalar_artifact).execute_main_into(scalar_output)
+        CPUExecutor(matrix_artifact).execute_main_into(matrix_output)
+        CPUExecutor(rank3_artifact).execute_main_into(rank3_output)
+    finally:
+        scalar_artifact.close()
+        matrix_artifact.close()
+        rank3_artifact.close()
+
+    assert scalar_output.item() == pytest.approx(3.0)
+    np.testing.assert_array_equal(
+        matrix_output,
+        np.array([[2, 4], [6, 8]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        rank3_output,
+        np.array([[[2], [3]], [[4], [5]]], dtype=np.int32),
+    )
+
+
+def test_cpu_executor_rejects_output_descriptor_shape_and_dtype_mismatches():
+    artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")
+    executor = CPUExecutor(artifact)
+    try:
+        with pytest.raises(EvaluationError, match="shape mismatch"):
+            executor.execute_main_into(np.empty((4,), dtype=np.float32))
+        with pytest.raises(EvaluationError, match="dtype mismatch"):
+            executor.execute_main_into(np.empty((5,), dtype=np.int32))
+    finally:
+        artifact.close()
