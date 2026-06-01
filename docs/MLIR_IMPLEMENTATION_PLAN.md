@@ -1715,9 +1715,10 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
   - Current: `remora.codegen.generate_ptx` invokes `iree-compile` with the CUDA HAL backend and dumps generated `.ptx` files. The generated PTX is an IREE HAL dispatch kernel, not yet the final direct Remora ABI kernel. This is useful for inspection but does not satisfy the production GPU backend requirement.
 - [x] Implement first direct Remora ABI PTX codegen slice
   - Current: `remora.codegen.generate_direct_remora_ptx` emits direct
-    descriptor-ABI PTX for a named rank-1 `float32` unary map function with a
-    literal float section constant. This feeds `RemoraExecutor` directly and is
-    separate from IREE HAL PTX.
+    descriptor-ABI PTX for named rank-1 through rank-3 `float32` unary map
+    functions with a literal float section constant. Rank-2/rank-3 kernels use
+    flattened CUDA indexing and descriptor strides. This feeds `RemoraExecutor`
+    directly and is separate from IREE HAL PTX.
   - Deferred: replace the hand-authored PTX slice with `gpu.module` /
     `gpu.func` lowering through the standalone NVIDIA pipeline.
 - [x] Implement `_extract_kernel_metadata` to collect kernel names and argument info
@@ -2056,9 +2057,9 @@ types.
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
 PTX kernels with descriptor arguments. The first generated direct Remora ABI PTX
-slice covers rank-1 `float32` unary maps. Broader generated GPU kernels remain
-blocked on direct `gpu.module` lowering; IREE HAL PTX is intentionally not
-treated as a launchable Remora ABI artifact.
+slice covers rank-1 through rank-3 `float32` unary maps. Broader generated GPU
+kernels remain blocked on direct `gpu.module` lowering; IREE HAL PTX is
+intentionally not treated as a launchable Remora ABI artifact.
 
 ---
 
