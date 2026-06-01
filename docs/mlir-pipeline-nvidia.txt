@@ -1,0 +1,15 @@
+# Inspection-only NVIDIA path for the current Phase 6 state.
+#
+# The installed standalone LLVM/MLIR 18 tools are pinned for CPU lowering and
+# linalg fusion validation. The current Remora lowering still emits tensor/linalg
+# modules without explicit gpu.module/gpu.func kernels, so there is no production
+# standalone NVVM pipeline artifact yet.
+#
+# Temporary PTX inspection remains available through remora.codegen.generate_ptx,
+# which invokes iree-compile with:
+#
+#   iree-compile --iree-hal-target-backends=cuda --iree-cuda-target=sm_80 \
+#     --iree-cuda-target-features=+ptx75 --output-format=vm-asm -
+#
+# This produces IREE HAL dispatch PTX and does not satisfy the final Remora
+# descriptor ABI GPU backend.

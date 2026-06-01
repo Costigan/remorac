@@ -40,17 +40,19 @@ CPU-first Phase 7/8 usability slice:
   emitted MLIR through `mlir-opt` or `iree-opt` when available, and use
   `iree-compile` to produce CUDA PTX for current lowered modules.
 - `remora.compiler` exposes public source-to-MLIR and source-to-PTX helpers.
-- `remora.runtime` contains an interim typed-AST CPU evaluator for trying Dense
-  Core examples before the pinned MLIR CPU `ExecutionEngine` path exists.
-- `remorac` is registered as a console script with CPU execution by default,
-  MLIR/PTX inspection targets, and AST/typed-AST/HIR/MLIR/PTX emit flags.
+- `remora.runtime` contains both a typed-AST interpreter and a compiled CPU
+  executor. The compiled path lowers through standalone MLIR/LLVM tools, emits
+  an object with `llc-18`, links a temporary shared library with `gcc`/`cc`, and
+  calls `main` through `ctypes`.
+- `remorac` is registered as a console script with compiled CPU execution by
+  default, an explicit `--target interp` reference evaluator, MLIR/PTX
+  inspection targets, and AST/typed-AST/HIR/MLIR/PTX emit flags.
 - `remora` is registered as a CPU-only REPL console script with persistent
   value definitions, `:type`, `:mlir`, `:load`, `:reset`, `:target`, and
   `:help`.
 
-Full Remora ABI code generation, MLIR `ExecutionEngine` CPU execution, CUDA
-launch path, dynamic shapes, dynamic rank, or automatic differentiation has not
-been implemented.
+Full descriptor-ABI code generation, CUDA launch path, dynamic shapes, dynamic
+rank, or automatic differentiation has not been implemented.
 
 ## Backend Planning Decisions
 
@@ -58,12 +60,13 @@ been implemented.
   `iree-compiler` dependency remains useful for parser/verifier scaffolding and
   temporary PTX inspection, but IREE HAL PTX does not satisfy the Remora runtime
   ABI milestones.
-- The next backend work should pin one standalone LLVM/MLIR release, record the
-  exact toolchain in `docs/MLIR_TOOLCHAIN.md`, and validate matching CPU and
-  NVIDIA pass pipelines.
+- The standalone CPU/fusion toolchain is pinned to LLVM/MLIR 18.1.3 and
+  recorded in `docs/MLIR_TOOLCHAIN.md`. Production NVIDIA lowering remains
+  deferred until Remora emits direct `gpu.module` kernels using the descriptor
+  ABI.
 - CPU compiled execution comes before CUDA execution. The typed-AST evaluator
-  is a reference/interpreter path; `remorac --target cpu` should eventually run
-  compiled code through the rank-specialized descriptor ABI.
+  is now an explicit `--target interp` reference path; `remorac --target cpu`
+  runs the compiled CPU executor for the lowered Dense Core subset.
 - Binary scalar-cell maps now lower to MLIR and unblock prelude `dot` as binary
   map plus fold.
 - Fusion, kernel-count, and smoke timing tests are now part of the vertical
@@ -383,12 +386,20 @@ Deferred MLIR lowering work:
   It checks `PATH` first and then the active Python environment's script
   directory, so `.venv/bin/iree-opt` and `.venv/bin/iree-compile` are detected
   even when the virtualenv is not activated in the shell.
+- Standalone LLVM/MLIR tools are detected with versioned executable fallbacks:
+  `/usr/bin/mlir-opt-18`, `/usr/bin/mlir-translate-18`, and `/usr/bin/llc-18`.
 - The installed `iree-compiler` package exposes `iree.compiler.passmanager`,
   and the validation pipeline `builtin.module(canonicalize,cse)` runs against
   current lowered modules.
-- `mlir-opt` is not available on the current `PATH`, but `iree-opt` is
-  available in `.venv/bin`. `verify_module_text` uses `mlir-opt` when present
-  and otherwise uses `iree-opt --verify-diagnostics -`.
+- `verify_module_text` uses standalone `mlir-opt` when present and otherwise
+  uses `iree-opt --verify-diagnostics -`.
+- `CPU_PIPELINE` is validated through standalone `mlir-opt-18`; current Dense
+  Core modules lower to LLVM dialect and translate to LLVM IR through
+  `mlir-translate-18`.
+- `FUSION_PIPELINE` is validated through standalone `mlir-opt-18`; map chains
+  and the current dot lowering fuse down to one `linalg.generic`. The
+  map-then-fold milestone shape currently lowers from three `linalg.generic`
+  ops to two after fusion, so full map/reduce fusion remains tracked.
 - `remora.codegen.generate_ptx` uses `iree-compile` with the CUDA HAL backend
   and `--iree-hal-dump-executable-files-to` to obtain emitted `.ptx` files.
   This proves the current lowered MLIR can reach PTX with the installed IREE
@@ -400,19 +411,21 @@ Deferred MLIR lowering work:
   facts in the generated PTX today: entry name, PTX parameter count, and
   `.maxntid` block size. Input/output element types are left empty until the
   final Remora kernel ABI is generated.
-- The CPU and NVIDIA pipeline strings from the plan are represented in code,
-  but the current IREE pass registry does not recognize at least
-  `one-shot-bufferize`. These builders raise `PipelineUnavailable` with the
-  underlying pass-manager diagnostic instead of failing opaquely.
+- The in-process IREE pass registry still does not recognize the standalone CPU
+  lowering pipeline. That path raises `PipelineUnavailable`; the validated
+  production-style path is the external standalone `mlir-opt-18` runner.
 
 Deferred pipeline/codegen work:
 
-- Pin an LLVM/MLIR distribution that provides `mlir-opt`, `mlir-translate`,
-  `llc`, and the expected pass registry.
-- Validate and commit exact CPU and NVIDIA pipelines against that toolchain.
+- Install `ptxas` for standalone PTX assembly checks.
+- Lower Remora modules to explicit `gpu.module` / `gpu.func` kernels and
+  validate a production NVIDIA NVVM pipeline against the descriptor ABI.
 - Replace the IREE HAL dispatch PTX path with a final direct-launch Remora ABI
   path or add an adapter layer that makes the ABI boundary explicit.
-- Add CPU `ExecutionEngine` execution after the CPU lowering pipeline is pinned.
+- Replace the temporary shared-library CPU executor with a direct MLIR
+  `ExecutionEngine` binding if/when compatible Python bindings are available.
+- Move compiled CPU execution to the final descriptor-output ABI instead of
+  returning MLIR heap-allocated memref structs from `main`.
 
 ## Compiler Facade and CPU Runtime Decisions
 
@@ -422,34 +435,41 @@ Deferred pipeline/codegen work:
   verifier is available.
 - `compile_source_to_mlir` and `compile_source_to_ptx` provide small public
   helpers for examples, CLI plumbing, and future tests.
-- The current CPU runtime is intentionally an interpreter over the typed AST,
-  not the final MLIR CPU backend. This lets users try examples now while the
-  standalone LLVM/MLIR CPU pipeline and `ExecutionEngine` remain unpinned.
-- CPU evaluation returns Python scalars or numpy arrays plus the checked Remora
+- The compiled CPU runtime lowers MLIR to LLVM IR, emits a temporary object with
+  `llc-18`, links a temporary shared library with `gcc`/`cc`, and calls `main`
+  with `ctypes`.
+- The typed-AST evaluator remains available as `--target interp` and as a test
+  oracle for cases that have not been lowered to compiled MLIR yet.
+- CPU execution returns Python scalars or numpy arrays plus the checked Remora
   type. Arrays use numpy dtypes matching the Dense Core scalar policy:
   `int32`, `float32`, and `bool`.
 - `remora.display.format_result` is the shared result formatter for `remorac`
   and the REPL. It prints booleans as `true`/`false`, preserves a decimal point
   for float scalars and float arrays, and supports vectors, matrices, and
   rank-3 arrays through numpy rendering with Remora scalar formatting.
-- The evaluator covers the checked-in examples: scalar arithmetic, conditionals,
+- The interpreter covers the checked-in examples: scalar arithmetic, conditionals,
   top-level value definitions, direct top-level function calls, top-level
   functions used as unary `map` callables, `iota`, `map`, `fold`, nested maps,
   row reductions, rank-2/rank-3 literals, operator sections, and the narrow
   direct local lambda application pattern.
+- The compiled CPU executor covers the Dense Core acceptance subset and
+  additional tests for scalar values, vectors, matrices, rank-3 arrays, vector
+  sum, dot product, static `shape`/`rank`, and booleans.
 - `stdlib/prelude.rem` now contains the supported starter subset: `add`, `sub`,
   `mul`, `div`, `sum`, `product`, `scale`, and `dot`. These are loaded
   automatically by the compiler facade and CPU evaluator; the REPL initializes
   and resets its session definitions with the same prelude definitions.
 - The `remorac` console script defaults to `--target cpu`, printing the
-  evaluated result. It also supports `--emit-ast`, `--emit-typed-ast`,
-  `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus `--target mlir` and
-  `--target ptx` aliases for artifact inspection.
+  compiled CPU result. It also supports `--target interp`, `--emit-ast`,
+  `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus
+  `--target mlir` and `--target ptx` aliases for artifact inspection.
 
 Deferred CPU/runtime work:
 
-- Replace or supplement the typed-AST evaluator with MLIR `ExecutionEngine`
-  execution once the CPU pipeline is pinned.
+- Switch compiled CPU execution to explicit output descriptors matching
+  `docs/ABI.md`; the current path reads MLIR-returned memref structs.
+- Replace the subprocess `llc`/`gcc` shared-library path with in-process
+  execution if a stable MLIR/LLVM execution binding is added.
 - Add CUDA driver module-load and launch tests only after the Remora ABI kernel
   boundary is explicit.
 
@@ -543,10 +563,14 @@ Current tests cover:
   full-rank literal indexing to `tensor.extract` are covered.
 - Pipeline/codegen coverage for toolchain detection, validation-pipeline
   pass-manager execution, direct `run_pipeline`, external verifier execution
-  when available, unavailable-pass diagnostics, CPU pipeline gating until the
-  toolchain is pinned, and CUDA PTX generation through `iree-compile` when
-  available. PTX tests cover both a simple map and the Phase 6 milestone
-  expression `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
+  when available, unavailable-pass diagnostics, standalone CPU lowering to LLVM
+  dialect/LLVM IR, checked-in pipeline artifact consistency, and CUDA PTX
+  inspection generation through `iree-compile` when available. PTX tests cover
+  both a simple map and the Phase 6 milestone expression
+  `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
+- Fusion/performance-smoke coverage for map-chain fusion, dot fusion,
+  map-then-fold materialization status, fused operation counts for vector scale,
+  map-chain, vector sum, and dot, plus CPU pipeline compile-time thresholds.
 - CPU runtime and CLI coverage for scalar evaluation, direct top-level function
   calls, top-level functions as map callables, `iota`/`map`/`fold`,
   row-reduction maps, static `shape`/`rank`, array indexing, prelude `sum`,

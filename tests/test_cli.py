@@ -103,8 +103,27 @@ def test_cli_emit_ptx_for_top_level_function_map(tmp_path, capsys):
 
 
 def test_cli_cpu_runs_checked_in_examples(capsys):
+    compiled_examples = {
+        "bool_logic.remora",
+        "chained_maps.remora",
+        "dot_product.remora",
+        "indexing.remora",
+        "lift_map.remora",
+        "matrix_row_reduce.remora",
+        "nested_let.remora",
+        "prelude_scale.remora",
+        "prelude_sum.remora",
+        "rank3_map.remora",
+        "reduce_iota.remora",
+        "scalar_arithmetic.remora",
+        "shape_rank.remora",
+        "three_dimensional_transform.remora",
+        "threshold_mask.remora",
+        "top_level_value.remora",
+    }
     for path in sorted(Path("examples").glob("*.remora")):
-        assert main([str(path)]) == 0, path
+        args = [str(path)] if path.name in compiled_examples else ["--target", "interp", str(path)]
+        assert main(args) == 0, path
         captured = capsys.readouterr()
         assert captured.out.strip(), path
         assert captured.err == "", path

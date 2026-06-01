@@ -15,7 +15,7 @@ from remora.errors import RemoraError
 from remora.hir import lower_to_hir
 from remora.parser import parse_program
 from remora.prelude import with_prelude
-from remora.runtime import evaluate_source
+from remora.runtime import evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
 
 
@@ -24,9 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", type=Path, help="Remora source file")
     parser.add_argument(
         "--target",
-        choices=("cpu", "mlir", "ptx"),
+        choices=("cpu", "interp", "mlir", "ptx"),
         default="cpu",
-        help="output target; cpu evaluates the program",
+        help="output target; cpu runs compiled CPU code, interp uses the reference evaluator",
     )
     parser.add_argument("--emit-ast", action="store_true", help="print parsed AST and exit")
     parser.add_argument(
@@ -60,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.target == "cpu":
+            result = evaluate_source_compiled(source)
+            print(format_result(result.value, result.type))
+            return 0
+        if args.target == "interp":
             result = evaluate_source(source)
             print(format_result(result.value, result.type))
             return 0

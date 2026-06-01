@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+from pathlib import Path
+from shutil import which
+import subprocess
+import tempfile
 from typing import Callable
 
 import numpy as np
 
+from remora.abi import memref_descriptor_type
+from remora.compiler import compile_source
 from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program
+from remora.pipeline import (
+    PipelineToolchain,
+    PipelineUnavailable,
+    detect_toolchain,
+    run_cpu_pipeline_text,
+    translate_mlir_to_llvmir,
+)
 from remora.prelude import with_prelude
 from remora.typechecker import (
     TypeChecker,
@@ -50,6 +64,16 @@ class EvaluationResult:
     type: RemoraType
 
 
+@dataclass(frozen=True)
+class CompiledCPUArtifact:
+    library_path: Path
+    temp_dir: tempfile.TemporaryDirectory[str]
+    return_type: RemoraType
+
+    def close(self) -> None:
+        self.temp_dir.cleanup()
+
+
 Value = object
 Env = dict[str, Value]
 CallableValue = Callable[..., Value]
@@ -61,6 +85,14 @@ def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationR
     return evaluate_typed_program(typed)
 
 
+def evaluate_source_compiled(source: str, *, include_prelude: bool = True) -> EvaluationResult:
+    artifact = CPUExecutor.compile_source(source, include_prelude=include_prelude)
+    try:
+        return CPUExecutor(artifact).execute_main()
+    finally:
+        artifact.close()
+
+
 def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
     if program.body is None or program.type is None:
         raise EvaluationError("definition-only programs cannot be evaluated")
@@ -69,6 +101,148 @@ def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
     for definition in program.definitions:
         _bind_definition(definition, env)
     return EvaluationResult(_eval_expr(program.body, env), program.type)
+
+
+class CPUExecutor:
+    """Execute compiled Remora programs on CPU through LLVM and ctypes."""
+
+    def __init__(self, artifact: CompiledCPUArtifact) -> None:
+        self._artifact = artifact
+        self._library = ctypes.CDLL(str(artifact.library_path))
+
+    @classmethod
+    def compile_source(
+        cls,
+        source: str,
+        *,
+        include_prelude: bool = True,
+        toolchain: PipelineToolchain | None = None,
+    ) -> CompiledCPUArtifact:
+        compiler_artifact = compile_source(
+            source,
+            verify=False,
+            include_prelude=include_prelude,
+        )
+        if compiler_artifact.return_type is None:
+            raise EvaluationError("definition-only programs cannot be compiled for CPU execution")
+
+        toolchain = detect_toolchain() if toolchain is None else toolchain
+        lowered = run_cpu_pipeline_text(compiler_artifact.mlir_text, toolchain=toolchain)
+        llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
+
+        temp_dir = tempfile.TemporaryDirectory(prefix="remora-cpu-")
+        root = Path(temp_dir.name)
+        ll_path = root / "module.ll"
+        obj_path = root / "module.o"
+        so_path = root / "module.so"
+        ll_path.write_text(llvm_ir, encoding="utf-8")
+
+        llc = toolchain.llc
+        if llc is None:
+            temp_dir.cleanup()
+            raise PipelineUnavailable("llc is required for compiled CPU execution")
+        linker = which("gcc") or which("cc")
+        if linker is None:
+            temp_dir.cleanup()
+            raise PipelineUnavailable("gcc or cc is required for compiled CPU execution")
+
+        _run_checked(
+            [
+                llc,
+                "-filetype=obj",
+                "-relocation-model=pic",
+                str(ll_path),
+                "-o",
+                str(obj_path),
+            ],
+            "llc failed during compiled CPU execution",
+            temp_dir,
+        )
+        _run_checked(
+            [linker, "-shared", str(obj_path), "-o", str(so_path)],
+            "system linker failed during compiled CPU execution",
+            temp_dir,
+        )
+        return CompiledCPUArtifact(so_path, temp_dir, compiler_artifact.return_type)
+
+    def execute_main(self) -> EvaluationResult:
+        main = self._library.main
+        return_type = self._artifact.return_type
+        main.restype = _ctypes_return_type(return_type)
+        raw_result = main()
+        return EvaluationResult(_ctypes_to_python_value(raw_result, return_type), return_type)
+
+
+def _run_checked(
+    args: list[str],
+    message: str,
+    temp_dir: tempfile.TemporaryDirectory[str],
+) -> None:
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        temp_dir.cleanup()
+        stderr = result.stderr.strip()
+        raise RuntimeUnavailable(f"{message}: {stderr}")
+
+
+def _ctypes_return_type(value_type: RemoraType):
+    if value_type == INT:
+        return ctypes.c_int32
+    if value_type == FLOAT:
+        return ctypes.c_float
+    if value_type == BOOL:
+        return ctypes.c_bool
+    if isinstance(value_type, ArrayType):
+        return memref_descriptor_type(value_type.rank)
+    raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
+
+
+def _ctypes_to_python_value(raw_result: object, value_type: RemoraType) -> object:
+    if value_type == INT:
+        return int(raw_result)
+    if value_type == FLOAT:
+        return float(raw_result)
+    if value_type == BOOL:
+        return bool(raw_result)
+    if isinstance(value_type, ArrayType):
+        return _descriptor_to_numpy(raw_result, value_type)
+    raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
+
+
+def _descriptor_to_numpy(descriptor: object, value_type: ArrayType) -> np.ndarray:
+    dtype = _numpy_dtype(value_type.element)
+    shape = tuple(dim.value for dim in value_type.shape)
+    output = np.empty(shape, dtype=dtype)
+    if output.size == 0:
+        return output
+
+    itemsize = np.dtype(dtype).itemsize
+    aligned = getattr(descriptor, "aligned")
+    if aligned is None:
+        raise RuntimeUnavailable("compiled CPU returned a null aligned pointer")
+    offset = int(getattr(descriptor, "offset"))
+    strides = tuple(int(getattr(descriptor, f"stride{axis}")) for axis in range(value_type.rank))
+    c_scalar = _ctypes_scalar_type(value_type.element)
+    base_address = int(aligned) + offset * itemsize
+
+    if value_type.rank == 0:
+        return np.array(ctypes.cast(base_address, ctypes.POINTER(c_scalar)).contents.value, dtype=dtype)
+
+    for index in np.ndindex(shape):
+        element_offset = sum(i * stride for i, stride in zip(index, strides))
+        address = base_address + element_offset * itemsize
+        output[index] = ctypes.cast(address, ctypes.POINTER(c_scalar)).contents.value
+    return output
+
+
+def _ctypes_scalar_type(value_type: ScalarType):
+    if value_type == INT:
+        return ctypes.c_int32
+    if value_type == FLOAT:
+        return ctypes.c_float
+    if value_type == BOOL:
+        return ctypes.c_bool
+    raise RuntimeUnavailable(f"compiled CPU element type {value_type} is not supported")
 
 
 def format_value(value: object) -> str:
