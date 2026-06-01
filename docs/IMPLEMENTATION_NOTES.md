@@ -102,6 +102,9 @@ rank, or automatic differentiation has not been implemented.
   `allocated == aligned` and represents view displacement with `offset`.
 - Numpy view support is already covered for transposed and sliced arrays. This
   follows `docs/ABI.md`: view offsets are not hidden by changing `aligned`.
+- `numpy_from_memref_descriptor` converts rank-0 through rank-3 descriptors back
+  to numpy values. It is used by the compiled CPU executor and is covered for
+  scalar, contiguous, sliced, transposed, and negative-stride descriptors.
 
 Deferred ABI/runtime work:
 
@@ -424,8 +427,8 @@ Deferred pipeline/codegen work:
   path or add an adapter layer that makes the ABI boundary explicit.
 - Replace the temporary shared-library CPU executor with a direct MLIR
   `ExecutionEngine` binding if/when compatible Python bindings are available.
-- Move compiled CPU execution to the final descriptor-output ABI instead of
-  returning MLIR heap-allocated memref structs from `main`.
+- Replace the generated C CPU output-descriptor adapter with native
+  descriptor-ABI MLIR exports.
 
 ## Compiler Facade and CPU Runtime Decisions
 
@@ -438,6 +441,14 @@ Deferred pipeline/codegen work:
 - The compiled CPU runtime lowers MLIR to LLVM IR, emits a temporary object with
   `llc-18`, links a temporary shared library with `gcc`/`cc`, and calls `main`
   with `ctypes`.
+- Array results from compiled CPU execution are converted through
+  `remora.abi.numpy_from_memref_descriptor`, keeping result unpacking aligned
+  with the documented descriptor layout.
+- The compiled CPU shared library includes a generated C ABI shim,
+  `remora_main_out`, that calls the MLIR-returned `main` function and copies
+  the result into an explicit rank-specialized Remora output descriptor. This
+  gives the CPU path an output-descriptor surface before native MLIR wrapper
+  lowering exists.
 - The typed-AST evaluator remains available as `--target interp` and as a test
   oracle for cases that have not been lowered to compiled MLIR yet.
 - CPU execution returns Python scalars or numpy arrays plus the checked Remora
@@ -466,8 +477,8 @@ Deferred pipeline/codegen work:
 
 Deferred CPU/runtime work:
 
-- Switch compiled CPU execution to explicit output descriptors matching
-  `docs/ABI.md`; the current path reads MLIR-returned memref structs.
+- Replace the generated C output-descriptor shim with native MLIR lowering that
+  exports descriptor-ABI functions directly.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process
   execution if a stable MLIR/LLVM execution binding is added.
 - Add CUDA driver module-load and launch tests only after the Remora ABI kernel

@@ -65,6 +65,8 @@ _DESCRIPTORS = {
     3: RemoraMemRef3,
 }
 
+_DESCRIPTOR_RANKS = {descriptor_type: rank for rank, descriptor_type in _DESCRIPTORS.items()}
+
 
 def memref_descriptor_type(rank: int) -> type[ctypes.Structure]:
     """Return the rank-specialized descriptor type for ranks 0 through 3."""
@@ -153,6 +155,64 @@ def make_numpy_memref_descriptor(array: np.ndarray) -> ctypes.Structure:
     return descriptor
 
 
+def descriptor_rank(descriptor: ctypes.Structure) -> int:
+    """Return the rank of a Remora memref descriptor instance or type."""
+    descriptor_type = descriptor if isinstance(descriptor, type) else type(descriptor)
+    try:
+        return _DESCRIPTOR_RANKS[descriptor_type]
+    except KeyError as exc:
+        raise RemoraError(f"unknown Remora memref descriptor type {descriptor_type}") from exc
+
+
+def descriptor_shape(descriptor: ctypes.Structure) -> tuple[int, ...]:
+    """Return descriptor sizes as a shape tuple."""
+    rank = descriptor_rank(descriptor)
+    return tuple(int(getattr(descriptor, f"size{axis}")) for axis in range(rank))
+
+
+def descriptor_strides(descriptor: ctypes.Structure) -> tuple[int, ...]:
+    """Return descriptor strides in elements."""
+    rank = descriptor_rank(descriptor)
+    return tuple(int(getattr(descriptor, f"stride{axis}")) for axis in range(rank))
+
+
+def numpy_from_memref_descriptor(
+    descriptor: ctypes.Structure,
+    dtype: object,
+    *,
+    copy: bool = True,
+) -> np.ndarray:
+    """Create a numpy value from a rank-specialized Remora memref descriptor."""
+    np_dtype = np.dtype(dtype)
+    shape = descriptor_shape(descriptor)
+    itemsize = np_dtype.itemsize
+    aligned = descriptor.aligned
+    if aligned is None:
+        raise RemoraError("descriptor aligned pointer is null")
+
+    offset = int(descriptor.offset)
+    data_address = int(aligned) + offset * itemsize
+
+    if not shape:
+        scalar_type = np.ctypeslib.as_ctypes_type(np_dtype)
+        value = ctypes.cast(data_address, ctypes.POINTER(scalar_type)).contents.value
+        return np.array(value, dtype=np_dtype)
+    if any(dim == 0 for dim in shape):
+        return np.empty(shape, dtype=np_dtype)
+
+    byte_strides = tuple(stride * itemsize for stride in descriptor_strides(descriptor))
+    lowest, highest = _span_byte_bounds(shape, byte_strides)
+    buffer_address = data_address + lowest
+    view = np.ndarray(
+        shape=shape,
+        dtype=np_dtype,
+        buffer=_memory_at(buffer_address, highest - lowest + itemsize),
+        offset=-lowest,
+        strides=byte_strides,
+    )
+    return view.copy() if copy else view
+
+
 def _pointer_value(pointer: PointerValue) -> int:
     if isinstance(pointer, ctypes.c_void_p):
         if pointer.value is None:
@@ -166,3 +226,17 @@ def _base_array(array: np.ndarray) -> np.ndarray:
     while isinstance(base.base, np.ndarray):
         base = base.base
     return base
+
+
+def _span_byte_bounds(shape: tuple[int, ...], byte_strides: tuple[int, ...]) -> tuple[int, int]:
+    lowest = 0
+    highest = 0
+    for dim, stride in zip(shape, byte_strides):
+        extent = (dim - 1) * stride
+        lowest += min(0, extent)
+        highest += max(0, extent)
+    return lowest, highest
+
+
+def _memory_at(address: int, size: int) -> ctypes.Array:
+    return (ctypes.c_char * size).from_address(address)

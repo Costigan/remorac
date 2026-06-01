@@ -7,9 +7,12 @@ from remora.abi import (
     RemoraMemRef1,
     RemoraMemRef2,
     RemoraMemRef3,
+    descriptor_shape,
+    descriptor_strides,
     element_strides,
     make_memref_descriptor,
     make_numpy_memref_descriptor,
+    numpy_from_memref_descriptor,
 )
 
 
@@ -152,3 +155,64 @@ def test_element_strides_and_offset_for_negative_stride_numpy_view():
     assert descriptor.offset == 5
     assert descriptor.size0 == 6
     assert descriptor.stride0 == -1
+
+
+def test_descriptor_shape_and_strides_helpers():
+    descriptor = make_memref_descriptor(
+        device_or_host_ptr=0x1000,
+        shape=(2, 3, 4),
+        strides=(12, 4, 1),
+        dtype=np.float32,
+    )
+
+    assert descriptor_shape(descriptor) == (2, 3, 4)
+    assert descriptor_strides(descriptor) == (12, 4, 1)
+
+
+def test_numpy_from_rank_0_descriptor_round_trip():
+    array = np.asarray(42, dtype=np.int32)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    result = numpy_from_memref_descriptor(descriptor, np.int32)
+
+    assert result.shape == ()
+    assert result.dtype == np.int32
+    assert result.item() == 42
+
+
+def test_numpy_from_rank_1_descriptor_round_trip():
+    array = np.arange(5, dtype=np.float32)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    result = numpy_from_memref_descriptor(descriptor, np.float32)
+
+    np.testing.assert_array_equal(result, array)
+
+
+def test_numpy_from_rank_2_descriptor_round_trip_with_view():
+    array = np.arange(20, dtype=np.float32).reshape(4, 5)
+    view = array[1:, 2:]
+    descriptor = make_numpy_memref_descriptor(view)
+
+    result = numpy_from_memref_descriptor(descriptor, np.float32)
+
+    np.testing.assert_array_equal(result, view)
+
+
+def test_numpy_from_rank_3_descriptor_round_trip():
+    array = np.arange(24, dtype=np.int32).reshape(2, 3, 4)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    result = numpy_from_memref_descriptor(descriptor, np.int32)
+
+    np.testing.assert_array_equal(result, array)
+
+
+def test_numpy_from_negative_stride_descriptor_round_trip():
+    array = np.arange(6, dtype=np.float32)
+    view = array[::-1]
+    descriptor = make_numpy_memref_descriptor(view)
+
+    result = numpy_from_memref_descriptor(descriptor, np.float32)
+
+    np.testing.assert_array_equal(result, view)

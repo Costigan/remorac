@@ -1942,7 +1942,7 @@ class RemoraExecutor:
 
 #### 7.3 CPU Fallback Executor
 
-For testing without a GPU, for debugging, and for the early REPL, use a compiled CPU executor with the CPU pipeline. The current implementation uses standalone LLVM tools (`mlir-opt-18`, `mlir-translate-18`, `llc-18`) plus `gcc`/`cc` to build a temporary shared library and invoke `main` through `ctypes`. A direct MLIR `ExecutionEngine` binding can replace this later if compatible Python bindings are added. The final CPU executor should follow the same logical ABI as the CUDA executor:
+For testing without a GPU, for debugging, and for the early REPL, use a compiled CPU executor with the CPU pipeline. The current implementation uses standalone LLVM tools (`mlir-opt-18`, `mlir-translate-18`, `llc-18`) plus `gcc`/`cc` to build a temporary shared library and invoke a generated C adapter, `remora_main_out`, through `ctypes`. A direct MLIR `ExecutionEngine` binding can replace this later if compatible Python bindings are added. The final CPU executor should follow the same logical ABI as the CUDA executor:
 
 - inputs are numpy arrays described by rank-0..3 descriptors
 - outputs are allocated by the executor from `KernelMeta`
@@ -1953,8 +1953,9 @@ This keeps REPL, CPU tests, and GPU tests aligned. Current implementation note:
 `remorac --target cpu` runs compiled CPU code for the lowered Dense Core subset.
 `--target interp` keeps the typed-AST evaluator available for reference results
 and examples that have not been lowered to compiled MLIR yet. The current
-compiled CPU executor still reads MLIR-returned memref structs; explicit
-output-descriptor ABI calls remain follow-on work.
+compiled CPU executor writes results through explicit output descriptors via a
+generated C shim; native MLIR descriptor exports and input descriptors remain
+follow-on work.
 
 ```python
 from mlir.execution_engine import ExecutionEngine
@@ -1981,15 +1982,21 @@ class CPUExecutor:
 - [ ] Implement `CUDAModule` and `CUDAKernel`
 - [x] Implement Remora memref descriptor structs with ctypes for rank-0, rank-1, rank-2, and rank-3 buffers
 - [x] Implement descriptor construction from numpy arrays and Remora view metadata, including byte-stride to element-stride conversion and nonzero offsets for future views
+- [x] Implement descriptor-to-numpy result unpacking for rank-0 through rank-3 CPU results
+  - Current: `numpy_from_memref_descriptor` is shared by ABI tests and the
+    compiled CPU executor. It handles contiguous descriptors and view-like
+    offsets/strides, including negative strides.
 - [ ] Implement `CUDAKernel.launch` with descriptor-aware ctypes argument packing
 - [ ] Implement `RemoraExecutor.execute` for a single kernel
 - [ ] Implement output shape computation from kernel metadata
 - [x] Implement `CPUExecutor` for GPU-free compiled execution
   - Current: `CPUExecutor` lowers source to LLVM IR, emits an object with
-    `llc-18`, links a temporary shared library with `gcc`/`cc`, calls `main`
-    with `ctypes`, and converts scalar or rank-0..3 memref returns to Python
-    scalars/numpy arrays.
-  - Deferred: explicit output descriptors matching `docs/ABI.md`.
+    `llc-18`, compiles a generated C ABI shim, links a temporary shared
+    library with `gcc`/`cc`, and calls `remora_main_out` with a pointer to a
+    rank-specialized output descriptor. The shim currently adapts the
+    MLIR-returned `main` value into the explicit output descriptor.
+  - Deferred: replace the generated C shim with native MLIR lowering that
+    exports descriptor-ABI functions directly.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
@@ -2005,8 +2012,10 @@ class CPUExecutor:
 
 **Milestone M6**: descriptor ABI tests pass for rank 0 through rank 3, and compiled CPU execution returns `[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]` for a `map (* 2.0)` program.
 Current: ABI descriptor tests pass, compiled CPU execution covers the acceptance
-subset, and `remorac --target cpu` defaults to compiled CPU execution. The final
-explicit input/output descriptor ABI executor remains deferred.
+subset, and `remorac --target cpu` defaults to compiled CPU execution. Compiled
+CPU output now flows through explicit rank-specialized descriptors via a
+generated C adapter shim; native MLIR descriptor exports and input descriptors
+remain deferred.
 
 ---
 
