@@ -963,7 +963,7 @@ class TypedMap:
 - [x] Implement `TypeEnv`, `TypeChecker.infer`, and `TypeChecker.check` for bidirectional typing
 - [x] Implement explicit numeric promotion and `TypedCast`
 - [x] Enforce initial Dense Core rank limit: rank 0 through rank 3 only
-- [ ] Generalize Dense Core rank limit and typechecker coverage to `MAX_RANK = 10`
+- [x] Generalize Dense Core rank limit and typechecker coverage to `MAX_RANK = 10`
 - [x] Implement static Dense Core `shape` / `rank` typing
   - Current: `rank expr` returns `int`; `shape expr` returns `int[rank]`.
     Scalar shape is represented as `int[0]`. Function operands are rejected as
@@ -2921,7 +2921,7 @@ tests/acceptance/
 │   └── dot_product.rem
 ├── fail/
 │   ├── ragged_array.rem
-│   ├── rank4_rejected.rem
+│   ├── rank11_rejected.rem
 │   ├── dynamic_dim_rejected.rem
 │   ├── dynamic_function_rejected.rem
 │   ├── fold_accumulator_mismatch.rem
@@ -2948,7 +2948,7 @@ tests/acceptance/
     "expect_stdout": "[[[1.5],\n  [2.5]],\n\n [[3.5],\n  [4.5]]]\n"
   },
   {
-    "path": "fail/rank4_rejected.remora",
+    "path": "fail/rank11_rejected.remora",
     "target": "cpu",
     "expect_exit": 1,
     "expect_stderr_contains": "rank limit exceeded in Dense Core"

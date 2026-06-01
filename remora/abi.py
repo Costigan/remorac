@@ -9,11 +9,12 @@ from typing import TypeAlias
 import numpy as np
 
 from remora.errors import RemoraError
+from remora.limits import MAX_DENSE_RANK
 
 
 PointerValue: TypeAlias = int | ctypes.c_void_p
 
-MAX_RANK = 10
+MAX_RANK = MAX_DENSE_RANK
 
 
 def _memref_fields(rank: int) -> list[tuple[str, object]]:

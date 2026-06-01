@@ -70,8 +70,8 @@
     "expect_stderr_contains": "recursive function definitions are deferred"
   },
   {
-    "name": "rank4_rejected",
-    "path": "fail/rank4_rejected.remora",
+    "name": "rank11_rejected",
+    "path": "fail/rank11_rejected.remora",
     "target": "cpu",
     "expect_exit": 1,
     "expect_stderr_contains": "rank limit exceeded in Dense Core"

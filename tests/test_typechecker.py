@@ -14,6 +14,7 @@ from remora.typechecker import (
     TypedRightSection,
     TypedShape,
 )
+from remora.limits import MAX_DENSE_RANK
 from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
 
 
@@ -28,6 +29,10 @@ def shape_values(array_type: ArrayType) -> tuple[int, ...]:
 def let_body(typed: TypedLet):
     assert isinstance(typed, TypedLet)
     return typed.body
+
+
+def nested_scalar_literal(rank: int, value: str = "1") -> str:
+    return "[" * rank + value + "]" * rank
 
 
 def test_scalar_literal_typing():
@@ -245,9 +250,27 @@ def test_direct_local_lambda_application_typechecks():
     assert typed.body.type == INT
 
 
-def test_rank_4_result_is_rejected():
+def test_rank_4_array_literal_typing_is_in_dense_core_scope():
+    typed = infer(nested_scalar_literal(4))
+
+    assert typed.type == ArrayType(
+        INT,
+        (StaticDim(1), StaticDim(1), StaticDim(1), StaticDim(1)),
+    )
+
+
+def test_rank_10_array_literal_typing_is_in_dense_core_scope():
+    typed = infer(nested_scalar_literal(MAX_DENSE_RANK))
+
+    assert typed.type == ArrayType(
+        INT,
+        tuple(StaticDim(1) for _axis in range(MAX_DENSE_RANK)),
+    )
+
+
+def test_rank_above_dense_core_limit_is_rejected():
     with pytest.raises(RemoraTypeError, match="rank limit"):
-        infer("[[[[1]]]]")
+        infer(nested_scalar_literal(MAX_DENSE_RANK + 1))
 
 
 def test_milestone_m2_expression_typechecks():
