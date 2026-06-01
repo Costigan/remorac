@@ -1,19 +1,25 @@
 import ctypes
 
 import numpy as np
+import pytest
 
 from remora.abi import (
+    MAX_RANK,
     RemoraMemRef0,
     RemoraMemRef1,
+    RemoraMemRef10,
     RemoraMemRef2,
     RemoraMemRef3,
+    RemoraMemRef4,
     descriptor_shape,
     descriptor_strides,
     element_strides,
     make_memref_descriptor,
     make_numpy_memref_descriptor,
+    memref_descriptor_type,
     numpy_from_memref_descriptor,
 )
+from remora.errors import RemoraError
 
 
 def field_names(struct_type):
@@ -21,43 +27,27 @@ def field_names(struct_type):
 
 
 def test_memref_field_names_and_order():
-    assert field_names(RemoraMemRef0) == ["allocated", "aligned", "offset"]
-    assert field_names(RemoraMemRef1) == [
-        "allocated",
-        "aligned",
-        "offset",
-        "size0",
-        "stride0",
-    ]
-    assert field_names(RemoraMemRef2) == [
-        "allocated",
-        "aligned",
-        "offset",
-        "size0",
-        "size1",
-        "stride0",
-        "stride1",
-    ]
-    assert field_names(RemoraMemRef3) == [
-        "allocated",
-        "aligned",
-        "offset",
-        "size0",
-        "size1",
-        "size2",
-        "stride0",
-        "stride1",
-        "stride2",
-    ]
+    for rank in range(MAX_RANK + 1):
+        expected = (
+            ["allocated", "aligned", "offset"]
+            + [f"size{axis}" for axis in range(rank)]
+            + [f"stride{axis}" for axis in range(rank)]
+        )
+        assert field_names(memref_descriptor_type(rank)) == expected
 
 
 def test_memref_struct_sizes_are_stable_on_64_bit():
     pointer_size = ctypes.sizeof(ctypes.c_void_p)
     assert pointer_size == 8
-    assert ctypes.sizeof(RemoraMemRef0) == 2 * pointer_size + 1 * 8
-    assert ctypes.sizeof(RemoraMemRef1) == 2 * pointer_size + 3 * 8
-    assert ctypes.sizeof(RemoraMemRef2) == 2 * pointer_size + 5 * 8
-    assert ctypes.sizeof(RemoraMemRef3) == 2 * pointer_size + 7 * 8
+    for rank in range(MAX_RANK + 1):
+        assert ctypes.sizeof(memref_descriptor_type(rank)) == (
+            2 * pointer_size + (1 + 2 * rank) * 8
+        )
+
+
+def test_memref_descriptor_type_rejects_rank_above_max():
+    with pytest.raises(RemoraError, match="ranks 0 through 10"):
+        memref_descriptor_type(MAX_RANK + 1)
 
 
 def test_contiguous_rank_1_descriptor_from_numpy():
@@ -88,6 +78,25 @@ def test_contiguous_rank_3_descriptor_from_numpy():
     assert isinstance(descriptor, RemoraMemRef3)
     assert (descriptor.size0, descriptor.size1, descriptor.size2) == (2, 3, 4)
     assert (descriptor.stride0, descriptor.stride1, descriptor.stride2) == (12, 4, 1)
+
+
+def test_contiguous_rank_4_descriptor_from_numpy():
+    array = np.arange(120, dtype=np.float32).reshape(2, 3, 4, 5)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    assert isinstance(descriptor, RemoraMemRef4)
+    assert descriptor_shape(descriptor) == (2, 3, 4, 5)
+    assert descriptor_strides(descriptor) == (60, 20, 5, 1)
+
+
+def test_contiguous_rank_10_descriptor_from_numpy():
+    shape = (1, 1, 1, 1, 1, 1, 1, 1, 2, 3)
+    array = np.arange(6, dtype=np.float32).reshape(shape)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    assert isinstance(descriptor, RemoraMemRef10)
+    assert descriptor_shape(descriptor) == shape
+    assert descriptor_strides(descriptor) == (6, 6, 6, 6, 6, 6, 6, 6, 3, 1)
 
 
 def test_rank_0_scalar_descriptor_creation():
@@ -204,6 +213,16 @@ def test_numpy_from_rank_3_descriptor_round_trip():
     descriptor = make_numpy_memref_descriptor(array)
 
     result = numpy_from_memref_descriptor(descriptor, np.int32)
+
+    np.testing.assert_array_equal(result, array)
+
+
+def test_numpy_from_rank_10_descriptor_round_trip():
+    shape = (1, 1, 1, 1, 1, 1, 1, 1, 2, 3)
+    array = np.arange(6, dtype=np.float32).reshape(shape)
+    descriptor = make_numpy_memref_descriptor(array)
+
+    result = numpy_from_memref_descriptor(descriptor, np.float32)
 
     np.testing.assert_array_equal(result, array)
 

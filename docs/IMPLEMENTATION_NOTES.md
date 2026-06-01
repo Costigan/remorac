@@ -10,7 +10,7 @@ The implementation is currently limited to the Phase 0 foundation through a
 CPU-first Phase 7/8 usability slice:
 
 - Python package skeleton and dependency metadata.
-- Rank-0 through rank-3 external ABI descriptor structs.
+- Rank-0 through rank-10 external ABI descriptor structs.
 - Parser and AST for the Dense Core surface subset.
 - Static type representation and a small typechecker for literals, `iota`,
   `let`, `if`, primitive operators, `map`, and `fold`.
@@ -54,6 +54,20 @@ CPU-first Phase 7/8 usability slice:
 Full descriptor-ABI code generation, CUDA launch path, dynamic shapes, dynamic
 rank, or automatic differentiation has not been implemented.
 
+## Rank Direction
+
+- Dense Core now has a declared static maximum rank of 10. This is a bounded
+  rank-specialized design for deep-learning tensor programs, not an unbounded
+  dynamic-rank runtime.
+- The user-facing goal is to accept static-rank tensors from rank 0 through
+  rank 10 and reject rank 11+ with a clear Dense Core rank-limit diagnostic.
+- New compiler/runtime code should be rank-parametric against `MAX_RANK = 10`
+  instead of baking in rank-0 through rank-3 branches. Temporary rank-3
+  execution gaps must be documented where they remain.
+- Dynamic rank is still deferred. The planned path is bounded dynamic-rank
+  dispatch to rank-specialized kernels, not generic rank-interpreting kernels on
+  the high-performance CPU/GPU path.
+
 ## Backend Planning Decisions
 
 - The production backend is standard LLVM/MLIR, not IREE. The current
@@ -85,11 +99,7 @@ rank, or automatic differentiation has not been implemented.
 ## ABI Decisions
 
 - `remora.abi` defines the exact rank-specialized ctypes structs from
-  `docs/ABI.md`:
-  - `RemoraMemRef0`
-  - `RemoraMemRef1`
-  - `RemoraMemRef2`
-  - `RemoraMemRef3`
+  `docs/ABI.md`: `RemoraMemRef0` through `RemoraMemRef10`.
 - Descriptor fields are literal ctypes fields, not packed arrays:
   `allocated`, `aligned`, `offset`, followed by rank-specific `sizeN` and
   `strideN` fields.
@@ -102,9 +112,10 @@ rank, or automatic differentiation has not been implemented.
   `allocated == aligned` and represents view displacement with `offset`.
 - Numpy view support is already covered for transposed and sliced arrays. This
   follows `docs/ABI.md`: view offsets are not hidden by changing `aligned`.
-- `numpy_from_memref_descriptor` converts rank-0 through rank-3 descriptors back
+- `numpy_from_memref_descriptor` converts rank-0 through rank-10 descriptors back
   to numpy values. It is retained as ABI infrastructure and is covered for
-  scalar, contiguous, sliced, transposed, and negative-stride descriptors.
+  scalar, contiguous, sliced, transposed, negative-stride, and high-rank
+  descriptors.
 
 Deferred ABI/runtime work:
 

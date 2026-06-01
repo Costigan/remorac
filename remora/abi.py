@@ -13,67 +13,48 @@ from remora.errors import RemoraError
 
 PointerValue: TypeAlias = int | ctypes.c_void_p
 
-
-class RemoraMemRef0(ctypes.Structure):
-    _fields_ = [
-        ("allocated", ctypes.c_void_p),
-        ("aligned", ctypes.c_void_p),
-        ("offset", ctypes.c_int64),
-    ]
+MAX_RANK = 10
 
 
-class RemoraMemRef1(ctypes.Structure):
-    _fields_ = [
-        ("allocated", ctypes.c_void_p),
-        ("aligned", ctypes.c_void_p),
-        ("offset", ctypes.c_int64),
-        ("size0", ctypes.c_int64),
-        ("stride0", ctypes.c_int64),
-    ]
+def _memref_fields(rank: int) -> list[tuple[str, object]]:
+    return (
+        [
+            ("allocated", ctypes.c_void_p),
+            ("aligned", ctypes.c_void_p),
+            ("offset", ctypes.c_int64),
+        ]
+        + [(f"size{axis}", ctypes.c_int64) for axis in range(rank)]
+        + [(f"stride{axis}", ctypes.c_int64) for axis in range(rank)]
+    )
 
 
-class RemoraMemRef2(ctypes.Structure):
-    _fields_ = [
-        ("allocated", ctypes.c_void_p),
-        ("aligned", ctypes.c_void_p),
-        ("offset", ctypes.c_int64),
-        ("size0", ctypes.c_int64),
-        ("size1", ctypes.c_int64),
-        ("stride0", ctypes.c_int64),
-        ("stride1", ctypes.c_int64),
-    ]
+def _make_memref_type(rank: int) -> type[ctypes.Structure]:
+    return type(
+        f"RemoraMemRef{rank}",
+        (ctypes.Structure,),
+        {
+            "__module__": __name__,
+            "_fields_": _memref_fields(rank),
+        },
+    )
 
 
-class RemoraMemRef3(ctypes.Structure):
-    _fields_ = [
-        ("allocated", ctypes.c_void_p),
-        ("aligned", ctypes.c_void_p),
-        ("offset", ctypes.c_int64),
-        ("size0", ctypes.c_int64),
-        ("size1", ctypes.c_int64),
-        ("size2", ctypes.c_int64),
-        ("stride0", ctypes.c_int64),
-        ("stride1", ctypes.c_int64),
-        ("stride2", ctypes.c_int64),
-    ]
-
-
-_DESCRIPTORS = {
-    0: RemoraMemRef0,
-    1: RemoraMemRef1,
-    2: RemoraMemRef2,
-    3: RemoraMemRef3,
-}
+_DESCRIPTORS = {rank: _make_memref_type(rank) for rank in range(MAX_RANK + 1)}
+globals().update(
+    {descriptor_type.__name__: descriptor_type for descriptor_type in _DESCRIPTORS.values()}
+)
 
 _DESCRIPTOR_RANKS = {descriptor_type: rank for rank, descriptor_type in _DESCRIPTORS.items()}
 
 
 def memref_descriptor_type(rank: int) -> type[ctypes.Structure]:
-    """Return the rank-specialized descriptor type for ranks 0 through 3."""
+    """Return the rank-specialized descriptor type for supported static ranks."""
     try:
         return _DESCRIPTORS[rank]
     except KeyError as exc:
-        raise RemoraError("Remora Dense Core ABI supports only ranks 0 through 3") from exc
+        raise RemoraError(
+            f"Remora Dense Core ABI supports only ranks 0 through {MAX_RANK}"
+        ) from exc
 
 
 def element_strides(array: np.ndarray) -> tuple[int, ...]:

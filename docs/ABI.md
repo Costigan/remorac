@@ -4,9 +4,9 @@ This document specifies the external execution ABI for Remora Dense Core kernels
 
 ## Scope
 
-The ABI covers dense rank-0, rank-1, rank-2, and rank-3 arrays with static ranks and static dimensions. It is view-capable: descriptors include offset, sizes, and strides even when the first allocated arrays are contiguous row-major.
+The ABI covers dense rank-0 through rank-10 arrays with static ranks and static dimensions. It is view-capable: descriptors include offset, sizes, and strides even when the first allocated arrays are contiguous row-major.
 
-Dynamic rank, rank-4+, ragged arrays, boxed arrays, arrays of functions, and hidden-shape values are out of scope.
+Dynamic rank, rank-11+, ragged arrays, boxed arrays, arrays of functions, and hidden-shape values are out of scope.
 
 ## Descriptor Rules
 
@@ -27,12 +27,13 @@ Contiguous row-major examples:
 - rank 1 shape `[n]`: strides `[1]`
 - rank 2 shape `[rows, cols]`: strides `[cols, 1]`
 - rank 3 shape `[d0, d1, d2]`: strides `[d1*d2, d2, 1]`
+- rank 10 follows the same row-major rule: each stride is the product of all inner dimensions
 
 For views, keep `allocated` and `aligned` pointing at the base allocation and represent the logical first element with `offset`. Do not hide view offsets by changing `aligned` unless an external library forces that representation and an ABI test documents it.
 
 ## C Layout
 
-Use these layouts for `ctypes`, CPU `ExecutionEngine` calls, and CUDA kernel launches.
+Use these layouts for `ctypes`, CPU `ExecutionEngine` calls, and CUDA kernel launches. The descriptor family is defined for every rank `N` where `0 <= N <= 10`.
 
 ```c
 typedef struct {
@@ -70,6 +71,8 @@ typedef struct {
   int64_t stride1;
   int64_t stride2;
 } RemoraMemRef3;
+
+/* For RemoraMemRefN, append size0..sizeN-1 followed by stride0..strideN-1. */
 ```
 
 Element type is not encoded in the descriptor layout. Kernel metadata records the element type for each descriptor argument.
@@ -109,10 +112,10 @@ Rank-0 values use only `offset`.
 
 `tests/test_abi.py` must validate:
 
-- ctypes struct sizes and field order for ranks 0, 1, 2, and 3
+- ctypes struct sizes and field order for ranks 0 through 10
 - descriptor construction from contiguous numpy arrays
 - descriptor construction from a sliced/transposed numpy view, including byte-stride to element-stride conversion and nonzero element offsets, even before view operations exist in Remora syntax
-- CPU `ExecutionEngine` round-trip for rank 0, 1, 2, and 3
-- CUDA round-trip for rank 0, 1, 2, and 3 when a CUDA device is available
+- CPU `ExecutionEngine` round-trip for representative ranks, including 0, 1, 2, 3, and at least one rank above 3
+- CUDA round-trip for representative ranks, including 0, 1, 2, 3, and at least one rank above 3 when a CUDA device is available
 
 The CUDA tests launch tiny kernels that read from an input descriptor and write through an output descriptor. They are ABI tests, not optimizer or lowering tests.
