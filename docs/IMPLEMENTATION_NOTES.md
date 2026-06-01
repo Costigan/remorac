@@ -433,6 +433,8 @@ Deferred MLIR lowering work:
   maps over two matching inputs. Rank-2/rank-3 kernels use flattened CUDA
   indexing and descriptor strides. This is a runtime/codegen vertical slice
   only; it does not replace the planned `gpu.module` / NVVM lowering path.
+  Rank-4+ direct PTX is intentionally rejected by this shortcut so production
+  GPU work stays focused on MLIR-generated kernels.
 - The in-process IREE pass registry still does not recognize the standalone CPU
   lowering pipeline. That path raises `PipelineUnavailable`; the validated
   production-style path is the external standalone `mlir-opt-18` runner.
