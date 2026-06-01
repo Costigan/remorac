@@ -12,13 +12,14 @@ from remora.abi import (
     numpy_from_memref_descriptor,
 )
 from remora.executor import RemoraExecutor
-from remora.runtime import CUDAKernel, CUDAModule, CUDARuntime, CPUExecutor
+from remora.runtime import CUDAKernel, CUDAModule, CUDARuntime, CPUExecutor, CPUFunctionExecutor
 
 __all__ = [
     "CUDAKernel",
     "CUDAModule",
     "CUDARuntime",
     "CPUExecutor",
+    "CPUFunctionExecutor",
     "RemoraExecutor",
     "RemoraMemRef0",
     "RemoraMemRef1",

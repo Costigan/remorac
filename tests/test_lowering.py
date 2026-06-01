@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from remora.compiler import compile_source_to_mlir
+from remora.compiler import compile_function_source
 from remora.defunc import defunctionalize
 from remora.hir import (
     HIRCall,
@@ -570,3 +571,21 @@ def test_lowers_ranked_output_descriptor_export_with_strided_stores():
     assert "scf.for" in lowered.text
     assert "tensor.extract" in lowered.text
     assert "memref.store" in lowered.text
+
+
+def test_lowers_descriptor_input_function_export():
+    artifact = compile_function_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+        verify=False,
+    )
+
+    assert "func.func private @__remora_entry(%arg0: tensor<4xf32>) -> tensor<4xf32>" in artifact.mlir_text
+    assert (
+        "func.func @remora_call(%arg0: memref<4xf32, strided<[?], offset: ?>>, "
+        "%arg1: memref<4xf32, strided<[?], offset: ?>>) attributes {llvm.emit_c_interface}"
+        in artifact.mlir_text
+    )
+    assert "bufferization.to_tensor" in artifact.mlir_text
+    assert "call @__remora_entry" in artifact.mlir_text

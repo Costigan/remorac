@@ -13,7 +13,7 @@ from typing import Any, Callable
 import numpy as np
 
 from remora.abi import make_numpy_memref_descriptor
-from remora.compiler import compile_source
+from remora.compiler import compile_function_source, compile_source
 from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
@@ -73,6 +73,19 @@ class CompiledCPUArtifact:
     library_path: Path
     temp_dir: tempfile.TemporaryDirectory[str]
     return_type: RemoraType
+
+    def close(self) -> None:
+        self.temp_dir.cleanup()
+
+
+@dataclass(frozen=True)
+class CompiledCPUFunctionArtifact:
+    library_path: Path
+    temp_dir: tempfile.TemporaryDirectory[str]
+    function_name: str
+    param_types: tuple[RemoraType, ...]
+    return_type: RemoraType
+    export_name: str
 
     def close(self) -> None:
         self.temp_dir.cleanup()
@@ -448,6 +461,82 @@ class CPUExecutor:
         function(ctypes.byref(descriptor))
 
 
+class CPUFunctionExecutor:
+    """Execute one compiled top-level Remora function with descriptor inputs."""
+
+    def __init__(self, artifact: CompiledCPUFunctionArtifact) -> None:
+        self._artifact = artifact
+        self._library = ctypes.CDLL(str(artifact.library_path))
+
+    @classmethod
+    def compile_source(
+        cls,
+        source: str,
+        function_name: str,
+        param_types: tuple[RemoraType, ...],
+        *,
+        include_prelude: bool = True,
+        toolchain: PipelineToolchain | None = None,
+    ) -> CompiledCPUFunctionArtifact:
+        compiler_artifact = compile_function_source(
+            source,
+            function_name,
+            param_types,
+            verify=False,
+            include_prelude=include_prelude,
+        )
+        toolchain = detect_toolchain() if toolchain is None else toolchain
+        lowered = run_cpu_pipeline_text(compiler_artifact.mlir_text, toolchain=toolchain)
+        llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
+        temp_dir = _compile_llvm_ir_to_shared_library(llvm_ir, toolchain)
+        return CompiledCPUFunctionArtifact(
+            temp_dir[1],
+            temp_dir[0],
+            function_name,
+            param_types,
+            compiler_artifact.return_type,
+            "remora_call",
+        )
+
+    def execute(self, *inputs: np.ndarray) -> EvaluationResult:
+        output = _empty_output_value(self._artifact.return_type)
+        self.execute_into(output, *inputs)
+        if isinstance(self._artifact.return_type, ScalarType):
+            return EvaluationResult(output.item(), self._artifact.return_type)
+        return EvaluationResult(output, self._artifact.return_type)
+
+    def execute_into(self, output: np.ndarray, *inputs: np.ndarray) -> None:
+        if len(inputs) != len(self._artifact.param_types):
+            raise EvaluationError(
+                f"compiled CPU function expects {len(self._artifact.param_types)} inputs, got {len(inputs)}"
+            )
+        for index, (input_value, input_type) in enumerate(zip(inputs, self._artifact.param_types)):
+            _validate_numpy_value(
+                np.asarray(input_value),
+                input_type,
+                f"compiled CPU function input {index}",
+            )
+        _validate_numpy_value(
+            output,
+            self._artifact.return_type,
+            "compiled CPU function output",
+        )
+
+        descriptors = [make_numpy_memref_descriptor(np.asarray(input_value)) for input_value in inputs]
+        output_descriptor = make_numpy_memref_descriptor(output)
+        function = getattr(self._library, f"_mlir_ciface_{self._artifact.export_name}")
+        descriptor_types = [type(descriptor) for descriptor in descriptors]
+        function.argtypes = [
+            *(ctypes.POINTER(descriptor_type) for descriptor_type in descriptor_types),
+            ctypes.POINTER(type(output_descriptor)),
+        ]
+        function.restype = None
+        function(
+            *(ctypes.byref(descriptor) for descriptor in descriptors),
+            ctypes.byref(output_descriptor),
+        )
+
+
 def _run_checked(
     args: list[str],
     message: str,
@@ -458,6 +547,46 @@ def _run_checked(
         temp_dir.cleanup()
         stderr = result.stderr.strip()
         raise RuntimeUnavailable(f"{message}: {stderr}")
+
+
+def _compile_llvm_ir_to_shared_library(
+    llvm_ir: str,
+    toolchain: PipelineToolchain,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    temp_dir = tempfile.TemporaryDirectory(prefix="remora-cpu-")
+    root = Path(temp_dir.name)
+    ll_path = root / "module.ll"
+    obj_path = root / "module.o"
+    so_path = root / "module.so"
+    ll_path.write_text(llvm_ir, encoding="utf-8")
+
+    llc = toolchain.llc
+    if llc is None:
+        temp_dir.cleanup()
+        raise PipelineUnavailable("llc is required for compiled CPU execution")
+    linker = which("gcc") or which("cc")
+    if linker is None:
+        temp_dir.cleanup()
+        raise PipelineUnavailable("gcc or cc is required for compiled CPU execution")
+
+    _run_checked(
+        [
+            llc,
+            "-filetype=obj",
+            "-relocation-model=pic",
+            str(ll_path),
+            "-o",
+            str(obj_path),
+        ],
+        "llc failed during compiled CPU execution",
+        temp_dir,
+    )
+    _run_checked(
+        [linker, "-shared", str(obj_path), "-o", str(so_path)],
+        "system linker failed during compiled CPU execution",
+        temp_dir,
+    )
+    return temp_dir, so_path
 
 
 def _empty_output_value(value_type: RemoraType) -> np.ndarray:
@@ -478,6 +607,19 @@ def _result_dtype(value_type: RemoraType) -> np.dtype:
     if isinstance(value_type, ArrayType):
         return np.dtype(_numpy_dtype(value_type.element))
     raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
+
+
+def _validate_numpy_value(value: np.ndarray, value_type: RemoraType, label: str) -> None:
+    expected_shape = _result_shape(value_type)
+    expected_dtype = _result_dtype(value_type)
+    if value.shape != expected_shape:
+        raise EvaluationError(
+            f"{label} shape mismatch: expected {expected_shape}, got {value.shape}"
+        )
+    if value.dtype != expected_dtype:
+        raise EvaluationError(
+            f"{label} dtype mismatch: expected {expected_dtype}, got {value.dtype}"
+        )
 
 
 def format_value(value: object) -> str:

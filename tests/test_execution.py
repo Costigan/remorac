@@ -3,8 +3,9 @@ import importlib.util
 import numpy as np
 import pytest
 
-from remora.runtime import CPUExecutor, evaluate_source, evaluate_source_compiled
+from remora.runtime import CPUExecutor, CPUFunctionExecutor, evaluate_source, evaluate_source_compiled
 from remora.runtime import EvaluationError
+from remora.types import FLOAT, ArrayType, StaticDim
 
 
 pytestmark = pytest.mark.skipif(
@@ -154,3 +155,50 @@ def test_cpu_executor_rejects_output_descriptor_shape_and_dtype_mismatches():
             executor.execute_main_into(np.empty((5,), dtype=np.int32))
     finally:
         artifact.close()
+
+
+def test_cpu_function_executor_runs_descriptor_input_vector_map():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(5),)),),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(np.arange(5, dtype=np.float32))
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6, 8], dtype=np.float32))
+
+
+def test_cpu_function_executor_runs_rank0_descriptor_input():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def bump x = x + 1.0",
+        "bump",
+        (FLOAT,),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(np.asarray(2.0, dtype=np.float32))
+    finally:
+        artifact.close()
+
+    assert result.value == pytest.approx(3.0)
+
+
+def test_cpu_function_executor_honors_strided_descriptor_inputs_and_outputs():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(5),)),),
+    )
+    backing_input = np.arange(10, dtype=np.float32).reshape(5, 2)
+    input_view = backing_input[:, 0]
+    backing_output = np.full((5, 2), -1.0, dtype=np.float32)
+    output_view = backing_output[:, 1]
+    try:
+        CPUFunctionExecutor(artifact).execute_into(output_view, input_view)
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(output_view, np.array([0, 4, 8, 12, 16], dtype=np.float32))
+    np.testing.assert_array_equal(backing_output[:, 0], np.full((5,), -1.0, dtype=np.float32))
