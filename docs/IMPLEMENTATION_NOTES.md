@@ -49,6 +49,23 @@ Full Remora ABI code generation, MLIR `ExecutionEngine` CPU execution, CUDA
 launch path, dynamic shapes, dynamic rank, or automatic differentiation has not
 been implemented.
 
+## Backend Planning Decisions
+
+- The production backend is standard LLVM/MLIR, not IREE. The current
+  `iree-compiler` dependency remains useful for parser/verifier scaffolding and
+  temporary PTX inspection, but IREE HAL PTX does not satisfy the Remora runtime
+  ABI milestones.
+- The next backend work should pin one standalone LLVM/MLIR release, record the
+  exact toolchain in `docs/MLIR_TOOLCHAIN.md`, and validate matching CPU and
+  NVIDIA pass pipelines.
+- CPU compiled execution comes before CUDA execution. The typed-AST evaluator
+  is a reference/interpreter path; `remorac --target cpu` should eventually run
+  compiled code through the rank-specialized descriptor ABI.
+- Binary scalar-cell maps are the next missing MLIR lowering feature because
+  they unblock prelude `dot` as binary map plus fold.
+- Fusion, kernel-count, and smoke timing tests are now part of the vertical
+  slice. They should land before broadening the language beyond Dense Core.
+
 ## Project and Tooling
 
 - The project uses `pyproject.toml` with Python `>=3.11`.

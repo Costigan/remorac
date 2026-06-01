@@ -9,7 +9,28 @@ This document is a concrete engineering plan for building a Remora compiler. The
 
 Both tools share the same parser, type checker, lowering, MLIR pass pipeline, execution engine, and result display. The first prototype still proves one end-to-end compiler path, but it should expose that path through a CPU-first REPL as soon as parser/typechecker/lowering/runtime pieces are usable. The REPL maintains accumulated source definitions in session state and recompiles the current expression with those definitions; it does not require incremental MLIR module linking.
 
-The compilation backend is MLIR via the `mlir-python-bindings` package, targeting NVIDIA CUDA via the PTX path (with AMD ROCm as a secondary target). See `MLIR_ARCHITECTURE.md` for the full rationale and comparison.
+The production compilation backend is standard MLIR via a pinned standalone LLVM/MLIR toolchain, targeting CPU LLVM first and NVIDIA CUDA/PTX second. The current `iree-compiler` dependency is a bootstrap aid for MLIR parsing, verification, and temporary PTX inspection; it is not the final execution ABI. See `MLIR_ARCHITECTURE.md` for the full rationale and comparison.
+
+### 1.0 Backend Decision and Performance Contract
+
+The plan must not split execution across incompatible runtime models. The durable path is:
+
+1. Emit strongly typed Remora HIR.
+2. Lower HIR to standard `tensor`/`linalg`/`arith`/`func` MLIR.
+3. Validate fusion and shape/rank invariants at the `linalg` level.
+4. Lower to a descriptor-based CPU ABI and execute compiled CPU code.
+5. Lower the same kernel ABI to NVIDIA PTX and launch it manually with `cuda-python`.
+
+`iree-compile` may remain as an optional developer inspection tool, but passing an IREE PTX smoke test does not count as completing the runtime/compiler backend. A phase is complete only when its tests exercise the Remora ABI described in `docs/ABI.md` or explicitly state that they are syntax/inspection-only tests.
+
+High-performance work is part of the vertical slice, not a final polish pass. Before broadening the language beyond Dense Core, the compiler must prove these gates:
+
+- Map chains lower to one fused loop/kernel where MLIR supports fusion.
+- `map` feeding `fold` does not materialize the mapped vector for the milestone dot/map-fold cases, or the plan records the exact missed-fusion reason.
+- Binary scalar-cell `map` lowers to multi-input `linalg.generic`.
+- CPU compiled execution matches the typed-AST evaluator and NumPy for every acceptance pass case.
+- GPU execution uses the documented rank-specialized descriptor ABI, not IREE HAL argument conventions.
+- CPU/GPU performance tests record at least basic timing and kernel-count regressions for vector scale, map-chain, vector sum, and dot product.
 
 ### 1.1 First Prototype Contract
 
@@ -129,8 +150,10 @@ This keeps the GPU backend reachable quickly while avoiding early erasure of fra
 | CUDA execution | **`cuda-python`** package | Official NVIDIA Python CUDA driver bindings |
 | Testing | **pytest** | Standard; plays well with Python project |
 | Numeric arrays (host-side) | **numpy** | Universal Python array library; used for result marshaling |
-| LLVM version | **LLVM/MLIR 18** (pin to a release) | Stable; mlir-python-bindings packages available |
+| LLVM version | Pin one supported LLVM/MLIR release; start with LLVM/MLIR 18 unless unavailable | Reproducible pipelines; Python bindings and command-line tools must match |
 | CUDA version | **CUDA 12+** | Required for modern PTX features |
+
+Implementation correction: until the standalone LLVM/MLIR package is pinned, the repository may use `iree-compiler` for parsing and verification scaffolding. That dependency must not become the production runtime path by accident. If the project deliberately switches to IREE as the production backend later, this plan, `docs/ABI.md`, and runtime tests must be rewritten around IREE's runtime ABI instead of the manual Remora descriptor ABI.
 
 ### 3.1 Why Not Mojo (Yet)
 
@@ -140,7 +163,7 @@ The first prototype still uses Python + direct MLIR bindings because this plan n
 
 1. Emitting `tensor`/`linalg`/`gpu` MLIR for Remora's rank-lifting semantics.
 2. Validating `linalg.generic` fusion and bufferization behavior pass by pass.
-3. Pinning an LLVM/MLIR 18 lowering pipeline and inspecting the IR at every stage.
+3. Pinning one LLVM/MLIR lowering pipeline and inspecting the IR at every stage.
 4. Defining a stable runtime ABI around MLIR-lowered memref descriptors.
 
 Using Mojo as the implementation language or as a source-code target would add another compiler layer between Remora and the MLIR being tested. That is valuable later, but it makes the first vertical slice harder to debug: failures could come from Remora lowering, generated Mojo code, Mojo compiler lowering, or the GPU runtime. Mojo is also still pre-1.0, source stability is not guaranteed, and cross-compilation/linking support remains a work in progress.
@@ -152,7 +175,7 @@ Revisit Mojo after M9/M10, when the direct MLIR path has proven the Remora seman
 
 ### 3.2 Installing `mlir-python-bindings`
 
-The MLIR Python package is not on PyPI; it must be built from source or obtained from an LLVM nightly release artifact:
+The production MLIR Python package is not the IREE-bundled `mlir` package. It must come from the same standalone LLVM/MLIR release as the command-line tools, either by building from source or using a vetted release artifact:
 
 ```bash
 # Option A: Build from LLVM source (slow but exact)
@@ -165,9 +188,12 @@ make -j$(nproc) mlir-python-bindings
 # Option B: Use pre-built wheels from LLVM nightly (faster)
 pip install mlir-python-bindings --find-links https://github.com/llvm/llvm-project/releases/...
 
-# Option C: Use the mlir package bundled with iree-compiler (quickest for getting started)
-pip install iree-compiler  # pulls in mlir as a dependency
+# Bootstrap only: iree-compiler can provide temporary parser/verifier coverage,
+# but it does not satisfy the production backend/runtime milestones.
+pip install iree-compiler
 ```
+
+The IREE bootstrap path is allowed only for early syntax validation and temporary PTX inspection. Phase 6 completion requires standalone LLVM/MLIR bindings plus matching `mlir-opt`, `mlir-translate`, and `llc` tools.
 
 ### 3.3 Remora Language References
 
@@ -242,9 +268,9 @@ remora-gpu/
 │       ├── vector_cell_map.rem
 │       ├── nested_map.rem       # Map chain fusion verification
 │       ├── hof_param.rem        # Function as parameter
+│       ├── dot_product.rem      # Prelude dot through binary map plus fold
 │       ├── large_vector.rem     # Performance test (10M elements)
 │       └── deferred/
-│           ├── dot_product.rem
 │           └── matmul.rem
 │
 ├── pyproject.toml
@@ -1184,7 +1210,7 @@ For genuinely dynamic cases, defer to a post-Dense-Core phase.
 
 **Goal**: Generate MLIR operations from HIR using `mlir-python-bindings`. This is the core of the compiler.
 
-The snippets in this phase are design sketches until validated against the pinned LLVM/MLIR 18 Python bindings. Implementation must proceed by creating tiny checked builders in this order: `iota`, unary scalar `map`, scalar `fold`, then composition of `map` into `fold`. Each builder must round-trip through `mlir-opt --verify-diagnostics` before being used by the compiler.
+The snippets in this phase are design sketches until validated against the pinned LLVM/MLIR Python bindings. Implementation must proceed by creating tiny checked builders in this order: `iota`, unary scalar `map`, scalar `fold`, then composition of `map` into `fold`. Each builder must round-trip through `mlir-opt --verify-diagnostics` before being used by the compiler.
 
 #### 5.1 MLIR Module Setup
 
@@ -1402,6 +1428,8 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [ ] Validate exact MLIR Python builder patterns for `tensor.empty`, `linalg.generic`, `linalg.index`, `tensor.extract`, and `func.func` against checked-in golden MLIR fixtures
   - Partial: checked-in fixtures now validate the current textual, parse-checked MLIR output for `iota`, scalar maps, rank-2 literal maps, and map-then-fold programs. Python builder pattern validation remains deferred until the dialect builder dependencies are stable.
 - [x] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
+- [ ] Implement `_lower_map_binary_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise binary maps
+  - Required next: lower `map (*) xs ys` to a multi-input `linalg.generic` with one identity indexing map per input and one identity output map. This unblocks MLIR lowering for the current prelude `dot` implementation.
 - [ ] Implement `_lower_map_cell` for static frame/cell maps whose total result rank is <= 3
   - Partial: textual MLIR lowering supports the rank-1-cell reduction pattern over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred.
 - [x] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
@@ -1420,6 +1448,8 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
   - Check rank-2 and rank-3 scalar maps produce the expected number of parallel iterators
   - Check rank-0 scalar maps over scalar inputs lower as scalar function application
   - Check nested scalar map chains over `iota` and static array literals
+  - Check binary scalar maps over rank-1 and rank-2 static literals
+  - Check prelude dot lowers as binary map plus fold
   - Check a vector-cell map over a rank-2 array splits frame and cell dimensions correctly
   - Check rank-2/rank-3 outermost folds over array cells
   - Check rank-2/rank-3 rank-1-cell maps whose lifted lambda body is a fold
@@ -1437,21 +1467,43 @@ Current status: the generated textual MLIR is parse-validated through
 so external verifier round-tripping remains an environment setup task before
 Phase 6 pipeline validation.
 
+**Milestone M4.5**: binary scalar-cell maps and `dot` lower to parse-validated MLIR. `let xs = [1,2,3] in let ys = [4,5,6] in map (*) xs ys` must emit a two-input `linalg.generic`, and the prelude dot-product example must lower to binary map plus fold without using the typed-AST evaluator.
+
 ---
 
 ### Phase 6: MLIR Pass Pipeline
 
-**Goal**: Drive the MLIR module through the full lowering pipeline, from `tensor + linalg` all the way to PTX.
+**Goal**: Drive the MLIR module through the full lowering pipeline, from `tensor + linalg` to CPU LLVM execution first and NVIDIA PTX second.
 
-The pass lists below are starting points, not authoritative API. LLVM/MLIR pass names, nesting, and options change across releases. The implementation must pin one LLVM/MLIR 18 build and record the exact command-line-equivalent pipeline that works with that build.
+The pass lists below are starting points, not authoritative API. LLVM/MLIR pass names, nesting, and options change across releases. The implementation must pin one LLVM/MLIR release and record the exact command-line-equivalent pipeline that works with that build.
 
-Current implementation note: Phase 6 is implemented against the installed
-`iree-compiler` toolchain because this repository does not currently have
-standalone LLVM/MLIR tools (`mlir-opt`, `mlir-translate`, `llc`) on `PATH`.
-`remora.pipeline` still records the starter CPU/NVIDIA MLIR pass strings, but
-the executable PTX-producing path uses `iree-compile` and is covered by tests.
-Pinning standalone LLVM/MLIR 18 remains deferred toolchain work, not a blocker
-for the current IREE-backed Phase 6 validation slice.
+Current implementation note: Phase 6 is partially scaffolded against the
+installed `iree-compiler` package because this repository does not currently
+have standalone LLVM/MLIR tools (`mlir-opt`, `mlir-translate`, `llc`) on
+`PATH`. That is acceptable for syntax validation and temporary PTX inspection
+only. Phase 6 is not complete until a standalone LLVM/MLIR toolchain is pinned,
+the CPU and NVIDIA pipelines are validated against that toolchain, and the
+executor tests run compiled code through the Remora descriptor ABI.
+
+#### 6.0 Backend Lockdown Tasks
+
+Before adding more language features beyond Dense Core conveniences, complete
+these tasks:
+
+- [ ] Add `tools/validate_mlir_toolchain.py`.
+  - It prints versions for `mlir-opt`, `mlir-translate`, `llc`, `ptxas` when
+    present, and the Python MLIR bindings.
+  - It verifies that the Python bindings and command-line tools are from the
+    same LLVM major version.
+- [ ] Commit `docs/MLIR_TOOLCHAIN.md` with the exact install source, version,
+  and command paths used by the project.
+- [ ] Commit checked-in pipeline artifacts:
+  - `docs/mlir-pipeline-cpu.txt`
+  - `docs/mlir-pipeline-nvidia.txt`
+- [ ] Mark IREE-backed PTX tests as inspection tests, not runtime completion
+  tests.
+- [ ] Add CI skips/gates so lack of GPU does not hide CPU compiled-execution
+  regressions.
 
 #### 6.1 Pass Pipeline Configurations (`remora/pipeline.py`)
 
@@ -1633,15 +1685,16 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
 #### 6.3 Tasks
 
 - [ ] Implement `build_cpu_pipeline` and verify with `ExecutionEngine`
+  - Required: `map (* 2.0) (iota 10)`, map-chain, vector sum, and dot product execute as compiled CPU code and match the typed-AST evaluator.
   - Partial: `remora.pipeline` contains the starter CPU pipeline string and reports `PipelineUnavailable` when the installed pass registry cannot parse it. ExecutionEngine verification is deferred until the standalone MLIR toolchain is pinned.
-- [ ] Pin an LLVM/MLIR 18 build and commit the exact validated CPU and NVIDIA pipelines
+- [ ] Pin one LLVM/MLIR release and commit the exact validated CPU and NVIDIA pipelines
 - [ ] Implement `build_gpu_nvidia_pipeline` only after validating pass names/options with `mlir-opt`
   - Partial: `remora.pipeline` contains the starter NVIDIA pipeline string, gated behind pass-manager parsing. The installed IREE pass registry does not accept the starter standalone MLIR pipeline, so direct pass-pipeline execution remains gated.
 - [x] Implement `run_pipeline` with debug mode
 - [x] Implement external MLIR verification for emitted modules
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.
 - [x] Implement `generate_ptx`
-  - Current: `remora.codegen.generate_ptx` invokes `iree-compile` with the CUDA HAL backend and dumps generated `.ptx` files. The generated PTX is an IREE HAL dispatch kernel, not yet the final direct Remora ABI kernel.
+  - Current: `remora.codegen.generate_ptx` invokes `iree-compile` with the CUDA HAL backend and dumps generated `.ptx` files. The generated PTX is an IREE HAL dispatch kernel, not yet the final direct Remora ABI kernel. This is useful for inspection but does not satisfy the production GPU backend requirement.
 - [x] Implement `_extract_kernel_metadata` to collect kernel names and argument info
   - Current: metadata extraction records PTX entry name, PTX parameter count, and `.maxntid` block size. Final input/output element type metadata is deferred until the direct Remora kernel ABI path exists.
 - [x] Write `tests/test_pipeline.py`:
@@ -1651,16 +1704,39 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
   - Fusion test: map chain produces a single `linalg.generic` after fusion pass
   - Verify PTX is syntactically valid (parse it back with a PTX parser or run `ptxas --dry-run`)
 
-**Milestone M5**: Generate valid PTX from `fold (+) 0.0 (map (* 2.0) (iota 1000))`.
-Current: the IREE-backed PTX path generates PTX for lowered Dense Core modules;
-tests cover both `map (* 2) (iota 4)` and
-`fold (+) 0.0 (map (* 2.0) (iota 1000))`.
+**Milestone M5**: Generate valid PTX from `fold (+) 0.0 (map (* 2.0) (iota 1000))` through the pinned standalone MLIR/NVVM pipeline.
+Current: the IREE-backed PTX path can generate inspection PTX for lowered Dense
+Core modules, and tests cover both `map (* 2) (iota 4)` and
+`fold (+) 0.0 (map (* 2.0) (iota 1000))`. That path is explicitly
+inspection-only and does not satisfy M5 until the Remora descriptor ABI pipeline
+is pinned and validated.
+
+**Milestone M5.5**: compiled CPU execution replaces the typed-AST evaluator for acceptance pass cases. `remorac --target cpu` may keep the typed-AST evaluator behind an explicit development flag, but the default CPU target must execute lowered compiled code through the same logical descriptor/result path planned for GPU.
+
+#### 6.4 Performance Gates
+
+Add `tests/test_fusion.py` and `tests/test_performance_smoke.py` before GPU runtime work:
+
+- [ ] Verify map-chain fusion at the MLIR level: `map f (map g xs)` should have one fused elementwise loop/kernel after the selected fusion pipeline.
+- [ ] Verify dot-product shape: binary map plus fold either fuses or records a known materialization with an issue reference.
+- [ ] Verify kernel count for vector scale, map-chain, vector sum, and dot.
+- [ ] Record CPU compiled execution timings for small and medium arrays. These are smoke thresholds, not benchmark claims, but they must catch severe regressions.
+- [ ] When GPU is available, record GPU launch count and end-to-end timings behind `REMORA_TEST_GPU=1`.
 
 ---
 
 ### Phase 7: Runtime and Execution Engine
 
 **Goal**: Load compiled PTX, execute on GPU, copy result back to host.
+
+Phase 7 starts only after compiled CPU execution is working for the Dense Core
+acceptance suite. This ordering is intentional: CPU compiled execution proves
+the lowering, result ABI, output allocation, and metadata model without adding
+CUDA driver complexity. GPU execution must reuse those contracts rather than
+inventing a separate path.
+
+The typed-AST evaluator remains useful for reference results and REPL
+bootstrap, but it is not the production CPU backend.
 
 The runtime ABI is descriptor-based and is specified normatively in `docs/ABI.md`. Remora external kernels receive pointers to rank-specialized memref descriptor structs, not ad hoc raw pointer plus dimension lists. For a ranked memref, the descriptor contains:
 
@@ -1890,8 +1966,11 @@ class CPUExecutor:
 - [ ] Implement `CUDAKernel.launch` with descriptor-aware ctypes argument packing
 - [ ] Implement `RemoraExecutor.execute` for a single kernel
 - [ ] Implement output shape computation from kernel metadata
-- [ ] Implement `CPUExecutor` for GPU-free testing
+- [ ] Implement `CPUExecutor` for GPU-free compiled execution
+  - Required before GPU runtime: rank-0 through rank-3 outputs, scalar results as rank-0 descriptors, and numpy input/output descriptor construction.
   - Current: `remora.runtime.evaluate_source` is an interim typed-AST CPU evaluator covering the checked-in Dense Core examples. MLIR `ExecutionEngine` execution remains deferred until the CPU pipeline is pinned.
+- [ ] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
+- [ ] Keep typed-AST evaluation as a reference oracle for tests and possibly a `--target interp` development target.
 - [ ] Write `tests/test_execution.py`:
   - Current: `tests/test_runtime.py` covers the interim CPU evaluator, all checked-in examples, compiler facade helpers, and `remorac` CPU output. Rename or expand into `tests/test_execution.py` when the MLIR `CPUExecutor` exists.
   - Double all elements of `[1.0, 2.0, 3.0]` → `[2.0, 4.0, 6.0]`
@@ -2820,8 +2899,8 @@ tests/programs/
 ├── 11_nested_map.rem            map (* 2.0) (map (+ 1.0) (iota 100))
 ├── 12_large_vector.rem          fold (+) 0.0 (map (* 2.0) (iota 10000000))
 ├── 13_repl_session.rem          REPL session transcript (used by test_repl.py)
+├── 14_dot_product.rem           let-bound vectors passed to prelude dot
 └── deferred/
-    ├── dot_product.rem          requires stdlib zip/dot policy
     └── matmul.rem               requires matrix-specific lowering or stdlib expansion
 ```
 
@@ -2851,8 +2930,12 @@ def test_fold_after_map_fusion():
     assert fused.count('linalg.generic') == 1
 
 def test_numerical_correctness_dot_product():
-    """Deferred until the stdlib defines dot/zip for Dense Core."""
-    result = run_remorac("dot [1.0,2.0,3.0] [4.0,5.0,6.0]")
+    """Dot product through binary map and fold."""
+    result = run_remorac(
+        "let xs = [1.0,2.0,3.0] in "
+        "let ys = [4.0,5.0,6.0] in "
+        "dot xs ys"
+    )
     assert abs(float(result) - 32.0) < 1e-5
 
 def test_large_vector_sum():
@@ -2907,6 +2990,11 @@ Fixed block size of 256 threads for flattened 1D iteration; 16×16 blocks for na
 
 Tiled shared memory optimization (for reductions and matrix operations) is a Phase 5 improvement in the `MLIR_ARCHITECTURE.md` plan — not required for a correct prototype.
 
+Correctness comes first, but launch geometry must be observable. Kernel metadata
+must record the selected block size, grid shape, output element count, and
+number of generated kernels. Tests should assert these facts for vector scale,
+rank-2 map, vector sum, and dot so performance regressions are visible early.
+
 ### 7.5 REPL Compilation Latency
 
 Each REPL expression re-compiles all accumulated definitions plus the new expression. For a session with few definitions (the common case in early exploration), this is acceptable. If compile latency becomes an issue in long sessions, cache compiled CPU artifacts or PTX by function name and content hash; only recompile definitions that have changed.
@@ -2930,12 +3018,12 @@ This table describes the practical state of the system after each phase. "User c
 | Phase 2: Type System and Shape Inference | Static shape evaluation, rank-0..3 type representation, bidirectional checking for lambdas/operator sections, numeric casts, and rank-limited map/fold typing | Ask the compiler to type-check Dense Core programs and get useful diagnostics for mismatched shapes, rank-4 values, non-constant dimensions, or fold accumulator errors |
 | Phase 3: High-Level IR (HIR) | A typed, simplified HIR with explicit shapes and desugared primitive operations | Inspect a compiler-friendly representation of parsed and typed programs before MLIR lowering |
 | Phase 4: Defunctionalization | Static lambda lifting and rejection of deferred dynamic higher-order patterns | Compile maps/folds using inline lambdas or named functions without runtime function pointers |
-| Phase 5: HIR to MLIR Linalg Lowering | Verified MLIR generation for `iota`, rank-0..3 scalar maps, static frame/cell maps up to rank 3, scalar folds, and map-fold composition | Emit MLIR for Dense Core programs and validate it against golden fixtures plus the MLIR verifier |
-| Phase 6: MLIR Pass Pipeline | Pinned and validated LLVM/MLIR 18 CPU and NVIDIA lowering pipelines | Lower generated MLIR through CPU LLVM or NVIDIA PTX-producing pipelines with reproducible pass behavior |
-| Phase 7: Runtime and Execution Engine | CUDA runtime wrapper, rank-0..3 descriptor ABI packing, CPU executor, and single-kernel execution support | Execute generated kernels and copy results back to host memory through the documented Remora Dense Core ABI |
+| Phase 5: HIR to MLIR Linalg Lowering | Verified MLIR generation for `iota`, rank-0..3 scalar maps, binary scalar maps, static frame/cell maps up to rank 3, scalar folds, and map-fold/dot composition | Emit MLIR for Dense Core programs and validate it against golden fixtures plus the MLIR verifier |
+| Phase 6: MLIR Pass Pipeline | Pinned and validated LLVM/MLIR CPU and NVIDIA lowering pipelines, plus fusion/performance smoke gates | Lower generated MLIR through CPU LLVM or NVIDIA PTX-producing pipelines with reproducible pass behavior |
+| Phase 7: Runtime and Execution Engine | CPU compiled executor, CUDA runtime wrapper, rank-0..3 descriptor ABI packing, and single-kernel execution support | Execute generated kernels on CPU first and GPU second, copying results through the documented Remora Dense Core ABI |
 | Phase 8: User-Facing Entry Points | Shared result display, CLI plumbing for `remorac`, and REPL entry point scaffold | Exercise the same execution/display path from command-line tools instead of internal compiler objects |
 | Phase 9: Early REPL | CPU-first, non-incremental `remora` interactive session reusing the compiler pipeline | Enter expressions interactively, define simple functions, inspect types, load files, reset state, and recover from errors without restarting |
-| Phase 10: Standard Library | Initial `prelude.rem` plus direct lowering support for required built-ins | Use named library functions such as `sum`, `scale`, and eventually `dot` instead of spelling every program with raw `map`/`fold` |
+| Phase 10: Standard Library | Initial `prelude.rem` plus direct lowering support for required built-ins | Use named library functions such as `sum`, `scale`, and `dot` instead of spelling every program with raw `map`/`fold` |
 | Phase 11: Dynamic Shape and Rank Roadmap | Static-rank dynamic dimensions, shape constraints, bounded dynamic-rank dispatch, and a documented path toward fully dynamic rank | Run programs with runtime extents first, then dispatch dynamic-rank values to rank-specialized kernels |
 | Phase 12: Automatic Differentiation Extension | HIR-level AD pass, differentiability rules, primitive derivative rules, and generated gradient functions | Use `grad`/`value_and_grad` for scalar and dense-array float programs on CPU and later GPU |
 | Phase 13: Testing and Verification | Unit, acceptance, pipeline, fusion, runtime, CLI, AD, dynamic-shape, and end-to-end tests with CPU-by-default and GPU-gated suites | Run the test suite to verify language behavior, parser/type/lowering correctness, CPU parity, GPU execution, AD behavior, dynamic-shape behavior, and fusion expectations |
@@ -2949,14 +3037,17 @@ This table describes the practical state of the system after each phase. "User c
 | M2 | Type checker slice complete | Resolve rank-0..3 Dense Core map/fold, insert numeric casts, and reject bad shapes, rank-4 values, and non-constant dimensions | `pytest tests/test_typechecker.py` |
 | M3 | HIR slice complete | Lower only static lambdas/named functions needed by map/fold | `pytest tests/test_hir.py` |
 | M4 | MLIR lowering slice complete | Produce verified MLIR for `iota`, rank-1/2/3 maps, static frame/cell maps, scalar fold, and explicit casts | `pytest tests/test_lowering.py` |
-| M5 | Pinned pipelines complete | Validated CPU and NVIDIA LLVM-18 pipelines are committed | `python tools/validate_mlir_pipeline.py` |
-| M6 | ABI/runtime complete | Rank-0..3 descriptor ABI tests pass on CPU and CUDA where available | `pytest tests/test_abi.py && pytest tests/test_execution.py` |
+| M4.5 | Dot-shaped MLIR complete | Binary scalar-cell maps lower to multi-input `linalg.generic`; prelude `dot` lowers as binary map plus fold | `pytest tests/test_lowering.py -k "binary or dot"` |
+| M5 | Pinned pipelines complete | Validated CPU and NVIDIA LLVM/MLIR pipelines plus toolchain documentation are committed | `python tools/validate_mlir_toolchain.py && python tools/validate_mlir_pipeline.py` |
+| M5.5 | Fusion/performance gates | Map-chain, map-fold, and dot have MLIR fusion/kernel-count smoke tests | `pytest tests/test_fusion.py tests/test_performance_smoke.py` |
+| M6 | CPU compiled execution complete | Rank-0..3 descriptor ABI tests pass and `remorac --target cpu` runs acceptance cases through compiled code | `pytest tests/test_abi.py && pytest tests/test_execution.py` |
+| M6.5 | GPU runtime complete | CUDA descriptor launch path runs vector scale, vector sum, and dot on NVIDIA when available | `REMORA_TEST_GPU=1 pytest tests/test_execution.py -k gpu` |
 | M7 | Shared execution/display complete | Generated programs run through the executor API and format scalar/vector/matrix/rank-3 results consistently | `pytest tests/test_execution.py` |
 | M8 | Early REPL | Interactive expression evaluation, definitions, `:type`, `:load`, `:reset`, and error recovery on CPU | `remora --target cpu` |
 | M9 | AOT vertical slice complete | `remorac` runs `fold (+) 0.0 (map (* 2.0) (iota 1000))` on CPU and NVIDIA | `remorac tests/programs/iota_map_fold.rem` |
 | M9.5 | Dense Core acceptance suite | Pass/fail acceptance manifest covers Dense Core language behavior on CPU | `pytest tests/test_acceptance.py` |
 | M10 | Fusion checks | Map chains and map-fold avoid materialized intermediates where MLIR supports it | `pytest tests/test_fusion.py` |
-| M11 | Expanded language | Stdlib subset, dot product, transpose/slice syntax over the existing view-capable ABI | `remorac tests/programs/dot_product.rem` |
+| M11 | Expanded language | Stdlib subset, transpose/slice syntax over the existing view-capable ABI, and broader examples after compiled CPU/GPU execution is stable | `remorac tests/programs/transpose_view.rem` |
 | M12 | Static-rank dynamic dimensions | Rank-1/2/3 programs with runtime extents compile and execute | `pytest tests/test_dynamic_shapes.py` |
 | M13 | Bounded dynamic rank | Runtime rank dispatch chooses rank-specialized kernels for rank 0..3 | `pytest tests/test_dynamic_rank.py` |
 | M14 | Scalar AD | `grad` works for scalar `float -> float` functions on CPU | `pytest tests/test_ad.py -k scalar` |
@@ -2969,12 +3060,14 @@ This table describes the practical state of the system after each phase. "User c
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Runtime ABI mismatch between MLIR-lowered kernels and CUDA launcher | High | High | Use `docs/ABI.md`; write descriptor layout and adapter-kernel tests for rank 0..3 before launching generated kernels |
+| IREE inspection path accidentally becomes the production runtime ABI | Medium | High | Treat IREE PTX as inspection-only unless the plan and `docs/ABI.md` are explicitly rewritten around IREE runtime conventions |
+| Typed-AST CPU evaluator hides lowering/runtime bugs | High | High | Make compiled CPU execution the default `remorac --target cpu` path before GPU runtime work; keep interpreter only as a reference oracle |
 | Manual CUDA launch path diverges from MLIR host `gpu.launch_func` path | Medium | High | Prototype supports only manual PTX launch; generated host launch is deferred |
 | MLIR Python bindings API drift between LLVM versions | Medium | High | Pin LLVM version in `pyproject.toml`; test against one pinned wheel |
-| Pass pipeline names/options differ from examples | High | High | Validate with `mlir-opt` and commit the known-good LLVM-18 pipeline artifact |
+| Pass pipeline names/options differ from examples | High | High | Validate with `mlir-opt` and commit the known-good LLVM/MLIR pipeline artifact |
 | GPU pipeline lowering produces incorrect PTX | Medium | High | Always verify on CPU pipeline first; use `--emit-mlir-after` to bisect failures |
 | Bufferization failures for unusual Remora patterns | Medium | Medium | Use `-allow-return-allocs-from-loops` flag; fallback to explicit copy insertion |
-| Affine fusion does not fire (pass preconditions not met) | Medium | Low | Fusion is an optimization; correctness doesn't depend on it; verify separately |
+| Affine/linalg fusion does not fire for map-chain or dot | Medium | High | Fusion is required for high performance; add fusion/kernel-count tests and block broadening scope if milestone programs materialize avoidable temporaries |
 | CUDA driver initialization fails on CI (no GPU) | High (CI) | Low | `--target cpu` path for all CI tests; GPU tests run only with `REMORA_TEST_GPU=1` |
 | Defunctionalization misses a pattern | Low-Medium | Medium | Start with static-only (error on dynamic HOF); add dynamic dispatch incrementally |
 | Grid size integer overflow for very large arrays | Low | Medium | Use `int64` for element counts; test with arrays >2^31 elements |
