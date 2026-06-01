@@ -500,7 +500,7 @@ CUDA runtime launch (Python ctypes wrapper, using docs/ABI.md descriptors)
 ```
 
 Development phases:
-1. **Phase 1**: Implement Remora Dense Core front-end and Linalg lowering for static dense rank-0 through rank-3 arrays, scalar maps, static frame/cell maps, and outermost-dimension folds. Verify correctness by lowering to CPU LLVM instead of NVVM.
+1. **Phase 1**: Implement Remora Dense Core front-end and Linalg lowering for bounded static dense ranks up to `MAX_RANK = 10`, scalar maps, static frame/cell maps, and outermost-dimension folds. Verify correctness by lowering to CPU LLVM instead of NVVM.
 2. **Phase 2**: Add a CPU-first `remora` REPL that reuses the full compiler path by recompiling each expression as a self-contained temporary program with accumulated definitions. This gives early interactive feedback without requiring incremental MLIR compilation.
 3. **Phase 3**: Validate the rank-0..3 descriptor ABI in `docs/ABI.md`; then enable GPU lowering.
 4. **Phase 4**: Add fusion verification — confirm intermediate arrays are eliminated.

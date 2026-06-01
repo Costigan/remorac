@@ -768,7 +768,7 @@ Then:
 - Frame shape = `arr.shape[:arr.rank - cell_rank]`
 - `map f arr : result_cell_type.with_frame(frame_shape)`
 
-Dense Core caps every expression result at rank 3. Any `map`, literal, or future shape operation whose result rank would exceed 3 is rejected until the ABI and lowering tests are extended.
+Dense Core caps every expression result at `MAX_RANK = 10`. Any `map`, literal, or future shape operation whose result rank would exceed 10 is rejected with the Dense Core rank-limit diagnostic.
 
 In code:
 ```python
@@ -1728,8 +1728,12 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     matching `float32` inputs. Rank-2/rank-3 kernels use flattened CUDA
     indexing and descriptor strides. This feeds `RemoraExecutor` directly and
     is separate from IREE HAL PTX.
-  - Deferred: replace the hand-authored PTX slice with `gpu.module` /
-    `gpu.func` lowering through the standalone NVIDIA pipeline.
+  - Decision: do not widen this hand-authored PTX slice to rank 4 through rank
+    10. It is a runtime/codegen smoke path only. Higher-rank and production GPU
+    work must go through `gpu.module` / `gpu.func` lowering through the
+    standalone NVIDIA pipeline.
+  - Current tests assert that rank-4 direct PTX generation is rejected cleanly
+    instead of being partially supported by the shortcut.
 - [x] Implement `_extract_kernel_metadata` to collect kernel names and argument info
   - Current: metadata extraction records PTX entry name, PTX parameter count, and `.maxntid` block size. Final input/output element type metadata is deferred until the direct Remora kernel ABI path exists.
 - [x] Write `tests/test_pipeline.py`:
@@ -2071,8 +2075,9 @@ types.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
 PTX kernels with descriptor arguments. The first generated direct Remora ABI PTX
 slice covers rank-1 through rank-3 `float32` unary and binary maps. Broader
-generated GPU kernels remain blocked on direct `gpu.module` lowering; IREE HAL
-PTX is intentionally not treated as a launchable Remora ABI artifact.
+generated GPU kernels remain blocked on direct `gpu.module` lowering; the
+hand-authored PTX shortcut is intentionally not being expanded to rank 10. IREE
+HAL PTX is intentionally not treated as a launchable Remora ABI artifact.
 
 ---
 
