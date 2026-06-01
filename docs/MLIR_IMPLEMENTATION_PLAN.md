@@ -39,7 +39,7 @@ The first implementation is **Remora Dense Core**, not the full language surface
 The first cut must prove one end-to-end path before broadening scope:
 
 1. Parse, type-check, lower, compile, and execute `iota`, unary `map`, and scalar `fold`.
-2. Support dense rank-0, rank-1, rank-2, and rank-3 arrays with static rank, static dimensions, and static element types.
+2. Support dense rank-0 through rank-10 arrays with static rank, static dimensions, and static element types. Earlier phases may land rank-0 through rank-3 execution first, but new infrastructure must be written rank-parametrically against `MAX_RANK = 10`.
 3. Verify every program on the CPU lowering path before enabling GPU execution.
 4. Target NVIDIA CUDA only.
 5. Use one stable kernel ABI: Remora external kernels receive pointers to rank-specialized **memref descriptor structs**, and the Python runtime constructs and passes those descriptors.
@@ -70,7 +70,9 @@ Deferred:
 def f n = iota n       -- rejected unless n is a compile-time constant
 ```
 
-Rank-0 through rank-3 arrays are in scope. Rank-4+ should be rejected with a clear "rank limit exceeded in Dense Core" diagnostic until the lowering and ABI tests are extended.
+Dense Core's bounded static-rank target is rank 0 through rank 10. This bound is intentionally high enough for deep-learning tensor layouts while preserving rank-specialized MLIR, static iterator counts, and descriptor layouts. Rank 11+ must be rejected with a clear "rank limit exceeded in Dense Core" diagnostic. Dynamic rank remains deferred; do not replace rank-specialized lowering with generic rank-interpreting loops on the main performance path.
+
+Implementation rule: compiler internals should be rank-parametric. Do not add new `if rank in (0, 1, 2, 3)` ladders unless a phase is explicitly documenting a temporary execution gap; generate shapes, iterator lists, descriptor fields, tests, and diagnostics from the rank value and `MAX_RANK`.
 
 #### Numeric Policy
 
@@ -94,7 +96,7 @@ The prototype does not support dynamic function values: returning closures, stor
 
 The runtime array model is view-capable from day one. A value may describe a non-contiguous view by carrying `offset`, `sizes`, and `strides`, even though the first lowering only needs to allocate contiguous row-major arrays. This prevents transpose, slicing, and subarray support from requiring an ABI replacement later.
 
-Contiguous row-major rank-3 shape `[d0, d1, d2]` has strides `[d1*d2, d2, 1]`. Transpose/slice operations are deferred as language features, but the descriptor representation must already be able to express them.
+Contiguous row-major rank-3 shape `[d0, d1, d2]` has strides `[d1*d2, d2, 1]`; the same product-of-inner-dimensions rule applies through rank 10. Transpose/slice operations are deferred as language features, but the descriptor representation must already be able to express them.
 
 #### MLIR Strategy
 
@@ -111,9 +113,9 @@ This keeps the GPU backend reachable quickly while avoiding early erasure of fra
 | Feature | Notes |
 |---|---|
 | Scalar types: `float`, `int`, `bool` | `f32`, `i32`, `i1` in MLIR |
-| Rank-0 through rank-3 dense arrays with static shapes | `tensor<f32>`, `tensor<d0xf32>`, `tensor<d0xd1xf32>`, and `tensor<d0xd1xd2xf32>` |
-| Lifted application (`map f arr`) | Unary static callable over scalar, vector, matrix, or rank-3 dense arrays |
-| Reduction (`fold f init arr`) | Scalar accumulator over the outermost dimension of rank-1 through rank-3 arrays |
+| Rank-0 through rank-10 dense arrays with static shapes | Rank-specialized `tensor<...xf32>` values with static extents |
+| Lifted application (`map f arr`) | Unary static callable over scalar, vector, matrix, tensor3, and higher static-rank dense arrays up to rank 10 |
+| Reduction (`fold f init arr`) | Scalar accumulator over the outermost dimension of rank-1 through rank-10 arrays |
 | Lambda expressions | Static lambdas for `map`, `fold`, and monomorphized direct higher-order calls |
 | `let` bindings | Lexically scoped |
 | Top-level function definitions | Named functions; static function values allowed when resolved at compile time |
@@ -124,7 +126,7 @@ This keeps the GPU backend reachable quickly while avoiding early erasure of fra
 
 - Incremental REPL compilation and long-session module caching
 - Standard library beyond compiler built-ins
-- Rank-4+ array programs
+- Rank-11+ array programs
 - Transpose, slicing, and matrix-specific operators as surface-language features
 - Dynamic shapes and dynamic dimensions
 - Dynamic rank (rank not known at compile time)
@@ -251,7 +253,7 @@ remora-gpu/
 │   ├── test_defunc.py           # Defunctionalization tests
 │   ├── test_lowering.py         # HIR → MLIR lowering tests
 │   ├── test_pipeline.py         # MLIR pass pipeline tests
-│   ├── test_abi.py              # Rank-0..3 descriptor ABI tests
+│   ├── test_abi.py              # Rank-0..10 descriptor ABI tests
 │   ├── test_execution.py        # End-to-end GPU execution tests
 │   ├── test_repl.py             # REPL interaction tests
 │   ├── golden_mlir/             # Checked MLIR fixtures for builder/pipeline validation
@@ -275,7 +277,7 @@ remora-gpu/
 │
 ├── pyproject.toml
 ├── docs/
-│   └── ABI.md                   # Remora external kernel ABI, rank-0..3 descriptors
+│   └── ABI.md                   # Remora external kernel ABI, rank-0..10 descriptors
 └── README.md
 ```
 
@@ -491,7 +493,7 @@ NAME       : /[a-zA-Z_][a-zA-Z0-9_']*/
 %ignore /--[^\n]*/   // line comments
 ```
 
-**Implementation note**: Standard infix operators (`+`, `*`, etc.) are parsed through a precedence-climbing layer or a Pratt parser. Operator sections such as `(*)`, `(* 2.0)`, and `(2.0 *)` are explicit grammar forms so examples like `map (* 2.0) xs` are valid unary maps, not accidental binary `map` syntax. Binary scalar-cell maps such as `map (*) a b` are supported for the Dense Core static rank-0 through rank-3 subset and lower to multi-input `linalg.generic` for ranked arrays.
+**Implementation note**: Standard infix operators (`+`, `*`, etc.) are parsed through a precedence-climbing layer or a Pratt parser. Operator sections such as `(*)`, `(* 2.0)`, and `(2.0 *)` are explicit grammar forms so examples like `map (* 2.0) xs` are valid unary maps, not accidental binary `map` syntax. Binary scalar-cell maps such as `map (*) a b` are currently supported for the Dense Core static rank-0 through rank-3 execution subset and lower to multi-input `linalg.generic` for ranked arrays. They must be generalized rank-parametrically up to `MAX_RANK = 10`.
 
 The parser exposes separate entry points:
 
@@ -936,7 +938,7 @@ class TypeChecker:
 
 Array literal typing must recursively enforce shape consistency, not only element scalar type consistency. For example, `[[1, 2], [3]]` is a type error because the nested element shapes differ. Empty array literals are deferred until the language has explicit type annotations.
 
-Dense Core rejects any `fold` where the accumulator type, init expression type, and reduction function result type do not unify exactly after explicit numeric promotion. Generalized reductions over array cells can be added later after rank-1 through rank-3 scalar folds are stable.
+Dense Core rejects any `fold` where the accumulator type, init expression type, and reduction function result type do not unify exactly after explicit numeric promotion. Generalized reductions over array cells can be added later after the current rank-1 through rank-3 scalar folds are generalized across `MAX_RANK`.
 
 #### 2.6 Typed AST
 
@@ -960,7 +962,8 @@ class TypedMap:
 - [x] Implement `infer_lifting` for rank-polymorphic map
 - [x] Implement `TypeEnv`, `TypeChecker.infer`, and `TypeChecker.check` for bidirectional typing
 - [x] Implement explicit numeric promotion and `TypedCast`
-- [x] Enforce Dense Core rank limit: rank 0 through rank 3 only
+- [x] Enforce initial Dense Core rank limit: rank 0 through rank 3 only
+- [ ] Generalize Dense Core rank limit and typechecker coverage to `MAX_RANK = 10`
 - [x] Implement static Dense Core `shape` / `rank` typing
   - Current: `rank expr` returns `int`; `shape expr` returns `int[rank]`.
     Scalar shape is represented as `int[0]`. Function operands are rejected as
@@ -978,7 +981,7 @@ class TypedMap:
   - fold on vector: `fold (+) 0.0 : float[n] → float`
   - Nested map: `map (map f) : float[m,n] → float[m,n]`
   - `map (* 2.0) (iota 10)` inserts an int-to-float cast and returns `float[10]`
-  - Rank-4 result is rejected
+  - Rank-limit result is rejected
   - Type error for mismatched element types
 
 **Milestone M2**: Type-check `fold (+) 0.0 (map (\x -> x * x) (iota 10))` and resolve all types and frame shapes.
@@ -1311,7 +1314,7 @@ def _lower_map_scalar(self, node: HIRMap, env: ValueEnv) -> Value:
 
 **Case B: Vector/matrix cell function** (some dimensions are frame, rest are cell)
 
-Dense Core must support this for total input/output rank up to 3 after scalar-cell rank-0..3 maps are working. This is needed for real Remora frame/cell behavior over matrices and rank-3 tensors, but it should be implemented after the scalar-cell builder has golden MLIR coverage.
+Dense Core must support this for total input/output rank up to `MAX_RANK = 10` after the current scalar-cell rank-0 through rank-3 maps are generalized. This is needed for real Remora frame/cell behavior over matrices and higher-rank tensors, but it should be implemented after the scalar-cell builder has golden MLIR coverage.
 
 This requires indexing maps that split frame dimensions (parallel) from cell dimensions (sequential within the body):
 
@@ -1431,9 +1434,11 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [x] Implement `_lower_map_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise maps
 - [x] Implement `_lower_map_binary_scalar` for rank-0, rank-1, rank-2, and rank-3 elementwise binary maps
   - Current: `map (*) xs ys` lowers to a multi-input `linalg.generic` with one identity indexing map per input and one identity output map. Prelude `dot` lowers through binary map plus fold.
+- [ ] Generalize scalar and binary map lowering tests across ranks 4 through 10 without adding rank-specific branches
 - [x] Implement `_lower_map_cell` for the current static rank-1-cell reduction pattern whose total result rank is <= 3
   - Current: textual MLIR lowering supports rank-1-cell reduction maps over rank-2/rank-3 inputs, such as `map (\row -> fold (+) 0 row) xs`. General cell maps whose body is not a fold remain deferred until after compiled CPU execution is in place.
 - [x] Implement `_lower_fold` for reductions over the outermost dimension of rank-1, rank-2, and rank-3 arrays
+- [ ] Generalize fold lowering tests across representative ranks above 3
 - [x] Implement `_lower_prim_op` for all scalar operations
 - [x] Implement `_lower_cast` for explicit numeric promotions
 - [x] Implement `_lower_iota`
@@ -1443,7 +1448,8 @@ def _lower_iota(self, node: HIRIota, env: ValueEnv) -> Value:
 - [x] Implement `_lower_function` for scalar HIR functions → `func.func`
   - Current: scalar HIR functions lower to `func.func private`; user-authored top-level function definitions reach MLIR for direct scalar calls and unary/binary `map` callables through call-site typed static lambda specialization. General array-parameter top-level HIR/MLIR function emission remains deferred.
 - [x] Implement `_lower_main`: create a `main()` `func.func` that wraps the program body
-- [x] Reject dynamic dimensions until Dense Core static-shape rank-0..3 programs execute end-to-end
+- [x] Reject dynamic dimensions until the initial Dense Core static-shape rank-0 through rank-3 programs execute end-to-end
+- [ ] Keep dynamic dimensions rejected while widening static-rank support to `MAX_RANK = 10`
 - [x] Write `tests/test_lowering.py`:
   - Check generated MLIR text for `map (\x -> x * 2.0) (iota 10)` contains the expected `iota` and scalar-map `linalg.generic` operations
   - Check rank-2 and rank-3 scalar maps produce the expected number of parallel iterators
@@ -1964,7 +1970,7 @@ class RemoraExecutor:
 
 For testing without a GPU, for debugging, and for the early REPL, use a compiled CPU executor with the CPU pipeline. The current implementation uses standalone LLVM tools (`mlir-opt-18`, `mlir-translate-18`, `llc-18`) plus `gcc`/`cc` to build a temporary shared library and invoke MLIR's generated C-interface symbol, `_mlir_ciface_remora_main_out`, through `ctypes`. A direct MLIR `ExecutionEngine` binding can replace this later if compatible Python bindings are added. The final CPU executor should follow the same logical ABI as the CUDA executor:
 
-- inputs are numpy arrays described by rank-0..3 descriptors
+- inputs are numpy arrays described by rank-0 through rank-10 descriptors
 - outputs are allocated by the executor from `KernelMeta`
 - `main` writes into output descriptors rather than returning heap-allocated arrays
 - scalar results are represented as rank-0 descriptors
@@ -2000,9 +2006,9 @@ class CPUExecutor:
 
 - [x] Implement `CUDARuntime`: init, alloc, free, H2D/D2H copy, synchronize
 - [x] Implement `CUDAModule` and `CUDAKernel`
-- [x] Implement Remora memref descriptor structs with ctypes for rank-0, rank-1, rank-2, and rank-3 buffers
+- [x] Implement Remora memref descriptor structs with ctypes for rank-0 through rank-10 buffers
 - [x] Implement descriptor construction from numpy arrays and Remora view metadata, including byte-stride to element-stride conversion and nonzero offsets for future views
-- [x] Implement descriptor-to-numpy result unpacking for rank-0 through rank-3 CPU results
+- [x] Implement descriptor-to-numpy result unpacking for rank-0 through rank-10 CPU results
   - Current: `numpy_from_memref_descriptor` is retained as ABI infrastructure
     and covered by ABI tests. Compiled CPU execution now writes directly into
     numpy-backed output descriptors.
@@ -2031,7 +2037,9 @@ class CPUExecutor:
     rank-specialized input descriptors and an output descriptor.
   - Current tests cover rank-0 scalar inputs, rank-1 through rank-3 array
     inputs, binary descriptor-input maps, fold/dot-shaped reductions, strided
-    numpy input/output views, and mismatch diagnostics.
+    numpy input/output views, and mismatch diagnostics. ABI-only descriptor
+    construction/unpacking coverage extends through rank 10; compiled CPU
+    callable lowering above rank 3 remains follow-on work.
 - [x] Switch `remorac --target cpu` default from typed-AST evaluation to compiled CPU execution after `CPUExecutor` covers the acceptance suite.
 - [x] Keep typed-AST evaluation as a reference oracle via `--target interp`.
 - [x] Write `tests/test_execution.py`:
@@ -2047,7 +2055,7 @@ class CPUExecutor:
   - A live CUDA rank-1 descriptor round-trip test runs when a CUDA driver/device
     is available, and skips otherwise.
 
-**Milestone M6**: descriptor ABI tests pass for rank 0 through rank 3, and compiled CPU execution returns `[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]` for a `map (* 2.0)` program.
+**Milestone M6**: descriptor ABI tests pass for rank 0 through rank 10, and compiled CPU execution returns `[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]` for a `map (* 2.0)` program.
 Current: ABI descriptor tests pass, compiled CPU execution covers the acceptance
 subset, and `remorac --target cpu` defaults to compiled CPU execution. Compiled
 CPU output now flows through explicit rank-specialized descriptors via a native
@@ -2714,7 +2722,8 @@ case rank(x):
   0 -> call f_rank0(x)
   1 -> call f_rank1(x)
   2 -> call f_rank2(x)
-  3 -> call f_rank3(x)
+  ...
+  10 -> call f_rank10(x)
   _ -> error unsupported rank
 ```
 
@@ -2725,7 +2734,7 @@ Required changes:
 - Insert runtime dispatch in the host/executor layer or in generated wrapper code
 - Preserve GPU kernels as rank-specialized kernels; do not attempt unbounded-rank `linalg.generic`
 
-This is the recommended first implementation of dynamic rank.
+This is the recommended first implementation of dynamic rank. The current bounded dispatch target is `MAX_RANK = 10`, matching the static-rank ABI and Dense Core type limit.
 
 #### 11.4 Stage D: Fully Dynamic Rank
 
@@ -2744,12 +2753,12 @@ Required changes:
 - [ ] Extend type checking for static-rank dynamic-dimension programs
 - [ ] Extend MLIR lowering for `tensor<?x...>` with static rank
 - [ ] Extend `docs/ABI.md` with dynamic-dimension descriptor rules
-- [ ] Implement bounded dynamic-rank host dispatch for rank 0 through rank 3
+- [ ] Implement bounded dynamic-rank host dispatch for rank 0 through rank 10
 - [ ] Add tests for dynamic dimensions, shape equality failures, and rank dispatch
 
-**Milestone M12**: Static-rank dynamic-dimension programs execute on CPU and NVIDIA for rank 1 through rank 3.
+**Milestone M12**: Static-rank dynamic-dimension programs execute on CPU and NVIDIA for representative ranks, including rank 1 through rank 3 and at least one rank above 3.
 
-**Milestone M13**: Bounded dynamic-rank dispatch chooses rank-specialized kernels for rank 0 through rank 3.
+**Milestone M13**: Bounded dynamic-rank dispatch chooses rank-specialized kernels for rank 0 through rank 10.
 
 ---
 
@@ -3092,12 +3101,12 @@ This table describes the practical state of the system after each phase. "User c
 |---|---|---|
 | Phase 0: Infrastructure and Hello World | Python project skeleton, dependency checks, CPU MLIR hello-world, and a manually launched CUDA/PTX smoke test | Confirm the local machine can import MLIR/CUDA packages and run a trivial generated kernel |
 | Phase 1: Parser and AST | Remora grammar, AST nodes, parser entry points for programs/definitions/expressions, and parser tests | Parse source containing literals, arrays, lambdas, `let`, `iota`, unary `map`, scalar `fold`, and top-level definitions |
-| Phase 2: Type System and Shape Inference | Static shape evaluation, rank-0..3 type representation, bidirectional checking for lambdas/operator sections, numeric casts, and rank-limited map/fold typing | Ask the compiler to type-check Dense Core programs and get useful diagnostics for mismatched shapes, rank-4 values, non-constant dimensions, or fold accumulator errors |
+| Phase 2: Type System and Shape Inference | Static shape evaluation, rank-parametric type representation up to `MAX_RANK = 10`, bidirectional checking for lambdas/operator sections, numeric casts, and rank-limited map/fold typing | Ask the compiler to type-check Dense Core programs and get useful diagnostics for mismatched shapes, rank-11 values, non-constant dimensions, or fold accumulator errors |
 | Phase 3: High-Level IR (HIR) | A typed, simplified HIR with explicit shapes and desugared primitive operations | Inspect a compiler-friendly representation of parsed and typed programs before MLIR lowering |
 | Phase 4: Defunctionalization | Static lambda lifting and rejection of deferred dynamic higher-order patterns | Compile maps/folds using inline lambdas or named functions without runtime function pointers |
-| Phase 5: HIR to MLIR Linalg Lowering | Verified MLIR generation for `iota`, rank-0..3 scalar maps, binary scalar maps, static frame/cell maps up to rank 3, scalar folds, and map-fold/dot composition | Emit MLIR for Dense Core programs and validate it against golden fixtures plus the MLIR verifier |
+| Phase 5: HIR to MLIR Linalg Lowering | Verified MLIR generation for `iota`, rank-parametric scalar maps, binary scalar maps, static frame/cell maps up to `MAX_RANK = 10`, scalar folds, and map-fold/dot composition | Emit MLIR for Dense Core programs and validate it against golden fixtures plus the MLIR verifier |
 | Phase 6: MLIR Pass Pipeline | Pinned and validated LLVM/MLIR CPU lowering and fusion pipelines, with NVIDIA production lowering explicitly blocked on `gpu.module`/descriptor ABI work | Lower generated MLIR through CPU LLVM dialect/LLVM IR with reproducible pass behavior and inspect temporary IREE PTX without treating it as the final backend |
-| Phase 7: Runtime and Execution Engine | CPU compiled executor, CUDA runtime wrapper, rank-0..3 descriptor ABI packing, and single-kernel execution support | Execute generated kernels on CPU first and GPU second, copying results through the documented Remora Dense Core ABI |
+| Phase 7: Runtime and Execution Engine | CPU compiled executor, CUDA runtime wrapper, rank-0..10 descriptor ABI packing, and single-kernel execution support | Execute generated kernels on CPU first and GPU second, copying results through the documented Remora Dense Core ABI |
 | Phase 8: User-Facing Entry Points | Shared result display, CLI plumbing for `remorac`, and REPL entry point scaffold | Exercise the same execution/display path from command-line tools instead of internal compiler objects |
 | Phase 9: Early REPL | CPU-first, non-incremental `remora` interactive session reusing the compiler pipeline | Enter expressions interactively, define simple functions, inspect types, load files, reset state, and recover from errors without restarting |
 | Phase 10: Standard Library | Initial `prelude.rem` plus direct lowering support for required built-ins | Use named library functions such as `sum`, `scale`, and `dot` instead of spelling every program with raw `map`/`fold` |
@@ -3111,13 +3120,13 @@ This table describes the practical state of the system after each phase. "User c
 |---|---|---|---|
 | M0 | Infrastructure ready | CPU and CUDA toolchains import; one hand-written PTX launch works | `pytest tests/test_infra.py` |
 | M1 | Parser slice complete | Parse definitions, expressions, operator sections, `iota`, unary `map`, scalar `fold` | `pytest tests/test_parser.py` |
-| M2 | Type checker slice complete | Resolve rank-0..3 Dense Core map/fold, insert numeric casts, and reject bad shapes, rank-4 values, and non-constant dimensions | `pytest tests/test_typechecker.py` |
+| M2 | Type checker slice complete | Resolve Dense Core map/fold up to `MAX_RANK = 10`, insert numeric casts, and reject bad shapes, rank-11 values, and non-constant dimensions | `pytest tests/test_typechecker.py` |
 | M3 | HIR slice complete | Lower only static lambdas/named functions needed by map/fold | `pytest tests/test_hir.py` |
 | M4 | MLIR lowering slice complete | Produce verified MLIR for `iota`, rank-1/2/3 maps, static frame/cell maps, scalar fold, and explicit casts | `pytest tests/test_lowering.py` |
 | M4.5 | Dot-shaped MLIR complete | Binary scalar-cell maps lower to multi-input `linalg.generic`; prelude `dot` lowers as binary map plus fold | `pytest tests/test_lowering.py -k "binary or dot"` |
 | M5 | Pinned CPU/fusion pipelines complete | Validated CPU LLVM/MLIR and fusion pipelines plus toolchain documentation are committed; NVIDIA is documented as inspection-only until direct GPU lowering lands | `python tools/validate_mlir_toolchain.py && python tools/validate_mlir_pipeline.py` |
 | M5.5 | Fusion/performance gates | Map-chain, map-fold, and dot have MLIR fusion/kernel-count smoke tests | `pytest tests/test_fusion.py tests/test_performance_smoke.py` |
-| M6 | CPU compiled execution complete | Rank-0..3 descriptor ABI tests pass and `remorac --target cpu` runs acceptance cases through compiled code | `pytest tests/test_abi.py && pytest tests/test_execution.py` |
+| M6 | CPU compiled execution complete | Rank-0..10 descriptor ABI tests pass and `remorac --target cpu` runs acceptance cases through compiled code | `pytest tests/test_abi.py && pytest tests/test_execution.py` |
 | M6.5 | GPU runtime infrastructure complete | CUDA descriptor launch packing and direct Remora ABI executor are implemented; a live rank-1 PTX descriptor round trip runs when NVIDIA is available | `pytest tests/test_cuda_runtime.py tests/test_executor.py` |
 | M7 | Shared execution/display complete | Generated programs run through the executor API and format scalar/vector/matrix/rank-3 results consistently | `pytest tests/test_execution.py` |
 | M8 | Early REPL | Interactive expression evaluation, definitions, `:type`, `:load`, `:reset`, and error recovery on CPU | `remora --target cpu` |
@@ -3126,7 +3135,7 @@ This table describes the practical state of the system after each phase. "User c
 | M10 | Fusion checks | Map chains and map-fold avoid materialized intermediates where MLIR supports it | `pytest tests/test_fusion.py` |
 | M11 | Expanded language | Stdlib subset, transpose/slice syntax over the existing view-capable ABI, and broader examples after compiled CPU/GPU execution is stable | `remorac tests/programs/transpose_view.rem` |
 | M12 | Static-rank dynamic dimensions | Rank-1/2/3 programs with runtime extents compile and execute | `pytest tests/test_dynamic_shapes.py` |
-| M13 | Bounded dynamic rank | Runtime rank dispatch chooses rank-specialized kernels for rank 0..3 | `pytest tests/test_dynamic_rank.py` |
+| M13 | Bounded dynamic rank | Runtime rank dispatch chooses rank-specialized kernels for rank 0..10 | `pytest tests/test_dynamic_rank.py` |
 | M14 | Scalar AD | `grad` works for scalar `float -> float` functions on CPU | `pytest tests/test_ad.py -k scalar` |
 | M15 | Array AD on GPU | `grad` works for scalar-output rank-1/2/3 dense float array functions and lowers to GPU | `pytest tests/test_ad.py` |
 
@@ -3136,7 +3145,7 @@ This table describes the practical state of the system after each phase. "User c
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Runtime ABI mismatch between MLIR-lowered kernels and CUDA launcher | High | High | Use `docs/ABI.md`; write descriptor layout and adapter-kernel tests for rank 0..3 before launching generated kernels |
+| Runtime ABI mismatch between MLIR-lowered kernels and CUDA launcher | High | High | Use `docs/ABI.md`; write descriptor layout and adapter-kernel tests for rank 0..10 before launching generated kernels |
 | IREE inspection path accidentally becomes the production runtime ABI | Medium | High | Treat IREE PTX as inspection-only unless the plan and `docs/ABI.md` are explicitly rewritten around IREE runtime conventions |
 | Typed-AST CPU evaluator hides lowering/runtime bugs | High | High | Make compiled CPU execution the default `remorac --target cpu` path before GPU runtime work; keep interpreter only as a reference oracle |
 | Manual CUDA launch path diverges from MLIR host `gpu.launch_func` path | Medium | High | Prototype supports only manual PTX launch; generated host launch is deferred |
