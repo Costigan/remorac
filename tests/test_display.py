@@ -45,3 +45,17 @@ def test_formats_matrices_and_rank3_arrays():
         format_result(tensor, ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))))
         == "[[[1.0],\n  [2.0]],\n\n [[3.0],\n  [4.0]]]"
     )
+
+
+def test_formats_rank4_and_rank10_arrays_with_numpy_style():
+    rank4 = np.full((1, 1, 1, 1), 2, dtype=np.int32)
+    rank10 = np.full((1, 1, 1, 1, 1, 1, 1, 1, 1, 1), 2, dtype=np.int32)
+
+    assert (
+        format_result(rank4, ArrayType(INT, tuple(StaticDim(1) for _axis in range(4))))
+        == "[[[[2]]]]"
+    )
+    assert (
+        format_result(rank10, ArrayType(INT, tuple(StaticDim(1) for _axis in range(10))))
+        == "[[[[[[[[[[2]]]]]]]]]]"
+    )
