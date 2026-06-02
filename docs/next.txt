@@ -1,0 +1,135 @@
+I read the MLIR docs, pipeline notes/reference .txt files, implementation notes, and source/tests. I also ran:
+
+validate_mlir_toolchain.py - passes, with expected warnings: IREE is LLVM 20-ish while standalone MLIR is LLVM
+18.1.3, and ptxas is missing.
+validate_mlir_pipeline.py - passes; map chains and dot fuse to one linalg.generic, map-fold still leaves two.
+Focused tests - 130 passed for execution/lowering/GPU lowering/pipeline/fusion.
+
+Current Baseline
+The compiler is now beyond the older phase text in places. CPU Dense Core is the stable path: parser/typechecker/
+HIR/defunc/textual MLIR, compiled CPU execution, descriptor-input CPU functions, REPL, rank-0 through rank-10 scalar
+maps, folds, binary maps, static shape/rank, full-rank literal indexing, prelude sum/product/scale/dot.
+
+The main gap is NVIDIA: there is a hand-authored direct PTX path for rank-1 through rank-3 float32 maps, plus an
+MLIR-derived descriptor wrapper for rank-1/rank-2 float32 maps. That is still not the production Remora gpu.module
+lowering promised by docs/ABI.md and docs/MLIR_TOOLCHAIN.md.
+
+Next Implementation Steps
+
+1. Make MLIR-generated GPU kernels the main NVIDIA path.
+   Convert remora/gpu_lowering.py from scaffold helpers into real HIR-to-gpu.module lowering for the same narrow
+   slice first: unary/binary float32 scalar-cell maps over rank-1 through rank-3 arrays. Keep the external
+   descriptor-pointer ABI, not MLIR exploded memrefs, as the launched kernel boundary.
+
+2. Replace or retire the hand-written PTX shortcut.
+   remora/codegen.py currently has generate_direct_remora_ptx as the executable GPU path. The next milestone should
+   route equivalent supported functions through MLIR/NVVM and RemoraExecutor, then keep direct PTX only as a
+   temporary fallback or delete it once tests are equivalent.
+
+3. Add live CUDA descriptor execution tests for MLIR-derived PTX.
+   Extend tests/test_executor.py and tests/test_gpu_lowering.py so rank-1, rank-2, and rank-3 unary/binary float32
+   maps launch via RemoraExecutor when CUDA is available. This is the most important “production ABI” proof.
+
+4. Install/add ptxas validation when available.
+   The toolchain validator reports ptxas missing. Once present, add an assembly check after llc PTX emission so
+   malformed PTX is caught before runtime launch.
+
+5. Generalize remaining rank-specialized lowering gaps.
+   CPU is rank-10 for scalar maps, but several lowerer paths still document rank-1-cell or rank-3-ish limits:
+   generalized cell maps, array-valued binary map cells, partial indexing, dynamic index expressions, and broader
+   array-cell folds. The next CPU-side work should be partial indexing via tensor.extract_slice and generalized
+   tensor SSA envs, because those unlock views/slices without replacing the ABI.
+
+6. Improve source diagnostics.
+   Source locations are still placeholder line/column 0. Before broadening syntax much further, wire Lark token
+   spans through AST/type errors so deferred/shape/rank diagnostics point at the actual source.
+
+The pragmatic next milestone is: MLIR-derived descriptor-ABI CUDA execution for rank-1 through rank-3 float32 unary/
+binary maps, with live CUDA tests and no hand-authored PTX dependency for that slice.
+
+Next priority is the real production GPU lowering path:
+
+1. Replace the scaffold bridge with direct HIR/tensor-linalg-to-gpu.module lowering.
+   Right now the MLIR GPU path wraps scaffold-generated exploded-memref kernels. The next step is generating
+   descriptor-ABI gpu.func kernels directly from HIR/linalg lowering instead of patching LLVM IR afterward.
+
+2. Add rank-3+ and non-contiguous GPU ABI coverage.
+   CPU descriptors handle strided views; GPU tests should cover strided input/output descriptors once generated
+   kernels use descriptor strides directly.
+
+3. Broaden GPU beyond float32 scalar maps.
+   Add int32, bool/comparison maps, then reductions (fold) and map-then-fold/dot.
+
+4. Improve CPU tensor lowering architecture.
+   Replace tensor let inlining with a real tensor SSA environment. That unlocks more general non-direct tensor
+   expressions, cleaner partial indexing, and future views/slices.
+
+5. Add static bounds checks for literal indexing.
+   Now that partial indexing lowers, catching out-of-bounds literal indices at type/check time is a cheap
+   correctness win.
+
+6. Only after that: GPU REPL/CLI target.
+   remorac --target gpu-nvidia should wait until the generated descriptor-ABI GPU path handles at least scalar maps
+   and reductions without the scaffold bridge.
+
+
+My goal is to have a highly-performant remora compiler and REPL that implement the full language and take advantage
+  of both a multicore CPU and a GPU.  How far are we from having that?
+
+
+• You are still a long way from that goal.
+
+  Current state is a solid prototype/compiler scaffold, not a highly performant full Remora implementation.
+
+  Where We Are
+
+  - Parser/typechecker/HIR/defunctionalization exist for a useful Dense Core subset.
+  - CPU compiled execution works for many examples through MLIR/LLVM tooling.
+  - REPL exists and uses the CPU path.
+  - GPU execution exists only for narrow function-level descriptor-ABI slices:
+      - rank-1..3 float32 maps
+      - rank-1..3 int32 maps
+      - narrow rank-1 float32 scalar reductions/dot-shaped reductions
+
+  - Tests are green and the toolchain story is much clearer than before.
+
+  Major Gaps
+
+  - Full language is not implemented. Dynamic shapes/rank, richer function typing, generalized higher-order behavior,
+    views/transposes/slices, more complete indexing, broader folds/maps, and many deferred cases remain.
+
+  - CPU performance is not yet a real multicore compiler story. The current CPU path uses MLIR/LLVM, but there is not
+    yet a mature scheduling, tiling, vectorization, thread-parallel runtime, or performance-regression framework for
+    multicore execution.
+
+  - GPU performance is very early. Current GPU kernels are correctness slices, not production kernels. Reductions are
+    serial, bool GPU ABI is unresolved, and general tensor/linalg-to-GPU lowering is not in place.
+
+  - REPL GPU execution is not implemented. GPU is exposed as function-level Python API execution, not as a complete
+    interactive Remora target.
+
+  - No mature optimizer pipeline yet for whole-program Remora: fusion is partly validated, but not enough to claim
+    high performance.
+
+  - No end-to-end user model for GPU inputs/outputs in CLI/REPL.
+
+  Distance To Goal
+  Roughly:
+
+  - Language prototype: maybe 35-45% toward a usable Dense Core subset.
+  - Full language implementation: likely under 25%.
+  - High-performance multicore CPU backend: maybe 15-25%.
+  - High-performance GPU backend: maybe 10-20%.
+  - Production-quality compiler + REPL experience: maybe 20-30%.
+
+  The biggest next milestones are:
+
+  1. Define the exact “full language” subset for v1, including what remains deferred.
+  2. Build a real CPU performance path: linalg fusion, bufferization, vectorization, OpenMP/threading, benchmarks.
+  3. Replace narrow GPU codegen with general MLIR GPU lowering for maps/folds/indexing/views.
+  4. Add parallel GPU reductions and block/grid scheduling.
+  5. Add CLI/REPL input binding for arrays and make gpu-nvidia a real execution target.
+  6. Add performance benchmarks and regression gates for CPU and GPU.
+
+  The current codebase is in a good position to keep building, but it is still a research/prototype compiler, not
+  close to the final high-performance multicore+GPU Remora system.

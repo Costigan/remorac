@@ -1,3 +1,5 @@
+This plan is out-of-date.  It is kept for historical interest.
+
 # Remora GPU Compiler: Detailed Implementation Plan
 
 ## 1. Goals and Deliverables
