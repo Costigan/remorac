@@ -1722,8 +1722,10 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     The follow-on device-module extraction, LLVM IR translation, and `llc`
     NVPTX text emission are now validated for the scaffold slice, but that PTX
     still uses MLIR's exploded memref ABI instead of the final Remora
-    descriptor-pointer ABI. The production tensor/linalg-to-gpu pipeline and
-    descriptor-ABI kernel export remain deferred.
+    descriptor-pointer ABI. A first MLIR-derived descriptor-ABI bridge now exists
+    for rank-1 unary `float32` maps by wrapping the inner exploded-memref kernel
+    before NVPTX emission, but the production tensor/linalg-to-gpu pipeline and
+    general descriptor-ABI kernel export remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
   - Current: `remora.gpu_lowering` now builds parse-validated `gpu.module` /
     `gpu.func` scaffolds for the same narrow rank-1 through rank-3 `float32`
@@ -1754,6 +1756,9 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     now makes the current split explicit by pairing the inspection scaffold with
     the separate executable descriptor-ABI PTX artifact for the same supported
     function.
+  - Current: `remora.codegen.generate_rank1_f32_unary_mlir_descriptor_abi_ptx`
+    is the first MLIR-derived executable bridge for this area. It currently
+    covers only rank-1 unary `float32` maps and remains experimental.
   - Decision: do not widen this hand-authored PTX slice to rank 4 through rank
     10. It is a runtime/codegen smoke path only. Higher-rank and production GPU
     work must go through `gpu.module` / `gpu.func` lowering through the
