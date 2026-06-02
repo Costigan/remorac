@@ -24,6 +24,7 @@ from remora.runtime import evaluate_source_compiled, resolve_cpu_threads
 class BenchmarkResult:
     name: str
     cpu_threads: int | None
+    cpu_vectorize: bool
     mlir_compile_s: float
     fusion_pipeline_s: float
     cpu_pipeline_s: float
@@ -42,6 +43,7 @@ def benchmark_source(
     *,
     name: str = "program",
     cpu_threads: int | None = None,
+    cpu_vectorize: bool = False,
     toolchain: PipelineToolchain | None = None,
 ) -> BenchmarkResult:
     """Compile and execute one source string, returning coarse timing metrics."""
@@ -57,16 +59,21 @@ def benchmark_source(
     fusion_pipeline_s = time.perf_counter() - start
 
     start = time.perf_counter()
-    lowered = run_cpu_pipeline_text(mlir, toolchain=toolchain)
+    lowered = run_cpu_pipeline_text(mlir, toolchain=toolchain, vectorize=cpu_vectorize)
     cpu_pipeline_s = time.perf_counter() - start
 
     start = time.perf_counter()
-    evaluate_source_compiled(source, cpu_threads=resolved_cpu_threads)
+    evaluate_source_compiled(
+        source,
+        cpu_threads=resolved_cpu_threads,
+        cpu_vectorize=cpu_vectorize,
+    )
     compiled_execution_s = time.perf_counter() - start
 
     return BenchmarkResult(
         name=name,
         cpu_threads=resolved_cpu_threads,
+        cpu_vectorize=cpu_vectorize,
         mlir_compile_s=mlir_compile_s,
         fusion_pipeline_s=fusion_pipeline_s,
         cpu_pipeline_s=cpu_pipeline_s,
@@ -82,6 +89,32 @@ def _allocation_count(lowered_mlir: str) -> int:
     return lowered_mlir.count("llvm.call @malloc") + lowered_mlir.count("memref.alloc")
 
 
+def check_result_against_baseline(
+    result: BenchmarkResult,
+    baselines: dict[str, object],
+) -> list[str]:
+    cases = baselines.get("cases")
+    if not isinstance(cases, list):
+        return ["benchmark baseline file must contain a cases list"]
+    baseline = next(
+        (case for case in cases if isinstance(case, dict) and case.get("name") == result.name),
+        None,
+    )
+    if baseline is None:
+        return [f"benchmark baseline for {result.name!r} was not found"]
+
+    failures: list[str] = []
+    max_fused = baseline.get("max_linalg_generic_after_fusion")
+    if isinstance(max_fused, int) and result.linalg_generic_after_fusion > max_fused:
+        failures.append(
+            f"{result.name}: linalg_generic_after_fusion {result.linalg_generic_after_fusion} > {max_fused}"
+        )
+    max_allocs = baseline.get("max_allocation_count")
+    if isinstance(max_allocs, int) and result.allocation_count > max_allocs:
+        failures.append(f"{result.name}: allocation_count {result.allocation_count} > {max_allocs}")
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Benchmark a Remora Dense Core source file")
     parser.add_argument("file", type=Path, help="Remora source file")
@@ -92,6 +125,26 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="requested CPU worker thread count; defaults to REMORA_NUM_THREADS when set",
     )
+    vectorize_group = parser.add_mutually_exclusive_group()
+    vectorize_group.add_argument(
+        "--cpu-vectorize",
+        dest="cpu_vectorize",
+        action="store_true",
+        help="use the experimental affine/vector CPU lowering pipeline",
+    )
+    vectorize_group.add_argument(
+        "--no-cpu-vectorize",
+        dest="cpu_vectorize",
+        action="store_false",
+        help="use the scalar CPU lowering pipeline",
+    )
+    parser.set_defaults(cpu_vectorize=False)
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="optional benchmark baseline JSON file to check this result against",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -100,11 +153,20 @@ def main(argv: list[str] | None = None) -> int:
             source,
             name=args.name or args.file.stem,
             cpu_threads=args.cpu_threads,
+            cpu_vectorize=args.cpu_vectorize,
         )
-    except (OSError, RemoraError) as exc:
+        failures: list[str] = []
+        if args.baseline is not None:
+            baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+            failures = check_result_against_baseline(result, baseline)
+    except (OSError, RemoraError, json.JSONDecodeError) as exc:
         print(f"remora-bench: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result.to_dict(), sort_keys=True))
+    if failures:
+        for failure in failures:
+            print(f"remora-bench: {failure}", file=sys.stderr)
+        return 2
     return 0
 
 

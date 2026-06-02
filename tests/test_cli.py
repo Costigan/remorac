@@ -89,6 +89,24 @@ def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
     assert captured.err == ""
 
 
+def test_cli_accepts_cpu_vectorize_option(tmp_path, capsys):
+    source = write_source(tmp_path, "map (* 2.0) (iota 4)")
+
+    assert main(["--cpu-vectorize", str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "[0.0, 2.0, 4.0, 6.0]\n"
+    assert captured.err == ""
+
+
+def test_cli_accepts_no_cpu_vectorize_option(tmp_path, capsys):
+    source = write_source(tmp_path, "1 + 2")
+
+    assert main(["--no-cpu-vectorize", str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "3\n"
+    assert captured.err == ""
+
+
 def test_cli_runs_threaded_cpu_when_openmp_available(tmp_path, capsys):
     if not has_openmp_runtime():
         pytest.skip("OpenMP runtime is unavailable")

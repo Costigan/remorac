@@ -565,18 +565,27 @@ Deferred pipeline/codegen work:
   use `--cpu-threads 1`. With LLVM 18 libomp installed, map-shaped programs,
   scalar reductions, dot-shaped reductions, and row reductions execute through
   the threaded pipeline.
+- CPU execution also accepts `--cpu-vectorize`, `--no-cpu-vectorize`, and a
+  `cpu_vectorize` public compile-helper option. The vectorized path is
+  experimental and intentionally non-default. It lowers through affine loops,
+  runs MLIR 18's affine super-vectorizer, and then lowers vector/affine/scf to
+  LLVM. The current smoke programs compile and execute through this path, but
+  MLIR may still choose scalar LLVM for simple loops.
 - `remora-bench` provides the first JSON benchmark harness. It records MLIR
   compile time, fusion pipeline time, CPU pipeline time, compiled execution
-  time, requested CPU threads, linalg/LLVM operation counts, and a coarse
-  allocation count. Static smoke ceilings live in
-  `docs/BENCHMARK_BASELINES.json`.
+  time, requested CPU threads, requested vectorization mode, linalg/LLVM
+  operation counts, and a coarse allocation count. Static smoke ceilings live in
+  `docs/BENCHMARK_BASELINES.json` and can be checked with
+  `remora-bench --baseline docs/BENCHMARK_BASELINES.json program.remora`.
 
 Deferred CPU/runtime work:
 
 - Complete the multicore CPU lowering path for broader nested tensor programs
   and add CI coverage in an environment with libomp installed.
-- Add vectorization controls and make the benchmark baselines enforce
-  allocation/reuse and wall-clock trend gates instead of only smoke structure.
+- Extend benchmark gating from current fusion/allocation ceilings to
+  machine-local wall-clock trend comparisons.
+- Start buffer reuse/arena planning for intermediate tensors that survive
+  fusion.
 - Expose descriptor-input callable compilation through a documented CLI or
   stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process

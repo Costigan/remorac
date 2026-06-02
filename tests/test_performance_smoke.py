@@ -6,7 +6,11 @@ import time
 
 import pytest
 
-from remora.benchmark import benchmark_source, main as benchmark_main
+from remora.benchmark import (
+    benchmark_source,
+    check_result_against_baseline,
+    main as benchmark_main,
+)
 from remora.compiler import compile_source_to_mlir
 from remora.pipeline import detect_toolchain, run_cpu_pipeline_text, run_fusion_pipeline_text
 
@@ -98,9 +102,21 @@ def test_benchmark_source_records_cpu_thread_request():
 
     assert result.name == "tiny"
     assert result.cpu_threads == 1
+    assert result.cpu_vectorize is False
     assert result.linalg_generic_before >= result.linalg_generic_after_fusion
     assert result.llvm_func_count >= 1
     assert result.allocation_count >= 0
+
+
+def test_benchmark_source_records_cpu_vectorize_request():
+    result = benchmark_source(
+        "map (* 2.0) (iota 4)",
+        name="tiny-vectorized",
+        cpu_vectorize=True,
+    )
+
+    assert result.cpu_vectorize is True
+    assert result.llvm_func_count >= 1
 
 
 def test_benchmark_cli_emits_json(tmp_path, capsys):
@@ -113,8 +129,42 @@ def test_benchmark_cli_emits_json(tmp_path, capsys):
 
     assert payload["name"] == "bench"
     assert payload["cpu_threads"] == 1
+    assert payload["cpu_vectorize"] is False
     assert "allocation_count" in payload
     assert captured.err == ""
+
+
+def test_benchmark_cli_checks_baseline(tmp_path, capsys):
+    source = tmp_path / "bench.remora"
+    source.write_text("map (* 2) (iota 4)", encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "bench",
+                        "max_linalg_generic_after_fusion": 0,
+                        "max_allocation_count": 0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert benchmark_main(["--baseline", str(baseline), str(source)]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["name"] == "bench"
+    assert "linalg_generic_after_fusion" in captured.err
+
+
+def test_benchmark_baseline_checker_reports_missing_case():
+    result = benchmark_source("map (* 2) (iota 4)", name="missing")
+
+    failures = check_result_against_baseline(result, {"cases": []})
+
+    assert failures == ["benchmark baseline for 'missing' was not found"]
 
 
 def test_benchmark_baselines_cover_smoke_cases():
