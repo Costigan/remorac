@@ -1723,10 +1723,10 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     NVPTX text emission are now validated for the scaffold slice, but that PTX
     still uses MLIR's exploded memref ABI instead of the final Remora
     descriptor-pointer ABI. A first MLIR-derived descriptor-ABI bridge now exists
-    for rank-1 unary/binary `float32` maps and rank-2 unary `float32` maps by
-    wrapping the inner exploded-memref kernel before NVPTX emission, but the
-    production tensor/linalg-to-gpu pipeline and general descriptor-ABI kernel
-    export remain deferred.
+    for rank-1 unary/binary `float32` maps and rank-2 unary/binary `float32`
+    maps by wrapping the inner exploded-memref kernel before NVPTX emission, but
+    the production tensor/linalg-to-gpu pipeline and general descriptor-ABI
+    kernel export remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
   - Current: `remora.gpu_lowering` now builds parse-validated `gpu.module` /
     `gpu.func` scaffolds for the same narrow rank-1 through rank-3 `float32`

@@ -465,13 +465,13 @@ Deferred pipeline/codegen work:
   Remora descriptor-pointer ABI. PTX assembly and runtime launch are not wired
   yet.
 - The first MLIR-derived executable GPU slice now exists for rank-1 `float32`
-  unary/binary maps and rank-2 `float32` unary maps.
+  unary/binary maps and rank-2 `float32` unary/binary maps.
   `generate_mlir_descriptor_abi_ptx` lowers the
   scaffold through the LLVM-dialect path, injects a descriptor-pointer ABI
   wrapper around the inner exploded-memref kernel, and emits PTX that
   `RemoraExecutor` can launch. This remains an experimental bridge step, not
   full production `gpu.module` lowering parity, and it is only validated for the
-  current contiguous rank-1 unary/binary and rank-2 unary slices.
+  current contiguous rank-1 unary/binary and rank-2 unary/binary slices.
 - For the current supported rank-1 through rank-3 float map slice, the
   executable descriptor-ABI GPU path remains `generate_direct_remora_ptx`.
   `compile_function_source_to_supported_gpu_artifacts` now makes that split

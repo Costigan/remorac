@@ -542,6 +542,35 @@ def test_rank2_unary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available(
     assert kernels[0].output_shape == (2, 3)
 
 
+def test_rank2_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def add xs ys = map (+) xs ys",
+            "add",
+            (
+                ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+                ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+            ),
+            kernel_name="remora_add2d",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_add2d" in ptx
+    assert ".visible .entry remora_add2d_inner" not in ptx
+    assert ".func remora_add2d_inner" in ptx or ".visible .func remora_add2d_inner" in ptx
+    assert ptx_param_count(ptx, "remora_add2d") == 3
+    assert ptx_func_param_count(ptx, "remora_add2d_inner") == 21
+    assert kernels[0].name == "remora_add2d"
+    assert kernels[0].num_inputs == 2
+    assert kernels[0].output_shape == (2, 3)
+
+
 def test_extract_gpu_module_reports_missing_module():
     with pytest.raises(GPUScaffoldError, match="was not found"):
         extract_gpu_module_body_as_module("module {}")
