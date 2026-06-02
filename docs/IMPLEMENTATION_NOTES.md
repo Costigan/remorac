@@ -558,16 +558,23 @@ Deferred pipeline/codegen work:
   `--target mlir` and `--target ptx` aliases for artifact inspection.
 - CPU execution now accepts an explicit requested thread count through
   `--cpu-threads`, the public CPU compile helpers, and `REMORA_NUM_THREADS`.
-  The current backend records this value in compiled artifacts and benchmark
-  output; it does not yet lower to an OpenMP/thread-parallel MLIR pipeline.
+  `cpu_threads > 1` selects the experimental OpenMP lowering path:
+  `linalg` to `scf.parallel`, `scf.parallel` to the OpenMP dialect, then OpenMP
+  to LLVM. This path currently requires a libomp-compatible runtime with
+  `__kmpc` symbols at link time; environments without libomp get a stable
+  diagnostic and should use `--cpu-threads 1`.
 - `remora-bench` provides the first JSON benchmark harness. It records MLIR
   compile time, fusion pipeline time, CPU pipeline time, compiled execution
-  time, requested CPU threads, and coarse operation counts.
+  time, requested CPU threads, linalg/LLVM operation counts, and a coarse
+  allocation count. Static smoke ceilings live in
+  `docs/BENCHMARK_BASELINES.json`.
 
 Deferred CPU/runtime work:
 
-- Implement the actual multicore CPU lowering path for the requested thread
-  count, likely through an explicit OpenMP or parallel runtime strategy.
+- Complete the multicore CPU lowering path for reductions and nested tensor
+  programs, and add CI coverage in an environment with libomp installed.
+- Add vectorization controls and make the benchmark baselines enforce
+  allocation/reuse and wall-clock trend gates instead of only smoke structure.
 - Expose descriptor-input callable compilation through a documented CLI or
   stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "notes": "Static smoke baselines for the current dense CPU lowering path. These are ceilings for compiler-shape metrics, not wall-clock performance guarantees.",
+  "cases": [
+    {
+      "name": "vector_scale",
+      "max_linalg_generic_after_fusion": 1,
+      "max_allocation_count": 8
+    },
+    {
+      "name": "map_chain",
+      "max_linalg_generic_after_fusion": 1,
+      "max_allocation_count": 8
+    },
+    {
+      "name": "vector_sum",
+      "max_linalg_generic_after_fusion": 2,
+      "max_allocation_count": 8
+    },
+    {
+      "name": "dot",
+      "max_linalg_generic_after_fusion": 1,
+      "max_allocation_count": 8
+    }
+  ]
+}

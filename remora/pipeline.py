@@ -33,6 +33,19 @@ CPU_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
+CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
+    [
+        "linalg-fuse-elementwise-ops",
+        "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "convert-linalg-to-parallel-loops",
+        "convert-scf-to-openmp",
+        "convert-openmp-to-llvm",
+        "convert-scf-to-cf",
+        "convert-to-llvm",
+        "reconcile-unrealized-casts",
+    ]
+) + ")"
+
 GPU_NVIDIA_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
@@ -129,6 +142,10 @@ def build_cpu_pipeline() -> Any:
     return build_pipeline(CPU_PIPELINE)
 
 
+def build_cpu_threaded_pipeline() -> Any:
+    return build_pipeline(CPU_THREADED_PIPELINE)
+
+
 def build_gpu_nvidia_pipeline() -> Any:
     return build_pipeline(GPU_NVIDIA_PIPELINE)
 
@@ -210,8 +227,10 @@ def run_cpu_pipeline_text(
     mlir_text: str,
     *,
     toolchain: PipelineToolchain | None = None,
+    threaded: bool = False,
 ) -> str:
-    return run_external_pipeline_text(mlir_text, CPU_PIPELINE, toolchain=toolchain)
+    pipeline = CPU_THREADED_PIPELINE if threaded else CPU_PIPELINE
+    return run_external_pipeline_text(mlir_text, pipeline, toolchain=toolchain)
 
 
 def run_fusion_pipeline_text(

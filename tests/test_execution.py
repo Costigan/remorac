@@ -11,7 +11,9 @@ from remora.runtime import (
     evaluate_source,
     evaluate_source_compiled,
     resolve_cpu_threads,
+    has_openmp_runtime,
 )
+from remora.pipeline import PipelineUnavailable
 from remora.types import FLOAT, INT, ArrayType, StaticDim
 
 
@@ -140,16 +142,16 @@ def test_cpu_executor_compile_source_keeps_artifact_until_closed():
 
 
 def test_cpu_executor_records_requested_thread_count(monkeypatch):
-    explicit = CPUExecutor.compile_source("1 + 2", cpu_threads=3)
+    explicit = CPUExecutor.compile_source("1 + 2", cpu_threads=1)
     try:
-        assert explicit.cpu_threads == 3
+        assert explicit.cpu_threads == 1
     finally:
         explicit.close()
 
-    monkeypatch.setenv("REMORA_NUM_THREADS", "4")
+    monkeypatch.setenv("REMORA_NUM_THREADS", "1")
     from_env = CPUExecutor.compile_source("1 + 2")
     try:
-        assert from_env.cpu_threads == 4
+        assert from_env.cpu_threads == 1
     finally:
         from_env.close()
 
@@ -161,6 +163,14 @@ def test_resolve_cpu_threads_rejects_invalid_values(monkeypatch):
     monkeypatch.setenv("REMORA_NUM_THREADS", "not-an-int")
     with pytest.raises(EvaluationError, match="positive integer"):
         resolve_cpu_threads()
+
+
+def test_cpu_threads_request_requires_openmp_runtime_when_unavailable():
+    if has_openmp_runtime():
+        pytest.skip("OpenMP runtime is available")
+
+    with pytest.raises(PipelineUnavailable, match="OpenMP runtime"):
+        CPUExecutor.compile_source("map (* 2) (iota 4)", cpu_threads=2)
 
 
 def test_cpu_executor_execute_main_formats_scalar_vector_matrix_and_rank3_results():

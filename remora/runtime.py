@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from shutil import which
 import subprocess
@@ -117,6 +118,11 @@ def _validate_cpu_threads(value: int, label: str) -> int:
     if value < 1:
         raise EvaluationError(f"{label} must be a positive integer")
     return int(value)
+
+
+def has_openmp_runtime() -> bool:
+    """Return whether a libomp-compatible runtime is available for MLIR OpenMP IR."""
+    return _find_openmp_runtime() is not None
 
 
 def cuda_available() -> bool:
@@ -433,7 +439,24 @@ class CPUExecutor:
             raise EvaluationError("definition-only programs cannot be compiled for CPU execution")
 
         toolchain = detect_toolchain() if toolchain is None else toolchain
-        lowered = run_cpu_pipeline_text(compiler_artifact.mlir_text, toolchain=toolchain)
+        threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
+        if threaded and not has_openmp_runtime():
+            raise PipelineUnavailable(
+                "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "
+                "install libomp or use --cpu-threads 1"
+            )
+        try:
+            lowered = run_cpu_pipeline_text(
+                compiler_artifact.mlir_text,
+                toolchain=toolchain,
+                threaded=threaded,
+            )
+        except PipelineUnavailable as exc:
+            if threaded:
+                raise PipelineUnavailable(
+                    f"threaded CPU lowering is not available for this program: {exc}"
+                ) from exc
+            raise
         llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
 
         temp_dir = tempfile.TemporaryDirectory(prefix="remora-cpu-")
@@ -465,7 +488,14 @@ class CPUExecutor:
             temp_dir,
         )
         _run_checked(
-            [linker, "-shared", str(obj_path), "-o", str(so_path)],
+            [
+                linker,
+                "-shared",
+                str(obj_path),
+                "-o",
+                str(so_path),
+                *_openmp_link_args(threaded),
+            ],
             "system linker failed during compiled CPU execution",
             temp_dir,
         )
@@ -503,7 +533,8 @@ class CPUExecutor:
         function = self._library._mlir_ciface_remora_main_out
         function.argtypes = [ctypes.POINTER(type(descriptor))]
         function.restype = None
-        function(ctypes.byref(descriptor))
+        with _temporary_omp_threads(self._artifact.cpu_threads):
+            function(ctypes.byref(descriptor))
 
 
 class CPUFunctionExecutor:
@@ -533,9 +564,26 @@ class CPUFunctionExecutor:
             include_prelude=include_prelude,
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
-        lowered = run_cpu_pipeline_text(compiler_artifact.mlir_text, toolchain=toolchain)
+        threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
+        if threaded and not has_openmp_runtime():
+            raise PipelineUnavailable(
+                "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "
+                "install libomp or use --cpu-threads 1"
+            )
+        try:
+            lowered = run_cpu_pipeline_text(
+                compiler_artifact.mlir_text,
+                toolchain=toolchain,
+                threaded=threaded,
+            )
+        except PipelineUnavailable as exc:
+            if threaded:
+                raise PipelineUnavailable(
+                    f"threaded CPU lowering is not available for this function: {exc}"
+                ) from exc
+            raise
         llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
-        temp_dir = _compile_llvm_ir_to_shared_library(llvm_ir, toolchain)
+        temp_dir = _compile_llvm_ir_to_shared_library(llvm_ir, toolchain, threaded=threaded)
         return CompiledCPUFunctionArtifact(
             temp_dir[1],
             temp_dir[0],
@@ -579,10 +627,11 @@ class CPUFunctionExecutor:
             ctypes.POINTER(type(output_descriptor)),
         ]
         function.restype = None
-        function(
-            *(ctypes.byref(descriptor) for descriptor in descriptors),
-            ctypes.byref(output_descriptor),
-        )
+        with _temporary_omp_threads(self._artifact.cpu_threads):
+            function(
+                *(ctypes.byref(descriptor) for descriptor in descriptors),
+                ctypes.byref(output_descriptor),
+            )
 
 
 def _run_checked(
@@ -600,6 +649,8 @@ def _run_checked(
 def _compile_llvm_ir_to_shared_library(
     llvm_ir: str,
     toolchain: PipelineToolchain,
+    *,
+    threaded: bool = False,
 ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     temp_dir = tempfile.TemporaryDirectory(prefix="remora-cpu-")
     root = Path(temp_dir.name)
@@ -630,11 +681,63 @@ def _compile_llvm_ir_to_shared_library(
         temp_dir,
     )
     _run_checked(
-        [linker, "-shared", str(obj_path), "-o", str(so_path)],
+        [
+            linker,
+            "-shared",
+            str(obj_path),
+            "-o",
+            str(so_path),
+            *_openmp_link_args(threaded),
+        ],
         "system linker failed during compiled CPU execution",
         temp_dir,
     )
     return temp_dir, so_path
+
+
+def _use_threaded_cpu_pipeline(cpu_threads: int | None) -> bool:
+    return cpu_threads is not None and cpu_threads > 1
+
+
+def _find_openmp_runtime() -> str | None:
+    candidates = [
+        "/usr/lib/llvm-18/lib/libomp.so",
+        "/usr/lib/llvm-17/lib/libomp.so",
+        "/usr/lib/x86_64-linux-gnu/libomp.so",
+        "/usr/lib/x86_64-linux-gnu/libomp.so.5",
+        "/lib/x86_64-linux-gnu/libomp.so.5",
+    ]
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return str(path)
+    found = which("libomp.so")
+    return found
+
+
+def _openmp_link_args(threaded: bool) -> list[str]:
+    if not threaded:
+        return []
+    runtime = _find_openmp_runtime()
+    if runtime is None:
+        raise PipelineUnavailable("OpenMP runtime libomp was not found")
+    return [runtime]
+
+
+@contextmanager
+def _temporary_omp_threads(cpu_threads: int | None):
+    if cpu_threads is None:
+        yield
+        return
+    previous = os.environ.get("OMP_NUM_THREADS")
+    os.environ["OMP_NUM_THREADS"] = str(cpu_threads)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = previous
 
 
 def _empty_output_value(value_type: RemoraType) -> np.ndarray:
