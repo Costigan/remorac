@@ -62,7 +62,7 @@ class ASTBuilder(Transformer):
                 definitions.append(item)
             else:
                 body = item
-        return Program(definitions, body, self._loc())
+        return Program(definitions, body, self._loc_from(items))
 
     def top_level(self, items: list[Any]) -> list[Any]:
         return items
@@ -71,91 +71,108 @@ class ASTBuilder(Transformer):
         name = str(items[0])
         params = [str(param) for param in items[1]]
         body = items[2]
-        return FuncDef(name, params, body, self._loc())
+        return FuncDef(name, params, body, self._loc_from(items))
 
     def val_def(self, items: list[Any]) -> ValDef:
-        return ValDef(str(items[0]), items[1], self._loc())
+        return ValDef(str(items[0]), items[1], self._loc_from(items))
 
     def params(self, items: list[Any]) -> list[str]:
         return [str(item) for item in items]
 
     def let_expr(self, items: list[Any]) -> LetExpr:
-        return LetExpr(str(items[0]), items[1], items[2], self._loc())
+        return LetExpr(str(items[0]), items[1], items[2], self._loc_from(items))
 
     def if_expr(self, items: list[Any]) -> IfExpr:
-        return IfExpr(items[0], items[1], items[2], self._loc())
+        return IfExpr(items[0], items[1], items[2], self._loc_from(items))
 
     def lambda_expr(self, items: list[Any]) -> LambdaExpr:
         params = [str(item) for item in items[1:-2]]
         body = items[-1]
-        return LambdaExpr(params, body, self._loc())
+        return LambdaExpr(params, body, self._loc_from(items))
 
     def compose_expr(self, items: list[Any]) -> ComposeExpr:
-        return ComposeExpr(items[0], items[2], self._loc())
+        return ComposeExpr(items[0], items[2], self._loc_from(items))
 
     def binary_expr(self, items: list[Any]) -> AppExpr:
         left, op, right = items
-        return AppExpr(VarExpr(str(op), self._loc()), [left, right], self._loc())
+        return AppExpr(
+            VarExpr(str(op), self._loc_from([op])),
+            [left, right],
+            self._loc_from(items),
+        )
 
     def application(self, items: list[Any]) -> AppExpr:
         func = items[0]
         args = list(items[1:])
         if isinstance(func, AppExpr):
             return AppExpr(func.func, func.args + args, func.loc)
-        return AppExpr(func, args, self._loc())
+        return AppExpr(func, args, self._loc_from(items))
 
     def map_expr(self, items: list[Any]) -> MapExpr:
-        return MapExpr(items[0], list(items[1:]), self._loc())
+        return MapExpr(items[0], list(items[1:]), self._loc_from(items))
 
     def fold_expr(self, items: list[Any]) -> FoldExpr:
-        return FoldExpr(items[0], items[1], items[2], self._loc())
+        return FoldExpr(items[0], items[1], items[2], self._loc_from(items))
 
     def iota_expr(self, items: list[Any]) -> IotaExpr:
-        return IotaExpr(items[0], self._loc())
+        return IotaExpr(items[0], self._loc_from(items))
 
     def shape_expr(self, items: list[Any]) -> ShapeExpr:
-        return ShapeExpr(items[0], self._loc())
+        return ShapeExpr(items[0], self._loc_from(items))
 
     def rank_expr(self, items: list[Any]) -> RankExpr:
-        return RankExpr(items[0], self._loc())
+        return RankExpr(items[0], self._loc_from(items))
 
     def operator_func(self, items: list[Any]) -> OperatorFuncExpr:
-        return OperatorFuncExpr(str(items[0]), self._loc())
+        return OperatorFuncExpr(str(items[0]), self._loc_from(items))
 
     def left_section(self, items: list[Any]) -> LeftSectionExpr:
-        return LeftSectionExpr(str(items[0]), items[1], self._loc())
+        return LeftSectionExpr(str(items[0]), items[1], self._loc_from(items))
 
     def right_section(self, items: list[Any]) -> RightSectionExpr:
-        return RightSectionExpr(items[0], str(items[1]), self._loc())
+        return RightSectionExpr(items[0], str(items[1]), self._loc_from(items))
 
     def paren(self, items: list[Any]) -> Expr:
         return items[0]
 
     def array_lit(self, items: list[Any]) -> ArrayLit:
-        return ArrayLit(list(items), self._loc())
+        return ArrayLit(list(items), self._loc_from(items))
 
     def atom(self, items: list[Any]) -> Expr:
         expr = items[0]
         for suffix in items[1:]:
-            expr = IndexExpr(expr, suffix, self._loc())
+            expr = IndexExpr(expr, suffix, self._loc_from([expr]))
         return expr
 
     def index_suffix(self, items: list[Any]) -> list[Expr]:
         return list(items)
 
     def float_lit(self, items: list[Any]) -> FloatLit:
-        return FloatLit(float(items[0]), self._loc())
+        return FloatLit(float(items[0]), self._loc_from(items))
 
     def int_lit(self, items: list[Any]) -> IntLit:
-        return IntLit(int(items[0]), self._loc())
+        return IntLit(int(items[0]), self._loc_from(items))
 
     def bool_lit(self, items: list[Any]) -> BoolLit:
-        return BoolLit(str(items[0]) == "true", self._loc())
+        return BoolLit(str(items[0]) == "true", self._loc_from(items))
 
     def var(self, items: list[Any]) -> VarExpr:
-        return VarExpr(str(items[0]), self._loc())
+        return VarExpr(str(items[0]), self._loc_from(items))
 
-    def _loc(self) -> SourceLoc:
+    def _loc(self, line: int = 0, col: int = 0) -> SourceLoc:
+        return SourceLoc(self.filename, line, col)
+
+    def _loc_from(self, items: list[Any]) -> SourceLoc:
+        for item in items:
+            if isinstance(item, Token):
+                return SourceLoc(self.filename, item.line, item.column)
+            loc = getattr(item, "loc", None)
+            if isinstance(loc, SourceLoc):
+                return loc
+            if isinstance(item, list):
+                loc = self._loc_from(item)
+                if loc.line or loc.col:
+                    return loc
         return SourceLoc(self.filename, 0, 0)
 
 

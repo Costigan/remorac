@@ -71,6 +71,13 @@ def test_iota_has_static_rank_1_int_array_type():
     assert typed.type == ArrayType(INT, (StaticDim(10),))
 
 
+def test_type_errors_include_source_location():
+    program = parse_program("iota -1", "bad.remora")
+
+    with pytest.raises(RemoraTypeError, match=r"bad\.remora:1:6"):
+        TypeChecker().check_program(program)
+
+
 def test_shape_expression_typechecks_from_static_array_type():
     typed = infer("shape [[1, 2], [3, 4]]")
 

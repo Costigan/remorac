@@ -9,7 +9,8 @@ pipeline validation. IREE remains an inspection backend only.
 - `mlir-opt`: `/usr/bin/mlir-opt-18`
 - `mlir-translate`: `/usr/bin/mlir-translate-18`
 - `llc`: `/usr/bin/llc-18`
-- `ptxas`: not installed in the current environment
+- `ptxas`: not installed in the current environment; PTX assembly validation
+  is skipped when unavailable
 - IREE inspection tools: `.venv/bin/iree-opt`, `.venv/bin/iree-compile`
 - IREE package: `iree-compiler==20241104.1068`
 
@@ -31,11 +32,17 @@ The pipeline validator checks:
 - The lowered LLVM dialect translates to LLVM IR with `mlir-translate-18`.
 - Fusion reduces nested map programs at the `linalg.generic` level.
 
-## Deferred GPU Backend
+## GPU Backend Status
 
 The final NVIDIA backend requires Remora to lower to explicit `gpu.module` /
 `gpu.func` kernels using the descriptor ABI in `docs/ABI.md`, then translate
-device code through NVVM and assemble/check PTX. That path is not complete yet.
+device code through NVVM and assemble/check PTX.
 
-Until then, `remora.codegen.generate_ptx` is only an IREE HAL PTX inspection
-path. Its launch ABI is not the Remora descriptor ABI.
+The current executable MLIR-derived slice covers rank-1 through rank-3
+`float32` unary and binary scalar-cell maps. It lowers the scaffold
+`gpu.module` through NVVM, injects a descriptor-pointer ABI wrapper, emits PTX
+with `llc`, and launches through `RemoraExecutor` when CUDA is available.
+`ptxas` assembly checks are available through tests when `ptxas` is installed.
+
+`remora.codegen.generate_ptx` remains only an IREE HAL PTX inspection path. Its
+launch ABI is not the Remora descriptor ABI.

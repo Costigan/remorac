@@ -1723,8 +1723,8 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     NVPTX text emission are now validated for the scaffold slice, but that PTX
     still uses MLIR's exploded memref ABI instead of the final Remora
     descriptor-pointer ABI. A first MLIR-derived descriptor-ABI bridge now exists
-    for rank-1 unary/binary `float32` maps and rank-2 unary/binary `float32`
-    maps by wrapping the inner exploded-memref kernel before NVPTX emission, but
+    for rank-1 through rank-3 unary/binary `float32` maps by wrapping the inner
+    exploded-memref kernel before NVPTX emission, but
     the production tensor/linalg-to-gpu pipeline and general descriptor-ABI
     kernel export remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
@@ -1753,13 +1753,15 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     functions with a literal float section constant, plus binary maps over two
     matching `float32` inputs. Rank-2/rank-3 kernels use flattened CUDA
     indexing and descriptor strides. This feeds `RemoraExecutor` directly and
-    is separate from IREE HAL PTX. `compile_function_source_to_supported_gpu_artifacts`
-    now makes the current split explicit by pairing the inspection scaffold with
-    the separate executable descriptor-ABI PTX artifact for the same supported
-    function.
+    is separate from IREE HAL PTX and remains as a compatibility fallback.
+    `compile_function_source_to_supported_gpu_artifacts` now pairs the scaffold
+    with the MLIR-derived executable descriptor-ABI PTX artifact for the same
+    supported function when standalone NVPTX tools are available.
   - Current: `remora.codegen.generate_rank1_f32_unary_mlir_descriptor_abi_ptx`
-    is the first MLIR-derived executable bridge for this area. It currently
-    covers only rank-1 unary `float32` maps and remains experimental.
+    is a backward-compatible wrapper around
+    `generate_mlir_descriptor_abi_ptx`. The MLIR-derived executable bridge now
+    covers rank-1 through rank-3 unary/binary `float32` maps and remains
+    experimental.
   - Decision: do not widen this hand-authored PTX slice to rank 4 through rank
     10. It is a runtime/codegen smoke path only. Higher-rank and production GPU
     work must go through `gpu.module` / `gpu.func` lowering through the
@@ -2094,8 +2096,9 @@ class CPUExecutor:
   - Dot product `[1,2,3] · [4,5,6]` → `32.0`
   - Verify on CPU executor first, then GPU executor
   - CUDA runtime tests cover descriptor-aware argument packing without a GPU.
-  - A live CUDA rank-1 descriptor round-trip test runs when a CUDA driver/device
-    is available, and skips otherwise.
+  - Live CUDA descriptor round-trip tests for MLIR-derived rank-1 through rank-3
+    unary/binary `float32` maps run when a CUDA driver/device is available, and
+    skip otherwise.
 
 **Milestone M6**: descriptor ABI tests pass for rank 0 through rank 10, and compiled CPU execution returns `[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]` for a `map (* 2.0)` program.
 Current: ABI descriptor tests pass, compiled CPU execution covers the acceptance
@@ -2106,13 +2109,14 @@ descriptor-input callables when the caller supplies explicit static parameter
 types.
 
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
-Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
-PTX kernels with descriptor arguments, and live rank-1 through rank-3 `float32`
-map round trips run when a CUDA device is available. The generated direct
-Remora ABI PTX slice remains intentionally limited to rank-1 through rank-3
-unary/binary maps; broader generated GPU kernels are still blocked on direct
-`gpu.module` lowering, and IREE HAL PTX is intentionally not treated as a
-launchable Remora ABI artifact.
+Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch descriptor
+ABI PTX kernels, and live rank-1 through rank-3 `float32` map round trips run
+when a CUDA device is available. The preferred supported artifact is now the
+MLIR-derived descriptor-wrapper PTX. The hand-authored direct Remora ABI PTX
+slice remains intentionally limited to rank-1 through rank-3 unary/binary maps
+as a compatibility fallback; broader generated GPU kernels are still blocked on
+direct tensor/linalg-to-`gpu.module` lowering, and IREE HAL PTX is intentionally
+not treated as a launchable Remora ABI artifact.
 
 ---
 
@@ -2289,7 +2293,7 @@ Current: the shared executor entrypoint now matches on both backends:
 `CPUExecutor.execute_main([])` and `RemoraExecutor.execute_main([])` both return
 raw values, while higher-level helpers wrap them for CLI/runtime callers.
 Output formatting is shared by the interpreter reference path, compiled CPU
-execution, and the direct NVIDIA rank-1 through rank-3 PTX slice. Production
+execution, and the MLIR-derived NVIDIA rank-1 through rank-3 PTX slice. Production
 `gpu.module` lowering for broader generated Dense Core NVIDIA programs remains a
 later backend milestone, not a prerequisite for the current shared
 execution/display slice.
