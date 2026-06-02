@@ -114,6 +114,27 @@ def test_remora_executor_launches_direct_abi_kernel_and_copies_output():
     assert {ptr for ptr, _nbytes in runtime.allocations} == set(runtime.frees)
 
 
+def test_remora_executor_execute_main_uses_shared_entrypoint():
+    runtime = FakeRuntime()
+    meta = KernelMeta(
+        name="main",
+        grid_dims=1,
+        block_size=4,
+        num_inputs=1,
+        num_outputs=1,
+        input_elem_types=["f32"],
+        output_elem_types=["f32"],
+        output_shape=(5,),
+    )
+    executor = RemoraExecutor("ptx", [meta], runtime=runtime)
+
+    result = executor.execute_main([np.arange(5, dtype=np.float32)])
+
+    assert runtime.loaded_ptx == "ptx"
+    np.testing.assert_array_equal(result, np.full((5,), 3, dtype=np.float32))
+    assert len(runtime.kernel.launches) == 1
+
+
 def test_remora_executor_rejects_unknown_kernel_and_wrong_input_count():
     runtime = FakeRuntime()
     meta = KernelMeta(
