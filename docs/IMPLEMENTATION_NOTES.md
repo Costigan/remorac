@@ -85,6 +85,9 @@ rank, or automatic differentiation has not been implemented.
   map plus fold.
 - Fusion, kernel-count, and smoke timing tests are now part of the vertical
   slice. They should land before broadening the language beyond Dense Core.
+- The shared executor entrypoint is now aligned across the compiled CPU and
+  direct CUDA slices: both `CPUExecutor` and `RemoraExecutor` expose
+  `execute_main([])` and return raw values for shared display formatting.
 
 ## Project and Tooling
 
