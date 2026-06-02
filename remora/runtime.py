@@ -358,7 +358,8 @@ def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationR
 def evaluate_source_compiled(source: str, *, include_prelude: bool = True) -> EvaluationResult:
     artifact = CPUExecutor.compile_source(source, include_prelude=include_prelude)
     try:
-        return CPUExecutor(artifact).execute_main()
+        value = CPUExecutor(artifact).execute_main([])
+        return EvaluationResult(value, artifact.return_type)
     finally:
         artifact.close()
 
@@ -436,15 +437,15 @@ class CPUExecutor:
         )
         return CompiledCPUArtifact(so_path, temp_dir, compiler_artifact.return_type)
 
-    def execute_main(self, inputs: list[np.ndarray] | None = None) -> EvaluationResult:
+    def execute_main(self, inputs: list[np.ndarray] | None = None) -> object:
         if inputs is not None and len(inputs) != 0:
             raise EvaluationError("compiled CPU main does not accept inputs")
         return_type = self._artifact.return_type
         output = _empty_output_value(return_type)
         self.execute_main_into(output)
         if isinstance(return_type, ScalarType):
-            return EvaluationResult(output.item(), return_type)
-        return EvaluationResult(output, return_type)
+            return output.item()
+        return output
 
     def execute_main_into(self, output: np.ndarray) -> None:
         output_type = self._artifact.return_type

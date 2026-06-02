@@ -3,6 +3,7 @@ import importlib.util
 import numpy as np
 import pytest
 
+from remora.display import format_result
 from remora.runtime import CPUExecutor, CPUFunctionExecutor, evaluate_source, evaluate_source_compiled
 from remora.runtime import EvaluationError
 from remora.types import FLOAT, INT, ArrayType, StaticDim
@@ -129,7 +130,35 @@ def test_cpu_executor_compile_source_keeps_artifact_until_closed():
     finally:
         artifact.close()
 
-    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+    np.testing.assert_array_equal(result, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_cpu_executor_execute_main_formats_scalar_vector_matrix_and_rank3_results():
+    scalar_artifact = CPUExecutor.compile_source("1 + 2.0")
+    vector_artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")
+    matrix_artifact = CPUExecutor.compile_source(
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (* 2.0) xs"
+    )
+    rank3_artifact = CPUExecutor.compile_source(
+        "let xs = [[[1], [2]], [[3], [4]]] in map (\\x -> x + 1) xs"
+    )
+    try:
+        scalar = CPUExecutor(scalar_artifact).execute_main([])
+        vector = CPUExecutor(vector_artifact).execute_main([])
+        matrix = CPUExecutor(matrix_artifact).execute_main([])
+        rank3 = CPUExecutor(rank3_artifact).execute_main([])
+    finally:
+        scalar_artifact.close()
+        vector_artifact.close()
+        matrix_artifact.close()
+        rank3_artifact.close()
+
+    assert format_result(scalar, scalar_artifact.return_type) == "3.0"
+    assert format_result(vector, vector_artifact.return_type) == "[0.0, 2.0, 4.0, 6.0, 8.0]"
+    assert format_result(matrix, matrix_artifact.return_type) == "[[2.0, 4.0],\n [6.0, 8.0]]"
+    assert format_result(rank3, rank3_artifact.return_type) == (
+        "[[[2],\n  [3]],\n\n [[4],\n  [5]]]"
+    )
 
 
 def test_cpu_executor_writes_into_explicit_output_descriptor():

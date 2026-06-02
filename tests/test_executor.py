@@ -305,3 +305,45 @@ def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
         runtime.close()
 
     np.testing.assert_array_equal(result, np.array([2, 4, 6, 8], dtype=np.float32))
+
+
+def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA driver/device is not available: {exc}")
+
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+        kernel_name="remora_scale2d",
+    )
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),),
+        kernel_name="remora_scale3d",
+    )
+    try:
+        rank2_executor = RemoraExecutor(rank2_ptx, rank2_kernels, runtime=runtime)
+        rank3_executor = RemoraExecutor(rank3_ptx, rank3_kernels, runtime=runtime)
+        rank2 = rank2_executor.execute_main(
+            [np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)]
+        )
+        rank3 = rank3_executor.execute_main(
+            [np.array([[[1], [2]], [[3], [4]]], dtype=np.float32)]
+        )
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+    finally:
+        runtime.close()
+
+    np.testing.assert_array_equal(
+        rank2,
+        np.array([[2, 4, 6], [8, 10, 12]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        rank3,
+        np.array([[[2], [4]], [[6], [8]]], dtype=np.float32),
+    )

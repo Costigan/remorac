@@ -2089,11 +2089,12 @@ types.
 
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch direct ABI
-PTX kernels with descriptor arguments. The first generated direct Remora ABI PTX
-slice covers rank-1 through rank-3 `float32` unary and binary maps. Broader
-generated GPU kernels remain blocked on direct `gpu.module` lowering; the
-hand-authored PTX shortcut is intentionally not being expanded to rank 10. IREE
-HAL PTX is intentionally not treated as a launchable Remora ABI artifact.
+PTX kernels with descriptor arguments, and live rank-1 through rank-3 `float32`
+map round trips run when a CUDA device is available. The generated direct
+Remora ABI PTX slice remains intentionally limited to rank-1 through rank-3
+unary/binary maps; broader generated GPU kernels are still blocked on direct
+`gpu.module` lowering, and IREE HAL PTX is intentionally not treated as a
+launchable Remora ABI artifact.
 
 ---
 
@@ -2266,12 +2267,14 @@ def format_result(data: np.ndarray | float | int, ty: RemoraType) -> str:
   - Current: `tests/test_cli.py` runs every checked-in `examples/*.remora` through the `remorac` CPU entry point.
 
 **Milestone M7**: generated programs execute through the shared executor API on CPU and NVIDIA.
-Current: output formatting is shared by the interpreter reference path,
-compiled CPU `remorac`, and the REPL. CPU execution uses `CPUExecutor` for the
-lowered Dense Core subset, and direct Remora ABI CUDA execution exists for the
-rank-1 through rank-3 hand-authored PTX smoke slice. Full NVIDIA execution for
-generated Dense Core programs remains blocked on production `gpu.module`
-lowering through the standalone NVVM/PTX pipeline.
+Current: the shared executor entrypoint now matches on both backends:
+`CPUExecutor.execute_main([])` and `RemoraExecutor.execute_main([])` both return
+raw values, while higher-level helpers wrap them for CLI/runtime callers.
+Output formatting is shared by the interpreter reference path, compiled CPU
+execution, and the direct NVIDIA rank-1 through rank-3 PTX slice. Production
+`gpu.module` lowering for broader generated Dense Core NVIDIA programs remains a
+later backend milestone, not a prerequisite for the current shared
+execution/display slice.
 
 ---
 
