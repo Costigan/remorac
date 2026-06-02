@@ -13,6 +13,7 @@ from pathlib import Path
 from shutil import which
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from remora.errors import RemoraError
@@ -98,6 +99,10 @@ class PipelineToolchain:
     @property
     def has_ptx_toolchain(self) -> bool:
         return self.llc is not None and self.ptxas is not None
+
+    @property
+    def has_nvptx_codegen(self) -> bool:
+        return self.mlir_translate is not None and self.llc is not None
 
 
 def detect_toolchain() -> PipelineToolchain:
@@ -239,6 +244,63 @@ def translate_mlir_to_llvmir(
             f"LLVM IR translation failed with {Path(toolchain.mlir_translate).name}: {stderr}"
         )
     return result.stdout
+
+
+def translate_llvmir_to_nvptx_text(
+    llvm_ir: str,
+    *,
+    sm_version: str = "sm_80",
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    toolchain = detect_toolchain() if toolchain is None else toolchain
+    if toolchain.llc is None:
+        raise PipelineUnavailable("llc is required for NVPTX text generation")
+
+    with tempfile.TemporaryDirectory(prefix="remora-gpu-") as temp_dir:
+        llvm_ir_path = Path(temp_dir) / "module.ll"
+        llvm_ir_path.write_text(llvm_ir, encoding="utf-8")
+        result = subprocess.run(
+            [
+                toolchain.llc,
+                "-march=nvptx64",
+                f"-mcpu={sm_version}",
+                "-filetype=asm",
+                str(llvm_ir_path),
+                "-o",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise PipelineUnavailable(
+            f"NVPTX text generation failed with {Path(toolchain.llc).name}: {stderr}"
+        )
+    return result.stdout
+
+
+def lower_gpu_scaffold_to_nvptx_text(
+    mlir_text: str,
+    *,
+    sm_version: str = "sm_80",
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    from remora.gpu_lowering import extract_gpu_module_body_as_module
+
+    toolchain = detect_toolchain() if toolchain is None else toolchain
+    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        mlir_text,
+        toolchain=toolchain,
+    )
+    device_module = extract_gpu_module_body_as_module(lowered)
+    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+    return translate_llvmir_to_nvptx_text(
+        llvm_ir,
+        sm_version=sm_version,
+        toolchain=toolchain,
+    )
 
 
 def verify_module_text(mlir_text: str, toolchain: PipelineToolchain | None = None) -> None:

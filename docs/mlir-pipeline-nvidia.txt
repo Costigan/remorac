@@ -3,7 +3,8 @@
 # The installed standalone LLVM/MLIR 18 tools are pinned for CPU lowering and
 # linalg fusion validation. The production Remora lowering still emits
 # tensor/linalg modules for CPU execution, but remora.gpu_lowering now has a
-# parse-validated rank-1 float32 gpu.module/gpu.func scaffold.
+# parse-validated rank-1 through rank-3 float32 unary/binary gpu.module/gpu.func
+# scaffold slice.
 #
 # The currently validated scaffold-only NVVM conversion pass is:
 #
@@ -15,9 +16,12 @@
 #
 # This proves the GPU dialect operations, scf.if, arith ops, and memref load/store
 # in the scaffold can be converted toward NVVM/LLVM dialect. The converted
-# gpu.module body can be extracted and translated to non-empty LLVM IR with NVVM
-# intrinsics. It is not a complete production NVIDIA pipeline, does not translate
-# or assemble PTX, and is not wired to RemoraExecutor launch.
+# gpu.module body can be extracted, translated to non-empty LLVM IR with NVVM
+# intrinsics, and compiled with llc to standalone PTX text. That PTX remains
+# inspection-only because the current scaffold path still uses MLIR's exploded
+# memref ABI at the kernel boundary instead of the final Remora descriptor-pointer
+# ABI from docs/ABI.md. It is not a complete production NVIDIA pipeline, is not
+# assembled with ptxas here, and is not wired to RemoraExecutor launch.
 #
 # Temporary PTX inspection remains available through remora.codegen.generate_ptx,
 # which invokes iree-compile with:

@@ -1719,8 +1719,11 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))`.
     It also records the follow-on scaffold LLVM-dialect conversion pass:
     `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)`.
-    The production tensor/linalg-to-gpu pipeline and device-module extraction/PTX
-    translation remain deferred.
+    The follow-on device-module extraction, LLVM IR translation, and `llc`
+    NVPTX text emission are now validated for the scaffold slice, but that PTX
+    still uses MLIR's exploded memref ABI instead of the final Remora
+    descriptor-pointer ABI. The production tensor/linalg-to-gpu pipeline and
+    descriptor-ABI kernel export remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
   - Current: `remora.gpu_lowering` now builds parse-validated `gpu.module` /
     `gpu.func` scaffolds for the same narrow rank-1 through rank-3 `float32`
@@ -1765,9 +1768,11 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
 
 **Milestone M5**: Generate valid PTX from `fold (+) 0.0 (map (* 2.0) (iota 1000))` through the pinned standalone MLIR/NVVM pipeline.
 Current: standalone CPU lowering and linalg fusion are pinned against LLVM/MLIR
-18. IREE-backed PTX generation remains inspection-only and does not satisfy M5
-until Remora emits descriptor-ABI `gpu.module` kernels and the standalone NVVM
-pipeline is validated.
+18. The scaffold slice now validates all the way through standalone NVVM PTX
+text emission, but it still uses MLIR's exploded memref ABI and therefore
+remains inspection-only. IREE-backed PTX generation is also inspection-only. M5
+is not complete until Remora emits descriptor-ABI `gpu.module` kernels through
+the standalone NVVM pipeline.
 
 **Milestone M5.5**: compiled CPU execution replaces the typed-AST evaluator for acceptance pass cases. `remorac --target cpu` may keep the typed-AST evaluator behind an explicit development flag, but the default CPU target must execute lowered compiled code through the same logical descriptor/result path planned for GPU.
 

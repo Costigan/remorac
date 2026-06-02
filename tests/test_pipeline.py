@@ -49,6 +49,9 @@ def test_detect_toolchain_reports_available_bindings_and_missing_external_verifi
     assert toolchain.has_standalone_mlir == (
         toolchain.mlir_opt is not None and toolchain.mlir_translate is not None
     )
+    assert toolchain.has_nvptx_codegen == (
+        toolchain.mlir_translate is not None and toolchain.llc is not None
+    )
     assert toolchain.has_ptx_toolchain == (
         toolchain.llc is not None and toolchain.ptxas is not None
     )
