@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from remora.errors import RemoraError
+from remora.hir import HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.types import FLOAT, ArrayType
 
 
 class GPUScaffoldError(RemoraError):
@@ -58,3 +60,59 @@ def build_rank1_f32_unary_map_gpu_scaffold(
   }}
 }}"""
     return GPUModuleScaffold(text, module_name, kernel_name)
+
+
+def build_gpu_scaffold_for_function(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build the experimental GPU scaffold from a supported HIR function."""
+    size, multiplier = _rank1_f32_scale_map(function)
+    return build_rank1_f32_unary_map_gpu_scaffold(
+        size=size,
+        multiplier=multiplier,
+        module_name=module_name,
+        kernel_name=kernel_name or f"remora_{function.name}_rank1_f32",
+    )
+
+
+def _rank1_f32_scale_map(function: HIRFunction) -> tuple[int, float]:
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU scaffold currently supports one input parameter")
+    param = function.params[0]
+    if not (
+        isinstance(param.type, ArrayType)
+        and param.type.element == FLOAT
+        and param.type.rank == 1
+    ):
+        raise GPUScaffoldError("GPU scaffold currently supports rank-1 float inputs only")
+    if not (
+        isinstance(function.return_type, ArrayType)
+        and function.return_type.element == FLOAT
+        and function.return_type.shape == param.type.shape
+    ):
+        raise GPUScaffoldError("GPU scaffold output must match the rank-1 float input")
+    if not (
+        isinstance(function.body, HIRMap)
+        and len(function.body.arrays) == 1
+        and isinstance(function.body.array, HIRVar)
+        and function.body.array.name == param.name
+        and isinstance(function.body.func, HIRPrimCallable)
+    ):
+        raise GPUScaffoldError("GPU scaffold currently supports primitive maps over the parameter only")
+
+    callable_ = function.body.func
+    if callable_.op != "*":
+        raise GPUScaffoldError("GPU scaffold currently supports scale maps only")
+    multiplier = _literal_f32_section_multiplier(callable_)
+    return param.type.shape[0].value, multiplier
+
+
+def _literal_f32_section_multiplier(callable_: HIRPrimCallable) -> float:
+    if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
+        return float(callable_.left_arg.value)
+    if isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
+        return float(callable_.right_arg.value)
+    raise GPUScaffoldError("GPU scaffold scale map requires a literal float section")

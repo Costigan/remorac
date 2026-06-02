@@ -446,8 +446,9 @@ Deferred pipeline/codegen work:
   validate a production NVIDIA NVVM pipeline against the descriptor ABI.
   The first parse-validated scaffold now lives in `remora.gpu_lowering` for a
   rank-1 `float32` scale-map-shaped kernel with thread/block indexing, a bounds
-  guard, load, multiply, and store operations, but it is not wired to HIR
-  lowering, NVVM conversion, or runtime launch yet.
+  guard, load, multiply, and store operations. It is connected to the narrow
+  typed/HIR function shape `def scale xs = map (* c) xs`, but it is not wired to
+  NVVM conversion or runtime launch yet.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR
