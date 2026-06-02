@@ -1722,16 +1722,20 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     The production tensor/linalg-to-gpu pipeline and device-module extraction/PTX
     translation remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
-  - Current: `remora.gpu_lowering.build_rank1_f32_unary_map_gpu_scaffold`
-    emits a minimal rank-1 `float32` scale-map-shaped GPU module with
-    thread/block index computation, a bounds guard, `memref.load`, `arith.mulf`,
-    and `memref.store`. `build_gpu_scaffold_for_function` connects that scaffold
-    to the narrow typed/HIR function shape `def scale xs = map (* c) xs` for a
-    rank-1 `float32` input. Tests verify the scaffold parses as MLIR, passes
-    external verification when available, runs through the minimal nested NVVM
-    conversion pass and the scaffold LLVM-dialect conversion pass, and can be
-    extracted into non-empty device LLVM IR with NVVM intrinsics. This is not
-    PTX assembly or runtime launch support.
+  - Current: `remora.gpu_lowering` now builds parse-validated `gpu.module` /
+    `gpu.func` scaffolds for the same narrow rank-1 through rank-3 `float32`
+    unary/binary map slice supported by the direct PTX smoke path. Unary
+    scaffolds support literal float sections for `+`, `-`, `*`, and `/`; binary
+    scaffolds support direct two-input maps over matching shapes. Rank-2/rank-3
+    scaffolds flatten the launch index, use a product-size bounds guard, and
+    reconstruct multi-dimensional indices with `arith.divui` / `arith.remui`
+    before `memref.load` / `memref.store`. `build_gpu_scaffold_for_function`
+    connects that scaffold to supported typed/HIR function shapes. Tests verify
+    the scaffolds parse as MLIR, pass external verification when available, run
+    through the minimal nested NVVM conversion pass and the scaffold
+    LLVM-dialect conversion pass, and can be extracted into non-empty device
+    LLVM IR with NVVM intrinsics. This is not PTX assembly or runtime launch
+    support.
 - [x] Implement `run_pipeline` with debug mode
 - [x] Implement external MLIR verification for emitted modules
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.
