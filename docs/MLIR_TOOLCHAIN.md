@@ -39,9 +39,11 @@ The final NVIDIA backend requires Remora to lower to explicit `gpu.module` /
 device code through NVVM and assemble/check PTX.
 
 The current executable MLIR-derived slice covers rank-1 through rank-3
-`float32` unary and binary scalar-cell maps. It lowers the scaffold
-`gpu.module` through NVVM, injects a descriptor-pointer ABI wrapper, emits PTX
-with `llc`, and launches through `RemoraExecutor` when CUDA is available.
+`float32` and `int32` unary/binary scalar-cell maps, plus rank-1 `float32`
+scalar reductions and dot-shaped `fold (+) init (map (*) xs ys)` kernels. It
+emits a descriptor-pointer ABI `gpu.module` kernel directly, translates the
+device body through NVVM/LLVM IR, emits PTX with `llc`, and launches through
+`RemoraExecutor` when CUDA is available.
 `ptxas` assembly checks are available through tests when `ptxas` is installed.
 
 `remora.codegen.generate_ptx` remains only an IREE HAL PTX inspection path. Its

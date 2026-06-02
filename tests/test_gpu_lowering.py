@@ -11,13 +11,15 @@ from remora.compiler import (
 )
 from remora.gpu_lowering import (
     GPUScaffoldError,
+    build_descriptor_abi_f32_reduction_gpu_module,
+    build_descriptor_abi_i32_map_gpu_module,
     build_f32_binary_map_gpu_scaffold,
     build_f32_unary_map_gpu_scaffold,
     build_gpu_scaffold_for_function,
     build_rank1_f32_unary_map_gpu_scaffold,
     extract_gpu_module_body_as_module,
 )
-from remora.hir import HIRFunction, HIRLit, HIRMap, HIRParam, HIRPrimCallable, HIRVar
+from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRParam, HIRPrimCallable, HIRVar
 from remora.pipeline import (
     PipelineUnavailable,
     assemble_ptx_text,
@@ -56,16 +58,6 @@ def ptx_param_count(ptx_text: str, kernel_name: str) -> int:
     return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", match.group(1)))
 
 
-def ptx_func_param_count(ptx_text: str, func_name: str) -> int:
-    match = re.search(
-        rf"\.func\s+{re.escape(func_name)}\((.*?)\)\s*\n",
-        ptx_text,
-        flags=re.DOTALL,
-    )
-    assert match is not None
-    return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", match.group(1)))
-
-
 def test_rank1_f32_unary_map_gpu_scaffold_is_parseable_gpu_mlir():
     scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
     module = parse_mlir(scaffold.text)
@@ -87,6 +79,55 @@ def test_rank1_f32_unary_map_gpu_scaffold_is_parseable_gpu_mlir():
     assert "memref.store" in text
     assert "gpu.return" in text
     assert ".visible .entry" not in text
+
+
+def test_rank1_f32_reduction_descriptor_abi_module_is_parseable():
+    function = HIRFunction(
+        "sum",
+        [HIRParam("xs", ArrayType(FLOAT, (StaticDim(4),)))],
+        HIRFold(
+            StaticDim(4),
+            HIRPrimCallable("+", (FLOAT, FLOAT), FLOAT),
+            HIRLit(0.0, FLOAT),
+            HIRVar("xs", ArrayType(FLOAT, (StaticDim(4),))),
+            FLOAT,
+        ),
+        FLOAT,
+    )
+
+    module = build_descriptor_abi_f32_reduction_gpu_module(function, kernel_name="remora_sum")
+    parse_mlir(module.text)
+    text = module.text
+
+    assert "llvm.func @remora_sum(%input0_desc: !llvm.ptr, %output_desc: !llvm.ptr)" in text
+    assert "llvm.br ^bb1(%zero, %init : i64, f32)" in text
+    assert 'llvm.cond_br %inside, ^bb2, ^bb3(%acc : f32)' in text
+    assert "llvm.fadd %acc, %item" in text
+    assert "llvm.store %result, %out_elem_ptr" in text
+
+
+def test_rank1_i32_descriptor_abi_map_module_uses_integer_ops():
+    array_type = ArrayType(INT, (StaticDim(4),))
+    function = HIRFunction(
+        "inc",
+        [HIRParam("xs", array_type)],
+        HIRMap(
+            (StaticDim(4),),
+            (),
+            HIRPrimCallable("+", (INT, INT), INT, right_arg=HIRLit(2, INT)),
+            [HIRVar("xs", array_type)],
+            array_type,
+        ),
+        array_type,
+    )
+
+    module = build_descriptor_abi_i32_map_gpu_module(function, kernel_name="remora_inc")
+    text = module.text
+
+    assert "llvm.func @remora_inc(%input0_desc: !llvm.ptr, %output_desc: !llvm.ptr)" in text
+    assert "%c = llvm.mlir.constant(2 : i32) : i32" in text
+    assert "%y = llvm.add %x0, %c  : i32" in text
+    assert "llvm.store %y, %out_elem_ptr : i32, !llvm.ptr" in text
 
 
 def test_rank1_f32_unary_map_gpu_scaffold_uses_requested_size_and_multiplier():
@@ -244,7 +285,6 @@ def test_supported_gpu_artifacts_prefer_mlir_descriptor_abi_ptx():
     assert ".visible .entry remora_scale" in artifact.ptx_text
     assert ".param .u64 remora_scale_param_0" in artifact.ptx_text
     assert ".param .u64 remora_scale_param_1" in artifact.ptx_text
-    assert "remora_scale_inner" in artifact.ptx_text
     assert artifact.kernels[0].name == "remora_scale"
     assert artifact.kernels[0].num_inputs == 1
     assert artifact.kernels[0].output_shape == (4,)
@@ -459,11 +499,10 @@ def test_supported_gpu_artifacts_document_scaffold_vs_descriptor_abi_boundary_wh
     assert ptx_param_count(scaffold_ptx, "remora_scale") == 10
     assert ".param .u64 remora_scale_param_0" in artifact.ptx_text
     assert ".param .u64 remora_scale_param_1" in artifact.ptx_text
-    assert "remora_scale_inner" in artifact.ptx_text
     assert ptx_param_count(artifact.ptx_text, "remora_scale") == 2
 
 
-def test_rank1_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+def test_rank1_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
     toolchain = detect_toolchain()
     if not toolchain.has_nvptx_codegen:
         pytest.skip("standalone NVPTX text tools are not available")
@@ -480,16 +519,13 @@ def test_rank1_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
 
     assert artifact.function_name == "scale"
     assert ".visible .entry remora_scale" in ptx
-    assert ".visible .entry remora_scale_inner" not in ptx
-    assert ".func remora_scale_inner" in ptx or ".visible .func remora_scale_inner" in ptx
     assert ptx_param_count(ptx, "remora_scale") == 2
-    assert ptx_func_param_count(ptx, "remora_scale_inner") == 10
     assert kernels[0].name == "remora_scale"
     assert kernels[0].num_inputs == 1
     assert kernels[0].output_shape == (4,)
 
 
-def test_rank1_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+def test_rank1_binary_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
     toolchain = detect_toolchain()
     if not toolchain.has_nvptx_codegen:
         pytest.skip("standalone NVPTX text tools are not available")
@@ -509,16 +545,13 @@ def test_rank1_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available
 
     assert artifact.function_name == "add"
     assert ".visible .entry remora_add" in ptx
-    assert ".visible .entry remora_add_inner" not in ptx
-    assert ".func remora_add_inner" in ptx or ".visible .func remora_add_inner" in ptx
     assert ptx_param_count(ptx, "remora_add") == 3
-    assert ptx_func_param_count(ptx, "remora_add_inner") == 15
     assert kernels[0].name == "remora_add"
     assert kernels[0].num_inputs == 2
     assert kernels[0].output_shape == (4,)
 
 
-def test_rank2_unary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+def test_rank2_unary_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
     toolchain = detect_toolchain()
     if not toolchain.has_nvptx_codegen:
         pytest.skip("standalone NVPTX text tools are not available")
@@ -535,16 +568,13 @@ def test_rank2_unary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available(
 
     assert artifact.function_name == "scale"
     assert ".visible .entry remora_scale2d" in ptx
-    assert ".visible .entry remora_scale2d_inner" not in ptx
-    assert ".func remora_scale2d_inner" in ptx or ".visible .func remora_scale2d_inner" in ptx
     assert ptx_param_count(ptx, "remora_scale2d") == 2
-    assert ptx_func_param_count(ptx, "remora_scale2d_inner") == 14
     assert kernels[0].name == "remora_scale2d"
     assert kernels[0].num_inputs == 1
     assert kernels[0].output_shape == (2, 3)
 
 
-def test_rank2_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+def test_rank2_binary_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
     toolchain = detect_toolchain()
     if not toolchain.has_nvptx_codegen:
         pytest.skip("standalone NVPTX text tools are not available")
@@ -564,13 +594,116 @@ def test_rank2_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available
 
     assert artifact.function_name == "add"
     assert ".visible .entry remora_add2d" in ptx
-    assert ".visible .entry remora_add2d_inner" not in ptx
-    assert ".func remora_add2d_inner" in ptx or ".visible .func remora_add2d_inner" in ptx
     assert ptx_param_count(ptx, "remora_add2d") == 3
-    assert ptx_func_param_count(ptx, "remora_add2d_inner") == 21
     assert kernels[0].name == "remora_add2d"
     assert kernels[0].num_inputs == 2
     assert kernels[0].output_shape == (2, 3)
+
+
+def test_rank1_sum_mlir_gpu_ptx_exports_scalar_descriptor_abi_kernel_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def sum xs = fold (+) 0.0 xs",
+            "sum",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            include_prelude=False,
+            kernel_name="remora_sum",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "sum"
+    assert ".visible .entry remora_sum" in ptx
+    assert ptx_param_count(ptx, "remora_sum") == 2
+    assert kernels[0].name == "remora_sum"
+    assert kernels[0].num_inputs == 1
+    assert kernels[0].output_shape == ()
+    assert kernels[0].output_dtype == "float32"
+
+
+def test_rank1_dot_mlir_gpu_ptx_exports_scalar_descriptor_abi_kernel_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def dot xs ys = fold (+) 0.0 (map (*) xs ys)",
+            "dot",
+            (
+                ArrayType(FLOAT, (StaticDim(4),)),
+                ArrayType(FLOAT, (StaticDim(4),)),
+            ),
+            include_prelude=False,
+            kernel_name="remora_dot",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "dot"
+    assert ".visible .entry remora_dot" in ptx
+    assert ptx_param_count(ptx, "remora_dot") == 3
+    assert kernels[0].name == "remora_dot"
+    assert kernels[0].num_inputs == 2
+    assert kernels[0].output_shape == ()
+    assert kernels[0].output_dtype == "float32"
+
+
+def test_rank1_i32_unary_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def inc xs = map (+ 2) xs",
+            "inc",
+            (ArrayType(INT, (StaticDim(4),)),),
+            include_prelude=False,
+            kernel_name="remora_inc",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "inc"
+    assert ".visible .entry remora_inc" in ptx
+    assert ptx_param_count(ptx, "remora_inc") == 2
+    assert kernels[0].name == "remora_inc"
+    assert kernels[0].num_inputs == 1
+    assert kernels[0].output_shape == (4,)
+    assert kernels[0].output_dtype == "int32"
+
+
+def test_rank1_i32_binary_mlir_gpu_ptx_exports_descriptor_abi_kernel_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def add xs ys = map (+) xs ys",
+            "add",
+            (
+                ArrayType(INT, (StaticDim(4),)),
+                ArrayType(INT, (StaticDim(4),)),
+            ),
+            include_prelude=False,
+            kernel_name="remora_iadd",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_iadd" in ptx
+    assert ptx_param_count(ptx, "remora_iadd") == 3
+    assert kernels[0].name == "remora_iadd"
+    assert kernels[0].num_inputs == 2
+    assert kernels[0].output_shape == (4,)
+    assert kernels[0].output_dtype == "int32"
 
 
 def test_mlir_gpu_ptx_assembles_with_ptxas_when_available():

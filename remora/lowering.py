@@ -129,6 +129,8 @@ def type_to_mlir(value_type: RemoraType) -> str:
 def _prepare_main_expr(expr: HIRExpr | None) -> HIRExpr | None:
     if _can_lower_as_scalar_expr(expr):
         return expr
+    if isinstance(expr, HIRLet) and isinstance(expr.value_type, ArrayType):
+        return expr
     return _inline_lets(expr) if expr is not None else None
 
 
@@ -239,6 +241,8 @@ def _lower_main_module(
     node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
+    if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
+        return _lower_tensor_let_module(node, functions)
     if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall)):
         return _lower_scalar_module(node, functions)
     if isinstance(node, HIRIndex):
@@ -258,6 +262,59 @@ def _lower_main_module(
     if not isinstance(node.result_type, ArrayType):
         return _lower_scalar_map_module(node, functions)
     return _lower_iota_scalar_map_module(node, functions)
+
+
+def _lower_tensor_let_module(node: HIRLet, functions: dict[str, HIRFunction]) -> str:
+    value_blocks: list[str] = []
+    tensor_env: TensorEnv = {}
+    body: HIRExpr = node
+    ordinal = 0
+    while isinstance(body, HIRLet) and isinstance(body.value_type, ArrayType):
+        code, value_name, value_type, element_type = _lower_tensor_input(
+            body.value,
+            f"let_{ordinal}_{body.name}",
+            functions,
+            tensor_env,
+        )
+        value_blocks.append(code)
+        tensor_env[body.name] = (value_name, value_type, element_type)
+        body = body.body
+        ordinal += 1
+
+    body_module = _lower_main_module_with_tensor_env(body, functions, tensor_env)
+    prefix = "\n".join(block for block in value_blocks if block)
+    if not prefix:
+        return body_module
+    marker = "  func.func @main()"
+    header_start = body_module.find(marker)
+    if header_start < 0:
+        raise RemoraLoweringError("expected tensor-let body module to contain @main")
+    body_start = body_module.find("{", header_start)
+    if body_start < 0:
+        raise RemoraLoweringError("expected tensor-let body @main to have a body")
+    return body_module[: body_start + 1] + "\n" + prefix + body_module[body_start + 1 :]
+
+
+def _lower_main_module_with_tensor_env(
+    node: HIRExpr,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv,
+) -> str:
+    if isinstance(node, HIRMap):
+        if len(node.arrays) == 2:
+            if not node.cell_shape and not isinstance(node.result_type, ArrayType):
+                return _lower_scalar_map_binary_module(node, functions)
+            return _lower_binary_map_module(node, functions, tensor_env)
+        if len(node.arrays) != 1:
+            raise RemoraLoweringError("only unary and binary map MLIR lowering is supported")
+        if not isinstance(node.result_type, ArrayType):
+            return _lower_scalar_map_module(node, functions)
+        return _lower_iota_scalar_map_module(node, functions, tensor_env)
+    if isinstance(node, HIRFold):
+        return _lower_fold_module(node, functions, tensor_env)
+    if isinstance(node, HIRIndex):
+        return _lower_index_module(node, functions, tensor_env)
+    return _lower_main_module(node, functions)
 
 
 def _add_output_descriptor_export(mlir_text: str, return_type: RemoraType) -> str:
@@ -560,7 +617,11 @@ def _lower_array_literal_module(node: HIRArrayLit) -> str:
 }}"""
 
 
-def _lower_index_module(node: HIRIndex, functions: dict[str, HIRFunction]) -> str:
+def _lower_index_module(
+    node: HIRIndex,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> str:
     array_type = _expr_result_type(node.array)
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
@@ -571,6 +632,7 @@ def _lower_index_module(node: HIRIndex, functions: dict[str, HIRFunction]) -> st
         node.array,
         "idx_in",
         functions,
+        tensor_env,
     )
     index_lines: list[str] = []
     index_names: list[str] = []
@@ -956,8 +1018,6 @@ def _lower_array_fold_module(
 ) -> str:
     if not isinstance(node.func, HIRPrimCallable):
         raise RemoraLoweringError("only primitive array-cell fold callables lower to MLIR so far")
-    if not isinstance(node.init, HIRArrayLit):
-        raise RemoraLoweringError("only array literal fold initial values lower to array-cell MLIR so far")
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("array fold lowering requires an array result")
 

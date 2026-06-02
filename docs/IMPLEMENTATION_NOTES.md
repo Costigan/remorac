@@ -186,6 +186,8 @@ Known parser limitation:
 - Array indexing is typed for static arrays up to rank 10. Each index
   must be `int`; full-rank indexing returns a scalar, and partial indexing
   drops the indexed outer dimensions and returns the remaining array cell.
+  Literal integer indices are checked against static extents during
+  typechecking; dynamic index bounds remain a runtime/lowering follow-on.
 - Primitive numeric behavior:
   - `int op int -> int` for `+`, `-`, `*`
   - mixed `int`/`float` promotes to `float`
@@ -226,7 +228,7 @@ Deferred typechecker work:
 - Type variables or a real bidirectional annotation story for standalone
   lambdas beyond the direct local application pattern.
 - Compile-time constant folding for shape expressions.
-- Static bounds checking for literal indices.
+- Runtime bounds checks for dynamic indices.
 - Composition typing.
 - Generalized array-cell folds.
 - Better diagnostic locations and source spans.
@@ -392,10 +394,11 @@ Deferred MLIR lowering work:
 - Lower generalized non-direct tensor values beyond the current nested
   scalar-map subset, generalized array-cell fold callables beyond primitive
   operators, and generalized cell maps beyond rank-1-cell fold bodies.
-- Lower partial indexing to `tensor.extract_slice` or another array-cell
-  representation. Dynamic index expression lowering is also deferred.
-- Replace tensor let inlining with real SSA environment lowering when lowering
-  grows beyond direct iota/map/fold slices.
+- Broaden partial indexing beyond the current static/literal
+  `tensor.extract_slice` path. Dynamic index expression lowering is also
+  deferred.
+- Broaden tensor SSA environment lowering beyond the current simple
+  array-valued `let` slice.
 - Run `mlir-opt --verify-diagnostics` checks beyond parse validation once
   `mlir-opt` is available in the development environment.
 - Runtime-dependent `shape` lowering with `tensor.dim` remains deferred until
@@ -467,25 +470,30 @@ Deferred pipeline/codegen work:
   Remora descriptor-pointer ABI. PTX assembly and runtime launch are not wired
   yet.
 - The first MLIR-derived executable GPU slice now exists for rank-1 through
-  rank-3 `float32` unary/binary maps.
-  `generate_mlir_descriptor_abi_ptx` lowers the
-  scaffold through the LLVM-dialect path, injects a descriptor-pointer ABI
-  wrapper around the inner exploded-memref kernel, and emits PTX that
-  `RemoraExecutor` can launch. This remains an experimental bridge step, not
-  full production `gpu.module` lowering parity, and it is validated for the
-  current contiguous rank-1 through rank-3 unary/binary slices.
-- For the current supported rank-1 through rank-3 float map slice, the
-  executable descriptor-ABI GPU path now prefers
+  rank-3 `float32` and `int32` unary/binary maps, plus rank-1 `float32`
+  scalar reductions and dot-shaped reductions.
+  `generate_mlir_descriptor_abi_ptx` emits a descriptor-pointer ABI
+  `gpu.module` kernel directly, translates the extracted device body through
+  LLVM IR, and emits PTX that `RemoraExecutor` can launch. This remains an
+  experimental bridge step, not full production `gpu.module` lowering parity,
+  and it is validated for the current contiguous map/reduction slices.
+- For the current supported map/reduction slices, the executable
+  descriptor-ABI GPU path now prefers
   `generate_mlir_descriptor_abi_ptx`. `generate_direct_remora_ptx` remains as a
-  compatibility fallback when standalone NVPTX tools are unavailable.
-  `compile_function_source_to_supported_gpu_artifacts` returns both the
-  `gpu.module` scaffold and the executable descriptor-wrapper PTX artifact from
-  one HIR function.
+  compatibility fallback for the older rank-1 through rank-3 `float32` maps
+  when standalone NVPTX tools are unavailable.
+  `compile_function_source_to_supported_gpu_artifacts` returns an inspection
+  `gpu.module` artifact and the executable descriptor-ABI PTX artifact from one
+  HIR function.
 - `assemble_ptx_text` validates emitted PTX through `ptxas` and returns the
   generated cubin bytes when the assembler is installed. Tests skip this check
   in the current environment because `ptxas` is missing.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
+- Add bool-valued GPU maps after the descriptor element layout is pinned for
+  one-byte host `numpy.bool_` arrays versus MLIR/LLVM `i1` memory semantics.
+- Replace the serial one-thread reduction kernel with a parallel block/grid
+  reduction once the correctness path is stable.
 - Replace the temporary shared-library CPU executor with a direct MLIR
   `ExecutionEngine` binding if/when compatible Python bindings are available.
 - Add native descriptor-input exports so compiled functions can consume
@@ -597,8 +605,8 @@ Deferred CUDA/runtime work:
 - `:load` loads top-level value/function definitions from a file and evaluates
   the file body if present. This is intentionally simple and line-oriented for
   current one-line `def` examples.
-- `:target` reports `cpu`; non-CPU targets are rejected until the descriptor ABI
-  and runtime launch path are ready.
+- `:target` reports `cpu`; non-CPU targets are rejected until the CLI/REPL has
+  an input-binding model for invoking descriptor-input GPU functions.
 
 Deferred REPL work:
 
@@ -606,7 +614,8 @@ Deferred REPL work:
   function type story exists.
 - Replace source-string session accumulation with typed environment/HIR state
   if definitions become multi-line or more complex.
-- Add GPU target support only after the final Remora ABI execution path exists.
+- Add GPU target support only after the final Remora ABI execution path and a
+  user-facing input-binding model exist.
 
 ## Test Coverage So Far
 

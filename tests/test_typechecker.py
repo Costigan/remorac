@@ -119,6 +119,13 @@ def test_index_expression_rejects_too_many_indices():
         infer("[1, 2][0, 0]")
 
 
+def test_index_expression_rejects_literal_out_of_bounds_indices():
+    with pytest.raises(RemoraTypeError, match="index 2 is out of bounds for axis 0 with extent 2"):
+        infer("[[1, 2], [3, 4]][2, 0]")
+    with pytest.raises(RemoraTypeError, match="index -1 is out of bounds for axis 0 with extent 2"):
+        infer("[[1, 2], [3, 4]][-1]")
+
+
 def test_map_scalar_lambda_over_rank_1_array_promotes_result():
     typed = let_body(infer("let xs = [1.0, 2.0, 3.0] in map (\\x -> x + 1.0) xs"))
 

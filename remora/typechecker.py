@@ -280,8 +280,16 @@ class TypeChecker:
                     expr.loc,
                 )
             typed_indices = [self.infer(index, env) for index in expr.indices]
-            for typed_index in typed_indices:
+            for position, typed_index in enumerate(typed_indices):
                 self._require(typed_index.type, INT, expr.loc)
+                if isinstance(expr.indices[position], IntLit):
+                    value = expr.indices[position].value
+                    extent = typed_array.type.shape[position].value
+                    if value < 0 or value >= extent:
+                        raise RemoraTypeError(
+                            f"index {value} is out of bounds for axis {position} with extent {extent}",
+                            expr.indices[position].loc,
+                        )
             return TypedIndex(
                 expr,
                 typed_array,

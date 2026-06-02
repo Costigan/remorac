@@ -2110,12 +2110,13 @@ types.
 
 **Milestone M6.5**: direct Remora ABI CUDA runtime infrastructure is complete.
 Current: `CUDARuntime`, `CUDAKernel`, and `RemoraExecutor` can launch descriptor
-ABI PTX kernels, and live rank-1 through rank-3 `float32` map round trips run
-when a CUDA device is available. The preferred supported artifact is now the
-MLIR-derived descriptor-wrapper PTX. The hand-authored direct Remora ABI PTX
-slice remains intentionally limited to rank-1 through rank-3 unary/binary maps
-as a compatibility fallback; broader generated GPU kernels are still blocked on
-direct tensor/linalg-to-`gpu.module` lowering, and IREE HAL PTX is intentionally
+ABI PTX kernels, and live rank-1 through rank-3 `float32`/`int32` map round
+trips plus rank-1 `float32` scalar reductions run when a CUDA device is
+available. The preferred supported artifact is now the MLIR-derived direct
+descriptor-ABI PTX. The hand-authored direct Remora ABI PTX slice remains
+intentionally limited to rank-1 through rank-3 `float32` unary/binary maps as a
+compatibility fallback. Bool-valued GPU maps, parallel reductions, and broader
+generated GPU kernels remain follow-on work, and IREE HAL PTX is intentionally
 not treated as a launchable Remora ABI artifact.
 
 ---
@@ -2124,7 +2125,13 @@ not treated as a launchable Remora ABI artifact.
 
 **Goal**: expose the compiler through command-line tools: `remorac prog.rem` for file-based execution and `remora --target cpu` for interactive expression evaluation.
 
-For the first prototype, `remorac --target` supports `cpu` and `gpu-nvidia` only. The REPL starts with `cpu` and adds `gpu-nvidia` after the descriptor ABI and CUDA runtime are stable. `gpu-amd`, `--output`, and broad debug flags can be added after the vertical slice is stable.
+For the first prototype, `remorac --target` supports `cpu` for execution and
+developer artifact targets for inspection. Function-level NVIDIA execution is
+available through the Python compiler/executor API for the current
+descriptor-ABI slices. Whole-program `gpu-nvidia` CLI/REPL execution should be
+added only after the command-line surface has an explicit model for supplying
+array inputs to named GPU functions. `gpu-amd`, `--output`, and broad debug
+flags can be added after the vertical slice is stable.
 
 Current implementation note: `remorac` is registered as a Python console script
 and defaults to `--target cpu`, using compiled CPU execution for the lowered
@@ -2141,7 +2148,7 @@ Usage: remorac [OPTIONS] SOURCE_FILE
 
 Options:
   -o, --output PATH      Output binary path (default: run immediately)
-  --target BACKEND       gpu-nvidia (default) | cpu
+  --target BACKEND       cpu (default) | interp | mlir | ptx
   --emit-ast             Print AST and exit
   --emit-typed-ast       Print typed AST and exit
   --emit-hir             Print HIR and exit
@@ -2714,9 +2721,9 @@ def _build_prelude_env() -> TypeEnv:
 - [x] Implement basic array indexing lowering using `tensor.extract`
   - Current: full-rank indexing with literal integer indices lowers for
     tensor-producing expressions such as `iota` and static array literals,
-    including a compact rank-10 compiled CPU case. CPU evaluation also supports
-    partial indexing; partial MLIR lowering and dynamic index lowering remain
-    deferred.
+    including a compact rank-10 compiled CPU case. Static partial indexing
+    lowers through rank-reducing `tensor.extract_slice`, including simple
+    let-bound tensor values. Dynamic index lowering remains deferred.
 - [x] Load prelude automatically in compiler/runtime/REPL startup paths
   - Current: source composition injects the prelude for `remorac`, compiler
     facade calls, and CPU evaluation. The REPL initializes and resets its
