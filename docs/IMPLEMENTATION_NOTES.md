@@ -447,11 +447,12 @@ Deferred pipeline/codegen work:
 - Install `ptxas` for standalone PTX assembly checks.
 - Lower Remora modules to explicit `gpu.module` / `gpu.func` kernels and
   validate a production NVIDIA NVVM pipeline against the descriptor ABI.
-  The first parse-validated scaffold now lives in `remora.gpu_lowering` for a
-  rank-1 `float32` scale-map-shaped kernel with thread/block indexing, a bounds
-  guard, load, multiply, and store operations. It is connected to the narrow
-  typed/HIR function shape `def scale xs = map (* c) xs`. External verification
-  and the minimal nested NVVM conversion pass
+  The first parse-validated scaffold now lives in `remora.gpu_lowering` for the
+  current rank-1 through rank-3 `float32` unary/binary map slice. Unary
+  scaffolds support literal float sections and binary scaffolds support direct
+  two-input maps over matching shapes. Rank-2/rank-3 scaffolds reconstruct
+  multi-dimensional indices from the flattened thread index before load/store.
+  External verification and the minimal nested NVVM conversion pass
   `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))` are
   covered. The follow-on scaffold LLVM-dialect pass
   `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)`

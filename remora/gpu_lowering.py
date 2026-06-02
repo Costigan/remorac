@@ -20,6 +20,20 @@ class GPUModuleScaffold:
     kernel_name: str
 
 
+@dataclass(frozen=True)
+class _F32MapOperation:
+    op: str
+    constant: float | None = None
+    constant_side: str | None = None
+
+
+@dataclass(frozen=True)
+class _F32MapKernel:
+    shape: tuple[int, ...]
+    operation: _F32MapOperation
+    num_inputs: int
+
+
 def extract_gpu_module_body_as_module(
     mlir_text: str,
     *,
@@ -56,33 +70,58 @@ def build_rank1_f32_unary_map_gpu_scaffold(
     It gives the production GPU path a concrete MLIR target shape while the CPU
     path remains the correctness oracle.
     """
-    if size <= 0:
-        raise GPUScaffoldError("rank-1 GPU scaffold size must be positive")
-    if not module_name.isidentifier() or not kernel_name.isidentifier():
-        raise GPUScaffoldError("GPU scaffold names must be valid identifiers")
+    return build_f32_unary_map_gpu_scaffold(
+        shape=(size,),
+        operation="*",
+        constant=multiplier,
+        constant_side="right",
+        module_name=module_name,
+        kernel_name=kernel_name,
+    )
 
-    memref_type = f"memref<{size}xf32>"
-    text = f"""module {{
-  gpu.module @{module_name} {{
-    gpu.func @{kernel_name}(%input: {memref_type}, %output: {memref_type}) kernel {{
-      %tid = gpu.thread_id x
-      %bid = gpu.block_id x
-      %bdim = gpu.block_dim x
-      %block_base = arith.muli %bid, %bdim : index
-      %idx = arith.addi %block_base, %tid : index
-      %size = arith.constant {size} : index
-      %inside = arith.cmpi ult, %idx, %size : index
-      scf.if %inside {{
-        %x = memref.load %input[%idx] : {memref_type}
-        %c = arith.constant {multiplier:.6e} : f32
-        %y = arith.mulf %x, %c : f32
-        memref.store %y, %output[%idx] : {memref_type}
-      }}
-      gpu.return
-    }}
-  }}
-}}"""
-    return GPUModuleScaffold(text, module_name, kernel_name)
+
+def build_f32_unary_map_gpu_scaffold(
+    *,
+    shape: tuple[int, ...],
+    operation: str,
+    constant: float,
+    constant_side: str = "right",
+    module_name: str = "remora_gpu",
+    kernel_name: str = "remora_map_f32",
+) -> GPUModuleScaffold:
+    _validate_scaffold_names(module_name, kernel_name)
+    return _build_f32_map_gpu_scaffold(
+        _F32MapKernel(
+            shape=shape,
+            operation=_F32MapOperation(
+                operation,
+                float(constant),
+                constant_side,
+            ),
+            num_inputs=1,
+        ),
+        module_name=module_name,
+        kernel_name=kernel_name,
+    )
+
+
+def build_f32_binary_map_gpu_scaffold(
+    *,
+    shape: tuple[int, ...],
+    operation: str,
+    module_name: str = "remora_gpu",
+    kernel_name: str = "remora_map_f32_binary",
+) -> GPUModuleScaffold:
+    _validate_scaffold_names(module_name, kernel_name)
+    return _build_f32_map_gpu_scaffold(
+        _F32MapKernel(
+            shape=shape,
+            operation=_F32MapOperation(operation),
+            num_inputs=2,
+        ),
+        module_name=module_name,
+        kernel_name=kernel_name,
+    )
 
 
 def _matching_brace_index(text: str, open_index: int) -> int:
@@ -117,50 +156,188 @@ def build_gpu_scaffold_for_function(
     kernel_name: str | None = None,
 ) -> GPUModuleScaffold:
     """Build the experimental GPU scaffold from a supported HIR function."""
-    size, multiplier = _rank1_f32_scale_map(function)
-    return build_rank1_f32_unary_map_gpu_scaffold(
-        size=size,
-        multiplier=multiplier,
+    kernel = _f32_map_kernel(function)
+    return _build_f32_map_gpu_scaffold(
+        kernel,
         module_name=module_name,
-        kernel_name=kernel_name or f"remora_{function.name}_rank1_f32",
+        kernel_name=kernel_name or f"remora_{function.name}_f32",
     )
 
 
-def _rank1_f32_scale_map(function: HIRFunction) -> tuple[int, float]:
-    if len(function.params) != 1:
-        raise GPUScaffoldError("GPU scaffold currently supports one input parameter")
-    param = function.params[0]
-    if not (
-        isinstance(param.type, ArrayType)
-        and param.type.element == FLOAT
-        and param.type.rank == 1
-    ):
-        raise GPUScaffoldError("GPU scaffold currently supports rank-1 float inputs only")
+def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
+    if not module_name.isidentifier() or not kernel_name.isidentifier():
+        raise GPUScaffoldError("GPU scaffold names must be valid identifiers")
+
+
+def _build_f32_map_gpu_scaffold(
+    kernel: _F32MapKernel,
+    *,
+    module_name: str,
+    kernel_name: str,
+) -> GPUModuleScaffold:
+    _validate_scaffold_names(module_name, kernel_name)
+    shape = _validate_shape(kernel.shape)
+    memref_type = _memref_type(shape)
+    total_size = _product(shape)
+    indexing_lines, indices = _indexing_lines(shape)
+    input_params = ", ".join(
+        [f"%input{index}: {memref_type}" for index in range(kernel.num_inputs)]
+    )
+    operation_lines = _operation_lines(kernel, memref_type, indices)
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    gpu.func @{kernel_name}({input_params}, %output: {memref_type}) kernel {{
+      %tid = gpu.thread_id x
+      %bid = gpu.block_id x
+      %bdim = gpu.block_dim x
+      %block_base = arith.muli %bid, %bdim : index
+      %idx = arith.addi %block_base, %tid : index
+      %size = arith.constant {total_size} : index
+      %inside = arith.cmpi ult, %idx, %size : index
+      scf.if %inside {{
+{indexing_lines}
+{operation_lines}
+      }}
+      gpu.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, kernel_name)
+
+
+def _validate_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
+    if not 1 <= len(shape) <= 3:
+        raise GPUScaffoldError("GPU scaffold currently supports rank-1 through rank-3 shapes only")
+    if any(dim <= 0 for dim in shape):
+        raise GPUScaffoldError("GPU scaffold shape dimensions must be positive")
+    return tuple(int(dim) for dim in shape)
+
+
+def _memref_type(shape: tuple[int, ...]) -> str:
+    return f"memref<{'x'.join(str(dim) for dim in shape)}xf32>"
+
+
+def _product(shape: tuple[int, ...]) -> int:
+    total = 1
+    for dim in shape:
+        total *= dim
+    return total
+
+
+def _indexing_lines(shape: tuple[int, ...]) -> tuple[str, list[str]]:
+    if len(shape) == 1:
+        return "", ["%idx"]
+    if len(shape) == 2:
+        return "\n".join(
+            [
+                f"        %dim1 = arith.constant {shape[1]} : index",
+                "        %i0 = arith.divui %idx, %dim1 : index",
+                "        %i1 = arith.remui %idx, %dim1 : index",
+            ]
+        ), ["%i0", "%i1"]
+    plane = shape[1] * shape[2]
+    return "\n".join(
+        [
+            f"        %dim2 = arith.constant {shape[2]} : index",
+            f"        %plane = arith.constant {plane} : index",
+            "        %i0 = arith.divui %idx, %plane : index",
+            "        %rem0 = arith.remui %idx, %plane : index",
+            "        %i1 = arith.divui %rem0, %dim2 : index",
+            "        %i2 = arith.remui %rem0, %dim2 : index",
+        ]
+    ), ["%i0", "%i1", "%i2"]
+
+
+def _operation_lines(kernel: _F32MapKernel, memref_type: str, indices: list[str]) -> str:
+    index_text = ", ".join(indices)
+    lines = [f"        %x0 = memref.load %input0[{index_text}] : {memref_type}"]
+    if kernel.num_inputs == 2:
+        lines.append(f"        %x1 = memref.load %input1[{index_text}] : {memref_type}")
+        lines.append(f"        %y = {_binary_op_expr(kernel.operation)}")
+    else:
+        assert kernel.operation.constant is not None
+        lines.append(f"        %c = arith.constant {kernel.operation.constant:.6e} : f32")
+        lines.append(f"        %y = {_unary_op_expr(kernel.operation)}")
+    lines.append(f"        memref.store %y, %output[{index_text}] : {memref_type}")
+    return "\n".join(lines)
+
+
+def _unary_op_expr(operation: _F32MapOperation) -> str:
+    left = "%x0"
+    right = "%c"
+    if operation.constant_side == "left":
+        left, right = right, left
+    if operation.op == "*":
+        return f"arith.mulf {left}, {right} : f32"
+    if operation.op == "+":
+        return f"arith.addf {left}, {right} : f32"
+    if operation.op == "-":
+        return f"arith.subf {left}, {right} : f32"
+    if operation.op == "/":
+        return f"arith.divf {left}, {right} : f32"
+    raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+
+
+def _binary_op_expr(operation: _F32MapOperation) -> str:
+    if operation.op == "*":
+        return "arith.mulf %x0, %x1 : f32"
+    if operation.op == "+":
+        return "arith.addf %x0, %x1 : f32"
+    if operation.op == "-":
+        return "arith.subf %x0, %x1 : f32"
+    if operation.op == "/":
+        return "arith.divf %x0, %x1 : f32"
+    raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+
+
+def _f32_map_kernel(function: HIRFunction) -> _F32MapKernel:
+    if len(function.params) not in (1, 2):
+        raise GPUScaffoldError("GPU scaffold currently supports one or two input parameters")
+    input_types: list[ArrayType] = []
+    for param in function.params:
+        if not (
+            isinstance(param.type, ArrayType)
+            and param.type.element == FLOAT
+            and 1 <= param.type.rank <= 3
+        ):
+            raise GPUScaffoldError(
+                "GPU scaffold currently supports rank-1 through rank-3 float inputs only"
+            )
+        input_types.append(param.type)
     if not (
         isinstance(function.return_type, ArrayType)
         and function.return_type.element == FLOAT
-        and function.return_type.shape == param.type.shape
+        and 1 <= function.return_type.rank <= 3
     ):
-        raise GPUScaffoldError("GPU scaffold output must match the rank-1 float input")
+        raise GPUScaffoldError(
+            "GPU scaffold currently supports rank-1 through rank-3 float outputs only"
+        )
+    if any(input_type.shape != function.return_type.shape for input_type in input_types):
+        raise GPUScaffoldError("GPU scaffold input and output shapes must match")
     if not (
         isinstance(function.body, HIRMap)
-        and len(function.body.arrays) == 1
-        and isinstance(function.body.array, HIRVar)
-        and function.body.array.name == param.name
+        and len(function.body.arrays) == len(function.params)
+        and all(isinstance(array, HIRVar) for array in function.body.arrays)
+        and [array.name for array in function.body.arrays] == [param.name for param in function.params]
         and isinstance(function.body.func, HIRPrimCallable)
     ):
-        raise GPUScaffoldError("GPU scaffold currently supports primitive maps over the parameter only")
-
+        raise GPUScaffoldError(
+            "GPU scaffold currently supports primitive maps over function parameters only"
+        )
     callable_ = function.body.func
-    if callable_.op != "*":
-        raise GPUScaffoldError("GPU scaffold currently supports scale maps only")
-    multiplier = _literal_f32_section_multiplier(callable_)
-    return param.type.shape[0].value, multiplier
-
-
-def _literal_f32_section_multiplier(callable_: HIRPrimCallable) -> float:
-    if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
-        return float(callable_.left_arg.value)
-    if isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
-        return float(callable_.right_arg.value)
-    raise GPUScaffoldError("GPU scaffold scale map requires a literal float section")
+    if len(function.params) == 1:
+        if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
+            operation = _F32MapOperation(callable_.op, float(callable_.left_arg.value), "left")
+        elif isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
+            operation = _F32MapOperation(callable_.op, float(callable_.right_arg.value), "right")
+        else:
+            raise GPUScaffoldError("GPU scaffold unary map requires a literal float section")
+    elif callable_.left_arg is None and callable_.right_arg is None:
+        operation = _F32MapOperation(callable_.op)
+    else:
+        raise GPUScaffoldError("GPU scaffold binary map does not support operator sections")
+    return _F32MapKernel(
+        tuple(dim.value for dim in function.return_type.shape),
+        operation,
+        len(function.params),
+    )

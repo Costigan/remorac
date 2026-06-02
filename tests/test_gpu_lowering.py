@@ -5,10 +5,13 @@ import pytest
 from remora.compiler import compile_function_source
 from remora.gpu_lowering import (
     GPUScaffoldError,
+    build_f32_binary_map_gpu_scaffold,
+    build_f32_unary_map_gpu_scaffold,
     build_gpu_scaffold_for_function,
     build_rank1_f32_unary_map_gpu_scaffold,
     extract_gpu_module_body_as_module,
 )
+from remora.hir import HIRFunction, HIRLit, HIRMap, HIRParam, HIRPrimCallable, HIRVar
 from remora.pipeline import (
     PipelineUnavailable,
     detect_toolchain,
@@ -68,6 +71,67 @@ def test_rank1_f32_unary_map_gpu_scaffold_uses_requested_size_and_multiplier():
     assert "arith.constant 3.500000e+00 : f32" in text
 
 
+def test_rank2_f32_unary_map_gpu_scaffold_uses_product_size_and_multi_indices():
+    scaffold = build_f32_unary_map_gpu_scaffold(
+        shape=(2, 3),
+        operation="*",
+        constant=2.0,
+        kernel_name="remora_scale2d",
+    )
+    parse_mlir(scaffold.text)
+    text = scaffold.text
+
+    assert "gpu.func @remora_scale2d" in text
+    assert "memref<2x3xf32>" in text
+    assert "arith.constant 6 : index" in text
+    assert "arith.divui %idx, %dim1 : index" in text
+    assert "arith.remui %idx, %dim1 : index" in text
+    assert "memref.load %input0[%i0, %i1]" in text
+    assert "memref.store %y, %output[%i0, %i1]" in text
+
+
+def test_rank3_f32_unary_map_gpu_scaffold_supports_left_section_division():
+    scaffold = build_f32_unary_map_gpu_scaffold(
+        shape=(2, 3, 4),
+        operation="/",
+        constant=3.0,
+        constant_side="left",
+        kernel_name="remora_inv3d",
+    )
+    parse_mlir(scaffold.text)
+    text = scaffold.text
+
+    assert "gpu.func @remora_inv3d" in text
+    assert "memref<2x3x4xf32>" in text
+    assert "arith.constant 24 : index" in text
+    assert "arith.divui %idx, %plane : index" in text
+    assert "arith.remui %rem0, %dim2 : index" in text
+    assert "%y = arith.divf %c, %x0 : f32" in text
+    assert "memref.store %y, %output[%i0, %i1, %i2]" in text
+
+
+def test_rank1_through_rank3_binary_map_gpu_scaffolds_are_parseable():
+    for shape, kernel_name in [
+        ((4,), "remora_add1d"),
+        ((2, 3), "remora_add2d"),
+        ((2, 3, 4), "remora_add3d"),
+    ]:
+        scaffold = build_f32_binary_map_gpu_scaffold(
+            shape=shape,
+            operation="+",
+            kernel_name=kernel_name,
+        )
+        parse_mlir(scaffold.text)
+        text = scaffold.text
+
+        dims = "x".join(str(dim) for dim in shape)
+        assert f"gpu.func @{kernel_name}" in text
+        assert f"memref<{dims}xf32>" in text
+        assert "memref.load %input0" in text
+        assert "memref.load %input1" in text
+        assert "%y = arith.addf %x0, %x1 : f32" in text
+
+
 def test_rank1_f32_unary_map_gpu_scaffold_rejects_invalid_size():
     with pytest.raises(GPUScaffoldError, match="positive"):
         build_rank1_f32_unary_map_gpu_scaffold(size=0)
@@ -85,11 +149,57 @@ def test_builds_gpu_scaffold_from_rank1_f32_scale_hir_function():
     module = parse_mlir(scaffold.text)
     text = str(module)
 
-    assert scaffold.kernel_name == "remora_scale_rank1_f32"
-    assert "gpu.func @remora_scale_rank1_f32" in text
+    assert scaffold.kernel_name == "remora_scale_f32"
+    assert "gpu.func @remora_scale_f32" in text
     assert "memref<4xf32>" in text
     assert "arith.constant 2.500000e+00 : f32" in text
     assert "arith.mulf" in text
+
+
+def test_builds_gpu_scaffold_from_rank2_and_rank3_hir_functions():
+    rank2_artifact = compile_function_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+        verify=False,
+    )
+    rank3_artifact = compile_function_source(
+        "def div3 xs = map (3.0 /) xs",
+        "div3",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),),
+        verify=False,
+    )
+
+    rank2_text = build_gpu_scaffold_for_function(rank2_artifact.hir_function).text
+    rank3_text = build_gpu_scaffold_for_function(rank3_artifact.hir_function).text
+    parse_mlir(rank2_text)
+    parse_mlir(rank3_text)
+
+    assert "memref<2x3xf32>" in rank2_text
+    assert "arith.mulf" in rank2_text
+    assert "memref<2x2x1xf32>" in rank3_text
+    assert "arith.divf %x0, %c : f32" in rank3_text
+
+
+def test_builds_binary_gpu_scaffold_from_hir_function():
+    artifact = compile_function_source(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ),
+        verify=False,
+    )
+
+    scaffold = build_gpu_scaffold_for_function(artifact.hir_function)
+    parse_mlir(scaffold.text)
+    text = scaffold.text
+
+    assert "gpu.func @remora_add_f32" in text
+    assert "memref<2x3xf32>" in text
+    assert "memref.load %input1[%i0, %i1]" in text
+    assert "%y = arith.addf %x0, %x1 : f32" in text
 
 
 def test_gpu_scaffold_is_accepted_by_external_mlir_verifier_when_available():
@@ -148,6 +258,53 @@ def test_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
     assert "memref." not in lowered
 
 
+def test_rank2_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    scaffold = build_f32_unary_map_gpu_scaffold(
+        shape=(2, 3),
+        operation="*",
+        constant=2.0,
+        kernel_name="remora_scale2d",
+    )
+    try:
+        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+            scaffold.text,
+            toolchain=toolchain,
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"scaffold LLVM dialect pipeline is not available: {exc}")
+
+    assert "llvm.func @remora_scale2d" in lowered
+    assert "nvvm.kernel" in lowered
+    assert "llvm.fmul" in lowered
+
+
+def test_binary_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    scaffold = build_f32_binary_map_gpu_scaffold(
+        shape=(4,),
+        operation="+",
+        kernel_name="remora_add1d",
+    )
+    try:
+        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+            scaffold.text,
+            toolchain=toolchain,
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"scaffold LLVM dialect pipeline is not available: {exc}")
+
+    assert "llvm.func @remora_add1d" in lowered
+    assert "nvvm.kernel" in lowered
+    assert "llvm.fadd" in lowered
+
+
 def test_extracts_converted_gpu_module_for_device_translation():
     toolchain = detect_toolchain()
     if toolchain.mlir_opt is None:
@@ -200,17 +357,77 @@ def test_gpu_scaffold_from_function_rejects_non_float_inputs():
         verify=False,
     )
 
-    with pytest.raises(GPUScaffoldError, match="rank-1 float inputs"):
+    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-3 float inputs"):
         build_gpu_scaffold_for_function(artifact.hir_function)
 
 
-def test_gpu_scaffold_from_function_rejects_non_scale_maps():
-    artifact = compile_function_source(
-        "def inc xs = map (+ 1.0) xs",
-        "inc",
-        (ArrayType(FLOAT, (StaticDim(4),)),),
-        verify=False,
+def test_gpu_scaffold_from_function_rejects_nonliteral_unary_maps():
+    function = HIRFunction(
+        "addc",
+        [
+            HIRParam("xs", ArrayType(FLOAT, (StaticDim(4),))),
+        ],
+        HIRMap(
+            frame_shape=(StaticDim(4),),
+            cell_shape=(),
+            func=HIRPrimCallable("+", (FLOAT,), FLOAT, right_arg=HIRVar("c", FLOAT)),
+            arrays=[HIRVar("xs", ArrayType(FLOAT, (StaticDim(4),)))],
+            result_type=ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+        ArrayType(FLOAT, (StaticDim(4),)),
     )
 
-    with pytest.raises(GPUScaffoldError, match="scale maps"):
-        build_gpu_scaffold_for_function(artifact.hir_function)
+    with pytest.raises(GPUScaffoldError, match="unary map requires a literal float section"):
+        build_gpu_scaffold_for_function(function)
+
+
+def test_gpu_scaffold_from_function_rejects_binary_operator_sections():
+    function = HIRFunction(
+        "addc",
+        [
+            HIRParam("xs", ArrayType(FLOAT, (StaticDim(4),))),
+            HIRParam("ys", ArrayType(FLOAT, (StaticDim(4),))),
+        ],
+        HIRMap(
+            frame_shape=(StaticDim(4),),
+            cell_shape=(),
+            func=HIRPrimCallable("+", (FLOAT, FLOAT), FLOAT, right_arg=HIRLit(1.0, FLOAT)),
+            arrays=[
+                HIRVar("xs", ArrayType(FLOAT, (StaticDim(4),))),
+                HIRVar("ys", ArrayType(FLOAT, (StaticDim(4),))),
+            ],
+            result_type=ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+        ArrayType(FLOAT, (StaticDim(4),)),
+    )
+
+    with pytest.raises(GPUScaffoldError, match="binary map does not support operator sections"):
+        build_gpu_scaffold_for_function(function)
+
+
+def test_gpu_scaffold_rejects_rank_above_three_and_zero_dimensions():
+    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-3"):
+        build_f32_unary_map_gpu_scaffold(shape=(1, 1, 1, 1), operation="*", constant=2.0)
+    with pytest.raises(GPUScaffoldError, match="positive"):
+        build_f32_binary_map_gpu_scaffold(shape=(2, 0), operation="+")
+
+
+def test_gpu_scaffold_rejects_manual_mismatched_binary_shapes():
+    function = HIRFunction(
+        "bad_add",
+        [
+            HIRParam("xs", ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))),
+            HIRParam("ys", ArrayType(FLOAT, (StaticDim(3), StaticDim(2)))),
+        ],
+        HIRMap(
+            frame_shape=(StaticDim(2), StaticDim(3)),
+            cell_shape=(),
+            func=HIRPrimCallable("+", (FLOAT, FLOAT), FLOAT),
+            arrays=[HIRVar("xs", ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))), HIRVar("ys", ArrayType(FLOAT, (StaticDim(3), StaticDim(2))))],
+            result_type=ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ),
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+    )
+
+    with pytest.raises(GPUScaffoldError, match="input and output shapes must match"):
+        build_gpu_scaffold_for_function(function)
