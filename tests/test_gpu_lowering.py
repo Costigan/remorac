@@ -1,4 +1,5 @@
 import importlib.util
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ from remora.hir import HIRFunction, HIRLit, HIRMap, HIRParam, HIRPrimCallable, H
 from remora.pipeline import (
     PipelineUnavailable,
     detect_toolchain,
+    lower_gpu_scaffold_to_nvptx_text,
     run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
     run_gpu_nvidia_scaffold_nvvm_pipeline_text,
     translate_mlir_to_llvmir,
@@ -36,6 +38,16 @@ def parse_mlir(text: str):
     context.allow_unregistered_dialects = True
     with context, ir.Location.unknown(context):
         return ir.Module.parse(text)
+
+
+def ptx_param_count(ptx_text: str, kernel_name: str) -> int:
+    match = re.search(
+        rf"\.visible\s+\.entry\s+{re.escape(kernel_name)}\((.*?)\)\n",
+        ptx_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", match.group(1)))
 
 
 def test_rank1_f32_unary_map_gpu_scaffold_is_parseable_gpu_mlir():
@@ -342,6 +354,51 @@ def test_extracted_gpu_module_translates_to_nonempty_llvm_ir_when_available():
     assert "llvm.nvvm.read.ptx.sreg.tid.x" in llvm_ir
     assert "fmul float" in llvm_ir
     assert "ret void" in llvm_ir
+
+
+def test_rank1_gpu_scaffold_compiles_to_nvptx_text_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+    try:
+        ptx = lower_gpu_scaffold_to_nvptx_text(scaffold.text, toolchain=toolchain)
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert ".version" in ptx
+    assert ".target sm_80" in ptx
+    assert ".address_size 64" in ptx
+    assert ".visible .entry remora_map_rank1_f32" in ptx
+    assert "input_desc_param" not in ptx
+    assert ".maxntid" not in ptx
+    assert ptx_param_count(ptx, "remora_map_rank1_f32") == 10
+    assert "ret;" in ptx
+
+
+def test_rank2_gpu_scaffold_compiles_to_nvptx_text_with_exploded_memref_abi_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    scaffold = build_f32_unary_map_gpu_scaffold(
+        shape=(2, 3),
+        operation="*",
+        constant=2.0,
+        kernel_name="remora_scale2d",
+    )
+    try:
+        ptx = lower_gpu_scaffold_to_nvptx_text(scaffold.text, toolchain=toolchain)
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert ".visible .entry remora_scale2d" in ptx
+    assert ".target sm_80" in ptx
+    assert "input_desc_param" not in ptx
+    assert ptx_param_count(ptx, "remora_scale2d") == 14
+    assert "ld.param.u64" in ptx
+    assert "mul.wide.u32" in ptx or "mul.wide.s32" in ptx
 
 
 def test_extract_gpu_module_reports_missing_module():

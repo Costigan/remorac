@@ -459,7 +459,11 @@ Deferred pipeline/codegen work:
   removes the remaining `scf`/`cf`/`arith`/`memref` ops from the scaffold.
   `extract_gpu_module_body_as_module` can wrap the converted device body so
   `mlir-translate --mlir-to-llvmir` emits non-empty LLVM IR with NVVM
-  intrinsics. PTX translation/assembly and runtime launch are not wired yet.
+  intrinsics, and `llc -march=nvptx64 -mcpu=sm_80` now emits standalone PTX text
+  for this scaffold path. That PTX is still inspection-only because the current
+  MLIR-generated kernel entry uses the exploded memref ABI instead of the final
+  Remora descriptor-pointer ABI. PTX assembly and runtime launch are not wired
+  yet.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR
