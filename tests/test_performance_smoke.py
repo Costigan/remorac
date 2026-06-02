@@ -29,6 +29,13 @@ SMOKE_CASES = {
         1,
         5.0,
     ),
+    "row_reduce": (
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in "
+        "map (\\row -> fold (+) 0.0 row) xs",
+        1,
+        1,
+        5.0,
+    ),
 }
 
 
@@ -72,6 +79,17 @@ def test_threaded_cpu_pipeline_emits_openmp_for_parallel_map():
     lowered = run_cpu_pipeline_text(mlir, toolchain=detect_toolchain(), threaded=True)
 
     assert "omp.parallel" in lowered
+    assert "omp.wsloop" in lowered
+
+
+def test_threaded_cpu_pipeline_lowers_row_reduction():
+    source = "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
+    mlir = compile_source_to_mlir(source, verify=False)
+    lowered = run_cpu_pipeline_text(mlir, toolchain=detect_toolchain(), threaded=True)
+
+    assert "llvm.func @main" in lowered
+    assert "linalg.generic" not in lowered
+    assert "memref.alloca_scope" not in lowered
     assert "omp.wsloop" in lowered
 
 

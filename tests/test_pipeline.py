@@ -23,6 +23,7 @@ from remora.pipeline import (
     run_validation_pipeline,
     translate_mlir_to_llvmir,
     verify_module_text,
+    _strip_trivial_memref_alloca_scopes,
 )
 from remora.typechecker import TypeChecker
 
@@ -134,6 +135,30 @@ def test_pipeline_artifacts_match_code_constants():
     assert "convert-to-llvm" in CPU_PIPELINE
     assert "gpu.module(convert-gpu-to-nvvm" in GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE
     assert "convert-cf-to-llvm" in GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE
+
+
+def test_threaded_pipeline_strips_only_trivial_alloca_scopes():
+    text = """module {
+  func.func @f() {
+    memref.alloca_scope  {
+      scf.for %i = %c0 to %c1 step %c1 {
+        "test.use"() : () -> ()
+      }
+    }
+    memref.alloca_scope  {
+      %0 = memref.alloca() : memref<1xf32>
+      "test.use"(%0) : (memref<1xf32>) -> ()
+    }
+    return
+  }
+}
+"""
+
+    stripped = _strip_trivial_memref_alloca_scopes(text)
+
+    assert 'scf.for %i = %c0 to %c1 step %c1' in stripped
+    assert stripped.count("memref.alloca_scope") == 1
+    assert "%0 = memref.alloca()" in stripped
 
 
 def test_generate_ptx_with_iree_cuda_backend_when_available():

@@ -47,6 +47,25 @@ CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
+CPU_THREADED_PRE_PIPELINE = "builtin.module(" + ",".join(
+    [
+        "linalg-fuse-elementwise-ops",
+        "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "convert-linalg-to-parallel-loops",
+        "convert-scf-to-openmp",
+    ]
+) + ")"
+
+CPU_THREADED_POST_PIPELINE = "builtin.module(" + ",".join(
+    [
+        "convert-scf-to-cf",
+        "convert-openmp-to-llvm",
+        "convert-index-to-llvm",
+        "convert-to-llvm",
+        "reconcile-unrealized-casts",
+    ]
+) + ")"
+
 GPU_NVIDIA_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
@@ -230,8 +249,62 @@ def run_cpu_pipeline_text(
     toolchain: PipelineToolchain | None = None,
     threaded: bool = False,
 ) -> str:
-    pipeline = CPU_THREADED_PIPELINE if threaded else CPU_PIPELINE
-    return run_external_pipeline_text(mlir_text, pipeline, toolchain=toolchain)
+    if not threaded:
+        return run_external_pipeline_text(mlir_text, CPU_PIPELINE, toolchain=toolchain)
+    lowered = run_external_pipeline_text(
+        mlir_text,
+        CPU_THREADED_PRE_PIPELINE,
+        toolchain=toolchain,
+    )
+    lowered = _strip_trivial_memref_alloca_scopes(lowered)
+    return run_external_pipeline_text(
+        lowered,
+        CPU_THREADED_POST_PIPELINE,
+        toolchain=toolchain,
+    )
+
+
+def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
+    """Remove no-allocation `memref.alloca_scope` wrappers from MLIR text.
+
+    MLIR 18's linalg-to-parallel-loops path emits alloca scopes around loop
+    bodies even when they contain no stack allocations. Lowering nested
+    `scf.for` loops to CFG inside those wrappers can make the scope region
+    invalid, so the threaded pipeline erases only wrappers whose body has no
+    `memref.alloca` operations.
+    """
+    lines = mlir_text.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if "memref.alloca_scope" not in line or "{" not in line:
+            output.append(line)
+            index += 1
+            continue
+
+        depth = _brace_delta(line)
+        end = index + 1
+        while end < len(lines) and depth > 0:
+            depth += _brace_delta(lines[end])
+            end += 1
+        if depth != 0:
+            output.append(line)
+            index += 1
+            continue
+
+        body = lines[index + 1 : end - 1]
+        has_alloca = any("memref.alloca" in body_line for body_line in body)
+        if has_alloca:
+            output.extend(lines[index:end])
+        else:
+            output.extend(body)
+        index = end
+    return "\n".join(output) + ("\n" if mlir_text.endswith("\n") else "")
+
+
+def _brace_delta(line: str) -> int:
+    return line.count("{") - line.count("}")
 
 
 def run_fusion_pipeline_text(
