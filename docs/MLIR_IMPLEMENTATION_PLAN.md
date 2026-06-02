@@ -1750,7 +1750,10 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     functions with a literal float section constant, plus binary maps over two
     matching `float32` inputs. Rank-2/rank-3 kernels use flattened CUDA
     indexing and descriptor strides. This feeds `RemoraExecutor` directly and
-    is separate from IREE HAL PTX.
+    is separate from IREE HAL PTX. `compile_function_source_to_supported_gpu_artifacts`
+    now makes the current split explicit by pairing the inspection scaffold with
+    the separate executable descriptor-ABI PTX artifact for the same supported
+    function.
   - Decision: do not widen this hand-authored PTX slice to rank 4 through rank
     10. It is a runtime/codegen smoke path only. Higher-rank and production GPU
     work must go through `gpu.module` / `gpu.func` lowering through the
