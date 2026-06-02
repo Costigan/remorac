@@ -2104,10 +2104,12 @@ HAL PTX is intentionally not treated as a launchable Remora ABI artifact.
 For the first prototype, `remorac --target` supports `cpu` and `gpu-nvidia` only. The REPL starts with `cpu` and adds `gpu-nvidia` after the descriptor ABI and CUDA runtime are stable. `gpu-amd`, `--output`, and broad debug flags can be added after the vertical slice is stable.
 
 Current implementation note: `remorac` is registered as a Python console script
-and defaults to `--target cpu`, using the interim typed-AST evaluator. It also
-supports `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`,
-`--emit-ptx`, plus `--target mlir` and `--target ptx` for developer inspection
-of the current lowering/codegen artifacts.
+and defaults to `--target cpu`, using compiled CPU execution for the lowered
+Dense Core subset. The typed-AST evaluator remains available through
+`--target interp` as a reference oracle. The CLI also supports `--emit-ast`,
+`--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus
+`--target mlir` and `--target ptx` for developer inspection of the current
+lowering/codegen artifacts.
 
 #### 8.1 AOT Command-Line Interface (`bin/remorac`)
 
@@ -2264,9 +2266,12 @@ def format_result(data: np.ndarray | float | int, ty: RemoraType) -> str:
   - Current: `tests/test_cli.py` runs every checked-in `examples/*.remora` through the `remorac` CPU entry point.
 
 **Milestone M7**: generated programs execute through the shared executor API on CPU and NVIDIA.
-Current: output formatting is shared by the interim CPU evaluator, `remorac`,
-and the REPL. The final shared executor API is still deferred until the MLIR CPU
-or direct Remora ABI execution path exists.
+Current: output formatting is shared by the interpreter reference path,
+compiled CPU `remorac`, and the REPL. CPU execution uses `CPUExecutor` for the
+lowered Dense Core subset, and direct Remora ABI CUDA execution exists for the
+rank-1 through rank-3 hand-authored PTX smoke slice. Full NVIDIA execution for
+generated Dense Core programs remains blocked on production `gpu.module`
+lowering through the standalone NVVM/PTX pipeline.
 
 ---
 

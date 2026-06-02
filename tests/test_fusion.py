@@ -12,6 +12,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+MAP_FOLD_MISS_REASON = (
+    "MLIR 18's linalg-fuse-elementwise-ops fuses the iota producer into the "
+    "map, but it leaves the reduction consumer materialized as a second "
+    "linalg.generic in this textual pipeline."
+)
+
+
 def fused_mlir(source: str) -> tuple[str, str]:
     toolchain = detect_toolchain()
     if toolchain.mlir_opt is None:
@@ -44,12 +51,10 @@ def test_dot_binary_map_and_fold_fuse_to_one_linalg_generic():
     assert "arith.addf" in after
 
 
-def test_map_then_fold_milestone_records_current_materialization_status():
+def test_map_then_fold_records_the_current_materialization_reason():
     before, after = fused_mlir("fold (+) 0.0 (map (* 2.0) (iota 10))")
 
     assert before.count("linalg.generic") == 3
-    # LLVM/MLIR 18 fuses the iota producer into the map, but it does not fuse
-    # this map/reduction shape in the current textual lowering.
-    assert after.count("linalg.generic") == 2
+    assert after.count("linalg.generic") == 2, MAP_FOLD_MISS_REASON
     assert "arith.mulf" in after
     assert "arith.addf" in after

@@ -120,7 +120,7 @@ class CUDARuntime:
         )
         self._ctx = _cuda_value(
             self._cuda,
-            self._cuda.cuCtxCreate(0, self._device),
+            self._cuda.cuCtxCreate(None, 0, self._device),
             "cuCtxCreate failed",
         )
 
@@ -246,23 +246,26 @@ class CUDAKernel:
         stream: int = 0,
     ) -> None:
         packed_args, kernel_args = _pack_cuda_kernel_args(args, self._rt)
-        _cuda_check(
-            self._rt._cuda,
-            self._rt._cuda.cuLaunchKernel(
-                self._function,
-                int(grid[0]),
-                int(grid[1]),
-                int(grid[2]),
-                int(block[0]),
-                int(block[1]),
-                int(block[2]),
-                int(shared_mem),
-                stream,
-                kernel_args,
-                None,
-            ),
-            "cuLaunchKernel failed",
-        )
+        try:
+            _cuda_check(
+                self._rt._cuda,
+                self._rt._cuda.cuLaunchKernel(
+                    self._function,
+                    int(grid[0]),
+                    int(grid[1]),
+                    int(grid[2]),
+                    int(block[0]),
+                    int(block[1]),
+                    int(block[2]),
+                    int(shared_mem),
+                    stream,
+                    kernel_args,
+                    None,
+                ),
+                "cuLaunchKernel failed",
+            )
+        except TypeError as exc:
+            raise CUDAError(f"cuLaunchKernel argument marshalling failed: {exc}") from exc
         # Keep scalar ctypes values alive until after cuLaunchKernel returns.
         _ = packed_args
 
@@ -270,10 +273,10 @@ class CUDAKernel:
 def _pack_cuda_kernel_args(
     args: list[object],
     runtime: CUDARuntime,
-) -> tuple[list[ctypes._SimpleCData | ctypes.Structure], ctypes.Array]:
+) -> tuple[list[ctypes._SimpleCData | ctypes.Structure], list[int]]:
     packed_args: list[ctypes._SimpleCData | ctypes.Structure] = []
-    kernel_args = (ctypes.c_void_p * len(args))()
-    for index, arg in enumerate(args):
+    kernel_args: list[int] = []
+    for arg in args:
         if isinstance(arg, ctypes.Structure):
             descriptor_ptr = runtime.alloc(ctypes.sizeof(arg))
             runtime.copy_host_bytes_to_device(
@@ -296,7 +299,7 @@ def _pack_cuda_kernel_args(
         else:
             raise CUDAError(f"unsupported CUDA kernel argument type {type(arg).__name__}")
         packed_args.append(c_arg)
-        kernel_args[index] = ctypes.cast(ctypes.byref(c_arg), ctypes.c_void_p)
+        kernel_args.append(int(ctypes.cast(ctypes.byref(c_arg), ctypes.c_void_p).value))
     return packed_args, kernel_args
 
 

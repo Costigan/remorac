@@ -126,7 +126,9 @@ def test_cli_cpu_runs_checked_in_examples(capsys):
         "threshold_mask.remora",
         "top_level_value.remora",
     }
-    for path in sorted(Path("examples").glob("*.remora")):
+    for path in sorted(
+        p for p in Path("examples").glob("*.remora") if not p.name.startswith(".")
+    ):
         args = [str(path)] if path.name in compiled_examples else ["--target", "interp", str(path)]
         assert main(args) == 0, path
         captured = capsys.readouterr()

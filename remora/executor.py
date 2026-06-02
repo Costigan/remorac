@@ -75,9 +75,9 @@ class RemoraExecutor:
                 element_strides(output),
                 output.dtype,
             )
-            block_size = meta.block_size or 256
+            block_size = int(meta.block_size or 256)
             element_count = max(1, int(np.prod(output.shape, dtype=np.int64)))
-            grid_size = (element_count + block_size - 1) // block_size
+            grid_size = int((element_count + block_size - 1) // block_size)
 
             kernel.launch(
                 (grid_size, 1, 1),
