@@ -9,6 +9,9 @@ pipeline validation. IREE remains an inspection backend only.
 - `mlir-opt`: `/usr/bin/mlir-opt-18`
 - `mlir-translate`: `/usr/bin/mlir-translate-18`
 - `llc`: `/usr/bin/llc-18`
+- OpenMP runtime: libomp is not installed in the current environment; threaded
+  CPU execution with `--cpu-threads > 1` is skipped/fails with a diagnostic
+  until a libomp-compatible runtime with `__kmpc` symbols is available
 - `ptxas`: not installed in the current environment; PTX assembly validation
   is skipped when unavailable
 - IREE inspection tools: `.venv/bin/iree-opt`, `.venv/bin/iree-compile`
@@ -31,6 +34,12 @@ The pipeline validator checks:
 - Dense Core cases lower through standalone `mlir-opt-18` to LLVM dialect.
 - The lowered LLVM dialect translates to LLVM IR with `mlir-translate-18`.
 - Fusion reduces nested map programs at the `linalg.generic` level.
+
+The experimental threaded CPU pipeline is exposed as
+`remora.pipeline.CPU_THREADED_PIPELINE`. It lowers map-shaped `linalg` programs
+through `scf.parallel` and OpenMP dialect operations before LLVM lowering. Link
+and execution require libomp; libgomp does not satisfy the current MLIR
+OpenMP-to-LLVM symbols.
 
 ## GPU Backend Status
 

@@ -31,6 +31,7 @@ class BenchmarkResult:
     linalg_generic_before: int
     linalg_generic_after_fusion: int
     llvm_func_count: int
+    allocation_count: int
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -73,7 +74,12 @@ def benchmark_source(
         linalg_generic_before=mlir.count("linalg.generic"),
         linalg_generic_after_fusion=fused.count("linalg.generic"),
         llvm_func_count=lowered.count("llvm.func"),
+        allocation_count=_allocation_count(lowered),
     )
+
+
+def _allocation_count(lowered_mlir: str) -> int:
+    return lowered_mlir.count("llvm.call @malloc") + lowered_mlir.count("memref.alloc")
 
 
 def main(argv: list[str] | None = None) -> int:

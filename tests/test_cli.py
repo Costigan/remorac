@@ -80,7 +80,7 @@ def test_cli_loads_prelude_for_cpu_target(tmp_path, capsys):
 def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
     source = write_source(tmp_path, "1 + 2")
 
-    assert main(["--cpu-threads", "2", str(source)]) == 0
+    assert main(["--cpu-threads", "1", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "3\n"
     assert captured.err == ""

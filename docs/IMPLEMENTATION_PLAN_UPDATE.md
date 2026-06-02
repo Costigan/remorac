@@ -359,12 +359,31 @@ Completed in the follow-on sprint:
 5. Added `remora-bench`, a JSON benchmark harness for compile/pipeline/execution
    timing and coarse operation counts.
 
-The next sprint should finish the real M3 CPU multicore backend:
+Completed in the M3 CPU sprint:
 
-1. Select the concrete threading lowering strategy: OpenMP dialect/runtime,
-   affine/scf parallel lowering, or an explicit host thread runtime.
-2. Make `--cpu-threads` affect generated CPU execution instead of only metadata.
-3. Add benchmark baselines for large maps, map chains, reductions, dot, and row
-   reductions.
-4. Add allocation/reuse metrics for intermediate tensors.
-5. Keep all current validators and the full test suite green.
+1. Added an experimental threaded CPU pipeline that lowers linalg maps through
+   `scf.parallel`, the OpenMP dialect, OpenMP-to-LLVM, and LLVM lowering.
+2. Made `--cpu-threads` and `REMORA_NUM_THREADS` select that threaded pipeline
+   for requests above one thread, with explicit libomp runtime detection and a
+   stable diagnostic when the runtime is unavailable.
+3. Added execution-time `OMP_NUM_THREADS` scoping for compiled whole-program and
+   descriptor-input CPU calls.
+4. Added coarse allocation counts to `remora-bench`.
+5. Added `docs/BENCHMARK_BASELINES.json` and smoke coverage for the benchmark
+   baseline structure.
+6. Kept the focused CPU/CLI/performance/lowering/acceptance suite and MLIR
+   validators green.
+
+The next sprint should harden M3 rather than broaden the language:
+
+1. Make threaded lowering work for reductions and nested tensor programs, not
+   just parallel map-shaped programs.
+2. Add CI or a documented local validation profile with libomp installed so
+   `--cpu-threads > 1` is exercised through link and execution, not only MLIR
+   pipeline text.
+3. Add `--cpu-vectorize/--no-cpu-vectorize` and settle the vectorization stage
+   before GPU generalization resumes.
+4. Turn benchmark baselines into executable gates for allocation counts, fusion
+   counts, and optional machine-local trend comparisons.
+5. Start buffer reuse/arena planning for intermediate tensors that survive
+   fusion.

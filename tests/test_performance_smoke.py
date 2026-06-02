@@ -66,23 +66,46 @@ def test_cpu_pipeline_compile_time_smoke(name: str, source_and_expected):
     assert elapsed < cpu_budget_s, f"{name} CPU pipeline took {elapsed:.3f}s"
 
 
+def test_threaded_cpu_pipeline_emits_openmp_for_parallel_map():
+    source = "map (* 2) (iota 16)"
+    mlir = compile_source_to_mlir(source, verify=False)
+    lowered = run_cpu_pipeline_text(mlir, toolchain=detect_toolchain(), threaded=True)
+
+    assert "omp.parallel" in lowered
+    assert "omp.wsloop" in lowered
+
+
 def test_benchmark_source_records_cpu_thread_request():
-    result = benchmark_source("map (* 2) (iota 4)", name="tiny", cpu_threads=2)
+    result = benchmark_source("map (* 2) (iota 4)", name="tiny", cpu_threads=1)
 
     assert result.name == "tiny"
-    assert result.cpu_threads == 2
+    assert result.cpu_threads == 1
     assert result.linalg_generic_before >= result.linalg_generic_after_fusion
     assert result.llvm_func_count >= 1
+    assert result.allocation_count >= 0
 
 
 def test_benchmark_cli_emits_json(tmp_path, capsys):
     source = tmp_path / "bench.remora"
     source.write_text("map (* 2) (iota 4)", encoding="utf-8")
 
-    assert benchmark_main(["--cpu-threads", "2", str(source)]) == 0
+    assert benchmark_main(["--cpu-threads", "1", str(source)]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
     assert payload["name"] == "bench"
-    assert payload["cpu_threads"] == 2
+    assert payload["cpu_threads"] == 1
+    assert "allocation_count" in payload
     assert captured.err == ""
+
+
+def test_benchmark_baselines_cover_smoke_cases():
+    from pathlib import Path
+
+    payload = json.loads(Path("docs/BENCHMARK_BASELINES.json").read_text(encoding="utf-8"))
+    names = {case["name"] for case in payload["cases"]}
+
+    assert set(SMOKE_CASES) <= names
+    for case in payload["cases"]:
+        assert case["max_linalg_generic_after_fusion"] >= 0
+        assert case["max_allocation_count"] >= 0
