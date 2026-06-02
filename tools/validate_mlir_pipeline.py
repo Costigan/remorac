@@ -13,6 +13,8 @@ from remora.compiler import compile_source_to_mlir  # noqa: E402
 from remora.pipeline import (  # noqa: E402
     CPU_PIPELINE,
     FUSION_PIPELINE,
+    GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
+    GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
     PipelineUnavailable,
     detect_toolchain,
     run_cpu_pipeline_text,
@@ -63,7 +65,16 @@ def main() -> int:
     if not nvidia_artifact.is_file():
         print("missing docs/mlir-pipeline-nvidia.txt", file=sys.stderr)
         return 1
-    print("nvidia pipeline artifact: inspection-only until direct gpu.module lowering lands")
+    nvidia_text = nvidia_artifact.read_text(encoding="utf-8")
+    if GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE not in nvidia_text:
+        raise PipelineUnavailable(
+            "docs/mlir-pipeline-nvidia.txt does not mention the scaffold NVVM pipeline"
+        )
+    if GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE not in nvidia_text:
+        raise PipelineUnavailable(
+            "docs/mlir-pipeline-nvidia.txt does not mention the scaffold LLVM dialect pipeline"
+        )
+    print("nvidia pipeline artifact: scaffold-only until production gpu.module lowering lands")
     return 0
 
 

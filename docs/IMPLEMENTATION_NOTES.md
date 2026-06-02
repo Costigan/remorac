@@ -453,8 +453,9 @@ Deferred pipeline/codegen work:
   covered. The follow-on scaffold LLVM-dialect pass
   `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)`
   removes the remaining `scf`/`cf`/`arith`/`memref` ops from the scaffold.
-  Device-module extraction, LLVM IR/PTX translation, PTX assembly, and runtime
-  launch are not wired yet.
+  `extract_gpu_module_body_as_module` can wrap the converted device body so
+  `mlir-translate --mlir-to-llvmir` emits non-empty LLVM IR with NVVM
+  intrinsics. PTX translation/assembly and runtime launch are not wired yet.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR

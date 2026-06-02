@@ -7,12 +7,14 @@ from remora.gpu_lowering import (
     GPUScaffoldError,
     build_gpu_scaffold_for_function,
     build_rank1_f32_unary_map_gpu_scaffold,
+    extract_gpu_module_body_as_module,
 )
 from remora.pipeline import (
     PipelineUnavailable,
     detect_toolchain,
     run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
     run_gpu_nvidia_scaffold_nvvm_pipeline_text,
+    translate_mlir_to_llvmir,
     verify_module_text,
 )
 from remora.types import FLOAT, INT, ArrayType, StaticDim
@@ -144,6 +146,50 @@ def test_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
     assert "cf." not in lowered
     assert "arith." not in lowered
     assert "memref." not in lowered
+
+
+def test_extracts_converted_gpu_module_for_device_translation():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        scaffold.text,
+        toolchain=toolchain,
+    )
+
+    device_module = extract_gpu_module_body_as_module(lowered)
+
+    assert "module {" in device_module
+    assert "gpu.module" not in device_module
+    assert "llvm.func @remora_map_rank1_f32" in device_module
+    assert "nvvm.kernel" in device_module
+
+
+def test_extracted_gpu_module_translates_to_nonempty_llvm_ir_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_standalone_mlir:
+        pytest.skip("standalone MLIR tools are not available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        scaffold.text,
+        toolchain=toolchain,
+    )
+    device_module = extract_gpu_module_body_as_module(lowered)
+
+    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+
+    assert "define void @remora_map_rank1_f32" in llvm_ir
+    assert "llvm.nvvm.read.ptx.sreg.tid.x" in llvm_ir
+    assert "fmul float" in llvm_ir
+    assert "ret void" in llvm_ir
+
+
+def test_extract_gpu_module_reports_missing_module():
+    with pytest.raises(GPUScaffoldError, match="was not found"):
+        extract_gpu_module_body_as_module("module {}")
 
 
 def test_gpu_scaffold_from_function_rejects_non_float_inputs():
