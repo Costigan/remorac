@@ -76,6 +76,7 @@ class CompiledCPUArtifact:
     temp_dir: tempfile.TemporaryDirectory[str]
     return_type: RemoraType
     cpu_threads: int | None = None
+    cpu_vectorize: bool = False
 
     def close(self) -> None:
         self.temp_dir.cleanup()
@@ -90,6 +91,7 @@ class CompiledCPUFunctionArtifact:
     return_type: RemoraType
     export_name: str
     cpu_threads: int | None = None
+    cpu_vectorize: bool = False
 
     def close(self) -> None:
         self.temp_dir.cleanup()
@@ -389,11 +391,13 @@ def evaluate_source_compiled(
     *,
     include_prelude: bool = True,
     cpu_threads: int | None = None,
+    cpu_vectorize: bool = False,
 ) -> EvaluationResult:
     artifact = CPUExecutor.compile_source(
         source,
         include_prelude=include_prelude,
         cpu_threads=cpu_threads,
+        cpu_vectorize=cpu_vectorize,
     )
     try:
         value = CPUExecutor(artifact).execute_main([])
@@ -427,6 +431,7 @@ class CPUExecutor:
         include_prelude: bool = True,
         toolchain: PipelineToolchain | None = None,
         cpu_threads: int | None = None,
+        cpu_vectorize: bool = False,
     ) -> CompiledCPUArtifact:
         resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_source(
@@ -440,6 +445,8 @@ class CPUExecutor:
 
         toolchain = detect_toolchain() if toolchain is None else toolchain
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
+        if threaded and cpu_vectorize:
+            raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
         if threaded and not has_openmp_runtime():
             raise PipelineUnavailable(
                 "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "
@@ -450,6 +457,7 @@ class CPUExecutor:
                 compiler_artifact.mlir_text,
                 toolchain=toolchain,
                 threaded=threaded,
+                vectorize=cpu_vectorize,
             )
         except PipelineUnavailable as exc:
             if threaded:
@@ -504,6 +512,7 @@ class CPUExecutor:
             temp_dir,
             compiler_artifact.return_type,
             resolved_cpu_threads,
+            cpu_vectorize,
         )
 
     def execute_main(self, inputs: list[np.ndarray] | None = None) -> object:
@@ -554,6 +563,7 @@ class CPUFunctionExecutor:
         include_prelude: bool = True,
         toolchain: PipelineToolchain | None = None,
         cpu_threads: int | None = None,
+        cpu_vectorize: bool = False,
     ) -> CompiledCPUFunctionArtifact:
         resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_function_source(
@@ -565,6 +575,8 @@ class CPUFunctionExecutor:
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
+        if threaded and cpu_vectorize:
+            raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
         if threaded and not has_openmp_runtime():
             raise PipelineUnavailable(
                 "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "
@@ -575,6 +587,7 @@ class CPUFunctionExecutor:
                 compiler_artifact.mlir_text,
                 toolchain=toolchain,
                 threaded=threaded,
+                vectorize=cpu_vectorize,
             )
         except PipelineUnavailable as exc:
             if threaded:
@@ -592,6 +605,7 @@ class CPUFunctionExecutor:
             compiler_artifact.return_type,
             "remora_call",
             resolved_cpu_threads,
+            cpu_vectorize,
         )
 
     def execute(self, *inputs: np.ndarray) -> EvaluationResult:

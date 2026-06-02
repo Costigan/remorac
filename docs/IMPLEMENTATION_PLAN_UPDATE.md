@@ -384,9 +384,19 @@ The next sprint should harden M3 rather than broaden the language:
    scalar reductions, dot-shaped reductions, and row reductions.
 2. Add CI or a documented local validation profile with libomp installed so
    `--cpu-threads > 1` remains exercised through link and execution.
-3. Add `--cpu-vectorize/--no-cpu-vectorize` and settle the vectorization stage
-   before GPU generalization resumes.
-4. Turn benchmark baselines into executable gates for allocation counts, fusion
-   counts, and optional machine-local trend comparisons.
-5. Start buffer reuse/arena planning for intermediate tensors that survive
+3. Start buffer reuse/arena planning for intermediate tensors that survive
    fusion.
+4. Add optional machine-local wall-clock trend comparisons to the benchmark
+   harness.
+5. Broaden threaded/vectorized pipeline coverage to descriptor-input callable
+   examples and larger checked-in benchmark programs.
+
+Completed in the M3 hardening sprint:
+
+1. Added `--cpu-vectorize` and `--no-cpu-vectorize` CLI controls plus matching
+   runtime and benchmark API options.
+2. Added an experimental affine/vector CPU pipeline selected only when requested.
+3. Added benchmark JSON output for requested vectorization mode.
+4. Added `remora-bench --baseline` checks for fusion and allocation ceilings.
+5. Added tests for vectorized CPU execution, vectorized pipeline lowering,
+   unsupported threaded+vectorized selection, and benchmark baseline failures.

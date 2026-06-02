@@ -43,6 +43,13 @@ the OpenMP conversion so trivial no-allocation `memref.alloca_scope` wrappers do
 not block nested loop lowering. Link and execution require libomp; libgomp does
 not satisfy the current MLIR OpenMP-to-LLVM symbols.
 
+The experimental vectorized CPU pipeline is exposed as
+`remora.pipeline.CPU_VECTORIZED_PIPELINE` and selected by `--cpu-vectorize`. It
+uses affine loop lowering plus `affine-super-vectorize` before lowering vector,
+affine, SCF, and standard operations to LLVM. This mode is currently
+single-threaded; combining `--cpu-vectorize` with `--cpu-threads > 1` is rejected
+until the threaded/vectorized pipeline contract is deliberately designed.
+
 ## GPU Backend Status
 
 The final NVIDIA backend requires Remora to lower to explicit `gpu.module` /

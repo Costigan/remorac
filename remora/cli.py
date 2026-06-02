@@ -43,6 +43,20 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="requested CPU worker thread count; defaults to REMORA_NUM_THREADS when set",
     )
+    vectorize_group = parser.add_mutually_exclusive_group()
+    vectorize_group.add_argument(
+        "--cpu-vectorize",
+        dest="cpu_vectorize",
+        action="store_true",
+        help="use the experimental affine/vector CPU lowering pipeline",
+    )
+    vectorize_group.add_argument(
+        "--no-cpu-vectorize",
+        dest="cpu_vectorize",
+        action="store_false",
+        help="use the scalar CPU lowering pipeline",
+    )
+    parser.set_defaults(cpu_vectorize=False)
     args = parser.parse_args(argv)
 
     try:
@@ -66,7 +80,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.target == "cpu":
-            result = evaluate_source_compiled(source, cpu_threads=args.cpu_threads)
+            result = evaluate_source_compiled(
+                source,
+                cpu_threads=args.cpu_threads,
+                cpu_vectorize=args.cpu_vectorize,
+            )
             print(format_result(result.value, result.type))
             return 0
         if args.target == "interp":

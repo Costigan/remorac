@@ -9,6 +9,7 @@ from remora.lowering import MLIRLowering
 from remora.parser import parse_program
 from remora.pipeline import (
     CPU_PIPELINE,
+    CPU_VECTORIZED_PIPELINE,
     FUSION_PIPELINE,
     GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
     GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
@@ -115,6 +116,27 @@ def test_standalone_cpu_pipeline_lowers_to_llvm_dialect_when_available():
     assert "@main" in llvm_ir
 
 
+def test_standalone_cpu_vectorized_pipeline_lowers_to_llvm_dialect_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_standalone_mlir:
+        pytest.skip("standalone MLIR tools are not available")
+
+    module = lowered_module("map (* 2.0) (iota 10)")
+
+    lowered = run_cpu_pipeline_text(str(module), toolchain=toolchain, vectorize=True)
+    llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
+
+    assert "llvm.func @main" in lowered
+    assert "linalg.generic" not in lowered
+    assert "define {" in llvm_ir
+    assert "@main" in llvm_ir
+
+
+def test_cpu_pipeline_rejects_threaded_vectorized_mode():
+    with pytest.raises(PipelineUnavailable, match="threaded CPU vectorization"):
+        run_cpu_pipeline_text("module {}", threaded=True, vectorize=True)
+
+
 def test_standalone_fusion_pipeline_fuses_nested_scalar_map_when_available():
     toolchain = detect_toolchain()
     if toolchain.mlir_opt is None:
@@ -133,6 +155,7 @@ def test_standalone_fusion_pipeline_fuses_nested_scalar_map_when_available():
 def test_pipeline_artifacts_match_code_constants():
     assert "linalg-fuse-elementwise-ops" in FUSION_PIPELINE
     assert "convert-to-llvm" in CPU_PIPELINE
+    assert "affine-super-vectorize" in CPU_VECTORIZED_PIPELINE
     assert "gpu.module(convert-gpu-to-nvvm" in GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE
     assert "convert-cf-to-llvm" in GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE
 
