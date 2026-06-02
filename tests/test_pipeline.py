@@ -132,9 +132,12 @@ def test_standalone_cpu_vectorized_pipeline_lowers_to_llvm_dialect_when_availabl
     assert "@main" in llvm_ir
 
 
-def test_cpu_pipeline_rejects_threaded_vectorized_mode():
-    with pytest.raises(PipelineUnavailable, match="threaded CPU vectorization"):
-        run_cpu_pipeline_text("module {}", threaded=True, vectorize=True)
+def test_cpu_pipeline_supports_threaded_vectorized_mode():
+    try:
+        result = run_cpu_pipeline_text("module {}", threaded=True, vectorize=True)
+        assert "module {" in result
+    except PipelineUnavailable as e:
+        pytest.fail(f"Pipeline unavailable: {e}")
 
 
 def test_standalone_fusion_pipeline_fuses_nested_scalar_map_when_available():

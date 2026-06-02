@@ -1,1 +1,1 @@
-builtin.module(linalg-fuse-elementwise-ops,one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},convert-linalg-to-loops,convert-scf-to-cf,convert-to-llvm,reconcile-unrealized-casts)
+builtin.module(linalg-fuse-elementwise-ops,one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},func.func(buffer-deallocation),convert-linalg-to-loops,convert-scf-to-cf,convert-to-llvm,reconcile-unrealized-casts)

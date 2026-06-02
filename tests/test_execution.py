@@ -167,9 +167,19 @@ def test_cpu_executor_records_vectorization_request():
     np.testing.assert_array_equal(result, np.array([0, 2, 4, 6], dtype=np.float32))
 
 
-def test_cpu_executor_rejects_threaded_vectorized_mode():
-    with pytest.raises(PipelineUnavailable, match="threaded CPU vectorization"):
-        CPUExecutor.compile_source("map (* 2.0) (iota 4)", cpu_threads=2, cpu_vectorize=True)
+def test_cpu_executor_supports_threaded_vectorized_mode():
+    if not has_openmp_runtime():
+        pytest.skip("OpenMP runtime is unavailable")
+
+    artifact = CPUExecutor.compile_source("map (* 2.0) (iota 4)", cpu_threads=2, cpu_vectorize=True)
+    try:
+        assert artifact.cpu_threads == 2
+        assert artifact.cpu_vectorize is True
+        result = CPUExecutor(artifact).execute_main([])
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(result, np.array([0, 2, 4, 6], dtype=np.float32))
 
 
 def test_resolve_cpu_threads_rejects_invalid_values(monkeypatch):
