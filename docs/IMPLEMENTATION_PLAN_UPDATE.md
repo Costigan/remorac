@@ -332,17 +332,29 @@ env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest -q
 - Keep the typed-AST interpreter as a correctness oracle, not the default user
   execution path.
 
-## 7. Recommended Next Sprint
+## 7. Completed Sprint and Next Work
 
-The next sprint should deliver M1 and the first half of M2:
+Completed in this sprint:
 
-1. Add `docs/DENSE_CORE.md` and update `docs/ABI.md` for byte-backed bool arrays.
-2. Add acceptance manifest categories for supported/rejected/deferred programs.
-3. Introduce the internal MLIR text builder and tensor SSA environment.
-4. Port the current tensor-let, map, fold, and indexing lowering to that builder.
-5. Add tests proving no `@main` string-splicing remains.
-6. Keep all current validators and the full test suite green.
+1. Added `docs/DENSE_CORE.md`.
+2. Updated `docs/ABI.md` with the byte-backed public bool array policy.
+3. Added explicit acceptance manifest categories for supported, rejected, and
+   deferred programs.
+4. Introduced a small internal MLIR main-module builder and typed tensor SSA
+   environment values.
+5. Ported tensor-let/map/fold/index module assembly away from `@main`
+   string-splicing.
+6. Added tests for Dense Core docs, acceptance categories, and the no-splicing
+   tensor-let lowering contract.
 
-After that, prioritize M3 CPU multicore work before expanding GPU syntax
-coverage. A fast CPU baseline is the best oracle and fallback for every later
-GPU feature.
+The next sprint should finish M2 and start M3:
+
+1. Move the remaining scalar/iota/array literal module emitters onto the same
+   builder interface.
+2. Expand the tensor SSA environment to cover more non-direct tensor expressions
+   and remove remaining broad let-inlining cases.
+3. Add rank-4 and rank-10 fold/indexing acceptance coverage where Dense Core
+   type rules allow.
+4. Define the CPU multicore pipeline contract and add the first
+   `--cpu-threads`/benchmark harness implementation.
+5. Keep all current validators and the full test suite green.
