@@ -20,6 +20,22 @@ from remora.pipeline import (
 from remora.runtime import evaluate_source_compiled, resolve_cpu_threads
 
 
+BASELINE_SOURCES = {
+    "vector_scale": "map (* 2.0) (iota 1000)",
+    "map_chain": "map (* 3.0) (map (* 2.0) (iota 1000))",
+    "vector_sum": "fold (+) 0.0 (iota 1000)",
+    "dot": (
+        "let xs = [1.0, 2.0, 3.0] in "
+        "let ys = [4.0, 5.0, 6.0] in "
+        "dot xs ys"
+    ),
+    "row_reduce": (
+        "let xs = [[1.0, 2.0], [3.0, 4.0]] in "
+        "map (\\row -> fold (+) 0.0 row) xs"
+    ),
+}
+
+
 @dataclass(frozen=True)
 class BenchmarkResult:
     name: str
@@ -115,9 +131,42 @@ def check_result_against_baseline(
     return failures
 
 
+def run_benchmark_suite(
+    baseline_path: Path,
+    *,
+    cpu_threads: int | None = None,
+    cpu_vectorize: bool = False,
+) -> tuple[list[BenchmarkResult], list[str]]:
+    """Run all cases defined in the baseline file."""
+    baselines = json.loads(baseline_path.read_text(encoding="utf-8"))
+    cases = baselines.get("cases", [])
+    results: list[BenchmarkResult] = []
+    all_failures: list[str] = []
+
+    for case in cases:
+        name = case.get("name")
+        if not name:
+            continue
+        source = BASELINE_SOURCES.get(name)
+        if not source:
+            all_failures.append(f"No source string defined for baseline case {name!r}")
+            continue
+
+        result = benchmark_source(
+            source,
+            name=name,
+            cpu_threads=cpu_threads,
+            cpu_vectorize=cpu_vectorize,
+        )
+        results.append(result)
+        all_failures.extend(check_result_against_baseline(result, baselines))
+
+    return results, all_failures
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Benchmark a Remora Dense Core source file")
-    parser.add_argument("file", type=Path, help="Remora source file")
+    parser.add_argument("file", type=Path, nargs="?", help="Remora source file")
     parser.add_argument("--name", default=None, help="benchmark case name")
     parser.add_argument(
         "--cpu-threads",
@@ -145,24 +194,45 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="optional benchmark baseline JSON file to check this result against",
     )
+    parser.add_argument(
+        "--suite",
+        action="store_true",
+        help="run all cases from the baseline file; requires --baseline",
+    )
     args = parser.parse_args(argv)
 
+    if args.suite and not args.baseline:
+        print("remora-bench: --suite requires --baseline", file=sys.stderr)
+        return 1
+    if not args.suite and not args.file:
+        print("remora-bench: file is required unless using --suite", file=sys.stderr)
+        return 1
+
     try:
-        source = args.file.read_text(encoding="utf-8")
-        result = benchmark_source(
-            source,
-            name=args.name or args.file.stem,
-            cpu_threads=args.cpu_threads,
-            cpu_vectorize=args.cpu_vectorize,
-        )
-        failures: list[str] = []
-        if args.baseline is not None:
-            baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
-            failures = check_result_against_baseline(result, baseline)
+        if args.suite:
+            results, failures = run_benchmark_suite(
+                args.baseline,
+                cpu_threads=args.cpu_threads,
+                cpu_vectorize=args.cpu_vectorize,
+            )
+            print(json.dumps([r.to_dict() for r in results], sort_keys=True))
+        else:
+            source = args.file.read_text(encoding="utf-8")
+            result = benchmark_source(
+                source,
+                name=args.name or args.file.stem,
+                cpu_threads=args.cpu_threads,
+                cpu_vectorize=args.cpu_vectorize,
+            )
+            failures = []
+            if args.baseline is not None:
+                baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+                failures = check_result_against_baseline(result, baseline)
+            print(json.dumps(result.to_dict(), sort_keys=True))
     except (OSError, RemoraError, json.JSONDecodeError) as exc:
         print(f"remora-bench: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(result.to_dict(), sort_keys=True))
+
     if failures:
         for failure in failures:
             print(f"remora-bench: {failure}", file=sys.stderr)

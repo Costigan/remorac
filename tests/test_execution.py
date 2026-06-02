@@ -451,6 +451,51 @@ def test_cpu_function_executor_runs_binary_descriptor_input_map():
     )
 
 
+def test_threaded_cpu_function_executor_executes_map():
+    if not has_openmp_runtime():
+        pytest.skip("OpenMP runtime is unavailable")
+
+    artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(100),)),),
+        cpu_threads=4,
+    )
+    try:
+        assert artifact.cpu_threads == 4
+        result = CPUFunctionExecutor(artifact).execute(
+            np.arange(100, dtype=np.float32)
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.arange(100, dtype=np.float32) * 2.0,
+    )
+
+
+def test_vectorized_cpu_function_executor_executes_map():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(100),)),),
+        cpu_vectorize=True,
+    )
+    try:
+        assert artifact.cpu_vectorize is True
+        result = CPUFunctionExecutor(artifact).execute(
+            np.arange(100, dtype=np.float32)
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.arange(100, dtype=np.float32) * 2.0,
+    )
+
+
 def test_cpu_function_executor_runs_rank10_binary_descriptor_input_map():
     shape = unit_shape(10)
     artifact = CPUFunctionExecutor.compile_source(

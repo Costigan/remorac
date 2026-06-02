@@ -51,7 +51,7 @@ class KernelMeta:
     num_outputs: int
     input_elem_types: list[str]
     output_elem_types: list[str]
-    output_shape: tuple[int, ...] = ()
+    output_shape: tuple[int, ...] | None = None
     output_dtype: str | None = None
 
 
