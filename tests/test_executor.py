@@ -408,6 +408,36 @@ def test_compile_function_source_to_rank2_binary_mlir_gpu_ptx():
     ]
 
 
+def test_compile_function_source_to_rank3_unary_and_binary_mlir_gpu_ptx():
+    unary_ptx, unary_kernels, unary_artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),),
+        kernel_name="remora_scale3d",
+    )
+    binary_ptx, binary_kernels, binary_artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),
+        ),
+        kernel_name="remora_add3d",
+    )
+
+    assert unary_artifact.function_name == "scale"
+    assert ".visible .entry remora_scale3d" in unary_ptx
+    assert "remora_scale3d_inner" in unary_ptx
+    assert unary_kernels[0].num_inputs == 1
+    assert unary_kernels[0].output_shape == (2, 2, 1)
+
+    assert binary_artifact.function_name == "add"
+    assert ".visible .entry remora_add3d" in binary_ptx
+    assert "remora_add3d_inner" in binary_ptx
+    assert binary_kernels[0].num_inputs == 2
+    assert binary_kernels[0].output_shape == (2, 2, 1)
+
+
 def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     try:
         runtime = CUDARuntime()
@@ -542,6 +572,54 @@ def test_remora_executor_runs_rank2_binary_mlir_gpu_ptx_round_trip_when_availabl
     np.testing.assert_array_equal(
         result,
         np.array([[11, 22, 33], [44, 55, 66]], dtype=np.float32),
+    )
+
+
+def test_remora_executor_runs_rank3_mlir_gpu_ptx_round_trips_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA driver/device is not available: {exc}")
+
+    try:
+        unary_ptx, unary_kernels, _unary_artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def scale xs = map (* 2.0) xs",
+            "scale",
+            (ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),),
+            kernel_name="remora_scale3d",
+        )
+        binary_ptx, binary_kernels, _binary_artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def add xs ys = map (+) xs ys",
+            "add",
+            (
+                ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),
+                ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),
+            ),
+            kernel_name="remora_add3d",
+        )
+        unary_executor = RemoraExecutor(unary_ptx, unary_kernels, runtime=runtime)
+        binary_executor = RemoraExecutor(binary_ptx, binary_kernels, runtime=runtime)
+        unary = unary_executor.execute_main(
+            [np.array([[[1], [2]], [[3], [4]]], dtype=np.float32)]
+        )
+        binary = binary_executor.execute_main(
+            [
+                np.array([[[1], [2]], [[3], [4]]], dtype=np.float32),
+                np.array([[[10], [20]], [[30], [40]]], dtype=np.float32),
+            ]
+        )
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+    finally:
+        runtime.close()
+
+    np.testing.assert_array_equal(
+        unary,
+        np.array([[[2], [4]], [[6], [8]]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        binary,
+        np.array([[[11], [22]], [[33], [44]]], dtype=np.float32),
     )
 
 

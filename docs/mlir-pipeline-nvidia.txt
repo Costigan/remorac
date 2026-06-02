@@ -17,11 +17,13 @@
 # This proves the GPU dialect operations, scf.if, arith ops, and memref load/store
 # in the scaffold can be converted toward NVVM/LLVM dialect. The converted
 # gpu.module body can be extracted, translated to non-empty LLVM IR with NVVM
-# intrinsics, and compiled with llc to standalone PTX text. That PTX remains
-# inspection-only because the current scaffold path still uses MLIR's exploded
-# memref ABI at the kernel boundary instead of the final Remora descriptor-pointer
-# ABI from docs/ABI.md. It is not a complete production NVIDIA pipeline, is not
-# assembled with ptxas here, and is not wired to RemoraExecutor launch.
+# intrinsics, and compiled with llc to standalone PTX text.
+#
+# The raw scaffold PTX remains inspection-only because it uses MLIR's exploded
+# memref ABI at the kernel boundary. The executable MLIR-derived slice wraps that
+# inner kernel with the Remora descriptor-pointer ABI from docs/ABI.md and is
+# wired to RemoraExecutor for rank-1 through rank-3 float32 unary/binary maps.
+# PTX assembly is checked by tests when ptxas is installed.
 #
 # Temporary PTX inspection remains available through remora.codegen.generate_ptx,
 # which invokes iree-compile with:

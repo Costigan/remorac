@@ -157,6 +157,15 @@ def test_array_literal_after_atom_currently_parses_as_index():
     assert [index.value for index in expr.indices] == [1]
 
 
+def test_parser_records_source_locations():
+    program = parse_program("-- comment\nlet x = 1 in\nx + 2", "sample.remora")
+
+    assert program.body is not None
+    assert program.body.loc.file == "sample.remora"
+    assert program.body.loc.line == 2
+    assert program.body.loc.col == 5
+
+
 def test_malformed_syntax_errors():
     with pytest.raises(LarkError):
         parse_expr("let x = in 1")

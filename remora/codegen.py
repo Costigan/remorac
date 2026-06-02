@@ -135,7 +135,7 @@ def generate_mlir_descriptor_abi_ptx(
 ) -> tuple[str, list[KernelMeta]]:
     """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
 
-    This is intentionally narrow: rank-1 unary/binary and rank-2 unary/binary
+    This is intentionally narrow: rank-1 through rank-3 unary/binary
     `float32` maps. The inner kernel still comes from the scaffold GPU path; a
     descriptor-pointer ABI wrapper is injected before NVPTX emission so the
     exported entry can be launched by `RemoraExecutor`.
@@ -144,17 +144,17 @@ def generate_mlir_descriptor_abi_ptx(
     name = kernel_name or f"remora_{function.name}"
     map_kernel = _direct_f32_map_kernel(function)
     rank = len(map_kernel.shape)
-    if rank not in (1, 2):
+    if rank not in (1, 2, 3):
         raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports rank-1 and rank-2 f32 maps only"
+            "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 f32 maps only"
         )
     if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
         raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary rank-1/rank-2 f32 maps only"
+            "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary rank-1/rank-3 f32 maps only"
         )
     if map_kernel.num_inputs not in (1, 2):
         raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports one or two rank-1/rank-2 f32 input descriptors only"
+            "MLIR-derived descriptor-ABI PTX currently supports one or two rank-1/rank-3 f32 input descriptors only"
         )
 
     scaffold = build_gpu_scaffold_for_function(function, kernel_name=name)

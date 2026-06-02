@@ -51,8 +51,9 @@ CPU-first Phase 7/8 usability slice:
   value definitions, `:type`, `:mlir`, `:load`, `:reset`, `:target`, and
   `:help`.
 
-Full descriptor-ABI code generation, CUDA launch path, dynamic shapes, dynamic
-rank, or automatic differentiation has not been implemented.
+Full tensor/linalg-to-`gpu.module` lowering, dynamic shapes, dynamic rank, and
+automatic differentiation have not been implemented. A narrow descriptor-ABI
+CUDA launch path exists for rank-1 through rank-3 `float32` maps.
 
 ## Rank Direction
 
@@ -155,8 +156,8 @@ Deferred ABI/runtime work:
   before prepending definitions. This avoids creating a blank top-level
   separator between the injected prelude definitions and a commented example
   body.
-- Source locations currently store filename plus placeholder line/column `0`.
-  Precise source spans are deferred.
+- Source locations now use token-derived filename, line, and column data for
+  parsed AST nodes. Full source spans are still deferred.
 
 Known parser limitation:
 
@@ -367,6 +368,7 @@ Deferred defunctionalization work:
   `tensor.empty() : tensor<0xi32>`.
 - Full-rank `HIRIndex` with literal integer indices lowers to `tensor.extract`
   for tensor-producing expressions such as `iota` and static array literals.
+  Partial literal indexing lowers to rank-reducing `tensor.extract_slice`.
 - Standalone `HIRLit`, `HIRCast`, and `HIRPrimOp` expressions lower through a
   small scalar-region emitter. The same emitter is used for simple lifted
   lambda bodies inside scalar maps.
@@ -464,19 +466,24 @@ Deferred pipeline/codegen work:
   MLIR-generated kernel entry uses the exploded memref ABI instead of the final
   Remora descriptor-pointer ABI. PTX assembly and runtime launch are not wired
   yet.
-- The first MLIR-derived executable GPU slice now exists for rank-1 `float32`
-  unary/binary maps and rank-2 `float32` unary/binary maps.
+- The first MLIR-derived executable GPU slice now exists for rank-1 through
+  rank-3 `float32` unary/binary maps.
   `generate_mlir_descriptor_abi_ptx` lowers the
   scaffold through the LLVM-dialect path, injects a descriptor-pointer ABI
   wrapper around the inner exploded-memref kernel, and emits PTX that
   `RemoraExecutor` can launch. This remains an experimental bridge step, not
-  full production `gpu.module` lowering parity, and it is only validated for the
-  current contiguous rank-1 unary/binary and rank-2 unary/binary slices.
+  full production `gpu.module` lowering parity, and it is validated for the
+  current contiguous rank-1 through rank-3 unary/binary slices.
 - For the current supported rank-1 through rank-3 float map slice, the
-  executable descriptor-ABI GPU path remains `generate_direct_remora_ptx`.
-  `compile_function_source_to_supported_gpu_artifacts` now makes that split
-  explicit by returning both the inspection scaffold and the separate direct PTX
-  execution artifact from one HIR function.
+  executable descriptor-ABI GPU path now prefers
+  `generate_mlir_descriptor_abi_ptx`. `generate_direct_remora_ptx` remains as a
+  compatibility fallback when standalone NVPTX tools are unavailable.
+  `compile_function_source_to_supported_gpu_artifacts` returns both the
+  `gpu.module` scaffold and the executable descriptor-wrapper PTX artifact from
+  one HIR function.
+- `assemble_ptx_text` validates emitted PTX through `ptxas` and returns the
+  generated cubin bytes when the assembler is installed. Tests skip this check
+  in the current environment because `ptxas` is missing.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR

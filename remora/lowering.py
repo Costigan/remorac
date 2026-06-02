@@ -561,20 +561,17 @@ def _lower_array_literal_module(node: HIRArrayLit) -> str:
 
 
 def _lower_index_module(node: HIRIndex, functions: dict[str, HIRFunction]) -> str:
-    if not isinstance(node.result_type, ScalarType):
-        raise RemoraLoweringError("only full-rank scalar indexing lowers to MLIR so far")
     array_type = _expr_result_type(node.array)
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
-    if len(node.indices) != array_type.rank:
-        raise RemoraLoweringError("partial indexing lowering is deferred")
+    if len(node.indices) > array_type.rank:
+        raise RemoraLoweringError("too many indices for tensor input")
 
     array_code, array_value, array_mlir_type, _element_type = _lower_tensor_input(
         node.array,
         "idx_in",
         functions,
     )
-    result_type = type_to_mlir(node.result_type)
     index_lines: list[str] = []
     index_names: list[str] = []
     for position, index in enumerate(node.indices):
@@ -583,13 +580,33 @@ def _lower_index_module(node: HIRIndex, functions: dict[str, HIRFunction]) -> st
         name = f"%idx_{position}"
         index_names.append(name)
         index_lines.append(f"    {name} = arith.constant {index.value} : index")
-    indices = ", ".join(index_names)
     index_body = "\n".join(index_lines)
+    result_type = type_to_mlir(node.result_type)
+    if len(node.indices) == array_type.rank:
+        indices = ", ".join(index_names)
+        result_line = f"    %result = tensor.extract {array_value}[{indices}] : {array_mlir_type}"
+    elif isinstance(node.result_type, ArrayType):
+        offsets = [*index_names, *("%c0" for _axis in range(array_type.rank - len(node.indices)))]
+        sizes = [
+            *("1" for _axis in range(len(node.indices))),
+            *(str(dim.value) for dim in array_type.shape[len(node.indices) :]),
+        ]
+        strides = ["1" for _axis in range(array_type.rank)]
+        if "%c0" in offsets:
+            index_lines.insert(0, "    %c0 = arith.constant 0 : index")
+            index_body = "\n".join(index_lines)
+        result_line = (
+            f"    %result = tensor.extract_slice {array_value}"
+            f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
+            f"{array_mlir_type} to {result_type}"
+        )
+    else:
+        raise RemoraLoweringError("partial indexing result type must be an array")
     return f"""module {{
   func.func @main() -> {result_type} {{
 {array_code}
 {index_body}
-    %result = tensor.extract {array_value}[{indices}] : {array_mlir_type}
+{result_line}
     return %result : {result_type}
   }}
 }}"""

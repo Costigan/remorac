@@ -20,6 +20,7 @@ from remora.gpu_lowering import (
 from remora.hir import HIRFunction, HIRLit, HIRMap, HIRParam, HIRPrimCallable, HIRVar
 from remora.pipeline import (
     PipelineUnavailable,
+    assemble_ptx_text,
     detect_toolchain,
     lower_gpu_scaffold_to_nvptx_text,
     run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
@@ -229,7 +230,7 @@ def test_builds_binary_gpu_scaffold_from_hir_function():
     assert "%y = arith.addf %x0, %x1 : f32" in text
 
 
-def test_supported_gpu_artifacts_keep_scaffold_and_direct_abi_paths_distinct():
+def test_supported_gpu_artifacts_prefer_mlir_descriptor_abi_ptx():
     artifact = compile_function_source_to_supported_gpu_artifacts(
         "def scale xs = map (* 2.0) xs",
         "scale",
@@ -241,8 +242,9 @@ def test_supported_gpu_artifacts_keep_scaffold_and_direct_abi_paths_distinct():
 
     assert "gpu.func @remora_scale" in artifact.scaffold.text
     assert ".visible .entry remora_scale" in artifact.ptx_text
-    assert ".param .u64 input_desc_param" in artifact.ptx_text
-    assert ".param .u64 output_desc_param" in artifact.ptx_text
+    assert ".param .u64 remora_scale_param_0" in artifact.ptx_text
+    assert ".param .u64 remora_scale_param_1" in artifact.ptx_text
+    assert "remora_scale_inner" in artifact.ptx_text
     assert artifact.kernels[0].name == "remora_scale"
     assert artifact.kernels[0].num_inputs == 1
     assert artifact.kernels[0].output_shape == (4,)
@@ -435,7 +437,7 @@ def test_rank2_gpu_scaffold_compiles_to_nvptx_text_with_exploded_memref_abi_when
     assert "mul.wide.u32" in ptx or "mul.wide.s32" in ptx
 
 
-def test_supported_gpu_artifacts_document_scaffold_vs_direct_abi_boundary_when_available():
+def test_supported_gpu_artifacts_document_scaffold_vs_descriptor_abi_boundary_when_available():
     toolchain = detect_toolchain()
     if not toolchain.has_nvptx_codegen:
         pytest.skip("standalone NVPTX text tools are not available")
@@ -455,9 +457,9 @@ def test_supported_gpu_artifacts_document_scaffold_vs_direct_abi_boundary_when_a
         pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
 
     assert ptx_param_count(scaffold_ptx, "remora_scale") == 10
-    assert ".param .u64 input_desc_param" not in scaffold_ptx
-    assert ".param .u64 input_desc_param" in artifact.ptx_text
-    assert ".param .u64 output_desc_param" in artifact.ptx_text
+    assert ".param .u64 remora_scale_param_0" in artifact.ptx_text
+    assert ".param .u64 remora_scale_param_1" in artifact.ptx_text
+    assert "remora_scale_inner" in artifact.ptx_text
     assert ptx_param_count(artifact.ptx_text, "remora_scale") == 2
 
 
@@ -569,6 +571,25 @@ def test_rank2_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available
     assert kernels[0].name == "remora_add2d"
     assert kernels[0].num_inputs == 2
     assert kernels[0].output_shape == (2, 3)
+
+
+def test_mlir_gpu_ptx_assembles_with_ptxas_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.ptxas is None:
+        pytest.skip("ptxas is not available")
+
+    try:
+        ptx, _kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def scale xs = map (* 2.0) xs",
+            "scale",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            kernel_name="remora_scale",
+        )
+        cubin = assemble_ptx_text(ptx, toolchain=toolchain)
+    except PipelineUnavailable as exc:
+        pytest.skip(f"PTX assembly validation is not available: {exc}")
+
+    assert cubin
 
 
 def test_extract_gpu_module_reports_missing_module():

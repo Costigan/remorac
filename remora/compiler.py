@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from remora.codegen import (
+    CodegenUnavailable,
     KernelMeta,
     generate_mlir_descriptor_abi_ptx,
     generate_direct_remora_ptx,
@@ -16,6 +17,7 @@ from remora.hir import HIRFunction, HIRParam, HIRProgram, lower_expr, lower_to_h
 from remora.lowering import MLIRLowering
 from remora.parser import parse_program
 from remora.pipeline import run_validation_pipeline, verify_module_text
+from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
 from remora.types import FuncType, RemoraType
@@ -200,10 +202,11 @@ def compile_function_source_to_supported_gpu_artifacts(
 ) -> SupportedGPUFunctionArtifact:
     """Build the current inspection and execution GPU artifacts for one function.
 
-    The returned scaffold is the `gpu.module` inspection artifact for the
-    rank-1 through rank-3 float unary/binary map slice. The returned PTX is the
-    separate direct descriptor-ABI execution artifact used by `RemoraExecutor`
-    for that same supported slice.
+    The returned scaffold is the `gpu.module` artifact for the rank-1 through
+    rank-3 float unary/binary map slice. The returned PTX prefers the
+    MLIR-derived descriptor-ABI path; when standalone NVPTX tools are not
+    available it falls back to the older direct PTX slice so callers can still
+    inspect/launch the supported ABI shape in constrained environments.
     """
     artifact = compile_function_source(
         source,
@@ -213,10 +216,16 @@ def compile_function_source_to_supported_gpu_artifacts(
         include_prelude=include_prelude,
     )
     kernel = kernel_name or f"remora_{function_name}"
-    ptx_text, kernels = generate_direct_remora_ptx(
-        artifact.hir_function,
-        kernel_name=kernel,
-    )
+    try:
+        ptx_text, kernels = generate_mlir_descriptor_abi_ptx(
+            artifact.hir_function,
+            kernel_name=kernel,
+        )
+    except (CodegenUnavailable, PipelineUnavailable):
+        ptx_text, kernels = generate_direct_remora_ptx(
+            artifact.hir_function,
+            kernel_name=kernel,
+        )
     return SupportedGPUFunctionArtifact(
         compiler=artifact,
         scaffold=build_gpu_scaffold_for_function(
