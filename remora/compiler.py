@@ -14,6 +14,7 @@ from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
 from remora.types import FuncType, RemoraType
 from remora.ast_nodes import FuncDef
+from remora.gpu_lowering import GPUModuleScaffold, build_gpu_scaffold_for_function
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,14 @@ class FunctionCompilerArtifact:
 @dataclass(frozen=True)
 class PTXArtifact:
     compiler: CompilerArtifact
+    ptx_text: str
+    kernels: list[KernelMeta]
+
+
+@dataclass(frozen=True)
+class SupportedGPUFunctionArtifact:
+    compiler: FunctionCompilerArtifact
+    scaffold: GPUModuleScaffold
     ptx_text: str
     kernels: list[KernelMeta]
 
@@ -127,6 +136,44 @@ def compile_function_source_to_direct_ptx(
         kernel_name=kernel_name,
     )
     return ptx, kernels, artifact
+
+
+def compile_function_source_to_supported_gpu_artifacts(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    *,
+    include_prelude: bool = True,
+    kernel_name: str | None = None,
+) -> SupportedGPUFunctionArtifact:
+    """Build the current inspection and execution GPU artifacts for one function.
+
+    The returned scaffold is the `gpu.module` inspection artifact for the
+    rank-1 through rank-3 float unary/binary map slice. The returned PTX is the
+    separate direct descriptor-ABI execution artifact used by `RemoraExecutor`
+    for that same supported slice.
+    """
+    artifact = compile_function_source(
+        source,
+        function_name,
+        param_types,
+        verify=False,
+        include_prelude=include_prelude,
+    )
+    kernel = kernel_name or f"remora_{function_name}"
+    ptx_text, kernels = generate_direct_remora_ptx(
+        artifact.hir_function,
+        kernel_name=kernel,
+    )
+    return SupportedGPUFunctionArtifact(
+        compiler=artifact,
+        scaffold=build_gpu_scaffold_for_function(
+            artifact.hir_function,
+            kernel_name=kernel,
+        ),
+        ptx_text=ptx_text,
+        kernels=kernels,
+    )
 
 
 def compile_function_source(

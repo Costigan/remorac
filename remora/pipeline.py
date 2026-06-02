@@ -287,6 +287,12 @@ def lower_gpu_scaffold_to_nvptx_text(
     sm_version: str = "sm_80",
     toolchain: PipelineToolchain | None = None,
 ) -> str:
+    """Lower a scaffold-only gpu.module artifact to inspection PTX text.
+
+    This path is intentionally inspection-only: the resulting PTX uses MLIR's
+    exploded memref ABI at the kernel boundary, not the external descriptor ABI
+    required by `docs/ABI.md` and `RemoraExecutor`.
+    """
     from remora.gpu_lowering import extract_gpu_module_body_as_module
 
     toolchain = detect_toolchain() if toolchain is None else toolchain

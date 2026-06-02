@@ -464,6 +464,11 @@ Deferred pipeline/codegen work:
   MLIR-generated kernel entry uses the exploded memref ABI instead of the final
   Remora descriptor-pointer ABI. PTX assembly and runtime launch are not wired
   yet.
+- For the current supported rank-1 through rank-3 float map slice, the
+  executable descriptor-ABI GPU path remains `generate_direct_remora_ptx`.
+  `compile_function_source_to_supported_gpu_artifacts` now makes that split
+  explicit by returning both the inspection scaffold and the separate direct PTX
+  execution artifact from one HIR function.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR

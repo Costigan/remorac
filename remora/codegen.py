@@ -98,6 +98,9 @@ def generate_direct_remora_ptx(
 
     Supported today: rank-1 through rank-3 `float32` unary maps with a literal
     float section constant, and binary maps over two matching `float32` inputs.
+    Unlike the scaffold-only NVPTX inspection path, this emitter produces the
+    descriptor-pointer kernel ABI required by `docs/ABI.md` and
+    `RemoraExecutor`.
     """
     name = kernel_name or f"remora_{function.name}"
     map_kernel = _direct_f32_map_kernel(function)
