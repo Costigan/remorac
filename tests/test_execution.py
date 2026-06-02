@@ -4,8 +4,14 @@ import numpy as np
 import pytest
 
 from remora.display import format_result
-from remora.runtime import CPUExecutor, CPUFunctionExecutor, evaluate_source, evaluate_source_compiled
-from remora.runtime import EvaluationError
+from remora.runtime import (
+    CPUExecutor,
+    CPUFunctionExecutor,
+    EvaluationError,
+    evaluate_source,
+    evaluate_source_compiled,
+    resolve_cpu_threads,
+)
 from remora.types import FLOAT, INT, ArrayType, StaticDim
 
 
@@ -131,6 +137,30 @@ def test_cpu_executor_compile_source_keeps_artifact_until_closed():
         artifact.close()
 
     np.testing.assert_array_equal(result, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_cpu_executor_records_requested_thread_count(monkeypatch):
+    explicit = CPUExecutor.compile_source("1 + 2", cpu_threads=3)
+    try:
+        assert explicit.cpu_threads == 3
+    finally:
+        explicit.close()
+
+    monkeypatch.setenv("REMORA_NUM_THREADS", "4")
+    from_env = CPUExecutor.compile_source("1 + 2")
+    try:
+        assert from_env.cpu_threads == 4
+    finally:
+        from_env.close()
+
+
+def test_resolve_cpu_threads_rejects_invalid_values(monkeypatch):
+    with pytest.raises(EvaluationError, match="positive integer"):
+        resolve_cpu_threads(0)
+
+    monkeypatch.setenv("REMORA_NUM_THREADS", "not-an-int")
+    with pytest.raises(EvaluationError, match="positive integer"):
+        resolve_cpu_threads()
 
 
 def test_cpu_executor_execute_main_formats_scalar_vector_matrix_and_rank3_results():

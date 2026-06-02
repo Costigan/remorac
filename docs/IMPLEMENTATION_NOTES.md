@@ -556,9 +556,18 @@ Deferred pipeline/codegen work:
   compiled CPU result. It also supports `--target interp`, `--emit-ast`,
   `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus
   `--target mlir` and `--target ptx` aliases for artifact inspection.
+- CPU execution now accepts an explicit requested thread count through
+  `--cpu-threads`, the public CPU compile helpers, and `REMORA_NUM_THREADS`.
+  The current backend records this value in compiled artifacts and benchmark
+  output; it does not yet lower to an OpenMP/thread-parallel MLIR pipeline.
+- `remora-bench` provides the first JSON benchmark harness. It records MLIR
+  compile time, fusion pipeline time, CPU pipeline time, compiled execution
+  time, requested CPU threads, and coarse operation counts.
 
 Deferred CPU/runtime work:
 
+- Implement the actual multicore CPU lowering path for the requested thread
+  count, likely through an explicit OpenMP or parallel runtime strategy.
 - Expose descriptor-input callable compilation through a documented CLI or
   stable public Python convenience wrapper once the desired user API is clear.
 - Replace the subprocess `llc`/`gcc` shared-library path with in-process

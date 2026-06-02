@@ -1,0 +1,1 @@
+let init = [[[0]]] in let xs = [[[[1]]], [[[2]]]] in fold (+) init xs

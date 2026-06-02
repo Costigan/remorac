@@ -77,6 +77,15 @@ def test_cli_loads_prelude_for_cpu_target(tmp_path, capsys):
     assert captured.err == ""
 
 
+def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
+    source = write_source(tmp_path, "1 + 2")
+
+    assert main(["--cpu-threads", "2", str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "3\n"
+    assert captured.err == ""
+
+
 def test_cli_emit_mlir_for_top_level_function_direct_call(tmp_path, capsys):
     source = write_source(tmp_path, "def add1 x = x + 1\nadd1 41")
 

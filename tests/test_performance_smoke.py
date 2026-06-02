@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import time
 
 import pytest
 
+from remora.benchmark import benchmark_source, main as benchmark_main
 from remora.compiler import compile_source_to_mlir
 from remora.pipeline import detect_toolchain, run_cpu_pipeline_text, run_fusion_pipeline_text
 
@@ -62,3 +64,25 @@ def test_cpu_pipeline_compile_time_smoke(name: str, source_and_expected):
     assert "llvm.func @main" in lowered, name
     assert "linalg.generic" not in lowered, name
     assert elapsed < cpu_budget_s, f"{name} CPU pipeline took {elapsed:.3f}s"
+
+
+def test_benchmark_source_records_cpu_thread_request():
+    result = benchmark_source("map (* 2) (iota 4)", name="tiny", cpu_threads=2)
+
+    assert result.name == "tiny"
+    assert result.cpu_threads == 2
+    assert result.linalg_generic_before >= result.linalg_generic_after_fusion
+    assert result.llvm_func_count >= 1
+
+
+def test_benchmark_cli_emits_json(tmp_path, capsys):
+    source = tmp_path / "bench.remora"
+    source.write_text("map (* 2) (iota 4)", encoding="utf-8")
+
+    assert benchmark_main(["--cpu-threads", "2", str(source)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload["name"] == "bench"
+    assert payload["cpu_threads"] == 2
+    assert captured.err == ""

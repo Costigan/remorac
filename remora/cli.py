@@ -37,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--emit-hir", action="store_true", help="print defunctionalized HIR and exit")
     parser.add_argument("--emit-mlir", action="store_true", help="print validated MLIR and exit")
     parser.add_argument("--emit-ptx", action="store_true", help="print generated PTX and exit")
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help="requested CPU worker thread count; defaults to REMORA_NUM_THREADS when set",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -60,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.target == "cpu":
-            result = evaluate_source_compiled(source)
+            result = evaluate_source_compiled(source, cpu_threads=args.cpu_threads)
             print(format_result(result.value, result.type))
             return 0
         if args.target == "interp":
