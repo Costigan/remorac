@@ -5,6 +5,7 @@ import pytest
 
 from remora.compiler import (
     compile_function_source,
+    compile_function_source_to_mlir_gpu_ptx,
     compile_function_source_to_rank1_mlir_gpu_ptx,
     compile_function_source_to_supported_gpu_artifacts,
 )
@@ -484,6 +485,61 @@ def test_rank1_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
     assert kernels[0].name == "remora_scale"
     assert kernels[0].num_inputs == 1
     assert kernels[0].output_shape == (4,)
+
+
+def test_rank1_binary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
+            "def add xs ys = map (+) xs ys",
+            "add",
+            (
+                ArrayType(FLOAT, (StaticDim(4),)),
+                ArrayType(FLOAT, (StaticDim(4),)),
+            ),
+            kernel_name="remora_add",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_add" in ptx
+    assert ".visible .entry remora_add_inner" not in ptx
+    assert ".func remora_add_inner" in ptx or ".visible .func remora_add_inner" in ptx
+    assert ptx_param_count(ptx, "remora_add") == 3
+    assert ptx_func_param_count(ptx, "remora_add_inner") == 15
+    assert kernels[0].name == "remora_add"
+    assert kernels[0].num_inputs == 2
+    assert kernels[0].output_shape == (4,)
+
+
+def test_rank2_unary_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def scale xs = map (* 2.0) xs",
+            "scale",
+            (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+            kernel_name="remora_scale2d",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "scale"
+    assert ".visible .entry remora_scale2d" in ptx
+    assert ".visible .entry remora_scale2d_inner" not in ptx
+    assert ".func remora_scale2d_inner" in ptx or ".visible .func remora_scale2d_inner" in ptx
+    assert ptx_param_count(ptx, "remora_scale2d") == 2
+    assert ptx_func_param_count(ptx, "remora_scale2d_inner") == 14
+    assert kernels[0].name == "remora_scale2d"
+    assert kernels[0].num_inputs == 1
+    assert kernels[0].output_shape == (2, 3)
 
 
 def test_extract_gpu_module_reports_missing_module():

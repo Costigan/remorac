@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from remora.codegen import (
     KernelMeta,
+    generate_mlir_descriptor_abi_ptx,
     generate_direct_remora_ptx,
     generate_ptx,
     generate_rank1_f32_unary_mlir_descriptor_abi_ptx,
@@ -151,7 +152,7 @@ def compile_function_source_to_rank1_mlir_gpu_ptx(
     include_prelude: bool = True,
     kernel_name: str | None = None,
 ) -> tuple[str, list[KernelMeta], FunctionCompilerArtifact]:
-    """Compile one supported rank-1 unary function to MLIR-derived GPU PTX."""
+    """Compile one supported rank-1 unary/binary function to MLIR-derived GPU PTX."""
     artifact = compile_function_source(
         source,
         function_name,
@@ -160,6 +161,29 @@ def compile_function_source_to_rank1_mlir_gpu_ptx(
         include_prelude=include_prelude,
     )
     ptx, kernels = generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
+        artifact.hir_function,
+        kernel_name=kernel_name,
+    )
+    return ptx, kernels, artifact
+
+
+def compile_function_source_to_mlir_gpu_ptx(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    *,
+    include_prelude: bool = True,
+    kernel_name: str | None = None,
+) -> tuple[str, list[KernelMeta], FunctionCompilerArtifact]:
+    """Compile one supported function to MLIR-derived GPU PTX."""
+    artifact = compile_function_source(
+        source,
+        function_name,
+        param_types,
+        verify=False,
+        include_prelude=include_prelude,
+    )
+    ptx, kernels = generate_mlir_descriptor_abi_ptx(
         artifact.hir_function,
         kernel_name=kernel_name,
     )
