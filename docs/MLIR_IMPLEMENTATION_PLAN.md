@@ -1714,16 +1714,23 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
   - Current: LLVM/MLIR 18.1.3 is documented in `docs/MLIR_TOOLCHAIN.md`.
 - [ ] Implement production `build_gpu_nvidia_pipeline` after direct `gpu.module` lowering exists
   - Current: `docs/mlir-pipeline-nvidia.txt` documents that the IREE PTX path is
-    inspection-only. The current tensor/linalg module does not yet contain
-    Remora ABI `gpu.func` kernels for standalone NVVM lowering.
+    inspection-only and that the scaffold-only GPU path has one validated nested
+    NVVM conversion pass:
+    `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))`.
+    It also records the follow-on scaffold LLVM-dialect conversion pass:
+    `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)`.
+    The production tensor/linalg-to-gpu pipeline and device-module extraction/PTX
+    translation remain deferred.
 - [x] Add first parse-validated `gpu.module` / `gpu.func` scaffold
   - Current: `remora.gpu_lowering.build_rank1_f32_unary_map_gpu_scaffold`
     emits a minimal rank-1 `float32` scale-map-shaped GPU module with
     thread/block index computation, a bounds guard, `memref.load`, `arith.mulf`,
     and `memref.store`. `build_gpu_scaffold_for_function` connects that scaffold
     to the narrow typed/HIR function shape `def scale xs = map (* c) xs` for a
-    rank-1 `float32` input. Tests verify the scaffold parses as MLIR and remains
-    distinct from PTX text. This is not NVVM lowering or runtime launch support.
+    rank-1 `float32` input. Tests verify the scaffold parses as MLIR, passes
+    external verification when available, runs through the minimal nested NVVM
+    conversion pass and the scaffold LLVM-dialect conversion pass, and remains
+    distinct from PTX text. This is not runtime launch support.
 - [x] Implement `run_pipeline` with debug mode
 - [x] Implement external MLIR verification for emitted modules
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.
