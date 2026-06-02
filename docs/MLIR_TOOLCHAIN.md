@@ -37,9 +37,11 @@ The pipeline validator checks:
 
 The experimental threaded CPU pipeline is exposed as
 `remora.pipeline.CPU_THREADED_PIPELINE`. It lowers map-shaped `linalg` programs
-through `scf.parallel` and OpenMP dialect operations before LLVM lowering. Link
-and execution require libomp; libgomp does not satisfy the current MLIR
-OpenMP-to-LLVM symbols.
+and row-reduction-shaped programs through `scf.parallel` and OpenMP dialect
+operations before LLVM lowering. Runtime execution uses a split pipeline around
+the OpenMP conversion so trivial no-allocation `memref.alloca_scope` wrappers do
+not block nested loop lowering. Link and execution require libomp; libgomp does
+not satisfy the current MLIR OpenMP-to-LLVM symbols.
 
 ## GPU Backend Status
 

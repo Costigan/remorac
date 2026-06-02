@@ -21,6 +21,11 @@
       "name": "dot",
       "max_linalg_generic_after_fusion": 1,
       "max_allocation_count": 8
+    },
+    {
+      "name": "row_reduce",
+      "max_linalg_generic_after_fusion": 1,
+      "max_allocation_count": 8
     }
   ]
 }
