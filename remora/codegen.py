@@ -127,7 +127,7 @@ def generate_direct_remora_ptx(
     ]
 
 
-def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
+def generate_mlir_descriptor_abi_ptx(
     function: HIRFunction,
     *,
     kernel_name: str | None = None,
@@ -135,17 +135,30 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
 ) -> tuple[str, list[KernelMeta]]:
     """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
 
-    This is intentionally narrow: rank-1 `float32` unary maps with a literal
-    float section constant. The inner kernel still comes from the scaffold GPU
-    path; a descriptor-pointer ABI wrapper is injected before NVPTX emission so
-    the exported entry can be launched by `RemoraExecutor`.
+    This is intentionally narrow: rank-1 unary/binary and rank-2 unary
+    `float32` maps. The inner kernel still comes from the scaffold GPU path; a
+    descriptor-pointer ABI wrapper is injected before NVPTX emission so the
+    exported entry can be launched by `RemoraExecutor`.
     """
     toolchain = detect_toolchain() if toolchain is None else toolchain
     name = kernel_name or f"remora_{function.name}"
     map_kernel = _direct_f32_map_kernel(function)
-    if map_kernel.num_inputs != 1 or len(map_kernel.shape) != 1 or map_kernel.operation.constant is None:
+    rank = len(map_kernel.shape)
+    if rank not in (1, 2):
         raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports rank-1 unary f32 maps only"
+            "MLIR-derived descriptor-ABI PTX currently supports rank-1 and rank-2 f32 maps only"
+        )
+    if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
+        raise CodegenUnavailable(
+            "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary rank-1, and unary literal-section rank-2, f32 maps only"
+        )
+    if map_kernel.num_inputs not in (1, 2):
+        raise CodegenUnavailable(
+            "MLIR-derived descriptor-ABI PTX currently supports one or two rank-1/rank-2 f32 input descriptors only"
+        )
+    if rank == 2 and map_kernel.num_inputs != 1:
+        raise CodegenUnavailable(
+            "MLIR-derived descriptor-ABI PTX currently supports rank-2 unary f32 maps only"
         )
 
     scaffold = build_gpu_scaffold_for_function(function, kernel_name=name)
@@ -155,9 +168,11 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
     )
     device_module = extract_gpu_module_body_as_module(lowered)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-    wrapped_llvm_ir = _wrap_rank1_descriptor_abi_kernel_llvm_ir(
+    wrapped_llvm_ir = _wrap_descriptor_abi_kernel_llvm_ir(
         llvm_ir,
         kernel_name=name,
+        rank=rank,
+        num_inputs=map_kernel.num_inputs,
     )
     ptx = translate_llvmir_to_nvptx_text(wrapped_llvm_ir, toolchain=toolchain)
     return ptx, [
@@ -165,7 +180,7 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
             name=name,
             grid_dims=1,
             block_size=0,
-            num_inputs=1,
+            num_inputs=map_kernel.num_inputs,
             num_outputs=1,
             input_elem_types=["f32"],
             output_elem_types=["f32"],
@@ -173,6 +188,20 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
             output_dtype="float32",
         )
     ]
+
+
+def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+    toolchain: PipelineToolchain | None = None,
+) -> tuple[str, list[KernelMeta]]:
+    """Backward-compatible wrapper for the first MLIR-derived executable slice."""
+    return generate_mlir_descriptor_abi_ptx(
+        function,
+        kernel_name=kernel_name,
+        toolchain=toolchain,
+    )
 
 
 def _extract_kernel_metadata(ptx_text: str) -> list[KernelMeta]:
@@ -207,7 +236,13 @@ def _count_ptx_params(ptx_entry_text: str) -> int:
     return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", ptx_entry_text))
 
 
-def _wrap_rank1_descriptor_abi_kernel_llvm_ir(llvm_ir: str, *, kernel_name: str) -> str:
+def _wrap_descriptor_abi_kernel_llvm_ir(
+    llvm_ir: str,
+    *,
+    kernel_name: str,
+    rank: int,
+    num_inputs: int,
+) -> str:
     inner_name = f"{kernel_name}_inner"
     wrapped = llvm_ir.replace(f"@{kernel_name}", f"@{inner_name}")
     wrapped = re.sub(r"!nvvm\.annotations = !\{[^\n]*\}\n", "", wrapped)
@@ -219,40 +254,74 @@ def _wrap_rank1_descriptor_abi_kernel_llvm_ir(llvm_ir: str, *, kernel_name: str)
     wrapped = wrapped.replace(
         'source_filename = "LLVMDialectModule"\n',
         'source_filename = "LLVMDialectModule"\n'
-        '%remora.memref1 = type { ptr, ptr, i64, i64, i64 }\n',
+        f'%remora.memref{rank} = type {{ ptr, ptr, i64, '
+        + ", ".join(["i64"] * rank)
+        + (", " if rank else "")
+        + ", ".join(["i64"] * rank)
+        + " }\n",
         1,
     )
-    wrapper = f"""
-define void @{kernel_name}(ptr %input_desc, ptr %output_desc) {{
-  %in_alloc_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 0
-  %in_aligned_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 1
-  %in_offset_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 2
-  %in_size0_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 3
-  %in_stride0_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 4
-  %out_alloc_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 0
-  %out_aligned_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 1
-  %out_offset_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 2
-  %out_size0_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 3
-  %out_stride0_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 4
-  %in_alloc = load ptr, ptr %in_alloc_ptr, align 8
-  %in_aligned = load ptr, ptr %in_aligned_ptr, align 8
-  %in_offset = load i64, ptr %in_offset_ptr, align 8
-  %in_size0 = load i64, ptr %in_size0_ptr, align 8
-  %in_stride0 = load i64, ptr %in_stride0_ptr, align 8
-  %out_alloc = load ptr, ptr %out_alloc_ptr, align 8
-  %out_aligned = load ptr, ptr %out_aligned_ptr, align 8
-  %out_offset = load i64, ptr %out_offset_ptr, align 8
-  %out_size0 = load i64, ptr %out_size0_ptr, align 8
-  %out_stride0 = load i64, ptr %out_stride0_ptr, align 8
-  call void @{inner_name}(ptr %in_alloc, ptr %in_aligned, i64 %in_offset, i64 %in_size0, i64 %in_stride0, ptr %out_alloc, ptr %out_aligned, i64 %out_offset, i64 %out_size0, i64 %out_stride0)
-  ret void
-}}
-"""
+    params = [f"ptr %input{index}_desc" for index in range(num_inputs)] + ["ptr %output_desc"]
+    descriptor_lines: list[str] = []
+    call_args: list[str] = []
+    for index in range(num_inputs):
+        prefix = f"in{index}"
+        descriptor_name = f"%input{index}_desc"
+        descriptor_lines.extend(_descriptor_wrapper_lines(prefix, descriptor_name, rank=rank))
+        call_args.extend(_descriptor_call_args(prefix, rank=rank))
+    descriptor_lines.extend(_descriptor_wrapper_lines("out", "%output_desc", rank=rank))
+    call_args.extend(_descriptor_call_args("out", rank=rank))
+    wrapper = (
+        f"\ndefine void @{kernel_name}(" + ", ".join(params) + ") {\n"
+        + "\n".join(descriptor_lines)
+        + f"\n  call void @{inner_name}(" + ", ".join(call_args) + ")\n"
+        + "  ret void\n}\n"
+    )
     wrapped = wrapped.replace("\nattributes #0 =", f"{wrapper}\nattributes #0 =", 1)
     metadata_ids = [int(match.group(1)) for match in re.finditer(r"!(\d+) =", wrapped)]
     next_id = max(metadata_ids, default=-1) + 1
     wrapped = wrapped.rstrip() + f"\n\n!nvvm.annotations = !{{!{next_id}}}\n!{next_id} = !{{ptr @{kernel_name}, !\"kernel\", i32 1}}\n"
     return wrapped
+
+
+def _descriptor_wrapper_lines(prefix: str, descriptor_name: str, *, rank: int) -> list[str]:
+    struct_name = f"%remora.memref{rank}"
+    lines = [
+        f"  %{prefix}_alloc_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 0",
+        f"  %{prefix}_aligned_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 1",
+        f"  %{prefix}_offset_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 2",
+    ]
+    for index in range(rank):
+        lines.append(
+            f"  %{prefix}_size{index}_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 {3 + index}"
+        )
+    for index in range(rank):
+        lines.append(
+            f"  %{prefix}_stride{index}_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 {3 + rank + index}"
+        )
+    lines.extend(
+        [
+            f"  %{prefix}_alloc = load ptr, ptr %{prefix}_alloc_ptr, align 8",
+            f"  %{prefix}_aligned = load ptr, ptr %{prefix}_aligned_ptr, align 8",
+            f"  %{prefix}_offset = load i64, ptr %{prefix}_offset_ptr, align 8",
+        ]
+    )
+    for index in range(rank):
+        lines.append(f"  %{prefix}_size{index} = load i64, ptr %{prefix}_size{index}_ptr, align 8")
+    for index in range(rank):
+        lines.append(f"  %{prefix}_stride{index} = load i64, ptr %{prefix}_stride{index}_ptr, align 8")
+    return lines
+
+
+def _descriptor_call_args(prefix: str, *, rank: int) -> list[str]:
+    args = [
+        f"ptr %{prefix}_alloc",
+        f"ptr %{prefix}_aligned",
+        f"i64 %{prefix}_offset",
+    ]
+    args.extend(f"i64 %{prefix}_size{index}" for index in range(rank))
+    args.extend(f"i64 %{prefix}_stride{index}" for index in range(rank))
+    return args
 
 
 def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:

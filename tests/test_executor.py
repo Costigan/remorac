@@ -4,6 +4,7 @@ import pytest
 from remora.codegen import CodegenUnavailable, KernelMeta
 from remora.compiler import (
     compile_function_source_to_direct_ptx,
+    compile_function_source_to_mlir_gpu_ptx,
     compile_function_source_to_rank1_mlir_gpu_ptx,
 )
 from remora.executor import RemoraExecutor, RemoraExecutorError, compute_output_shape, kernel_output_dtype
@@ -315,6 +316,66 @@ def test_compile_function_source_to_rank1_mlir_gpu_ptx():
     ]
 
 
+def test_compile_function_source_to_rank1_binary_mlir_gpu_ptx():
+    ptx, kernels, artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(4),)),
+            ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+        kernel_name="remora_add",
+    )
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_add" in ptx
+    assert ".param .u64 remora_add_param_0" in ptx
+    assert ".param .u64 remora_add_param_1" in ptx
+    assert ".param .u64 remora_add_param_2" in ptx
+    assert "remora_add_inner" in ptx
+    assert kernels == [
+        KernelMeta(
+            name="remora_add",
+            grid_dims=1,
+            block_size=0,
+            num_inputs=2,
+            num_outputs=1,
+            input_elem_types=["f32"],
+            output_elem_types=["f32"],
+            output_shape=(4,),
+            output_dtype="float32",
+        )
+    ]
+
+
+def test_compile_function_source_to_rank2_unary_mlir_gpu_ptx():
+    ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def scale xs = map (* 2.0) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+        kernel_name="remora_scale2d",
+    )
+
+    assert artifact.function_name == "scale"
+    assert ".visible .entry remora_scale2d" in ptx
+    assert ".param .u64 remora_scale2d_param_0" in ptx
+    assert ".param .u64 remora_scale2d_param_1" in ptx
+    assert "remora_scale2d_inner" in ptx
+    assert kernels == [
+        KernelMeta(
+            name="remora_scale2d",
+            grid_dims=1,
+            block_size=0,
+            num_inputs=1,
+            num_outputs=1,
+            input_elem_types=["f32"],
+            output_elem_types=["f32"],
+            output_shape=(2, 3),
+            output_dtype="float32",
+        )
+    ]
+
+
 def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     try:
         runtime = CUDARuntime()
@@ -359,6 +420,63 @@ def test_remora_executor_runs_rank1_mlir_gpu_ptx_round_trip_when_available():
         runtime.close()
 
     np.testing.assert_array_equal(result, np.array([2, 4, 6, 8], dtype=np.float32))
+
+
+def test_remora_executor_runs_rank1_binary_mlir_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA driver/device is not available: {exc}")
+
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
+            "def add xs ys = map (+) xs ys",
+            "add",
+            (
+                ArrayType(FLOAT, (StaticDim(4),)),
+                ArrayType(FLOAT, (StaticDim(4),)),
+            ),
+            kernel_name="remora_add",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        result = executor.execute_main(
+            [
+                np.array([1, 2, 3, 4], dtype=np.float32),
+                np.array([10, 20, 30, 40], dtype=np.float32),
+            ]
+        )
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+    finally:
+        runtime.close()
+
+    np.testing.assert_array_equal(result, np.array([11, 22, 33, 44], dtype=np.float32))
+
+
+def test_remora_executor_runs_rank2_unary_mlir_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA driver/device is not available: {exc}")
+
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def scale xs = map (* 2.0) xs",
+            "scale",
+            (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
+            kernel_name="remora_scale2d",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        result = executor.execute_main([np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)])
+    except RuntimeUnavailable as exc:
+        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+    finally:
+        runtime.close()
+
+    np.testing.assert_array_equal(
+        result,
+        np.array([[2, 4, 6], [8, 10, 12]], dtype=np.float32),
+    )
 
 
 def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_available():
