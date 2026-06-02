@@ -94,6 +94,11 @@ class RemoraExecutor:
 
         return output
 
+    def execute_main(self, inputs: list[np.ndarray] | None = None) -> np.ndarray:
+        """Run the program entry kernel using the shared executor-style API."""
+        kernel_name = self._main_kernel_name()
+        return self.execute(kernel_name, [] if inputs is None else inputs)
+
     def close(self) -> None:
         self._module.close()
         if self._owns_runtime:
@@ -104,6 +109,15 @@ class RemoraExecutor:
 
     def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
         self.close()
+
+    def _main_kernel_name(self) -> str:
+        if "main" in self._kernels:
+            return "main"
+        if len(self._kernels) == 1:
+            return next(iter(self._kernels))
+        raise RemoraExecutorError(
+            "execute_main requires a kernel named main or exactly one compiled kernel"
+        )
 
 
 def compute_output_shape(meta: KernelMeta, inputs: list[np.ndarray]) -> tuple[int, ...]:
