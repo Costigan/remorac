@@ -260,7 +260,7 @@ class CUDAKernel:
                     int(shared_mem),
                     stream,
                     kernel_args,
-                    None,
+                    0,
                 ),
                 "cuLaunchKernel failed",
             )
@@ -273,9 +273,9 @@ class CUDAKernel:
 def _pack_cuda_kernel_args(
     args: list[object],
     runtime: CUDARuntime,
-) -> tuple[list[ctypes._SimpleCData | ctypes.Structure], list[int]]:
+) -> tuple[list[ctypes._SimpleCData | ctypes.Structure], int]:
     packed_args: list[ctypes._SimpleCData | ctypes.Structure] = []
-    kernel_args: list[int] = []
+    kernel_args: ctypes.Array[ctypes.c_void_p] = (ctypes.c_void_p * len(args))()
     for arg in args:
         if isinstance(arg, ctypes.Structure):
             descriptor_ptr = runtime.alloc(ctypes.sizeof(arg))
@@ -299,8 +299,8 @@ def _pack_cuda_kernel_args(
         else:
             raise CUDAError(f"unsupported CUDA kernel argument type {type(arg).__name__}")
         packed_args.append(c_arg)
-        kernel_args.append(int(ctypes.cast(ctypes.byref(c_arg), ctypes.c_void_p).value))
-    return packed_args, kernel_args
+        kernel_args[len(packed_args) - 1] = ctypes.cast(ctypes.byref(c_arg), ctypes.c_void_p)
+    return packed_args, int(ctypes.cast(kernel_args, ctypes.c_void_p).value)
 
 
 def _load_cuda_driver() -> Any:
@@ -436,7 +436,9 @@ class CPUExecutor:
         )
         return CompiledCPUArtifact(so_path, temp_dir, compiler_artifact.return_type)
 
-    def execute_main(self) -> EvaluationResult:
+    def execute_main(self, inputs: list[np.ndarray] | None = None) -> EvaluationResult:
+        if inputs is not None and len(inputs) != 0:
+            raise EvaluationError("compiled CPU main does not accept inputs")
         return_type = self._artifact.return_type
         output = _empty_output_value(return_type)
         self.execute_main_into(output)

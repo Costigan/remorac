@@ -125,7 +125,7 @@ def test_compiled_cpu_executes_rank10_shape_rank_and_indexing():
 def test_cpu_executor_compile_source_keeps_artifact_until_closed():
     artifact = CPUExecutor.compile_source("map (* 2) (iota 4)")
     try:
-        result = CPUExecutor(artifact).execute_main()
+        result = CPUExecutor(artifact).execute_main([])
     finally:
         artifact.close()
 
