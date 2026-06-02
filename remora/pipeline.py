@@ -39,8 +39,9 @@ CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
-        "convert-openmp-to-llvm",
         "convert-scf-to-cf",
+        "convert-openmp-to-llvm",
+        "convert-index-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]

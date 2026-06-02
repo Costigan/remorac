@@ -560,9 +560,11 @@ Deferred pipeline/codegen work:
   `--cpu-threads`, the public CPU compile helpers, and `REMORA_NUM_THREADS`.
   `cpu_threads > 1` selects the experimental OpenMP lowering path:
   `linalg` to `scf.parallel`, `scf.parallel` to the OpenMP dialect, then OpenMP
-  to LLVM. This path currently requires a libomp-compatible runtime with
-  `__kmpc` symbols at link time; environments without libomp get a stable
-  diagnostic and should use `--cpu-threads 1`.
+  to LLVM. This path requires a libomp-compatible runtime with `__kmpc` symbols
+  at link time; environments without libomp get a stable diagnostic and should
+  use `--cpu-threads 1`. With LLVM 18 libomp installed, map-shaped programs,
+  scalar reductions, and dot-shaped reductions execute through the threaded
+  pipeline. Row reductions still need threaded-pipeline hardening.
 - `remora-bench` provides the first JSON benchmark harness. It records MLIR
   compile time, fusion pipeline time, CPU pipeline time, compiled execution
   time, requested CPU threads, linalg/LLVM operation counts, and a coarse
@@ -571,7 +573,7 @@ Deferred pipeline/codegen work:
 
 Deferred CPU/runtime work:
 
-- Complete the multicore CPU lowering path for reductions and nested tensor
+- Complete the multicore CPU lowering path for row reductions and nested tensor
   programs, and add CI coverage in an environment with libomp installed.
 - Add vectorization controls and make the benchmark baselines enforce
   allocation/reuse and wall-clock trend gates instead of only smoke structure.

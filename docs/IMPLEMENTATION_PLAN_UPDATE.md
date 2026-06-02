@@ -371,16 +371,17 @@ Completed in the M3 CPU sprint:
 4. Added coarse allocation counts to `remora-bench`.
 5. Added `docs/BENCHMARK_BASELINES.json` and smoke coverage for the benchmark
    baseline structure.
-6. Kept the focused CPU/CLI/performance/lowering/acceptance suite and MLIR
+6. Added live libomp-gated execution coverage for threaded maps and scalar
+   reductions.
+7. Kept the focused CPU/CLI/performance/lowering/acceptance suite and MLIR
    validators green.
 
 The next sprint should harden M3 rather than broaden the language:
 
-1. Make threaded lowering work for reductions and nested tensor programs, not
-   just parallel map-shaped programs.
+1. Make threaded lowering work for row reductions and nested tensor programs,
+   not just maps, scalar reductions, and dot-shaped reductions.
 2. Add CI or a documented local validation profile with libomp installed so
-   `--cpu-threads > 1` is exercised through link and execution, not only MLIR
-   pipeline text.
+   `--cpu-threads > 1` remains exercised through link and execution.
 3. Add `--cpu-vectorize/--no-cpu-vectorize` and settle the vectorization stage
    before GPU generalization resumes.
 4. Turn benchmark baselines into executable gates for allocation counts, fusion

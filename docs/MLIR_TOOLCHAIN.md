@@ -9,9 +9,9 @@ pipeline validation. IREE remains an inspection backend only.
 - `mlir-opt`: `/usr/bin/mlir-opt-18`
 - `mlir-translate`: `/usr/bin/mlir-translate-18`
 - `llc`: `/usr/bin/llc-18`
-- OpenMP runtime: libomp is not installed in the current environment; threaded
-  CPU execution with `--cpu-threads > 1` is skipped/fails with a diagnostic
-  until a libomp-compatible runtime with `__kmpc` symbols is available
+- OpenMP runtime: `libomp-18-dev` is installed in the current environment;
+  threaded CPU execution with `--cpu-threads > 1` can link against the
+  LLVM/MLIR 18-compatible `__kmpc` runtime
 - `ptxas`: not installed in the current environment; PTX assembly validation
   is skipped when unavailable
 - IREE inspection tools: `.venv/bin/iree-opt`, `.venv/bin/iree-compile`
