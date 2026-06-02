@@ -22,7 +22,12 @@ from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
 from remora.types import FuncType, RemoraType
 from remora.ast_nodes import FuncDef
-from remora.gpu_lowering import GPUModuleScaffold, build_gpu_scaffold_for_function
+from remora.gpu_lowering import (
+    GPUModuleScaffold,
+    GPUScaffoldError,
+    build_descriptor_abi_f32_reduction_gpu_module,
+    build_gpu_scaffold_for_function,
+)
 
 
 @dataclass(frozen=True)
@@ -226,12 +231,20 @@ def compile_function_source_to_supported_gpu_artifacts(
             artifact.hir_function,
             kernel_name=kernel,
         )
-    return SupportedGPUFunctionArtifact(
-        compiler=artifact,
-        scaffold=build_gpu_scaffold_for_function(
+    try:
+        scaffold = build_gpu_scaffold_for_function(
             artifact.hir_function,
             kernel_name=kernel,
-        ),
+        )
+    except GPUScaffoldError:
+        scaffold = build_descriptor_abi_f32_reduction_gpu_module(
+            artifact.hir_function,
+            kernel_name=kernel,
+        )
+
+    return SupportedGPUFunctionArtifact(
+        compiler=artifact,
+        scaffold=scaffold,
         ptx_text=ptx_text,
         kernels=kernels,
     )

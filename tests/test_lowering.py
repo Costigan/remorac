@@ -228,6 +228,16 @@ def test_lowers_partial_indexing_to_rank_reducing_extract_slice():
     assert "to tensor<2xi32>" in lowered.text
 
 
+def test_lowers_partial_indexing_from_let_bound_tensor_env():
+    lowered = MLIRLowering().lower_program(
+        hir_from_source("let xs = [[1, 2], [3, 4]] in xs[1]")
+    )
+
+    assert "func.func @main() -> tensor<2xi32>" in lowered.text
+    assert "tensor.from_elements" in lowered.text
+    assert "tensor.extract_slice" in lowered.text
+
+
 def test_lowers_primitive_section_map_over_iota():
     program = hir_from_source("map (* 2.0) (iota 10)")
     lowered = MLIRLowering().lower_program(program)

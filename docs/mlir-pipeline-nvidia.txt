@@ -20,10 +20,11 @@
 # intrinsics, and compiled with llc to standalone PTX text.
 #
 # The raw scaffold PTX remains inspection-only because it uses MLIR's exploded
-# memref ABI at the kernel boundary. The executable MLIR-derived slice wraps that
-# inner kernel with the Remora descriptor-pointer ABI from docs/ABI.md and is
-# wired to RemoraExecutor for rank-1 through rank-3 float32 unary/binary maps.
-# PTX assembly is checked by tests when ptxas is installed.
+# memref ABI at the kernel boundary. The executable MLIR-derived slice emits a
+# descriptor-pointer ABI kernel directly and is wired to RemoraExecutor for
+# rank-1 through rank-3 float32/int32 unary/binary maps plus rank-1 float32
+# scalar reductions and dot-shaped reductions. PTX assembly is checked by tests
+# when ptxas is installed.
 #
 # Temporary PTX inspection remains available through remora.codegen.generate_ptx,
 # which invokes iree-compile with:

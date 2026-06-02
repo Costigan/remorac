@@ -14,17 +14,28 @@ import subprocess
 import tempfile
 from typing import Any
 
-from remora._gpu_map_support import F32MapKernel, F32MapOperation, analyze_supported_f32_map_function
+from remora._gpu_map_support import (
+    F32MapKernel,
+    F32MapOperation,
+    I32MapKernel,
+    analyze_supported_f32_map_function,
+    analyze_supported_i32_map_function,
+)
 from remora.errors import RemoraError
 from remora.hir import HIRFunction
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
-    run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
     translate_llvmir_to_nvptx_text,
     translate_mlir_to_llvmir,
 )
-from remora.gpu_lowering import build_gpu_scaffold_for_function, extract_gpu_module_body_as_module
+from remora.gpu_lowering import (
+    GPUScaffoldError,
+    build_descriptor_abi_f32_map_gpu_module,
+    build_descriptor_abi_f32_reduction_gpu_module,
+    build_descriptor_abi_i32_map_gpu_module,
+    extract_gpu_module_body_as_module,
+)
 
 
 class CodegenUnavailable(RemoraError):
@@ -136,43 +147,28 @@ def generate_mlir_descriptor_abi_ptx(
     """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
 
     This is intentionally narrow: rank-1 through rank-3 unary/binary
-    `float32` maps. The inner kernel still comes from the scaffold GPU path; a
-    descriptor-pointer ABI wrapper is injected before NVPTX emission so the
-    exported entry can be launched by `RemoraExecutor`.
+    `float32` maps. The generated GPU kernel accepts Remora descriptor pointers
+    directly, so the exported entry can be launched by `RemoraExecutor`.
     """
     toolchain = detect_toolchain() if toolchain is None else toolchain
     name = kernel_name or f"remora_{function.name}"
-    map_kernel = _direct_f32_map_kernel(function)
-    rank = len(map_kernel.shape)
-    if rank not in (1, 2, 3):
-        raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 f32 maps only"
-        )
-    if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
-        raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary rank-1/rank-3 f32 maps only"
-        )
-    if map_kernel.num_inputs not in (1, 2):
-        raise CodegenUnavailable(
-            "MLIR-derived descriptor-ABI PTX currently supports one or two rank-1/rank-3 f32 input descriptors only"
-        )
-
-    scaffold = build_gpu_scaffold_for_function(function, kernel_name=name)
-    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
-        scaffold.text,
-        toolchain=toolchain,
-    )
-    device_module = extract_gpu_module_body_as_module(lowered)
-    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-    wrapped_llvm_ir = _wrap_descriptor_abi_kernel_llvm_ir(
-        llvm_ir,
-        kernel_name=name,
-        rank=rank,
-        num_inputs=map_kernel.num_inputs,
-    )
-    ptx = translate_llvmir_to_nvptx_text(wrapped_llvm_ir, toolchain=toolchain)
-    return ptx, [
-        KernelMeta(
+    try:
+        map_kernel = _direct_f32_map_kernel(function)
+        rank = len(map_kernel.shape)
+        if rank not in (1, 2, 3):
+            raise CodegenUnavailable(
+                "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 f32 maps only"
+            )
+        if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
+            raise CodegenUnavailable(
+                "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary f32 maps only"
+            )
+        if map_kernel.num_inputs not in (1, 2):
+            raise CodegenUnavailable(
+                "MLIR-derived descriptor-ABI PTX currently supports one or two f32 input descriptors only"
+            )
+        gpu_module = build_descriptor_abi_f32_map_gpu_module(function, kernel_name=name)
+        meta = KernelMeta(
             name=name,
             grid_dims=1,
             block_size=0,
@@ -183,7 +179,56 @@ def generate_mlir_descriptor_abi_ptx(
             output_shape=map_kernel.shape,
             output_dtype="float32",
         )
-    ]
+    except CodegenUnavailable as f32_map_error:
+        try:
+            map_kernel = _direct_i32_map_kernel(function)
+            rank = len(map_kernel.shape)
+            if rank not in (1, 2, 3):
+                raise CodegenUnavailable(
+                    "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 i32 maps only"
+                )
+            if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
+                raise CodegenUnavailable(
+                    "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary i32 maps only"
+                )
+            if map_kernel.num_inputs not in (1, 2):
+                raise CodegenUnavailable(
+                    "MLIR-derived descriptor-ABI PTX currently supports one or two i32 input descriptors only"
+                )
+            gpu_module = build_descriptor_abi_i32_map_gpu_module(function, kernel_name=name)
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=map_kernel.num_inputs,
+                num_outputs=1,
+                input_elem_types=["i32"] * map_kernel.num_inputs,
+                output_elem_types=["i32"],
+                output_shape=map_kernel.shape,
+                output_dtype="int32",
+            )
+        except CodegenUnavailable as i32_map_error:
+            try:
+                gpu_module = build_descriptor_abi_f32_reduction_gpu_module(function, kernel_name=name)
+                num_inputs = len(function.params)
+                meta = KernelMeta(
+                    name=name,
+                    grid_dims=1,
+                    block_size=1,
+                    num_inputs=num_inputs,
+                    num_outputs=1,
+                    input_elem_types=["f32"] * num_inputs,
+                    output_elem_types=["f32"],
+                    output_shape=(),
+                    output_dtype="float32",
+                )
+            except GPUScaffoldError as reduction_error:
+                raise CodegenUnavailable(str(f32_map_error)) from reduction_error
+
+    device_module = extract_gpu_module_body_as_module(gpu_module.text)
+    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+    ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+    return ptx, [meta]
 
 
 def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
@@ -232,94 +277,6 @@ def _count_ptx_params(ptx_entry_text: str) -> int:
     return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", ptx_entry_text))
 
 
-def _wrap_descriptor_abi_kernel_llvm_ir(
-    llvm_ir: str,
-    *,
-    kernel_name: str,
-    rank: int,
-    num_inputs: int,
-) -> str:
-    inner_name = f"{kernel_name}_inner"
-    wrapped = llvm_ir.replace(f"@{kernel_name}", f"@{inner_name}")
-    wrapped = re.sub(r"!nvvm\.annotations = !\{[^\n]*\}\n", "", wrapped)
-    wrapped = re.sub(
-        rf"!\d+ = !\{{ptr @{re.escape(inner_name)}, !\"kernel\", i32 1\}}\n",
-        "",
-        wrapped,
-    )
-    wrapped = wrapped.replace(
-        'source_filename = "LLVMDialectModule"\n',
-        'source_filename = "LLVMDialectModule"\n'
-        f'%remora.memref{rank} = type {{ ptr, ptr, i64, '
-        + ", ".join(["i64"] * rank)
-        + (", " if rank else "")
-        + ", ".join(["i64"] * rank)
-        + " }\n",
-        1,
-    )
-    params = [f"ptr %input{index}_desc" for index in range(num_inputs)] + ["ptr %output_desc"]
-    descriptor_lines: list[str] = []
-    call_args: list[str] = []
-    for index in range(num_inputs):
-        prefix = f"in{index}"
-        descriptor_name = f"%input{index}_desc"
-        descriptor_lines.extend(_descriptor_wrapper_lines(prefix, descriptor_name, rank=rank))
-        call_args.extend(_descriptor_call_args(prefix, rank=rank))
-    descriptor_lines.extend(_descriptor_wrapper_lines("out", "%output_desc", rank=rank))
-    call_args.extend(_descriptor_call_args("out", rank=rank))
-    wrapper = (
-        f"\ndefine void @{kernel_name}(" + ", ".join(params) + ") {\n"
-        + "\n".join(descriptor_lines)
-        + f"\n  call void @{inner_name}(" + ", ".join(call_args) + ")\n"
-        + "  ret void\n}\n"
-    )
-    wrapped = wrapped.replace("\nattributes #0 =", f"{wrapper}\nattributes #0 =", 1)
-    metadata_ids = [int(match.group(1)) for match in re.finditer(r"!(\d+) =", wrapped)]
-    next_id = max(metadata_ids, default=-1) + 1
-    wrapped = wrapped.rstrip() + f"\n\n!nvvm.annotations = !{{!{next_id}}}\n!{next_id} = !{{ptr @{kernel_name}, !\"kernel\", i32 1}}\n"
-    return wrapped
-
-
-def _descriptor_wrapper_lines(prefix: str, descriptor_name: str, *, rank: int) -> list[str]:
-    struct_name = f"%remora.memref{rank}"
-    lines = [
-        f"  %{prefix}_alloc_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 0",
-        f"  %{prefix}_aligned_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 1",
-        f"  %{prefix}_offset_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 2",
-    ]
-    for index in range(rank):
-        lines.append(
-            f"  %{prefix}_size{index}_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 {3 + index}"
-        )
-    for index in range(rank):
-        lines.append(
-            f"  %{prefix}_stride{index}_ptr = getelementptr {struct_name}, ptr {descriptor_name}, i32 0, i32 {3 + rank + index}"
-        )
-    lines.extend(
-        [
-            f"  %{prefix}_alloc = load ptr, ptr %{prefix}_alloc_ptr, align 8",
-            f"  %{prefix}_aligned = load ptr, ptr %{prefix}_aligned_ptr, align 8",
-            f"  %{prefix}_offset = load i64, ptr %{prefix}_offset_ptr, align 8",
-        ]
-    )
-    for index in range(rank):
-        lines.append(f"  %{prefix}_size{index} = load i64, ptr %{prefix}_size{index}_ptr, align 8")
-    for index in range(rank):
-        lines.append(f"  %{prefix}_stride{index} = load i64, ptr %{prefix}_stride{index}_ptr, align 8")
-    return lines
-
-
-def _descriptor_call_args(prefix: str, *, rank: int) -> list[str]:
-    args = [
-        f"ptr %{prefix}_alloc",
-        f"ptr %{prefix}_aligned",
-        f"i64 %{prefix}_offset",
-    ]
-    args.extend(f"i64 %{prefix}_size{index}" for index in range(rank))
-    args.extend(f"i64 %{prefix}_stride{index}" for index in range(rank))
-    return args
-
-
 def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:
     try:
         return analyze_supported_f32_map_function(
@@ -334,6 +291,24 @@ def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:
         ).replace(
             "literal float section",
             "literal f32 section constant",
+        )
+        raise CodegenUnavailable(message) from exc
+
+
+def _direct_i32_map_kernel(function: HIRFunction) -> I32MapKernel:
+    try:
+        return analyze_supported_i32_map_function(
+            function,
+            on_unsupported=CodegenUnavailable,
+            context="direct MLIR descriptor PTX",
+        )
+    except CodegenUnavailable as exc:
+        message = str(exc).replace("int", "i32").replace(
+            "one or two input parameters",
+            "one or two input descriptors",
+        ).replace(
+            "literal i32 section",
+            "literal i32 section constant",
         )
         raise CodegenUnavailable(message) from exc
 
