@@ -1729,8 +1729,9 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
     to the narrow typed/HIR function shape `def scale xs = map (* c) xs` for a
     rank-1 `float32` input. Tests verify the scaffold parses as MLIR, passes
     external verification when available, runs through the minimal nested NVVM
-    conversion pass and the scaffold LLVM-dialect conversion pass, and remains
-    distinct from PTX text. This is not runtime launch support.
+    conversion pass and the scaffold LLVM-dialect conversion pass, and can be
+    extracted into non-empty device LLVM IR with NVVM intrinsics. This is not
+    PTX assembly or runtime launch support.
 - [x] Implement `run_pipeline` with debug mode
 - [x] Implement external MLIR verification for emitted modules
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.

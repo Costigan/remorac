@@ -14,10 +14,10 @@
 #   builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)
 #
 # This proves the GPU dialect operations, scf.if, arith ops, and memref load/store
-# in the scaffold can be converted toward NVVM/LLVM dialect. It is not a complete
-# production NVIDIA pipeline, does not extract/translate the device module to
-# usable LLVM IR/PTX, does not assemble PTX, and is not wired to RemoraExecutor
-# launch.
+# in the scaffold can be converted toward NVVM/LLVM dialect. The converted
+# gpu.module body can be extracted and translated to non-empty LLVM IR with NVVM
+# intrinsics. It is not a complete production NVIDIA pipeline, does not translate
+# or assemble PTX, and is not wired to RemoraExecutor launch.
 #
 # Temporary PTX inspection remains available through remora.codegen.generate_ptx,
 # which invokes iree-compile with:

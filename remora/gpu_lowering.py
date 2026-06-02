@@ -20,6 +20,29 @@ class GPUModuleScaffold:
     kernel_name: str
 
 
+def extract_gpu_module_body_as_module(
+    mlir_text: str,
+    *,
+    module_name: str = "remora_gpu",
+) -> str:
+    """Extract one `gpu.module` body and wrap it as a top-level MLIR module.
+
+    `mlir-translate --mlir-to-llvmir` does not translate a nested `gpu.module`
+    body from the full host module. This helper is a narrow scaffold utility for
+    device-module translation experiments after GPU-to-NVVM conversion.
+    """
+    marker = f"gpu.module @{module_name}"
+    start = mlir_text.find(marker)
+    if start < 0:
+        raise GPUScaffoldError(f"gpu.module @{module_name} was not found")
+    body_start = mlir_text.find("{", start)
+    if body_start < 0:
+        raise GPUScaffoldError(f"gpu.module @{module_name} has no body")
+    body_end = _matching_brace_index(mlir_text, body_start)
+    body = mlir_text[body_start + 1 : body_end]
+    return "module {\n" + _dedent_gpu_module_body(body) + "\n}\n"
+
+
 def build_rank1_f32_unary_map_gpu_scaffold(
     *,
     size: int,
@@ -60,6 +83,31 @@ def build_rank1_f32_unary_map_gpu_scaffold(
   }}
 }}"""
     return GPUModuleScaffold(text, module_name, kernel_name)
+
+
+def _matching_brace_index(text: str, open_index: int) -> int:
+    depth = 0
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise GPUScaffoldError("unterminated gpu.module body")
+
+
+def _dedent_gpu_module_body(body: str) -> str:
+    lines = body.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    dedented: list[str] = []
+    for line in lines:
+        dedented.append(line[4:] if line.startswith("    ") else line)
+    return "\n".join(dedented)
 
 
 def build_gpu_scaffold_for_function(
