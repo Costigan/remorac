@@ -14,10 +14,17 @@ import subprocess
 import tempfile
 from typing import Any
 
+from remora._gpu_map_support import F32MapKernel, F32MapOperation, analyze_supported_f32_map_function
 from remora.errors import RemoraError
-from remora.hir import HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
-from remora.pipeline import PipelineToolchain, detect_toolchain
-from remora.types import FLOAT, ArrayType
+from remora.hir import HIRFunction
+from remora.pipeline import (
+    PipelineToolchain,
+    detect_toolchain,
+    run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
+    translate_llvmir_to_nvptx_text,
+    translate_mlir_to_llvmir,
+)
+from remora.gpu_lowering import build_gpu_scaffold_for_function, extract_gpu_module_body_as_module
 
 
 class CodegenUnavailable(RemoraError):
@@ -120,6 +127,54 @@ def generate_direct_remora_ptx(
     ]
 
 
+def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+    toolchain: PipelineToolchain | None = None,
+) -> tuple[str, list[KernelMeta]]:
+    """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
+
+    This is intentionally narrow: rank-1 `float32` unary maps with a literal
+    float section constant. The inner kernel still comes from the scaffold GPU
+    path; a descriptor-pointer ABI wrapper is injected before NVPTX emission so
+    the exported entry can be launched by `RemoraExecutor`.
+    """
+    toolchain = detect_toolchain() if toolchain is None else toolchain
+    name = kernel_name or f"remora_{function.name}"
+    map_kernel = _direct_f32_map_kernel(function)
+    if map_kernel.num_inputs != 1 or len(map_kernel.shape) != 1 or map_kernel.operation.constant is None:
+        raise CodegenUnavailable(
+            "MLIR-derived descriptor-ABI PTX currently supports rank-1 unary f32 maps only"
+        )
+
+    scaffold = build_gpu_scaffold_for_function(function, kernel_name=name)
+    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        scaffold.text,
+        toolchain=toolchain,
+    )
+    device_module = extract_gpu_module_body_as_module(lowered)
+    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+    wrapped_llvm_ir = _wrap_rank1_descriptor_abi_kernel_llvm_ir(
+        llvm_ir,
+        kernel_name=name,
+    )
+    ptx = translate_llvmir_to_nvptx_text(wrapped_llvm_ir, toolchain=toolchain)
+    return ptx, [
+        KernelMeta(
+            name=name,
+            grid_dims=1,
+            block_size=0,
+            num_inputs=1,
+            num_outputs=1,
+            input_elem_types=["f32"],
+            output_elem_types=["f32"],
+            output_shape=map_kernel.shape,
+            output_dtype="float32",
+        )
+    ]
+
+
 def _extract_kernel_metadata(ptx_text: str) -> list[KernelMeta]:
     metas: list[KernelMeta] = []
     entry_matches = list(re.finditer(r"\.visible\s+\.entry\s+([A-Za-z_.$][\w.$]*)\s*\(", ptx_text))
@@ -152,67 +207,75 @@ def _count_ptx_params(ptx_entry_text: str) -> int:
     return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", ptx_entry_text))
 
 
-@dataclass(frozen=True)
-class _F32MapOperation:
-    op: str
-    constant: float | None = None
-    constant_side: str | None = None
+def _wrap_rank1_descriptor_abi_kernel_llvm_ir(llvm_ir: str, *, kernel_name: str) -> str:
+    inner_name = f"{kernel_name}_inner"
+    wrapped = llvm_ir.replace(f"@{kernel_name}", f"@{inner_name}")
+    wrapped = re.sub(r"!nvvm\.annotations = !\{[^\n]*\}\n", "", wrapped)
+    wrapped = re.sub(
+        rf"!\d+ = !\{{ptr @{re.escape(inner_name)}, !\"kernel\", i32 1\}}\n",
+        "",
+        wrapped,
+    )
+    wrapped = wrapped.replace(
+        'source_filename = "LLVMDialectModule"\n',
+        'source_filename = "LLVMDialectModule"\n'
+        '%remora.memref1 = type { ptr, ptr, i64, i64, i64 }\n',
+        1,
+    )
+    wrapper = f"""
+define void @{kernel_name}(ptr %input_desc, ptr %output_desc) {{
+  %in_alloc_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 0
+  %in_aligned_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 1
+  %in_offset_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 2
+  %in_size0_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 3
+  %in_stride0_ptr = getelementptr %remora.memref1, ptr %input_desc, i32 0, i32 4
+  %out_alloc_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 0
+  %out_aligned_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 1
+  %out_offset_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 2
+  %out_size0_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 3
+  %out_stride0_ptr = getelementptr %remora.memref1, ptr %output_desc, i32 0, i32 4
+  %in_alloc = load ptr, ptr %in_alloc_ptr, align 8
+  %in_aligned = load ptr, ptr %in_aligned_ptr, align 8
+  %in_offset = load i64, ptr %in_offset_ptr, align 8
+  %in_size0 = load i64, ptr %in_size0_ptr, align 8
+  %in_stride0 = load i64, ptr %in_stride0_ptr, align 8
+  %out_alloc = load ptr, ptr %out_alloc_ptr, align 8
+  %out_aligned = load ptr, ptr %out_aligned_ptr, align 8
+  %out_offset = load i64, ptr %out_offset_ptr, align 8
+  %out_size0 = load i64, ptr %out_size0_ptr, align 8
+  %out_stride0 = load i64, ptr %out_stride0_ptr, align 8
+  call void @{inner_name}(ptr %in_alloc, ptr %in_aligned, i64 %in_offset, i64 %in_size0, i64 %in_stride0, ptr %out_alloc, ptr %out_aligned, i64 %out_offset, i64 %out_size0, i64 %out_stride0)
+  ret void
+}}
+"""
+    wrapped = wrapped.replace("\nattributes #0 =", f"{wrapper}\nattributes #0 =", 1)
+    metadata_ids = [int(match.group(1)) for match in re.finditer(r"!(\d+) =", wrapped)]
+    next_id = max(metadata_ids, default=-1) + 1
+    wrapped = wrapped.rstrip() + f"\n\n!nvvm.annotations = !{{!{next_id}}}\n!{next_id} = !{{ptr @{kernel_name}, !\"kernel\", i32 1}}\n"
+    return wrapped
 
 
-@dataclass(frozen=True)
-class _F32MapKernel:
-    shape: tuple[int, ...]
-    operation: _F32MapOperation
-    num_inputs: int
-
-
-def _direct_f32_map_kernel(function: HIRFunction) -> _F32MapKernel:
-    if len(function.params) not in (1, 2):
-        raise CodegenUnavailable("direct PTX currently supports one or two input descriptors")
-    input_types: list[ArrayType] = []
-    for param in function.params:
-        if not (
-            isinstance(param.type, ArrayType)
-            and param.type.element == FLOAT
-            and 1 <= param.type.rank <= 3
-        ):
-            raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 f32 inputs only")
-        input_types.append(param.type)
-    if not (
-        isinstance(function.return_type, ArrayType)
-        and function.return_type.element == FLOAT
-        and 1 <= function.return_type.rank <= 3
-    ):
-        raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 f32 outputs only")
-    if any(input_type.shape != function.return_type.shape for input_type in input_types):
-        raise CodegenUnavailable("direct PTX input and output shapes must match")
-    if not (
-        isinstance(function.body, HIRMap)
-        and len(function.body.arrays) == len(function.params)
-        and all(isinstance(array, HIRVar) for array in function.body.arrays)
-        and [array.name for array in function.body.arrays] == [param.name for param in function.params]
-        and isinstance(function.body.func, HIRPrimCallable)
-    ):
-        raise CodegenUnavailable("direct PTX currently supports primitive maps over function parameters only")
-
-    callable_ = function.body.func
-    if len(function.params) == 1:
-        if isinstance(callable_.left_arg, HIRLit) and callable_.left_arg.type == FLOAT:
-            operation = _F32MapOperation(callable_.op, float(callable_.left_arg.value), "left")
-        elif isinstance(callable_.right_arg, HIRLit) and callable_.right_arg.type == FLOAT:
-            operation = _F32MapOperation(callable_.op, float(callable_.right_arg.value), "right")
-        else:
-            raise CodegenUnavailable("direct PTX unary map requires a literal f32 section constant")
-    elif callable_.left_arg is None and callable_.right_arg is None:
-        operation = _F32MapOperation(callable_.op)
-    else:
-        raise CodegenUnavailable("direct PTX binary map does not support operator sections")
-    return _F32MapKernel(tuple(dim.value for dim in function.return_type.shape), operation, len(function.params))
+def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:
+    try:
+        return analyze_supported_f32_map_function(
+            function,
+            on_unsupported=CodegenUnavailable,
+            context="direct PTX",
+        )
+    except CodegenUnavailable as exc:
+        message = str(exc).replace("float", "f32").replace(
+            "one or two input parameters",
+            "one or two input descriptors",
+        ).replace(
+            "literal float section",
+            "literal f32 section constant",
+        )
+        raise CodegenUnavailable(message) from exc
 
 
 def _f32_map_ptx(
     kernel_name: str,
-    kernel: _F32MapKernel,
+    kernel: F32MapKernel,
     block_size: int,
 ) -> str:
     if kernel.num_inputs == 2:
@@ -437,7 +500,7 @@ def _binary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
     raise CodegenUnavailable("direct PTX currently supports rank-1 through rank-3 maps only")
 
 
-def _unary_f32_ptx_op(operation: _F32MapOperation) -> str:
+def _unary_f32_ptx_op(operation: F32MapOperation) -> str:
     if operation.op == "*":
         return "mul.rn.f32 %f3, %f1, %f2;"
     if operation.op == "+":
@@ -453,7 +516,7 @@ def _unary_f32_ptx_op(operation: _F32MapOperation) -> str:
     raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
 
 
-def _binary_f32_ptx_op(operation: _F32MapOperation) -> str:
+def _binary_f32_ptx_op(operation: F32MapOperation) -> str:
     if operation.op == "*":
         return "mul.rn.f32 %f3, %f1, %f2;"
     if operation.op == "+":

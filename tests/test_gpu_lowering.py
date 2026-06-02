@@ -5,6 +5,7 @@ import pytest
 
 from remora.compiler import (
     compile_function_source,
+    compile_function_source_to_rank1_mlir_gpu_ptx,
     compile_function_source_to_supported_gpu_artifacts,
 )
 from remora.gpu_lowering import (
@@ -45,7 +46,17 @@ def parse_mlir(text: str):
 
 def ptx_param_count(ptx_text: str, kernel_name: str) -> int:
     match = re.search(
-        rf"\.visible\s+\.entry\s+{re.escape(kernel_name)}\((.*?)\)\n",
+        rf"\.visible\s+\.entry\s+{re.escape(kernel_name)}\((.*?)\)\s*(?://.*)?\n",
+        ptx_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", match.group(1)))
+
+
+def ptx_func_param_count(ptx_text: str, func_name: str) -> int:
+    match = re.search(
+        rf"\.func\s+{re.escape(func_name)}\((.*?)\)\s*\n",
         ptx_text,
         flags=re.DOTALL,
     )
@@ -447,6 +458,32 @@ def test_supported_gpu_artifacts_document_scaffold_vs_direct_abi_boundary_when_a
     assert ".param .u64 input_desc_param" in artifact.ptx_text
     assert ".param .u64 output_desc_param" in artifact.ptx_text
     assert ptx_param_count(artifact.ptx_text, "remora_scale") == 2
+
+
+def test_rank1_mlir_gpu_ptx_exports_descriptor_abi_wrapper_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_nvptx_codegen:
+        pytest.skip("standalone NVPTX text tools are not available")
+
+    try:
+        ptx, kernels, artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
+            "def scale xs = map (* 2.0) xs",
+            "scale",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            kernel_name="remora_scale",
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"standalone NVPTX text generation is not available: {exc}")
+
+    assert artifact.function_name == "scale"
+    assert ".visible .entry remora_scale" in ptx
+    assert ".visible .entry remora_scale_inner" not in ptx
+    assert ".func remora_scale_inner" in ptx or ".visible .func remora_scale_inner" in ptx
+    assert ptx_param_count(ptx, "remora_scale") == 2
+    assert ptx_func_param_count(ptx, "remora_scale_inner") == 10
+    assert kernels[0].name == "remora_scale"
+    assert kernels[0].num_inputs == 1
+    assert kernels[0].output_shape == (4,)
 
 
 def test_extract_gpu_module_reports_missing_module():
