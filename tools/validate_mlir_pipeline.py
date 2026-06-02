@@ -112,7 +112,11 @@ def main() -> int:
         raise PipelineUnavailable(
             "docs/mlir-pipeline-nvidia.txt does not mention the scaffold LLVM dialect pipeline"
         )
-    print("nvidia pipeline artifact: scaffold-only until production gpu.module lowering lands")
+    if "descriptor-pointer ABI" not in nvidia_text:
+        raise PipelineUnavailable(
+            "docs/mlir-pipeline-nvidia.txt does not mention the descriptor-ABI executable slice"
+        )
+    print("nvidia pipeline artifact: scaffold plus direct descriptor-ABI executable slice")
     return 0
 
 
