@@ -6,8 +6,9 @@ the phase plan stays in `docs/MLIR_IMPLEMENTATION_PLAN.md`.
 
 ## Current Scope
 
-The implementation is currently limited to the Phase 0 foundation through a
-CPU-first Phase 7/8 usability slice:
+The implementation is currently limited to the Dense Core subset documented in
+`docs/DENSE_CORE.md`, plus the Phase 0 foundation through a CPU-first Phase 7/8
+usability slice:
 
 - Python package skeleton and dependency metadata.
 - Rank-0 through rank-10 external ABI descriptor structs.
@@ -52,8 +53,10 @@ CPU-first Phase 7/8 usability slice:
   `:help`.
 
 Full tensor/linalg-to-`gpu.module` lowering, dynamic shapes, dynamic rank, and
-automatic differentiation have not been implemented. A narrow descriptor-ABI
-CUDA launch path exists for rank-1 through rank-3 `float32` maps.
+automatic differentiation have not been implemented. A function-level
+descriptor-ABI CUDA launch path exists for the current NVIDIA slices:
+rank-1 through rank-3 `float32`/`int32` unary and binary maps, plus rank-1
+`float32` scalar reductions and dot-shaped reductions.
 
 ## Rank Direction
 
@@ -116,6 +119,10 @@ CUDA launch path exists for rank-1 through rank-3 `float32` maps.
   `allocated == aligned` and represents view displacement with `offset`.
 - Numpy view support is already covered for transposed and sliced arrays. This
   follows `docs/ABI.md`: view offsets are not hidden by changing `aligned`.
+- Public `bool` arrays use one byte per element at descriptor boundaries.
+  Kernels may compute predicates internally as `i1`, but descriptor loads and
+  stores must use normalized byte-backed values so the ABI matches
+  `numpy.bool_`.
 - `numpy_from_memref_descriptor` converts rank-0 through rank-10 descriptors back
   to numpy values. It is retained as ABI infrastructure and is covered for
   scalar, contiguous, sliced, transposed, negative-stride, and high-rank

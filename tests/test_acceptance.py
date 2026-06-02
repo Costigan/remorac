@@ -13,6 +13,7 @@ def load_cases():
 
 def test_acceptance_manifest_cases(capsys):
     for case in load_cases():
+        assert case["category"] in {"supported", "rejected", "deferred"}, case["name"]
         source = ACCEPTANCE_DIR / case["path"]
         args = ["--target", case["target"], str(source)]
 
@@ -20,6 +21,10 @@ def test_acceptance_manifest_cases(capsys):
         captured = capsys.readouterr()
 
         assert exit_code == case["expect_exit"], case["name"]
+        if case["category"] == "supported":
+            assert exit_code == 0, case["name"]
+        else:
+            assert exit_code != 0, case["name"]
         if "expect_stdout" in case:
             assert captured.out == case["expect_stdout"], case["name"]
             assert captured.err == "", case["name"]
@@ -28,11 +33,15 @@ def test_acceptance_manifest_cases(capsys):
             assert case["expect_stderr_contains"] in captured.err, case["name"]
 
 
-def test_deferred_acceptance_cases_are_not_in_manifest():
+def test_deferred_acceptance_cases_are_manifested_as_deferred():
     manifest_paths = {case["path"] for case in load_cases()}
+    deferred_manifest_paths = {
+        case["path"] for case in load_cases() if case["category"] == "deferred"
+    }
     deferred_paths = {
         str(path.relative_to(ACCEPTANCE_DIR))
         for path in (ACCEPTANCE_DIR / "deferred").glob("*.remora")
     }
 
-    assert manifest_paths.isdisjoint(deferred_paths)
+    assert deferred_paths <= manifest_paths
+    assert deferred_paths == deferred_manifest_paths

@@ -43,6 +43,43 @@ class LoweredModule:
     module: Any
 
 
+@dataclass(frozen=True)
+class _TensorValue:
+    name: str
+    type: str
+    element_type: str
+
+
+class _MLIRMainModuleBuilder:
+    """Small textual MLIR builder for deterministic single-main modules."""
+
+    def __init__(
+        self,
+        result_type: str,
+        *,
+        functions: dict[str, HIRFunction] | None = None,
+    ) -> None:
+        self.result_type = result_type
+        self.functions = functions or {}
+        self.blocks: list[str] = []
+
+    def add_block(self, block: str) -> None:
+        if block.strip():
+            self.blocks.append(block.rstrip())
+
+    def render(self, result_value: str) -> str:
+        function_text = _lower_functions(self.functions)
+        function_prefix = f"\n{function_text}\n" if function_text else ""
+        body = "\n".join(self.blocks)
+        return f"""module {{
+{function_prefix}\
+  func.func @main() -> {self.result_type} {{
+{body}
+    return {result_value} : {self.result_type}
+  }}
+}}"""
+
+
 class MLIRLowering:
     """Minimal MLIR lowering context for the Phase 5 spike."""
 
@@ -277,44 +314,50 @@ def _lower_tensor_let_module(node: HIRLet, functions: dict[str, HIRFunction]) ->
             tensor_env,
         )
         value_blocks.append(code)
-        tensor_env[body.name] = (value_name, value_type, element_type)
+        tensor_env[body.name] = _TensorValue(value_name, value_type, element_type)
         body = body.body
         ordinal += 1
 
-    body_module = _lower_main_module_with_tensor_env(body, functions, tensor_env)
-    prefix = "\n".join(block for block in value_blocks if block)
-    if not prefix:
-        return body_module
-    marker = "  func.func @main()"
-    header_start = body_module.find(marker)
-    if header_start < 0:
-        raise RemoraLoweringError("expected tensor-let body module to contain @main")
-    body_start = body_module.find("{", header_start)
-    if body_start < 0:
-        raise RemoraLoweringError("expected tensor-let body @main to have a body")
-    return body_module[: body_start + 1] + "\n" + prefix + body_module[body_start + 1 :]
+    body_code, result_value, result_type = _lower_main_result_with_tensor_env(
+        body,
+        functions,
+        tensor_env,
+    )
+    builder = _MLIRMainModuleBuilder(result_type)
+    for block in value_blocks:
+        builder.add_block(block)
+    builder.add_block(body_code)
+    return builder.render(result_value)
 
 
-def _lower_main_module_with_tensor_env(
+def _lower_main_result_with_tensor_env(
     node: HIRExpr,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv,
-) -> str:
+) -> tuple[str, str, str]:
     if isinstance(node, HIRMap):
         if len(node.arrays) == 2:
             if not node.cell_shape and not isinstance(node.result_type, ArrayType):
-                return _lower_scalar_map_binary_module(node, functions)
-            return _lower_binary_map_module(node, functions, tensor_env)
+                raise RemoraLoweringError("tensor let body cannot be a scalar binary map yet")
+            return _lower_binary_map_result(node, functions, tensor_env)
         if len(node.arrays) != 1:
             raise RemoraLoweringError("only unary and binary map MLIR lowering is supported")
         if not isinstance(node.result_type, ArrayType):
-            return _lower_scalar_map_module(node, functions)
-        return _lower_iota_scalar_map_module(node, functions, tensor_env)
+            raise RemoraLoweringError("tensor let body cannot be a scalar map yet")
+        return _lower_iota_scalar_map_result(node, functions, tensor_env)
     if isinstance(node, HIRFold):
-        return _lower_fold_module(node, functions, tensor_env)
+        return _lower_fold_result(node, functions, tensor_env)
     if isinstance(node, HIRIndex):
-        return _lower_index_module(node, functions, tensor_env)
-    return _lower_main_module(node, functions)
+        return _lower_index_result(node, functions, tensor_env)
+    if isinstance(node, (HIRIota, HIRArrayLit)):
+        code, value_name, value_type, _element_type = _lower_tensor_input(
+            node,
+            "result",
+            functions,
+            tensor_env,
+        )
+        return code, value_name, value_type
+    raise RemoraLoweringError("unsupported tensor let body for MLIR lowering")
 
 
 def _add_output_descriptor_export(mlir_text: str, return_type: RemoraType) -> str:
@@ -415,13 +458,13 @@ def _lower_descriptor_internal_function(function: HIRFunction, name: str) -> str
         for index, param in enumerate(function.params)
     ]
     scalar_env: dict[str, _Operand] = {}
-    tensor_env: dict[str, tuple[str, str, str]] = {}
+    tensor_env: TensorEnv = {}
     for index, param in enumerate(function.params):
         param_type = type_to_mlir(param.type)
         if isinstance(param.type, ScalarType):
             scalar_env[param.name] = _Operand(f"%arg{index}", [], param_type)
         elif isinstance(param.type, ArrayType):
-            tensor_env[param.name] = (
+            tensor_env[param.name] = _TensorValue(
                 f"%arg{index}",
                 param_type,
                 type_to_mlir(param.type.element),
@@ -622,6 +665,17 @@ def _lower_index_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    code, result_value, result_type = _lower_index_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(code)
+    return builder.render(result_value)
+
+
+def _lower_index_result(
+    node: HIRIndex,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     array_type = _expr_result_type(node.array)
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
@@ -664,14 +718,8 @@ def _lower_index_module(
         )
     else:
         raise RemoraLoweringError("partial indexing result type must be an array")
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{array_code}
-{index_body}
-{result_line}
-    return %result : {result_type}
-  }}
-}}"""
+    body = "\n".join(part for part in (array_code, index_body, result_line) if part)
+    return body, "%result", result_type
 
 
 def _lower_scalar_map_module(node: HIRMap, functions: dict[str, HIRFunction]) -> str:
@@ -777,7 +825,7 @@ def _lower_function(function: HIRFunction) -> str:
   }}"""
 
 
-TensorEnv = dict[str, tuple[str, str, str]]
+TensorEnv = dict[str, _TensorValue]
 
 
 def _lower_iota_scalar_map_module(
@@ -785,8 +833,23 @@ def _lower_iota_scalar_map_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_iota_scalar_map_result(
+        node,
+        functions,
+        tensor_env,
+    )
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_iota_scalar_map_result(
+    node: HIRMap,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if node.cell_shape:
-        return _lower_map_cell_module(node, functions, tensor_env)
+        return _lower_map_cell_result(node, functions, tensor_env)
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("map lowering requires an array result")
 
@@ -809,9 +872,7 @@ def _lower_iota_scalar_map_module(
         result_type=result_element_type,
     )
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{input_code}
+    body = f"""{input_code}
     %map_empty = tensor.empty() : {result_type}
     %mapped = linalg.generic {{
       indexing_maps = [{identity}, {identity}],
@@ -820,9 +881,8 @@ def _lower_iota_scalar_map_module(
     ^bb0(%in: {input_element_type}, %out: {result_element_type}):
 {op_lines}
     }} -> {result_type}
-    return %mapped : {result_type}
-  }}
-}}"""
+"""
+    return body.rstrip(), "%mapped", result_type
 
 
 def _lower_binary_map_module(
@@ -830,6 +890,17 @@ def _lower_binary_map_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_binary_map_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_binary_map_result(
+    node: HIRMap,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if node.cell_shape:
         raise RemoraLoweringError("binary cell-map MLIR lowering is deferred")
     if len(node.arrays) != 2:
@@ -864,9 +935,7 @@ def _lower_binary_map_module(
         result_type=result_element_type,
     )
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{left_code}
+    body = f"""{left_code}
 {right_code}
     %map_empty = tensor.empty() : {result_type}
     %mapped = linalg.generic {{
@@ -876,9 +945,8 @@ def _lower_binary_map_module(
     ^bb0(%left_in: {left_element_type}, %right_in: {right_element_type}, %out: {result_element_type}):
 {op_lines}
     }} -> {result_type}
-    return %mapped : {result_type}
-  }}
-}}"""
+"""
+    return body.rstrip(), "%mapped", result_type
 
 
 def _lower_map_cell_module(
@@ -886,6 +954,17 @@ def _lower_map_cell_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_map_cell_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_map_cell_result(
+    node: HIRMap,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("cell-map lowering requires an array result")
     if len(node.cell_shape) != 1:
@@ -939,9 +1018,7 @@ def _lower_map_cell_module(
         result_type=result_element_type,
     )
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{input_code}
+    body = f"""{input_code}
     %map_empty = tensor.empty() : {result_type}
     %init = arith.constant {init_value} : {result_element_type}
     %filled = linalg.fill ins(%init : {result_element_type}) outs(%map_empty : {result_type}) -> {result_type}
@@ -952,9 +1029,8 @@ def _lower_map_cell_module(
     ^bb0(%in: {input_element_type}, %acc: {result_element_type}):
 {fold_body}
     }} -> {result_type}
-    return %mapped : {result_type}
-  }}
-}}"""
+"""
+    return body.rstrip(), "%mapped", result_type
 
 
 def _lower_fold_module(
@@ -962,9 +1038,20 @@ def _lower_fold_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_fold_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_fold_result(
+    node: HIRFold,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if isinstance(node.result_type, ArrayType):
-        return _lower_array_fold_module(node, functions, tensor_env)
-    return _lower_scalar_fold_module(node, functions, tensor_env)
+        return _lower_array_fold_result(node, functions, tensor_env)
+    return _lower_scalar_fold_result(node, functions, tensor_env)
 
 
 def _lower_scalar_fold_module(
@@ -972,6 +1059,17 @@ def _lower_scalar_fold_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_scalar_fold_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_scalar_fold_result(
+    node: HIRFold,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if not isinstance(node.func, HIRPrimCallable):
         raise RemoraLoweringError("only primitive fold callables lower to MLIR so far")
     if not isinstance(node.init, HIRLit):
@@ -993,9 +1091,7 @@ def _lower_scalar_fold_module(
         result_type=result_type,
     )
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{input_code}
+    body = f"""{input_code}
     %init_scalar = arith.constant {init_value} : {result_type}
     %init = tensor.from_elements %init_scalar : tensor<{result_type}>
     %folded = linalg.generic {{
@@ -1006,9 +1102,8 @@ def _lower_scalar_fold_module(
 {fold_body}
     }} -> tensor<{result_type}>
     %result = tensor.extract %folded[] : tensor<{result_type}>
-    return %result : {result_type}
-  }}
-}}"""
+"""
+    return body.rstrip(), "%result", result_type
 
 
 def _lower_array_fold_module(
@@ -1016,6 +1111,17 @@ def _lower_array_fold_module(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
+    body, result_value, result_type = _lower_array_fold_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_array_fold_result(
+    node: HIRFold,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
     if not isinstance(node.func, HIRPrimCallable):
         raise RemoraLoweringError("only primitive array-cell fold callables lower to MLIR so far")
     if not isinstance(node.result_type, ArrayType):
@@ -1053,9 +1159,7 @@ def _lower_array_fold_module(
         result_type=result_element_type,
     )
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{input_code}
+    body = f"""{input_code}
 {init_code}
     %folded = linalg.generic {{
       indexing_maps = [{_identity_affine_map(rank)}, {_drop_first_affine_map(rank)}],
@@ -1064,9 +1168,8 @@ def _lower_array_fold_module(
     ^bb0(%in: {input_element_type}, %acc: {result_element_type}):
 {fold_body}
     }} -> {result_type}
-    return %folded : {result_type}
-  }}
-}}"""
+"""
+    return body.rstrip(), "%folded", result_type
 
 
 def _lower_fold_input(
@@ -1186,8 +1289,8 @@ def _lower_tensor_input(
     if isinstance(node, HIRVar):
         if tensor_env is None or node.name not in tensor_env:
             raise RemoraLoweringError("only tensor literals, iota values, and descriptor inputs lower as tensor inputs so far")
-        value_name, value_type, element_type = tensor_env[node.name]
-        return "", value_name, value_type, element_type
+        value = tensor_env[node.name]
+        return "", value.name, value.type, value.element_type
 
     if isinstance(node, HIRIota):
         result_type = type_to_mlir(node.result_type)

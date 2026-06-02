@@ -1,6 +1,7 @@
 [
   {
     "name": "scalar_arithmetic",
+    "category": "supported",
     "path": "pass/scalar_arithmetic.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -8,6 +9,7 @@
   },
   {
     "name": "top_level_function",
+    "category": "supported",
     "path": "pass/top_level_function.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -15,6 +17,7 @@
   },
   {
     "name": "map_function",
+    "category": "supported",
     "path": "pass/map_function.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -22,6 +25,7 @@
   },
   {
     "name": "row_reduce",
+    "category": "supported",
     "path": "pass/row_reduce.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -29,6 +33,7 @@
   },
   {
     "name": "rank3_map",
+    "category": "supported",
     "path": "pass/rank3_map.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -36,6 +41,7 @@
   },
   {
     "name": "rank4_map",
+    "category": "supported",
     "path": "pass/rank4_map.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -43,6 +49,7 @@
   },
   {
     "name": "rank10_map",
+    "category": "supported",
     "path": "pass/rank10_map.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -50,6 +57,7 @@
   },
   {
     "name": "rank10_shape",
+    "category": "supported",
     "path": "pass/rank10_shape.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -57,6 +65,7 @@
   },
   {
     "name": "rank10_rank",
+    "category": "supported",
     "path": "pass/rank10_rank.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -64,6 +73,7 @@
   },
   {
     "name": "rank10_indexing",
+    "category": "supported",
     "path": "pass/rank10_indexing.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -71,6 +81,7 @@
   },
   {
     "name": "shape_rank",
+    "category": "supported",
     "path": "pass/shape_rank.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -78,6 +89,7 @@
   },
   {
     "name": "indexing",
+    "category": "supported",
     "path": "pass/indexing.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -85,6 +97,7 @@
   },
   {
     "name": "prelude_sum",
+    "category": "supported",
     "path": "pass/prelude_sum.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -92,6 +105,7 @@
   },
   {
     "name": "dot_product",
+    "category": "supported",
     "path": "pass/dot_product.remora",
     "target": "cpu",
     "expect_exit": 0,
@@ -99,6 +113,7 @@
   },
   {
     "name": "recursive_function",
+    "category": "rejected",
     "path": "fail/recursive_function.remora",
     "target": "cpu",
     "expect_exit": 1,
@@ -106,9 +121,18 @@
   },
   {
     "name": "rank11_rejected",
+    "category": "rejected",
     "path": "fail/rank11_rejected.remora",
     "target": "cpu",
     "expect_exit": 1,
     "expect_stderr_contains": "rank limit exceeded in Dense Core"
+  },
+  {
+    "name": "dynamic_shape",
+    "category": "deferred",
+    "path": "deferred/dynamic_shape.remora",
+    "target": "cpu",
+    "expect_exit": 1,
+    "expect_stderr_contains": "expected a non-negative integer constant dimension"
   }
 ]

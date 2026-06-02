@@ -77,6 +77,21 @@ typedef struct {
 
 Element type is not encoded in the descriptor layout. Kernel metadata records the element type for each descriptor argument.
 
+## Element Layout
+
+The descriptor layout is element-type agnostic, but public Remora Dense Core
+element storage uses these ABI sizes:
+
+- `int`: signed 32-bit integer (`int32`, MLIR `i32`)
+- `float`: IEEE 754 single precision (`float32`, MLIR `f32`)
+- `bool`: one byte per element at descriptor boundaries
+
+Boolean kernels may compute predicates internally as MLIR/LLVM `i1`, but public
+descriptor loads and stores for boolean arrays must use byte-backed values.
+Stored bool values are normalized: `0` is `false`, and `1` is `true`. This
+matches `numpy.bool_` storage and prevents LLVM `i1` memory layout from leaking
+into the external ABI.
+
 ## Kernel Entry Convention
 
 Exported Remora kernels receive descriptor pointers followed by scalar arguments, in metadata order:

@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from remora.hir import (
     HIRVar,
     lower_to_hir,
 )
+from remora import lowering as lowering_module
 from remora.lowering import MLIRLowering, RemoraLoweringError, type_to_mlir
 from remora.parser import parse_program
 from remora.typechecker import TypeChecker
@@ -71,6 +73,14 @@ def test_lower_type_returns_parseable_mlir_types():
 
     assert str(lowering.lower_type(INT)) == "i32"
     assert str(lowering.lower_type(ArrayType(INT, (StaticDim(10),)))) == "tensor<10xi32>"
+
+
+def test_tensor_let_lowering_uses_builder_not_main_string_splicing():
+    source = inspect.getsource(lowering_module._lower_tensor_let_module)
+
+    assert ".find(" not in source
+    assert "func.func @main" not in source
+    assert "_MLIRMainModuleBuilder" in source
 
 
 @pytest.mark.parametrize(

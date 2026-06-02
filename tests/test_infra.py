@@ -1,6 +1,10 @@
 import importlib.util
+from pathlib import Path
 
 import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_python_package_imports():
@@ -55,3 +59,13 @@ def test_mlir_or_iree_imports_if_available():
         return
 
     pytest.skip("MLIR or IREE compiler bindings are not installed")
+
+
+def test_dense_core_docs_pin_bool_abi_policy():
+    dense_core = (ROOT / "docs" / "DENSE_CORE.md").read_text(encoding="utf-8")
+    abi = (ROOT / "docs" / "ABI.md").read_text(encoding="utf-8")
+    notes = (ROOT / "docs" / "IMPLEMENTATION_NOTES.md").read_text(encoding="utf-8")
+
+    assert "one byte per element" in dense_core
+    assert "one byte per element" in abi
+    assert "docs/DENSE_CORE.md" in notes
