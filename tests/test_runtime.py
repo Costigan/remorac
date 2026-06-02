@@ -95,7 +95,9 @@ def test_cpu_evaluates_top_level_function_in_map():
 
 
 def test_cpu_evaluates_all_checked_in_examples():
-    for path in sorted(Path("examples").glob("*.remora")):
+    for path in sorted(
+        p for p in Path("examples").glob("*.remora") if not p.name.startswith(".")
+    ):
         result = evaluate_source(path.read_text(encoding="utf-8"))
         assert result.type is not None, path
 

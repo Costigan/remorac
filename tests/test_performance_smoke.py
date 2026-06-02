@@ -16,43 +16,49 @@ pytestmark = pytest.mark.skipif(
 
 
 SMOKE_CASES = {
-    "vector_scale": ("map (* 2.0) (iota 1000)", 1),
-    "map_chain": ("map (* 3.0) (map (* 2.0) (iota 1000))", 1),
-    "vector_sum": ("fold (+) 0.0 (iota 1000)", 2),
+    "vector_scale": ("map (* 2.0) (iota 1000)", 2, 1, 5.0),
+    "map_chain": ("map (* 3.0) (map (* 2.0) (iota 1000))", 3, 1, 5.0),
+    "vector_sum": ("fold (+) 0.0 (iota 1000)", 2, 2, 5.0),
     "dot": (
         "let xs = [1.0, 2.0, 3.0] in "
         "let ys = [4.0, 5.0, 6.0] in "
         "dot xs ys",
+        2,
         1,
+        5.0,
     ),
 }
 
 
-@pytest.mark.parametrize(("name", "source_and_expected"), SMOKE_CASES.items())
-def test_fused_linalg_operation_count_smoke(name: str, source_and_expected):
-    source, expected_count = source_and_expected
+def smoke_metrics(source: str) -> tuple[str, str, str, float, float]:
     toolchain = detect_toolchain()
     if toolchain.mlir_opt is None:
         pytest.skip("mlir-opt is not available")
 
     mlir = compile_source_to_mlir(source, verify=False)
+    start = time.perf_counter()
     fused = run_fusion_pipeline_text(mlir, toolchain=toolchain)
+    fusion_elapsed = time.perf_counter() - start
+    start = time.perf_counter()
+    lowered = run_cpu_pipeline_text(mlir, toolchain=toolchain)
+    cpu_elapsed = time.perf_counter() - start
+    return mlir, fused, lowered, fusion_elapsed, cpu_elapsed
 
-    assert fused.count("linalg.generic") == expected_count, name
+
+@pytest.mark.parametrize(("name", "source_and_expected"), SMOKE_CASES.items())
+def test_fused_linalg_operation_count_smoke(name: str, source_and_expected):
+    source, before_count, after_count, _cpu_budget_s = source_and_expected
+    mlir, fused, _lowered, _fusion_elapsed, _cpu_elapsed = smoke_metrics(source)
+
+    assert mlir.count("linalg.generic") == before_count, name
+    assert fused.count("linalg.generic") == after_count, name
 
 
 @pytest.mark.parametrize(("name", "source_and_expected"), SMOKE_CASES.items())
 def test_cpu_pipeline_compile_time_smoke(name: str, source_and_expected):
-    source, _expected_count = source_and_expected
-    toolchain = detect_toolchain()
-    if not toolchain.has_standalone_mlir:
-        pytest.skip("standalone MLIR tools are not available")
-
-    mlir = compile_source_to_mlir(source, verify=False)
-    start = time.perf_counter()
-    lowered = run_cpu_pipeline_text(mlir, toolchain=toolchain)
-    elapsed = time.perf_counter() - start
+    source, _before_count, _after_count, cpu_budget_s = source_and_expected
+    _mlir, _fused, lowered, _fusion_elapsed, elapsed = smoke_metrics(source)
 
     assert "llvm.func @main" in lowered, name
     assert "linalg.generic" not in lowered, name
-    assert elapsed < 5.0, f"{name} CPU pipeline took {elapsed:.3f}s"
+    assert elapsed < cpu_budget_s, f"{name} CPU pipeline took {elapsed:.3f}s"
