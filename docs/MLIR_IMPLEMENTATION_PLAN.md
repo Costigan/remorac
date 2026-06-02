@@ -1720,9 +1720,10 @@ def llvmir_to_ptx(ir_text: str, sm: str = "sm_80") -> str:
   - Current: `remora.gpu_lowering.build_rank1_f32_unary_map_gpu_scaffold`
     emits a minimal rank-1 `float32` scale-map-shaped GPU module with
     thread/block index computation, a bounds guard, `memref.load`, `arith.mulf`,
-    and `memref.store`. Tests verify the scaffold parses as MLIR and remains
-    distinct from PTX text. This is a target-shape scaffold only, not NVVM
-    lowering or runtime launch support.
+    and `memref.store`. `build_gpu_scaffold_for_function` connects that scaffold
+    to the narrow typed/HIR function shape `def scale xs = map (* c) xs` for a
+    rank-1 `float32` input. Tests verify the scaffold parses as MLIR and remains
+    distinct from PTX text. This is not NVVM lowering or runtime launch support.
 - [x] Implement `run_pipeline` with debug mode
 - [x] Implement external MLIR verification for emitted modules
   - Current: `verify_module_text` uses `mlir-opt` when available and otherwise uses `.venv/bin/iree-opt --verify-diagnostics -`.

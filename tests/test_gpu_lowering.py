@@ -2,10 +2,13 @@ import importlib.util
 
 import pytest
 
+from remora.compiler import compile_function_source
 from remora.gpu_lowering import (
     GPUScaffoldError,
+    build_gpu_scaffold_for_function,
     build_rank1_f32_unary_map_gpu_scaffold,
 )
+from remora.types import FLOAT, INT, ArrayType, StaticDim
 
 
 pytestmark = pytest.mark.skipif(
@@ -59,3 +62,46 @@ def test_rank1_f32_unary_map_gpu_scaffold_uses_requested_size_and_multiplier():
 def test_rank1_f32_unary_map_gpu_scaffold_rejects_invalid_size():
     with pytest.raises(GPUScaffoldError, match="positive"):
         build_rank1_f32_unary_map_gpu_scaffold(size=0)
+
+
+def test_builds_gpu_scaffold_from_rank1_f32_scale_hir_function():
+    artifact = compile_function_source(
+        "def scale xs = map (* 2.5) xs",
+        "scale",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+        verify=False,
+    )
+
+    scaffold = build_gpu_scaffold_for_function(artifact.hir_function)
+    module = parse_mlir(scaffold.text)
+    text = str(module)
+
+    assert scaffold.kernel_name == "remora_scale_rank1_f32"
+    assert "gpu.func @remora_scale_rank1_f32" in text
+    assert "memref<4xf32>" in text
+    assert "arith.constant 2.500000e+00 : f32" in text
+    assert "arith.mulf" in text
+
+
+def test_gpu_scaffold_from_function_rejects_non_float_inputs():
+    artifact = compile_function_source(
+        "def scale xs = map (* 2) xs",
+        "scale",
+        (ArrayType(INT, (StaticDim(4),)),),
+        verify=False,
+    )
+
+    with pytest.raises(GPUScaffoldError, match="rank-1 float inputs"):
+        build_gpu_scaffold_for_function(artifact.hir_function)
+
+
+def test_gpu_scaffold_from_function_rejects_non_scale_maps():
+    artifact = compile_function_source(
+        "def inc xs = map (+ 1.0) xs",
+        "inc",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+        verify=False,
+    )
+
+    with pytest.raises(GPUScaffoldError, match="scale maps"):
+        build_gpu_scaffold_for_function(artifact.hir_function)
