@@ -7,6 +7,7 @@ import time
 import pytest
 
 from remora.benchmark import (
+    BASELINE_SOURCES,
     benchmark_source,
     check_result_against_baseline,
     main as benchmark_main,
@@ -21,25 +22,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# (source, before_count, after_count, cpu_budget_s)
 SMOKE_CASES = {
-    "vector_scale": ("map (* 2.0) (iota 1000)", 2, 1, 5.0),
-    "map_chain": ("map (* 3.0) (map (* 2.0) (iota 1000))", 3, 1, 5.0),
-    "vector_sum": ("fold (+) 0.0 (iota 1000)", 2, 2, 5.0),
-    "dot": (
-        "let xs = [1.0, 2.0, 3.0] in "
-        "let ys = [4.0, 5.0, 6.0] in "
-        "dot xs ys",
-        2,
-        1,
-        5.0,
-    ),
-    "row_reduce": (
-        "let xs = [[1.0, 2.0], [3.0, 4.0]] in "
-        "map (\\row -> fold (+) 0.0 row) xs",
-        1,
-        1,
-        5.0,
-    ),
+    "vector_scale": (BASELINE_SOURCES["vector_scale"], 2, 1, 5.0),
+    "map_chain": (BASELINE_SOURCES["map_chain"], 3, 1, 5.0),
+    "vector_sum": (BASELINE_SOURCES["vector_sum"], 2, 2, 5.0),
+    "dot": (BASELINE_SOURCES["dot"], 2, 1, 5.0),
+    "row_reduce": (BASELINE_SOURCES["row_reduce"], 1, 1, 5.0),
 }
 
 
@@ -157,6 +146,19 @@ def test_benchmark_cli_checks_baseline(tmp_path, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out)["name"] == "bench"
     assert "linalg_generic_after_fusion" in captured.err
+
+
+def test_benchmark_cli_runs_suite(capsys):
+    baseline = "docs/BENCHMARK_BASELINES.json"
+
+    assert benchmark_main(["--baseline", baseline, "--suite"]) == 0
+    captured = capsys.readouterr()
+    results = json.loads(captured.out)
+
+    assert isinstance(results, list)
+    assert len(results) >= len(SMOKE_CASES)
+    assert any(r["name"] == "vector_scale" for r in results)
+    assert captured.err == ""
 
 
 def test_benchmark_baseline_checker_reports_missing_case():

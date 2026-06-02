@@ -400,3 +400,19 @@ Completed in the M3 hardening sprint:
 4. Added `remora-bench --baseline` checks for fusion and allocation ceilings.
 5. Added tests for vectorized CPU execution, vectorized pipeline lowering,
    unsupported threaded+vectorized selection, and benchmark baseline failures.
+
+Completed in the M3 performance suite sprint:
+
+1. Added `BASELINE_SOURCES` to `remora.benchmark` to centralize benchmark case source strings.
+2. Implemented `remora-bench --suite` to run all baseline cases from `docs/BENCHMARK_BASELINES.json`.
+3. Added `CPUFunctionExecutor` tests for threaded and vectorized options to broaden pipeline coverage.
+4. Fixed a bug in `RemoraExecutor` where scalar (empty shape) outputs were incorrectly defaulting to input shapes.
+5. Added `docs/BUFFER_REUSE_PLAN.md` documenting the strategy for reducing intermediate tensor allocations.
+6. Kept all validators and 365 tests green.
+
+The next sprint should focus on M4 GPU generalization and initial M3 buffer reuse implementation:
+
+1. Prototype the first buffer-deallocation or hoisting pass in the CPU pipeline.
+2. Generalize GPU loading to handle rank 4 through 10 descriptors via generated loops.
+3. Replace serial GPU reductions with parallel block reductions for better scaling.
+4. Maintain performance smoke tests and benchmark baselines during these invasive backend changes.

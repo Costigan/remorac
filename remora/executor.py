@@ -122,7 +122,7 @@ class RemoraExecutor:
 
 def compute_output_shape(meta: KernelMeta, inputs: list[np.ndarray]) -> tuple[int, ...]:
     """Compute a single output shape from kernel metadata and host inputs."""
-    if meta.output_shape:
+    if meta.output_shape is not None:
         return tuple(int(dim) for dim in meta.output_shape)
     if inputs:
         return tuple(int(dim) for dim in inputs[0].shape)
