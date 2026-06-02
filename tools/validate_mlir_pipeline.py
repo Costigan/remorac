@@ -25,14 +25,40 @@ from remora.pipeline import (  # noqa: E402
 
 
 CASES = {
-    "vector_scale": "map (* 2.0) (iota 10)",
-    "map_chain": "map (* 3) (map (* 2) (iota 10))",
-    "vector_sum": "fold (+) 0.0 (iota 10)",
-    "dot": (
-        "let xs = [1.0, 2.0, 3.0] in "
-        "let ys = [4.0, 5.0, 6.0] in "
-        "dot xs ys"
-    ),
+    "vector_scale": {
+        "source": "map (* 2.0) (iota 10)",
+        "before": 2,
+        "after": 1,
+    },
+    "map_chain": {
+        "source": "map (* 3) (map (* 2) (iota 10))",
+        "before": 3,
+        "after": 1,
+    },
+    "vector_sum": {
+        "source": "fold (+) 0.0 (iota 10)",
+        "before": 2,
+        "after": 2,
+    },
+    "dot": {
+        "source": (
+            "let xs = [1.0, 2.0, 3.0] in "
+            "let ys = [4.0, 5.0, 6.0] in "
+            "dot xs ys"
+        ),
+        "before": 2,
+        "after": 1,
+    },
+    "map_fold": {
+        "source": "fold (+) 0.0 (map (* 2.0) (iota 10))",
+        "before": 3,
+        "after": 2,
+        "miss_reason": (
+            "MLIR 18's linalg-fuse-elementwise-ops fuses the iota producer into "
+            "the map, but it leaves the reduction consumer materialized as a "
+            "second linalg.generic in this textual pipeline."
+        ),
+    },
 }
 
 
@@ -45,21 +71,33 @@ def main() -> int:
     _check_artifact("docs/mlir-pipeline-cpu.txt", CPU_PIPELINE)
     _check_artifact("docs/mlir-pipeline-fusion.txt", FUSION_PIPELINE)
 
-    for name, source in CASES.items():
+    for name, case in CASES.items():
         print(f"case: {name}")
-        mlir = compile_source_to_mlir(source, verify=False)
+        mlir = compile_source_to_mlir(case["source"], verify=False)
         fused = run_fusion_pipeline_text(mlir, toolchain=toolchain)
         cpu_lowered = run_cpu_pipeline_text(mlir, toolchain=toolchain)
         llvm_ir = translate_mlir_to_llvmir(cpu_lowered, toolchain=toolchain)
 
+        before_count = mlir.count("linalg.generic")
+        after_count = fused.count("linalg.generic")
+        if before_count != case["before"]:
+            raise PipelineUnavailable(
+                f"{name}: expected {case['before']} linalg.generic ops before fusion, got {before_count}"
+            )
+        if after_count != case["after"]:
+            raise PipelineUnavailable(
+                f"{name}: expected {case['after']} linalg.generic ops after fusion, got {after_count}"
+            )
         if "linalg.generic" in cpu_lowered:
             raise PipelineUnavailable(f"{name}: CPU pipeline left linalg.generic in output")
         if "llvm.func @main" not in cpu_lowered:
             raise PipelineUnavailable(f"{name}: CPU pipeline did not produce llvm.func @main")
         if "@main" not in llvm_ir:
             raise PipelineUnavailable(f"{name}: LLVM IR translation did not contain @main")
-        print(f"  linalg.generic before fusion: {mlir.count('linalg.generic')}")
-        print(f"  linalg.generic after fusion:  {fused.count('linalg.generic')}")
+        print(f"  linalg.generic before fusion: {before_count}")
+        print(f"  linalg.generic after fusion:  {after_count}")
+        if "miss_reason" in case:
+            print(f"  note: {case['miss_reason']}")
 
     nvidia_artifact = ROOT / "docs/mlir-pipeline-nvidia.txt"
     if not nvidia_artifact.is_file():
