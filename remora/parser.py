@@ -30,7 +30,9 @@ from remora.ast_nodes import (
     RankExpr,
     RightSectionExpr,
     ShapeExpr,
+    SliceRange,
     SourceLoc,
+    TransposeExpr,
     ValDef,
     VarExpr,
 )
@@ -42,6 +44,7 @@ _PARSER = Lark(
     _GRAMMAR,
     parser="lalr",
     start=["program", "definition", "expr"],
+    maybe_placeholders=True,
 )
 
 
@@ -123,6 +126,9 @@ class ASTBuilder(Transformer):
     def rank_expr(self, items: list[Any]) -> RankExpr:
         return RankExpr(items[0], self._loc_from(items))
 
+    def transpose_expr(self, items: list[Any]) -> TransposeExpr:
+        return TransposeExpr(items[0], self._loc_from(items))
+
     def operator_func(self, items: list[Any]) -> OperatorFuncExpr:
         return OperatorFuncExpr(str(items[0]), self._loc_from(items))
 
@@ -144,8 +150,14 @@ class ASTBuilder(Transformer):
             expr = IndexExpr(expr, suffix, self._loc_from([expr]))
         return expr
 
-    def index_suffix(self, items: list[Any]) -> list[Expr]:
+    def index_suffix(self, items: list[Any]) -> list[Expr | SliceRange]:
         return list(items)
+
+    def slice_range(self, items: list[Any]) -> SliceRange:
+        # With maybe_placeholders=True and [expr] ":" [expr], 
+        # items is [expr_or_None, expr_or_None]
+        start, end = items
+        return SliceRange(start, end, self._loc_from(items))
 
     def float_lit(self, items: list[Any]) -> FloatLit:
         return FloatLit(float(items[0]), self._loc_from(items))

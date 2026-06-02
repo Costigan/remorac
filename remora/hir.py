@@ -32,6 +32,8 @@ from remora.typechecker import (
     TypedRank,
     TypedRightSection,
     TypedShape,
+    TypedSlice,
+    TypedTranspose,
 )
 from remora.types import (
     BOOL,
@@ -132,8 +134,21 @@ class HIRPrimOp:
 @dataclass(frozen=True)
 class HIRIndex:
     array: HIRExpr
-    indices: list[HIRExpr]
+    indices: list[HIRExpr | HIRSlice]
     result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRSlice:
+    start: int
+    end: int
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRTranspose:
+    array: HIRExpr
+    result_type: ArrayType
 
 
 @dataclass(frozen=True)
@@ -176,6 +191,8 @@ HIRExpr: TypeAlias = (
     | HIRLambda
     | HIRPrimOp
     | HIRIndex
+    | HIRSlice
+    | HIRTranspose
     | HIRIota
     | HIRCast
     | HIRArrayLit
@@ -245,9 +262,15 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
     if isinstance(expr, TypedIndex):
         return HIRIndex(
             lower_expr(expr.array),
-            [lower_expr(index) for index in expr.indices],
+            [_lower_index_element(index) for index in expr.indices],
             expr.type,
         )
+
+    if isinstance(expr, TypedSlice):
+        return _lower_slice(expr)
+
+    if isinstance(expr, TypedTranspose):
+        return HIRTranspose(lower_expr(expr.array), expr.type)
 
     if isinstance(expr, TypedLambda):
         return HIRLambda(
@@ -286,6 +309,26 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
         return _lower_typed_node(expr)
 
     raise HIRLoweringError(f"cannot lower typed node {type(expr).__name__}")
+
+
+def _lower_index_element(index: TypedExpr | TypedSlice) -> HIRExpr | HIRSlice:
+    if isinstance(index, TypedSlice):
+        return _lower_slice(index)
+    return lower_expr(index)
+
+
+def _lower_slice(expr: TypedSlice) -> HIRSlice:
+    start_val = 0
+    if expr.expr.start is not None:
+        # confirmed in typechecker to be IntLit for now
+        start_val = expr.expr.start.value
+
+    # typedslice type is its own result type
+    # but we need end = start + length
+    length = expr.type.shape[0].value
+    end_val = start_val + length
+
+    return HIRSlice(start_val, end_val, expr.type)
 
 
 def lower_callable(expr: TypedExpr) -> HIRCallable:
@@ -374,6 +417,10 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRPrimOp):
         return expr.result_type
     if isinstance(expr, HIRIndex):
+        return expr.result_type
+    if isinstance(expr, HIRSlice):
+        return expr.result_type
+    if isinstance(expr, HIRTranspose):
         return expr.result_type
     if isinstance(expr, HIRIota):
         return expr.result_type
