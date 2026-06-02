@@ -173,6 +173,17 @@ def test_cpu_threads_request_requires_openmp_runtime_when_unavailable():
         CPUExecutor.compile_source("map (* 2) (iota 4)", cpu_threads=2)
 
 
+def test_threaded_cpu_executes_map_and_scalar_reduction_when_openmp_available():
+    if not has_openmp_runtime():
+        pytest.skip("OpenMP runtime is unavailable")
+
+    mapped = evaluate_source_compiled("map (* 2) (iota 4)", cpu_threads=4)
+    reduced = evaluate_source_compiled("fold (+) 0.0 (iota 10)", cpu_threads=4)
+
+    np.testing.assert_array_equal(mapped.value, np.array([0, 2, 4, 6], dtype=np.int32))
+    assert reduced.value == pytest.approx(45.0)
+
+
 def test_cpu_executor_execute_main_formats_scalar_vector_matrix_and_rank3_results():
     scalar_artifact = CPUExecutor.compile_source("1 + 2.0")
     vector_artifact = CPUExecutor.compile_source("map (* 2.0) (iota 5)")

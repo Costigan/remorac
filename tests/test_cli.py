@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from remora.cli import main
+from remora.runtime import has_openmp_runtime
 
 
 def write_source(tmp_path, text: str):
@@ -83,6 +86,18 @@ def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
     assert main(["--cpu-threads", "1", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "3\n"
+    assert captured.err == ""
+
+
+def test_cli_runs_threaded_cpu_when_openmp_available(tmp_path, capsys):
+    if not has_openmp_runtime():
+        pytest.skip("OpenMP runtime is unavailable")
+
+    source = write_source(tmp_path, "map (* 2) (iota 4)")
+
+    assert main(["--cpu-threads", "4", str(source)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "[0, 2, 4, 6]\n"
     assert captured.err == ""
 
 
