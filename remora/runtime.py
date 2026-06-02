@@ -445,8 +445,6 @@ class CPUExecutor:
 
         toolchain = detect_toolchain() if toolchain is None else toolchain
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
-        if threaded and cpu_vectorize:
-            raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
         if threaded and not has_openmp_runtime():
             raise PipelineUnavailable(
                 "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "
@@ -575,8 +573,6 @@ class CPUFunctionExecutor:
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
-        if threaded and cpu_vectorize:
-            raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
         if threaded and not has_openmp_runtime():
             raise PipelineUnavailable(
                 "cpu_threads > 1 requires an OpenMP runtime with __kmpc symbols; "

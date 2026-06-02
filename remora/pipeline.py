@@ -26,6 +26,7 @@ CPU_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "func.func(buffer-deallocation)",
         "convert-linalg-to-loops",
         "convert-scf-to-cf",
         "convert-to-llvm",
@@ -37,6 +38,7 @@ CPU_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "func.func(buffer-deallocation)",
         "convert-linalg-to-affine-loops",
         "func.func(affine-super-vectorize{virtual-vector-size=4 vectorize-reductions})",
         "lower-affine",
@@ -47,10 +49,30 @@ CPU_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
+CPU_THREADED_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
+    [
+        "linalg-fuse-elementwise-ops",
+        "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "func.func(buffer-deallocation)",
+        "convert-linalg-to-affine-loops",
+        "func.func(affine-parallelize,affine-super-vectorize{virtual-vector-size=4 vectorize-reductions})",
+        "lower-affine",
+        "convert-scf-to-openmp",
+        "convert-scf-to-cf",
+        "convert-openmp-to-llvm",
+        "convert-vector-to-llvm",
+        "convert-index-to-llvm",
+        "convert-to-llvm",
+        "reconcile-unrealized-casts",
+    ]
+) + ")"
+
+
 CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "func.func(buffer-deallocation)",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
         "convert-scf-to-cf",
@@ -65,6 +87,7 @@ CPU_THREADED_PRE_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+        "func.func(buffer-deallocation)",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
     ]
@@ -265,7 +288,7 @@ def run_cpu_pipeline_text(
     vectorize: bool = False,
 ) -> str:
     if threaded and vectorize:
-        raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
+        return run_external_pipeline_text(mlir_text, CPU_THREADED_VECTORIZED_PIPELINE, toolchain=toolchain)
     if vectorize:
         return run_external_pipeline_text(mlir_text, CPU_VECTORIZED_PIPELINE, toolchain=toolchain)
     if not threaded:
