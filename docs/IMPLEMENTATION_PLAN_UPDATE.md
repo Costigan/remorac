@@ -347,14 +347,24 @@ Completed in this sprint:
 6. Added tests for Dense Core docs, acceptance categories, and the no-splicing
    tensor-let lowering contract.
 
-The next sprint should finish M2 and start M3:
+Completed in the follow-on sprint:
 
-1. Move the remaining scalar/iota/array literal module emitters onto the same
-   builder interface.
-2. Expand the tensor SSA environment to cover more non-direct tensor expressions
-   and remove remaining broad let-inlining cases.
-3. Add rank-4 and rank-10 fold/indexing acceptance coverage where Dense Core
-   type rules allow.
-4. Define the CPU multicore pipeline contract and add the first
-   `--cpu-threads`/benchmark harness implementation.
+1. Moved the remaining straightforward whole-program scalar, iota, array
+   literal, and scalar map emitters onto the shared main-module builder.
+2. Added chained tensor-let coverage for let-bound maps feeding later tensor
+   expressions.
+3. Added rank-4 and rank-10 fold acceptance cases.
+4. Added requested CPU thread-count plumbing through CLI/runtime artifacts and
+   `REMORA_NUM_THREADS`.
+5. Added `remora-bench`, a JSON benchmark harness for compile/pipeline/execution
+   timing and coarse operation counts.
+
+The next sprint should finish the real M3 CPU multicore backend:
+
+1. Select the concrete threading lowering strategy: OpenMP dialect/runtime,
+   affine/scf parallel lowering, or an explicit host thread runtime.
+2. Make `--cpu-threads` affect generated CPU execution instead of only metadata.
+3. Add benchmark baselines for large maps, map chains, reductions, dot, and row
+   reductions.
+4. Add allocation/reuse metrics for intermediate tensors.
 5. Keep all current validators and the full test suite green.

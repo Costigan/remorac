@@ -614,17 +614,9 @@ def _lower_scalar_module(
         *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),
     ]
     result_value = "%result_cast" if value.type != result_type else value.value
-    body = "\n".join(lines)
-    function_text = _lower_functions(functions)
-    function_prefix = f"\n{function_text}\n" if function_text else ""
-
-    return f"""module {{
-{function_prefix}\
-  func.func @main() -> {result_type} {{
-{body}
-    return {result_value} : {result_type}
-  }}
-}}"""
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
+    builder.add_block("\n".join(lines))
+    return builder.render(result_value)
 
 
 def _lower_iota_module(node: HIRIota) -> str:
@@ -633,9 +625,7 @@ def _lower_iota_module(node: HIRIota) -> str:
     if element_type != "i32":
         raise RemoraLoweringError("iota lowering currently supports i32 results only")
 
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-    %empty = tensor.empty() : {result_type}
+    body = f"""    %empty = tensor.empty() : {result_type}
     %result = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>],
       iterator_types = [\"parallel\"]
@@ -645,19 +635,17 @@ def _lower_iota_module(node: HIRIota) -> str:
       %cast = arith.index_cast %idx : index to {element_type}
       linalg.yield %cast : {element_type}
     }} -> {result_type}
-    return %result : {result_type}
-  }}
-}}"""
+"""
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%result")
 
 
 def _lower_array_literal_module(node: HIRArrayLit) -> str:
     code, name, result_type, _element_type = _lower_tensor_input(node, "literal", {})
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{code}
-    return {name} : {result_type}
-  }}
-}}"""
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(code)
+    return builder.render(name)
 
 
 def _lower_index_module(
@@ -737,14 +725,9 @@ def _lower_scalar_map_module(node: HIRMap, functions: dict[str, HIRFunction]) ->
         result_type=result_type,
         next_temp=emitter.next_temp,
     )
-    body = "\n".join([*emitter.lines, *callable_lines])
-
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{body}
-    return {result_value} : {result_type}
-  }}
-}}"""
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
+    builder.add_block("\n".join([*emitter.lines, *callable_lines]))
+    return builder.render(result_value)
 
 
 def _lower_scalar_map_binary_module(node: HIRMap, functions: dict[str, HIRFunction]) -> str:
@@ -767,14 +750,9 @@ def _lower_scalar_map_binary_module(node: HIRMap, functions: dict[str, HIRFuncti
         result_type=result_type,
         next_temp=emitter.next_temp,
     )
-    body = "\n".join([*emitter.lines, *callable_lines])
-
-    return f"""module {{
-  func.func @main() -> {result_type} {{
-{body}
-    return {result_value} : {result_type}
-  }}
-}}"""
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
+    builder.add_block("\n".join([*emitter.lines, *callable_lines]))
+    return builder.render(result_value)
 
 
 def _lower_functions(functions: dict[str, HIRFunction]) -> str:

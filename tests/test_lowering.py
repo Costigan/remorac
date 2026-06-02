@@ -83,6 +83,19 @@ def test_tensor_let_lowering_uses_builder_not_main_string_splicing():
     assert "_MLIRMainModuleBuilder" in source
 
 
+def test_main_module_emitters_use_shared_builder():
+    for function in [
+        lowering_module._lower_scalar_module,
+        lowering_module._lower_iota_module,
+        lowering_module._lower_array_literal_module,
+        lowering_module._lower_scalar_map_module,
+        lowering_module._lower_scalar_map_binary_module,
+    ]:
+        source = inspect.getsource(function)
+        assert "_MLIRMainModuleBuilder" in source, function.__name__
+        assert "func.func @main" not in source, function.__name__
+
+
 @pytest.mark.parametrize(
     ("source", "return_type", "expected_op"),
     [
@@ -515,6 +528,18 @@ def test_lowers_let_bound_iota_map():
     assert "func.func @main() -> tensor<10xf32>" in lowered.text
     assert lowered.text.count("linalg.generic") == 2
     assert "arith.mulf" in lowered.text
+
+
+def test_lowers_chained_tensor_lets_through_tensor_env():
+    program = hir_from_source(
+        "let xs = iota 4 in let ys = map (* 2) xs in map (+ 1) ys"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<4xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 3
+    assert "arith.muli" in lowered.text
+    assert "arith.addi" in lowered.text
 
 
 def test_lowers_top_level_value_definition_map():

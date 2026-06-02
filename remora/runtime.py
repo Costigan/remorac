@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from shutil import which
 import subprocess
@@ -73,6 +74,7 @@ class CompiledCPUArtifact:
     library_path: Path
     temp_dir: tempfile.TemporaryDirectory[str]
     return_type: RemoraType
+    cpu_threads: int | None = None
 
     def close(self) -> None:
         self.temp_dir.cleanup()
@@ -86,6 +88,7 @@ class CompiledCPUFunctionArtifact:
     param_types: tuple[RemoraType, ...]
     return_type: RemoraType
     export_name: str
+    cpu_threads: int | None = None
 
     def close(self) -> None:
         self.temp_dir.cleanup()
@@ -94,6 +97,26 @@ class CompiledCPUFunctionArtifact:
 Value = object
 Env = dict[str, Value]
 CallableValue = Callable[..., Value]
+
+
+def resolve_cpu_threads(cpu_threads: int | None = None) -> int | None:
+    """Resolve requested CPU thread count from an explicit value or environment."""
+    if cpu_threads is not None:
+        return _validate_cpu_threads(cpu_threads, "cpu_threads")
+    raw = os.environ.get("REMORA_NUM_THREADS")
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise EvaluationError("REMORA_NUM_THREADS must be a positive integer") from exc
+    return _validate_cpu_threads(value, "REMORA_NUM_THREADS")
+
+
+def _validate_cpu_threads(value: int, label: str) -> int:
+    if value < 1:
+        raise EvaluationError(f"{label} must be a positive integer")
+    return int(value)
 
 
 def cuda_available() -> bool:
@@ -355,8 +378,17 @@ def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationR
     return evaluate_typed_program(typed)
 
 
-def evaluate_source_compiled(source: str, *, include_prelude: bool = True) -> EvaluationResult:
-    artifact = CPUExecutor.compile_source(source, include_prelude=include_prelude)
+def evaluate_source_compiled(
+    source: str,
+    *,
+    include_prelude: bool = True,
+    cpu_threads: int | None = None,
+) -> EvaluationResult:
+    artifact = CPUExecutor.compile_source(
+        source,
+        include_prelude=include_prelude,
+        cpu_threads=cpu_threads,
+    )
     try:
         value = CPUExecutor(artifact).execute_main([])
         return EvaluationResult(value, artifact.return_type)
@@ -388,7 +420,9 @@ class CPUExecutor:
         *,
         include_prelude: bool = True,
         toolchain: PipelineToolchain | None = None,
+        cpu_threads: int | None = None,
     ) -> CompiledCPUArtifact:
+        resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_source(
             source,
             verify=False,
@@ -435,7 +469,12 @@ class CPUExecutor:
             "system linker failed during compiled CPU execution",
             temp_dir,
         )
-        return CompiledCPUArtifact(so_path, temp_dir, compiler_artifact.return_type)
+        return CompiledCPUArtifact(
+            so_path,
+            temp_dir,
+            compiler_artifact.return_type,
+            resolved_cpu_threads,
+        )
 
     def execute_main(self, inputs: list[np.ndarray] | None = None) -> object:
         if inputs is not None and len(inputs) != 0:
@@ -483,7 +522,9 @@ class CPUFunctionExecutor:
         *,
         include_prelude: bool = True,
         toolchain: PipelineToolchain | None = None,
+        cpu_threads: int | None = None,
     ) -> CompiledCPUFunctionArtifact:
+        resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_function_source(
             source,
             function_name,
@@ -502,6 +543,7 @@ class CPUFunctionExecutor:
             param_types,
             compiler_artifact.return_type,
             "remora_call",
+            resolved_cpu_threads,
         )
 
     def execute(self, *inputs: np.ndarray) -> EvaluationResult:

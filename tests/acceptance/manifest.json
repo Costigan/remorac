@@ -80,6 +80,22 @@
     "expect_stdout": "1\n"
   },
   {
+    "name": "rank4_fold",
+    "category": "supported",
+    "path": "pass/rank4_fold.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[[[3]]]\n"
+  },
+  {
+    "name": "rank10_fold",
+    "category": "supported",
+    "path": "pass/rank10_fold.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[[[[[[[[[3]]]]]]]]]\n"
+  },
+  {
     "name": "shape_rank",
     "category": "supported",
     "path": "pass/shape_rank.remora",
