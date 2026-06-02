@@ -8,6 +8,13 @@ from remora.gpu_lowering import (
     build_gpu_scaffold_for_function,
     build_rank1_f32_unary_map_gpu_scaffold,
 )
+from remora.pipeline import (
+    PipelineUnavailable,
+    detect_toolchain,
+    run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
+    run_gpu_nvidia_scaffold_nvvm_pipeline_text,
+    verify_module_text,
+)
 from remora.types import FLOAT, INT, ArrayType, StaticDim
 
 
@@ -81,6 +88,62 @@ def test_builds_gpu_scaffold_from_rank1_f32_scale_hir_function():
     assert "memref<4xf32>" in text
     assert "arith.constant 2.500000e+00 : f32" in text
     assert "arith.mulf" in text
+
+
+def test_gpu_scaffold_is_accepted_by_external_mlir_verifier_when_available():
+    toolchain = detect_toolchain()
+    if not toolchain.has_external_verifier:
+        pytest.skip("no external MLIR verifier is available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+
+    verify_module_text(scaffold.text, toolchain)
+
+
+def test_gpu_scaffold_runs_minimal_nested_nvvm_pipeline_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+    try:
+        lowered = run_gpu_nvidia_scaffold_nvvm_pipeline_text(
+            scaffold.text,
+            toolchain=toolchain,
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"minimal scaffold NVVM pipeline is not available: {exc}")
+
+    assert "llvm.func @remora_map_rank1_f32" in lowered
+    assert "nvvm.kernel" in lowered
+    assert "nvvm.read.ptx.sreg.tid.x" in lowered
+    assert "llvm.fmul" in lowered
+
+
+def test_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
+    toolchain = detect_toolchain()
+    if toolchain.mlir_opt is None:
+        pytest.skip("mlir-opt is not available")
+
+    scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
+    try:
+        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+            scaffold.text,
+            toolchain=toolchain,
+        )
+    except PipelineUnavailable as exc:
+        pytest.skip(f"scaffold LLVM dialect pipeline is not available: {exc}")
+
+    assert "llvm.func @remora_map_rank1_f32" in lowered
+    assert "nvvm.kernel" in lowered
+    assert "nvvm.read.ptx.sreg.tid.x" in lowered
+    assert "llvm.cond_br" in lowered
+    assert "llvm.br" in lowered
+    assert "llvm.fmul" in lowered
+    assert "scf." not in lowered
+    assert "cf." not in lowered
+    assert "arith." not in lowered
+    assert "memref." not in lowered
 
 
 def test_gpu_scaffold_from_function_rejects_non_float_inputs():

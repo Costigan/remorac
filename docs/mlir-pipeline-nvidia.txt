@@ -1,9 +1,23 @@
-# Inspection-only NVIDIA path for the current Phase 6 state.
+# Scaffold-only NVIDIA path for the current GPU lowering state.
 #
 # The installed standalone LLVM/MLIR 18 tools are pinned for CPU lowering and
-# linalg fusion validation. The current Remora lowering still emits tensor/linalg
-# modules without explicit gpu.module/gpu.func kernels, so there is no production
-# standalone NVVM pipeline artifact yet.
+# linalg fusion validation. The production Remora lowering still emits
+# tensor/linalg modules for CPU execution, but remora.gpu_lowering now has a
+# parse-validated rank-1 float32 gpu.module/gpu.func scaffold.
+#
+# The currently validated scaffold-only NVVM conversion pass is:
+#
+#   builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))
+#
+# The currently validated scaffold-only LLVM-dialect conversion pass is:
+#
+#   builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)
+#
+# This proves the GPU dialect operations, scf.if, arith ops, and memref load/store
+# in the scaffold can be converted toward NVVM/LLVM dialect. It is not a complete
+# production NVIDIA pipeline, does not extract/translate the device module to
+# usable LLVM IR/PTX, does not assemble PTX, and is not wired to RemoraExecutor
+# launch.
 #
 # Temporary PTX inspection remains available through remora.codegen.generate_ptx,
 # which invokes iree-compile with:

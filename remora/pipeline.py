@@ -56,6 +56,18 @@ GPU_NVIDIA_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
+GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE = (
+    "builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))"
+)
+
+GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE = (
+    "builtin.module("
+    "gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),"
+    "convert-cf-to-llvm,"
+    "reconcile-unrealized-casts"
+    ")"
+)
+
 
 class PipelineUnavailable(RemoraError):
     """Raised when the installed MLIR toolchain cannot build a requested pipeline."""
@@ -114,6 +126,30 @@ def build_cpu_pipeline() -> Any:
 
 def build_gpu_nvidia_pipeline() -> Any:
     return build_pipeline(GPU_NVIDIA_PIPELINE)
+
+
+def run_gpu_nvidia_scaffold_nvvm_pipeline_text(
+    mlir_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    return run_external_pipeline_text(
+        mlir_text,
+        GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
+        toolchain=toolchain,
+    )
+
+
+def run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+    mlir_text: str,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> str:
+    return run_external_pipeline_text(
+        mlir_text,
+        GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
+        toolchain=toolchain,
+    )
 
 
 def build_pipeline(pipeline_text: str) -> Any:

@@ -10,6 +10,8 @@ from remora.parser import parse_program
 from remora.pipeline import (
     CPU_PIPELINE,
     FUSION_PIPELINE,
+    GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
+    GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
     PipelineUnavailable,
     build_cpu_pipeline,
     build_pipeline,
@@ -127,6 +129,8 @@ def test_standalone_fusion_pipeline_fuses_nested_scalar_map_when_available():
 def test_pipeline_artifacts_match_code_constants():
     assert "linalg-fuse-elementwise-ops" in FUSION_PIPELINE
     assert "convert-to-llvm" in CPU_PIPELINE
+    assert "gpu.module(convert-gpu-to-nvvm" in GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE
+    assert "convert-cf-to-llvm" in GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE
 
 
 def test_generate_ptx_with_iree_cuda_backend_when_available():

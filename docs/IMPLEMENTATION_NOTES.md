@@ -447,8 +447,14 @@ Deferred pipeline/codegen work:
   The first parse-validated scaffold now lives in `remora.gpu_lowering` for a
   rank-1 `float32` scale-map-shaped kernel with thread/block indexing, a bounds
   guard, load, multiply, and store operations. It is connected to the narrow
-  typed/HIR function shape `def scale xs = map (* c) xs`, but it is not wired to
-  NVVM conversion or runtime launch yet.
+  typed/HIR function shape `def scale xs = map (* c) xs`. External verification
+  and the minimal nested NVVM conversion pass
+  `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))` are
+  covered. The follow-on scaffold LLVM-dialect pass
+  `builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),convert-cf-to-llvm,reconcile-unrealized-casts)`
+  removes the remaining `scf`/`cf`/`arith`/`memref` ops from the scaffold.
+  Device-module extraction, LLVM IR/PTX translation, PTX assembly, and runtime
+  launch are not wired yet.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Replace the temporary shared-library CPU executor with a direct MLIR
