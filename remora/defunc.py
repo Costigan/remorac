@@ -14,6 +14,8 @@ from remora.hir import (
     HIRFold,
     HIRFunction,
     HIRIndex,
+    HIRSlice,
+    HIRTranspose,
     HIRIota,
     HIRLambda,
     HIRLet,
@@ -102,6 +104,10 @@ class _Defunctionalizer:
                 [self._rewrite_expr(index) for index in expr.indices],
                 expr.result_type,
             )
+        if isinstance(expr, HIRSlice):
+            return expr
+        if isinstance(expr, HIRTranspose):
+            return HIRTranspose(self._rewrite_expr(expr.array), expr.result_type)
         if isinstance(expr, HIRArrayLit):
             return HIRArrayLit(
                 [self._rewrite_expr(element) for element in expr.elements],

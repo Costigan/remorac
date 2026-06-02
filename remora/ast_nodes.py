@@ -103,6 +103,12 @@ class RankExpr:
 
 
 @dataclass(frozen=True)
+class TransposeExpr:
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class ComposeExpr:
     outer: Expr
     inner: Expr
@@ -162,7 +168,14 @@ class ArrayLit:
 @dataclass(frozen=True)
 class IndexExpr:
     array: Expr
-    indices: list[Expr]
+    indices: list[Expr | SliceRange]
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class SliceRange:
+    start: Expr | None
+    end: Expr | None
     loc: SourceLoc
 
 
@@ -176,6 +189,7 @@ Expr: TypeAlias = (
     | IotaExpr
     | ShapeExpr
     | RankExpr
+    | TransposeExpr
     | ComposeExpr
     | OperatorFuncExpr
     | LeftSectionExpr
@@ -186,6 +200,7 @@ Expr: TypeAlias = (
     | BoolLit
     | ArrayLit
     | IndexExpr
+    | SliceRange
 )
 
 Definition: TypeAlias = FuncDef | ValDef

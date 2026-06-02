@@ -410,6 +410,15 @@ Completed in the M3 performance suite sprint:
 5. Added `docs/BUFFER_REUSE_PLAN.md` documenting the strategy for reducing intermediate tensor allocations.
 6. Kept all validators and 365 tests green.
 
+Completed in the M6 surface syntax sprint:
+
+1. Added `transpose` keyword to the grammar and implemented axis-swapping (axes 0 and 1) in the compiler.
+2. Added Python-style slicing syntax `xs[start:end]` to the grammar, supporting static slice bounds.
+3. Implemented full slicing and partial indexing in the MLIR pipeline using `tensor.extract_slice`.
+4. Hardened the CPU MLIR pipeline by adding `expand-strided-metadata`, `lower-affine`, and proper `memref-to-llvm` lowering to support rank-reducing slices.
+5. Added comprehensive execution tests for `transpose` and various slicing scenarios (full, partial, mixed scalar/slice).
+6. Kept all validators and 427 tests green.
+
 The next sprint should focus on M4 GPU generalization and initial M3 buffer reuse implementation:
 
 1. Prototype the first buffer-deallocation or hoisting pass in the CPU pipeline.

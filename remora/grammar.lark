@@ -41,6 +41,7 @@ lambda_expr: LAMBDA NAME+ ARROW expr
          | "iota" atom               -> iota_expr
          | "shape" atom              -> shape_expr
          | "rank" atom               -> rank_expr
+         | "transpose" atom          -> transpose_expr
          | atom
 
 ?callable: atom
@@ -62,7 +63,12 @@ lambda_expr: LAMBDA NAME+ ARROW expr
         | BOOL                          -> bool_lit
         | NAME                          -> var
 
-index_suffix: "[" expr ("," expr)* "]"
+index_suffix: "[" index_element ("," index_element)* "]"
+
+?index_element: expr
+              | slice_range
+
+slice_range: [expr] ":" [expr]
 
 BOOL.2: "true" | "false"
 LAMBDA: "\\" | "lambda" | "λ"
@@ -70,6 +76,7 @@ ARROW: "->" | "→"
 COMPOSE: "∘"
 OR: "||"
 AND: "&&"
+COLON: ":"
 COMP_OP: "<=" | "<" | "==" | "!="
 ADD_OP: "+" | "-"
 MUL_OP: "*" | "/"

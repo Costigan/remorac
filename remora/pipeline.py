@@ -29,6 +29,11 @@ CPU_PIPELINE = "builtin.module(" + ",".join(
         "func.func(buffer-deallocation)",
         "convert-linalg-to-loops",
         "convert-scf-to-cf",
+        "expand-strided-metadata",
+        "lower-affine",
+        "finalize-memref-to-llvm",
+        "convert-arith-to-llvm",
+        "convert-index-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]
@@ -43,6 +48,10 @@ CPU_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
         "func.func(affine-super-vectorize{virtual-vector-size=4 vectorize-reductions})",
         "lower-affine",
         "convert-scf-to-cf",
+        "expand-strided-metadata",
+        "finalize-memref-to-llvm",
+        "convert-arith-to-llvm",
+        "convert-index-to-llvm",
         "convert-vector-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
@@ -59,14 +68,16 @@ CPU_THREADED_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
         "lower-affine",
         "convert-scf-to-openmp",
         "convert-scf-to-cf",
+        "expand-strided-metadata",
+        "finalize-memref-to-llvm",
+        "convert-arith-to-llvm",
+        "convert-index-to-llvm",
         "convert-openmp-to-llvm",
         "convert-vector-to-llvm",
-        "convert-index-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]
 ) + ")"
-
 
 CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
     [
@@ -76,12 +87,17 @@ CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
         "convert-scf-to-cf",
-        "convert-openmp-to-llvm",
+        "expand-strided-metadata",
+        "lower-affine",
+        "finalize-memref-to-llvm",
+        "convert-arith-to-llvm",
         "convert-index-to-llvm",
+        "convert-openmp-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]
 ) + ")"
+
 
 CPU_THREADED_PRE_PIPELINE = "builtin.module(" + ",".join(
     [
@@ -90,14 +106,18 @@ CPU_THREADED_PRE_PIPELINE = "builtin.module(" + ",".join(
         "func.func(buffer-deallocation)",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
+        "expand-strided-metadata",
+        "lower-affine",
     ]
 ) + ")"
 
 CPU_THREADED_POST_PIPELINE = "builtin.module(" + ",".join(
     [
         "convert-scf-to-cf",
-        "convert-openmp-to-llvm",
+        "finalize-memref-to-llvm",
+        "convert-arith-to-llvm",
         "convert-index-to-llvm",
+        "convert-openmp-to-llvm",
         "convert-to-llvm",
         "reconcile-unrealized-casts",
     ]

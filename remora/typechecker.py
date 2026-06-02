@@ -27,6 +27,8 @@ from remora.ast_nodes import (
     RankExpr,
     RightSectionExpr,
     ShapeExpr,
+    SliceRange,
+    TransposeExpr,
     ValDef,
     VarExpr,
 )
@@ -123,10 +125,25 @@ class TypedRank:
 
 
 @dataclass(frozen=True)
+class TypedTranspose:
+    expr: TransposeExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedSlice:
+    expr: SliceRange
+    start: TypedExpr | None
+    end: TypedExpr | None
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedIndex:
     expr: IndexExpr
     array: TypedExpr
-    indices: list[TypedExpr]
+    indices: list[TypedExpr | TypedSlice]
     type: RemoraType
 
 
@@ -192,6 +209,8 @@ TypedExpr: TypeAlias = (
     | TypedFold
     | TypedShape
     | TypedRank
+    | TypedTranspose
+    | TypedSlice
     | TypedIndex
     | TypedLambda
     | TypedOperatorFunc
@@ -270,32 +289,12 @@ class TypeChecker:
             typed_array = self.infer(expr.array, env)
             self._require_shape_operand(typed_array.type, "rank", expr.loc)
             return TypedRank(expr, typed_array, INT)
+        if isinstance(expr, TransposeExpr):
+            return self._infer_transpose(expr, env)
+        if isinstance(expr, SliceRange):
+            raise RemoraTypeError("slice range must be used within indexing", expr.loc)
         if isinstance(expr, IndexExpr):
-            typed_array = self.infer(expr.array, env)
-            if not isinstance(typed_array.type, ArrayType):
-                raise RemoraTypeError("indexing expects an array operand", expr.loc)
-            if len(expr.indices) > typed_array.type.rank:
-                raise RemoraTypeError(
-                    f"too many indices for rank-{typed_array.type.rank} array",
-                    expr.loc,
-                )
-            typed_indices = [self.infer(index, env) for index in expr.indices]
-            for position, typed_index in enumerate(typed_indices):
-                self._require(typed_index.type, INT, expr.loc)
-                if isinstance(expr.indices[position], IntLit):
-                    value = expr.indices[position].value
-                    extent = typed_array.type.shape[position].value
-                    if value < 0 or value >= extent:
-                        raise RemoraTypeError(
-                            f"index {value} is out of bounds for axis {position} with extent {extent}",
-                            expr.indices[position].loc,
-                        )
-            return TypedIndex(
-                expr,
-                typed_array,
-                typed_indices,
-                typed_array.type.drop_outer(len(typed_indices)),
-            )
+            return self._infer_indexing(expr, env)
         if isinstance(expr, LetExpr):
             if isinstance(expr.value, LambdaExpr):
                 return self._infer_let_lambda(expr, env)
@@ -577,6 +576,105 @@ class TypeChecker:
         self._require(typed.type.params[0], left_cell, expr.loc)
         self._require(typed.type.params[1], right_cell, expr.loc)
         return typed.type
+
+    def _infer_transpose(self, expr: TransposeExpr, env: TypeEnv) -> TypedTranspose:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 2:
+            raise RemoraTypeError("transpose expects an array of rank at least 2", expr.loc)
+
+        shape = typed_array.type.shape
+        transposed_shape = (shape[1], shape[0]) + shape[2:]
+        return TypedTranspose(
+            expr,
+            typed_array,
+            ArrayType(typed_array.type.element, transposed_shape),
+        )
+
+    def _infer_slice_range(
+        self,
+        expr: SliceRange,
+        axis_extent: StaticDim,
+        env: TypeEnv,
+    ) -> TypedSlice:
+        typed_start = self.infer(expr.start, env) if expr.start is not None else None
+        typed_end = self.infer(expr.end, env) if expr.end is not None else None
+        if typed_start is not None:
+            self._require(typed_start.type, INT, expr.loc)
+        if typed_end is not None:
+            self._require(typed_end.type, INT, expr.loc)
+
+        # For now, we only support static slices to keep ArrayType static
+        start_val = 0
+        if expr.start is not None:
+            if isinstance(expr.start, IntLit):
+                start_val = expr.start.value
+            else:
+                raise RemoraTypeError("only literal integer slice bounds are supported so far", expr.loc)
+
+        end_val = axis_extent.value
+        if expr.end is not None:
+            if isinstance(expr.end, IntLit):
+                end_val = expr.end.value
+            else:
+                raise RemoraTypeError("only literal integer slice bounds are supported so far", expr.loc)
+
+        if start_val < 0 or end_val < 0 or start_val > axis_extent.value or end_val > axis_extent.value or start_val > end_val:
+             raise RemoraTypeError(
+                 f"invalid slice {start_val}:{end_val} for axis with extent {axis_extent.value}",
+                 expr.loc,
+             )
+
+        slice_extent = end_val - start_val
+        return TypedSlice(
+            expr,
+            typed_start,
+            typed_end,
+            ArrayType(INT, (StaticDim(slice_extent),)),
+        )
+
+    def _infer_indexing(self, expr: IndexExpr, env: TypeEnv) -> TypedIndex:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("indexing expects an array operand", expr.loc)
+
+        if len(expr.indices) > typed_array.type.rank:
+            raise RemoraTypeError(
+                f"too many indices for rank-{typed_array.type.rank} array",
+                expr.loc,
+            )
+
+        typed_indices: list[TypedExpr | TypedSlice] = []
+        result_shape_parts: list[DimExpr] = []
+
+        for position, index in enumerate(expr.indices):
+            axis_extent = typed_array.type.shape[position]
+            if isinstance(index, SliceRange):
+                typed_slice = self._infer_slice_range(index, axis_extent, env)
+                typed_indices.append(typed_slice)
+                result_shape_parts.append(typed_slice.type.shape[0])
+            else:
+                typed_index = self.infer(index, env)
+                self._require(typed_index.type, INT, expr.loc)
+                if isinstance(index, IntLit):
+                    value = index.value
+                    if value < 0 or value >= axis_extent.value:
+                        raise RemoraTypeError(
+                            f"index {value} is out of bounds for axis {position} with extent {axis_extent.value}",
+                            index.loc,
+                        )
+                typed_indices.append(typed_index)
+                # scalar index drops the dimension, so no part added to result_shape_parts
+
+        # Add remaining dimensions from the original array
+        result_shape_parts.extend(typed_array.type.shape[len(expr.indices) :])
+
+        result_type: RemoraType
+        if not result_shape_parts:
+            result_type = typed_array.type.element
+        else:
+            result_type = ArrayType(typed_array.type.element, tuple(result_shape_parts))
+
+        return TypedIndex(expr, typed_array, typed_indices, result_type)
 
     def _infer_fold(self, expr: FoldExpr, env: TypeEnv) -> TypedFold:
         typed_init = self.infer(expr.init, env)

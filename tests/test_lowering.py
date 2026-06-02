@@ -247,7 +247,7 @@ def test_lowers_partial_indexing_to_rank_reducing_extract_slice():
 
     assert "func.func @main() -> tensor<2xi32>" in lowered.text
     assert "tensor.extract_slice" in lowered.text
-    assert "[%c1, %c0] [1, 2] [1, 1]" in lowered.text
+    assert "[1, 0] [1, 2] [1, 1]" in lowered.text
     assert "to tensor<2xi32>" in lowered.text
 
 

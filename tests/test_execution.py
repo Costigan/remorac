@@ -438,6 +438,82 @@ def test_cpu_function_executor_runs_rank10_descriptor_input_map():
     np.testing.assert_array_equal(result.value, np.full(shape, 2, dtype=np.int32))
 
 
+def test_compiled_cpu_executes_transpose():
+    result = evaluate_source_compiled("transpose [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]], dtype=np.float32),
+    )
+
+
+def test_compiled_cpu_executes_transpose_rank3():
+    result = evaluate_source_compiled("transpose [[[1, 2]], [[3, 4]]]")
+    # shape (2, 1, 2) -> (1, 2, 2)
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([[[1, 2], [3, 4]]], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_transpose_let():
+    source = "let xs = [[1, 2], [3, 4]] in transpose xs"
+    result = evaluate_source_compiled(source)
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([[1, 3], [2, 4]], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice():
+    result = evaluate_source_compiled("(iota 10)[1:4]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([1, 2, 3], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice_full():
+    result = evaluate_source_compiled("(iota 10)[:]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.arange(10, dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice_start_only():
+    result = evaluate_source_compiled("(iota 10)[7:]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([7, 8, 9], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice_end_only():
+    result = evaluate_source_compiled("(iota 10)[:3]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([0, 1, 2], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice_matrix():
+    source = "let xs = [[1, 2, 3], [4, 5, 6], [7, 8, 9]] in xs[1:3, 0:2]"
+    result = evaluate_source_compiled(source)
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([[4, 5], [7, 8]], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_slice_mixed():
+    source = "let xs = [[1, 2, 3], [4, 5, 6], [7, 8, 9]] in xs[1, 1:3]"
+    result = evaluate_source_compiled(source)
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([5, 6], dtype=np.int32),
+    )
+
+
 def test_cpu_function_executor_runs_binary_descriptor_input_map():
     artifact = CPUFunctionExecutor.compile_source(
         "def add xs ys = map (+) xs ys",

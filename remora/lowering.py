@@ -20,6 +20,8 @@ from remora.hir import (
     HIRFold,
     HIRFunction,
     HIRIndex,
+    HIRSlice,
+    HIRTranspose,
     HIRIota,
     HIRLambda,
     HIRLit,
@@ -110,6 +112,7 @@ class MLIRLowering:
                 HIRLet,
                 HIRCall,
                 HIRIndex,
+                HIRTranspose,
                 HIRIota,
                 HIRArrayLit,
                 HIRMap,
@@ -117,7 +120,7 @@ class MLIRLowering:
             ),
         ):
             raise RemoraLoweringError(
-                "only scalar expressions, scalar lets/calls, full-rank indexing, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
+                "only scalar expressions, scalar lets/calls, full-rank indexing, transpose, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
             )
 
         text = _lower_main_module(main, functions)
@@ -275,7 +278,7 @@ def _inline_callable(callable_: object, env: dict[str, HIRExpr]) -> object:
 
 
 def _lower_main_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRIota | HIRArrayLit | HIRMap | HIRFold,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRTranspose | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
@@ -284,6 +287,8 @@ def _lower_main_module(
         return _lower_scalar_module(node, functions)
     if isinstance(node, HIRIndex):
         return _lower_index_module(node, functions)
+    if isinstance(node, HIRTranspose):
+        return _lower_transpose_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):
@@ -349,6 +354,8 @@ def _lower_main_result_with_tensor_env(
         return _lower_fold_result(node, functions, tensor_env)
     if isinstance(node, HIRIndex):
         return _lower_index_result(node, functions, tensor_env)
+    if isinstance(node, HIRTranspose):
+        return _lower_transpose_result(node, functions, tensor_env)
     if isinstance(node, (HIRIota, HIRArrayLit)):
         code, value_name, value_type, _element_type = _lower_tensor_input(
             node,
@@ -667,8 +674,6 @@ def _lower_index_result(
     array_type = _expr_result_type(node.array)
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
-    if len(node.indices) > array_type.rank:
-        raise RemoraLoweringError("too many indices for tensor input")
 
     array_code, array_value, array_mlir_type, _element_type = _lower_tensor_input(
         node.array,
@@ -676,38 +681,104 @@ def _lower_index_result(
         functions,
         tensor_env,
     )
+
+    # We need offsets, sizes, and strides for extract_slice
+    # but we might also just need tensor.extract if all indices are scalars.
+    all_scalars = all(not isinstance(idx, HIRSlice) for idx in node.indices)
+    full_indexing = all_scalars and len(node.indices) == array_type.rank
+
     index_lines: list[str] = []
-    index_names: list[str] = []
-    for position, index in enumerate(node.indices):
-        if not isinstance(index, HIRLit) or index.type != INT:
-            raise RemoraLoweringError("only literal integer indices lower to MLIR so far")
-        name = f"%idx_{position}"
-        index_names.append(name)
-        index_lines.append(f"    {name} = arith.constant {index.value} : index")
-    index_body = "\n".join(index_lines)
-    result_type = type_to_mlir(node.result_type)
-    if len(node.indices) == array_type.rank:
+    
+    if full_indexing:
+        index_names: list[str] = []
+        for position, index in enumerate(node.indices):
+            # confirmed in HIR lowering to be HIRLit(INT) for now
+            assert isinstance(index, HIRLit)
+            name = f"%idx_{position}"
+            index_names.append(name)
+            index_lines.append(f"    {name} = arith.constant {index.value} : index")
+        
+        result_type = type_to_mlir(node.result_type)
         indices = ", ".join(index_names)
         result_line = f"    %result = tensor.extract {array_value}[{indices}] : {array_mlir_type}"
-    elif isinstance(node.result_type, ArrayType):
-        offsets = [*index_names, *("%c0" for _axis in range(array_type.rank - len(node.indices)))]
-        sizes = [
-            *("1" for _axis in range(len(node.indices))),
-            *(str(dim.value) for dim in array_type.shape[len(node.indices) :]),
-        ]
-        strides = ["1" for _axis in range(array_type.rank)]
-        if "%c0" in offsets:
-            index_lines.insert(0, "    %c0 = arith.constant 0 : index")
-            index_body = "\n".join(index_lines)
-        result_line = (
-            f"    %result = tensor.extract_slice {array_value}"
-            f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
-            f"{array_mlir_type} to {result_type}"
-        )
-    else:
-        raise RemoraLoweringError("partial indexing result type must be an array")
-    body = "\n".join(part for part in (array_code, index_body, result_line) if part)
-    return body, "%result", result_type
+        body = "\n".join(part for part in (array_code, "\n".join(index_lines), result_line) if part)
+        return body, "%result", result_type
+
+    # Slicing or partial indexing
+    offsets: list[str] = []
+    sizes: list[str] = []
+    strides: list[str] = []
+    
+    for position, index in enumerate(node.indices):
+        if isinstance(index, HIRSlice):
+            offsets.append(str(index.start))
+            sizes.append(str(index.end - index.start))
+            strides.append("1")
+        else:
+            # scalar index: offset=index, size=1
+            assert isinstance(index, HIRLit)
+            offsets.append(str(index.value))
+            sizes.append("1")
+            strides.append("1")
+            
+    # fill in remaining dimensions
+    for position in range(len(node.indices), array_type.rank):
+        offsets.append("0")
+        sizes.append(str(array_type.shape[position].value))
+        strides.append("1")
+
+    result_mlir_type = type_to_mlir(node.result_type)
+    
+    # If some dimensions were dropped (scalar indices), we need to cast the result
+    # of extract_slice because it preserves rank but with size 1 for dropped axes.
+    # Actually, tensor.extract_slice to result_type (which has lower rank) is allowed 
+    # if it is a rank-reducing slice.
+    
+    result_line = (
+        f"    %result = tensor.extract_slice {array_value}"
+        f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
+        f"{array_mlir_type} to {result_mlir_type}"
+    )
+    
+    body = "\n".join(part for part in (array_code, result_line) if part)
+    return body, "%result", result_mlir_type
+
+
+def _lower_transpose_module(
+    node: HIRTranspose,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> str:
+    code, result_value, result_type = _lower_transpose_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(code)
+    return builder.render(result_value)
+
+
+def _lower_transpose_result(
+    node: HIRTranspose,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
+    input_code, input_name, input_type, _input_element_type = _lower_tensor_input(
+        node.array,
+        "trans_in",
+        functions,
+        tensor_env,
+    )
+    result_type = type_to_mlir(node.result_type)
+    rank = node.result_type.rank
+    if rank < 2:
+        raise RemoraLoweringError("transpose expects an array of rank at least 2")
+
+    permutation = [1, 0, *range(2, rank)]
+    perm_attr = "[" + ", ".join(map(str, permutation)) + "]"
+
+    body = f"""{input_code}
+    %trans_empty = tensor.empty() : {result_type}
+    %transposed = linalg.transpose ins({input_name} : {input_type}) outs(%trans_empty : {result_type}) permutation = {perm_attr}
+"""
+    return body.rstrip(), "%transposed", result_type
 
 
 def _lower_scalar_map_module(node: HIRMap, functions: dict[str, HIRFunction]) -> str:
@@ -1313,7 +1384,21 @@ def _lower_tensor_input(
     if isinstance(node, HIRMap):
         return _lower_fold_input(node, functions, prefix, tensor_env=tensor_env)
 
+    if isinstance(node, HIRTranspose):
+        return _lower_transpose_input(node, functions, prefix, tensor_env=tensor_env)
+
     raise RemoraLoweringError("only tensor literals and iota values lower as tensor inputs so far")
+
+
+def _lower_transpose_input(
+    node: HIRTranspose,
+    functions: dict[str, HIRFunction],
+    prefix: str,
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str, str]:
+    code, result_value, result_type = _lower_transpose_result(node, functions, tensor_env)
+    element_type = type_to_mlir(node.result_type.element)
+    return code, result_value, result_type, element_type
 
 
 def _join_prefix(prefix: str, suffix: str) -> str:
@@ -1346,6 +1431,8 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRPrimOp):
         return expr.result_type
     if isinstance(expr, HIRIndex):
+        return expr.result_type
+    if isinstance(expr, HIRTranspose):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 
