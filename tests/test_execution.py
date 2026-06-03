@@ -52,6 +52,16 @@ def test_compiled_cpu_executes_scalar_expression():
     assert_compiled_matches_interpreter("1 + 2.0")
 
 
+def test_compiled_cpu_executes_scalar_if_expression():
+    assert_compiled_matches_interpreter("if 1 < 2 then 10 else 20")
+
+
+def test_compiled_cpu_executes_scalar_if_inside_map():
+    result = evaluate_source_compiled("map (\\x -> if x < 2 then x else 0) (iota 4)")
+
+    np.testing.assert_array_equal(result.value, np.array([0, 1, 0, 0], dtype=np.int32))
+
+
 def test_compiled_cpu_executes_vector_map():
     result = evaluate_source_compiled("map (* 2.0) (iota 5)")
 

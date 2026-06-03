@@ -8,6 +8,14 @@
     "expect_stdout": "3.0\n"
   },
   {
+    "name": "scalar_if",
+    "category": "supported",
+    "path": "pass/scalar_if.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "10\n"
+  },
+  {
     "name": "top_level_function",
     "category": "supported",
     "path": "pass/top_level_function.remora",

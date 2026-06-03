@@ -142,6 +142,14 @@ def test_lowers_scalar_let_with_ssa_value():
     assert "return %" in lowered.text
 
 
+def test_lowers_scalar_if_expression_to_select():
+    lowered = MLIRLowering().lower_program(hir_from_source("if true then 1 else 2"))
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert "arith.select" in lowered.text
+    assert "return %" in lowered.text
+
+
 def test_lowers_scalar_hir_function_and_call():
     function = HIRFunction(
         "__double",

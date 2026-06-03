@@ -136,6 +136,14 @@ class HIRPrimOp:
 
 
 @dataclass(frozen=True)
+class HIRIf:
+    condition: HIRExpr
+    then_branch: HIRExpr
+    else_branch: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
 class HIRIndex:
     array: HIRExpr
     indices: list[HIRExpr | HIRSlice]
@@ -220,6 +228,7 @@ HIRExpr: TypeAlias = (
     | HIRCall
     | HIRLambda
     | HIRPrimOp
+    | HIRIf
     | HIRIndex
     | HIRSlice
     | HIRTranspose
@@ -349,7 +358,12 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
         )
 
     if isinstance(expr, TypedIf):
-        raise HIRLoweringError("conditional HIR lowering is deferred")
+        return HIRIf(
+            lower_expr(expr.condition),
+            lower_expr(expr.then_branch),
+            lower_expr(expr.else_branch),
+            expr.type,
+        )
 
     if isinstance(expr, TypedExprNode):
         return _lower_typed_node(expr)

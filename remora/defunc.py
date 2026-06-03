@@ -13,6 +13,7 @@ from remora.hir import (
     HIRExpr,
     HIRFold,
     HIRFunction,
+    HIRIf,
     HIRIndex,
     HIRSlice,
     HIRTranspose,
@@ -93,6 +94,13 @@ class _Defunctionalizer:
             return HIRPrimOp(
                 expr.op,
                 [self._rewrite_expr(arg) for arg in expr.args],
+                expr.result_type,
+            )
+        if isinstance(expr, HIRIf):
+            return HIRIf(
+                self._rewrite_expr(expr.condition),
+                self._rewrite_expr(expr.then_branch),
+                self._rewrite_expr(expr.else_branch),
                 expr.result_type,
             )
         if isinstance(expr, HIRCast):
@@ -192,8 +200,30 @@ def _free_vars(expr: HIRExpr) -> set[str]:
         return _free_vars(expr.body) - params
     if isinstance(expr, HIRPrimOp):
         return set().union(*(_free_vars(arg) for arg in expr.args))
+    if isinstance(expr, HIRIf):
+        return (
+            _free_vars(expr.condition)
+            | _free_vars(expr.then_branch)
+            | _free_vars(expr.else_branch)
+        )
     if isinstance(expr, HIRCast):
         return _free_vars(expr.value)
+    if isinstance(expr, HIRIndex):
+        return _free_vars(expr.array) | set().union(
+            *(_free_vars(index) for index in expr.indices)
+        )
+    if isinstance(expr, HIRSlice):
+        return set()
+    if isinstance(expr, HIRTranspose):
+        return _free_vars(expr.array)
+    if isinstance(expr, HIRReshape):
+        return _free_vars(expr.array)
+    if isinstance(expr, HIRRavel):
+        return _free_vars(expr.array)
+    if isinstance(expr, HIRTake):
+        return _free_vars(expr.array)
+    if isinstance(expr, HIRDrop):
+        return _free_vars(expr.array)
     if isinstance(expr, HIRArrayLit):
         return set().union(*(_free_vars(element) for element in expr.elements))
     if isinstance(expr, (HIRIota, HIRLit)):

@@ -4,6 +4,7 @@ from remora.hir import (
     HIRArrayLit,
     HIRCast,
     HIRFold,
+    HIRIf,
     HIRIndex,
     HIRLoweringError,
     HIRIota,
@@ -69,6 +70,15 @@ def test_lowers_index_expression():
         if isinstance(index, HIRLit)
     ] == [1, 0]
     assert program.return_type == INT
+
+
+def test_lowers_scalar_if_expression():
+    program = lower_program_source("if true then 1 else 2")
+
+    assert isinstance(program.main, HIRIf)
+    assert isinstance(program.main.condition, HIRLit)
+    assert program.main.condition.value is True
+    assert program.main.result_type == INT
 
 
 def test_lowers_array_literal_with_typed_elements():
