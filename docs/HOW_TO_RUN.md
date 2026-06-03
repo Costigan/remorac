@@ -78,10 +78,16 @@ env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remorac --emit-ptx examp
 
 ## REPL
 
-Start the CPU REPL:
+Start the compiled CPU REPL:
 
 ```bash
 env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remora
+```
+
+Start the reference-interpreter REPL:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run remora --target interp
 ```
 
 Useful REPL commands:
@@ -90,6 +96,7 @@ Useful REPL commands:
 :help       Show commands
 :type EXPR  Show the inferred type
 :mlir EXPR  Print MLIR for supported lowering cases
+:target     Show or switch between cpu and interp
 :prelude    Show starter prelude definitions
 :defs       Show user definitions in this session
 :reset      Clear user definitions and reload the prelude

@@ -225,13 +225,15 @@ def parse_file(path: str | Path) -> Program:
 
 
 def parse_repl_input(text: str, filename: str = "<repl>") -> Definition | Expr:
+    if text.lstrip().startswith("def "):
+        return parse_definition(text, filename)
     try:
         return parse_definition(text, filename)
-    except Exception as definition_error:
+    except Exception:
         try:
             return parse_expr(text, filename)
-        except Exception:
-            raise definition_error
+        except Exception as expression_error:
+            raise expression_error
 
 
 def parse(source: str, filename: str = "<input>") -> Program:

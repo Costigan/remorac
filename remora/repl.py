@@ -13,8 +13,10 @@ from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program, parse_repl_input
 from remora.prelude import prelude_definition_sources
-from remora.runtime import evaluate_source
+from remora.runtime import EvaluationResult, evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
+
+REPL_TARGETS = ("cpu", "interp")
 
 
 @dataclass
@@ -25,8 +27,8 @@ class ReplState:
 
 
 def make_initial_state(target: str = "cpu") -> ReplState:
-    if target != "cpu":
-        raise ReplError("only the cpu REPL target is currently available")
+    if target not in REPL_TARGETS:
+        raise ReplError("available REPL targets: cpu, interp")
     return ReplState(target=target)
 
 
@@ -50,7 +52,7 @@ class ReplSession:
         try:
             item = parse_repl_input(text)
         except (LarkError, RemoraError) as exc:
-            return f"Parse error: {exc}"
+            return _format_parse_error(text, exc)
 
         try:
             if isinstance(item, (FuncDef, ValDef)):
@@ -70,8 +72,15 @@ class ReplSession:
 
     def _process_expression(self, source: str) -> str:
         program_source = _program_source(self.state.definition_sources, source)
-        result = evaluate_source(program_source, include_prelude=False)
+        result = self._evaluate_program_source(program_source)
         return format_result(result.value, result.type)
+
+    def _evaluate_program_source(self, program_source: str) -> EvaluationResult:
+        if self.state.target == "cpu":
+            return evaluate_source_compiled(program_source, include_prelude=False)
+        if self.state.target == "interp":
+            return evaluate_source(program_source, include_prelude=False)
+        raise ReplError(f"unknown REPL target: {self.state.target}")
 
     def _handle_command(self, command: str) -> str:
         parts = command.split(None, 1)
@@ -105,15 +114,15 @@ class ReplSession:
         except RemoraError as exc:
             return f"Error: {exc}"
         except LarkError as exc:
-            return f"Parse error: {exc}"
+            return _format_parse_error(arg, exc)
 
     def _target_command(self, arg: str) -> str:
         if not arg:
             return f"Current target: {self.state.target}"
-        if arg != "cpu":
-            return "Error: only the cpu REPL target is currently available"
+        if arg not in REPL_TARGETS:
+            return "Error: available REPL targets: cpu, interp"
         self.state.target = arg
-        return "Target: cpu"
+        return f"Target: {arg}"
 
     def _type_command(self, arg: str) -> str:
         if not arg:
@@ -153,9 +162,8 @@ class ReplSession:
             message = self._process_definition(definition_source, item)
             messages.append(message)
         if program.body is not None:
-            result = evaluate_source(
-                _program_source(self.state.definition_sources, _body_source(source)),
-                include_prelude=False,
+            result = self._evaluate_program_source(
+                _program_source(self.state.definition_sources, _body_source(source))
             )
             messages.append(format_result(result.value, result.type))
         return "\n".join(messages) if messages else "Loaded."
@@ -209,8 +217,8 @@ class ReplSession:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Remora CPU REPL")
-    parser.add_argument("--target", default="cpu", choices=("cpu",))
+    parser = argparse.ArgumentParser(description="Remora REPL")
+    parser.add_argument("--target", default="cpu", choices=REPL_TARGETS)
     args = parser.parse_args(argv)
     try:
         ReplSession(target=args.target, history=True).run()
@@ -247,6 +255,23 @@ def _balanced(text: str, open_char: str, close_char: str) -> bool:
     return text.count(open_char) <= text.count(close_char)
 
 
+def _format_parse_error(text: str, exc: Exception) -> str:
+    message = f"Parse error: {exc}"
+    hint = _parse_hint(text)
+    if hint:
+        return f"{message}\nHint: {hint}"
+    return message
+
+
+def _parse_hint(text: str) -> str | None:
+    stripped = " ".join(text.strip().split())
+    if stripped.startswith(("map \\", "fold \\", "map lambda", "fold lambda")):
+        return "parenthesize lambda callables, e.g. map (\\x -> x) ([1, 2, 3])"
+    if stripped.startswith("map (") and ") [" in stripped:
+        return "parenthesize array literal arguments after callables, e.g. map (\\x -> x) ([1, 2, 3])"
+    return None
+
+
 HELP_TEXT = """
 Remora REPL commands:
   :quit, :q      Exit the REPL
@@ -256,7 +281,8 @@ Remora REPL commands:
   :defs          Show user definitions in this session
   :load <file>   Load definitions and evaluate the file body
   :reset         Clear accumulated definitions
-  :target [cpu]  Show or set the current target
+  :target [cpu|interp]
+                 Show or set the current target
   :debug         Toggle debug mode
   :help          Show this message
 """
