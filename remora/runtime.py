@@ -115,10 +115,8 @@ class Arena:
     def close(self) -> None:
         """Free device resources if this is a GPU arena."""
         if self._runtime and self._ptr:
-            # CUDARuntime.alloc returns a ptr that is tracked for cleanup
-            # but here we might want manual management or just let it be.
-            # Currently CUDARuntime.alloc appends to self._allocated.
-            pass
+            self._runtime.free(self._ptr)
+            self._ptr = 0
 
 
 @dataclass(frozen=True)
@@ -821,9 +819,7 @@ def _empty_output_value(value_type: RemoraType, *, arena: Arena | None = None) -
         if arena._runtime is None:
             return np.frombuffer(arena._buffer, dtype=dtype, count=int(np.prod(shape)), offset=ptr - arena._host_ptr).reshape(shape)
         else:
-             # GPU arena: we return a host array and copy into it later?
-             # Actually, RemoraExecutor handles GPU output differently.
-             pass
+            raise RuntimeUnavailable("compiled CPU execution cannot use a GPU arena for host outputs")
     return np.empty(shape, dtype=dtype)
 
 

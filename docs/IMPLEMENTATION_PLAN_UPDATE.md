@@ -417,7 +417,8 @@ Completed in the M6 surface syntax sprint:
 3. Implemented full slicing and partial indexing in the MLIR pipeline using `tensor.extract_slice`.
 4. Hardened the CPU MLIR pipeline by adding `expand-strided-metadata`, `lower-affine`, and proper `memref-to-llvm` lowering to support rank-reducing slices.
 5. Added comprehensive execution tests for `transpose` and various slicing scenarios (full, partial, mixed scalar/slice).
-6. Kept all validators and 427 tests green.
+6. Added execution tests for `transpose` and various slicing scenarios, then
+   followed up by stabilizing view expressions as operands to maps/folds.
 
 Completed in the M4 GPU generalization sprint:
 
@@ -426,7 +427,8 @@ Completed in the M4 GPU generalization sprint:
 3. Implemented `llvm.atomicrmw fadd` for global accumulation across blocks in sum reductions.
 4. Added full GPU boolean array support as byte-backed `i8` descriptors, including logical (`&&`, `||`) and comparison (`==`, `!=`) operators.
 5. Hardened the typechecker to support comparison and logical operators in unary sections and operator functions.
-6. Kept all validators and 374 tests green (test count adjusted during refactoring).
+6. Kept validators green in the local toolchain; live CUDA coverage still
+   depends on CUDA and `ptxas` availability.
 
 Completed in the M3/M6 Arena and View Ops sprint:
 
@@ -435,6 +437,8 @@ Completed in the M3/M6 Arena and View Ops sprint:
 3. Updated `RemoraExecutor` and `CPUExecutor` to support optional arena-backed execution for results and intermediate data.
 4. Added surface syntax and full compiler support for `reshape`, `ravel`, `take`, and `drop`.
 5. Refactored the grammar to resolve precedence and ambiguity issues for view operations and parenthesized expressions.
-6. Kept all validators and 378 tests green.
+6. Restored the deliberate rejection of combined threaded+vectorized CPU
+   lowering until that contract is robust across row-reduction shapes.
+7. Stabilized view lowering so composed views use distinct SSA names.
 
 The next sprint should focus on full session-level arena management:

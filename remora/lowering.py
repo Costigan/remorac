@@ -681,6 +681,7 @@ def _lower_index_result(
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
 
+    prefix = "idx"
     array_code, array_value, array_mlir_type, _element_type = _lower_tensor_input(
         node.array,
         "idx_in",
@@ -700,15 +701,16 @@ def _lower_index_result(
         for position, index in enumerate(node.indices):
             # confirmed in HIR lowering to be HIRLit(INT) for now
             assert isinstance(index, HIRLit)
-            name = f"%idx_{position}"
+            name = f"%{prefix}_{position}"
             index_names.append(name)
             index_lines.append(f"    {name} = arith.constant {index.value} : index")
         
         result_type = type_to_mlir(node.result_type)
         indices = ", ".join(index_names)
-        result_line = f"    %result = tensor.extract {array_value}[{indices}] : {array_mlir_type}"
+        result_name = f"%{prefix}_result"
+        result_line = f"    {result_name} = tensor.extract {array_value}[{indices}] : {array_mlir_type}"
         body = "\n".join(part for part in (array_code, "\n".join(index_lines), result_line) if part)
-        return body, "%result", result_type
+        return body, result_name, result_type
 
     # Slicing or partial indexing
     offsets: list[str] = []
@@ -740,14 +742,15 @@ def _lower_index_result(
     # Actually, tensor.extract_slice to result_type (which has lower rank) is allowed 
     # if it is a rank-reducing slice.
     
+    result_name = f"%{prefix}_result"
     result_line = (
-        f"    %result = tensor.extract_slice {array_value}"
+        f"    {result_name} = tensor.extract_slice {array_value}"
         f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
         f"{array_mlir_type} to {result_mlir_type}"
     )
     
     body = "\n".join(part for part in (array_code, result_line) if part)
-    return body, "%result", result_mlir_type
+    return body, result_name, result_mlir_type
 
 
 def _lower_view_module(
@@ -770,13 +773,15 @@ def _lower_view_result(
         return _lower_index_result(node, functions, tensor_env)
 
     # Use a common pattern for others: lower input tensor, then apply one MLIR op
+    prefix = "view"
     input_code, input_name, input_type, _input_element_type = _lower_tensor_input(
         node.array,
-        "view_in",
+        _join_prefix(prefix, "in"),
         functions,
         tensor_env,
     )
     result_type = type_to_mlir(node.result_type)
+    result_name = f"%{_join_prefix(prefix, 'result')}"
     
     if isinstance(node, HIRTranspose):
         rank = node.result_type.rank
@@ -784,7 +789,7 @@ def _lower_view_result(
             raise RemoraLoweringError("transpose expects an array of rank at least 2")
         permutation = [1, 0, *range(2, rank)]
         perm_attr = "[" + ", ".join(map(str, permutation)) + "]"
-        result_line = f"    %result = linalg.transpose ins({input_name} : {input_type}) outs(%view_empty : {result_type}) permutation = {perm_attr}"
+        result_line = f"    {result_name} = linalg.transpose ins({input_name} : {input_type}) outs(%view_empty : {result_type}) permutation = {perm_attr}"
     
     elif isinstance(node, HIRReshape):
         # In MLIR 18, tensor.reshape usually requires a source and a shape tensor,
@@ -799,16 +804,18 @@ def _lower_view_result(
         # For simplicity, we'll just materialize a tiny shape tensor for now.
         rank = node.result_type.rank
         shape_vals = ", ".join(str(d.value) for d in node.result_type.shape)
-        shape_code = f"    %reshape_shape = arith.constant dense<[{shape_vals}]> : tensor<{rank}xindex>"
+        shape_name = f"%{_join_prefix(prefix, 'reshape_shape')}"
+        shape_code = f"    {shape_name} = arith.constant dense<[{shape_vals}]> : tensor<{rank}xindex>"
         input_code = f"{input_code}\n{shape_code}"
-        result_line = f"    %result = tensor.reshape {input_name}(%reshape_shape) : ({input_type}, tensor<{rank}xindex>) -> {result_type}"
+        result_line = f"    {result_name} = tensor.reshape {input_name}({shape_name}) : ({input_type}, tensor<{rank}xindex>) -> {result_type}"
         
     elif isinstance(node, HIRRavel):
         rank = node.result_type.rank # always 1
         total = node.result_type.shape[0].value
-        shape_code = f"    %ravel_shape = arith.constant dense<[{total}]> : tensor<1xindex>"
+        shape_name = f"%{_join_prefix(prefix, 'ravel_shape')}"
+        shape_code = f"    {shape_name} = arith.constant dense<[{total}]> : tensor<1xindex>"
         input_code = f"{input_code}\n{shape_code}"
-        result_line = f"    %result = tensor.reshape {input_name}(%ravel_shape) : ({input_type}, tensor<1xindex>) -> {result_type}"
+        result_line = f"    {result_name} = tensor.reshape {input_name}({shape_name}) : ({input_type}, tensor<1xindex>) -> {result_type}"
         
     elif isinstance(node, (HIRTake, HIRDrop)):
         # Both use tensor.extract_slice
@@ -825,7 +832,7 @@ def _lower_view_result(
         
         strides = ["1"] * rank
         result_line = (
-            f"    %result = tensor.extract_slice {input_name}"
+            f"    {result_name} = tensor.extract_slice {input_name}"
             f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
             f"{input_type} to {result_type}"
         )
@@ -841,7 +848,7 @@ def _lower_view_result(
          body = f"""{input_code}
 {result_line}
 """
-    return body.rstrip(), "%result", result_type
+    return body.rstrip(), result_name, result_type
 
 
 def _lower_view_input(

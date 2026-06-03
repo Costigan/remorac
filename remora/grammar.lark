@@ -58,17 +58,17 @@ lambda_expr: LAMBDA NAME+ ARROW expr
         | BOOL                          -> bool_lit
         | NAME                          -> var
 
-?view_expr: "map" callable primary primary  -> map_expr
-          | "map" callable primary          -> map_expr
-          | "fold" callable primary primary -> fold_expr
-          | "iota" primary               -> iota_expr
-          | "shape" primary              -> shape_expr
-          | "rank" primary               -> rank_expr
-          | "transpose" primary          -> transpose_expr
-          | "reshape" primary primary       -> reshape_expr
-          | "ravel" primary               -> ravel_expr
-          | "take" primary primary          -> take_expr
-          | "drop" primary primary          -> drop_expr
+?view_expr: "map" callable atom atom  -> map_expr
+          | "map" callable atom       -> map_expr
+          | "fold" callable atom atom -> fold_expr
+          | "iota" atom               -> iota_expr
+          | "shape" atom              -> shape_expr
+          | "rank" atom               -> rank_expr
+          | "transpose" atom          -> transpose_expr
+          | "reshape" primary atom    -> reshape_expr
+          | "ravel" atom              -> ravel_expr
+          | "take" primary atom       -> take_expr
+          | "drop" primary atom       -> drop_expr
 
 index_suffix: "[" index_element ("," index_element)* "]"
 
