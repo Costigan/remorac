@@ -4,6 +4,7 @@ from remora.defunc import RemoraDefuncError, defunctionalize
 from remora.hir import (
     HIRFunction,
     HIRMap,
+    HIRPrimOp,
     HIRPrimCallable,
     HIRProgram,
     HIRVar,
@@ -83,9 +84,24 @@ def test_named_function_reference_in_map_is_already_static():
     assert lowered.main.func.name == "__double"
 
 
-def test_lambda_capturing_outer_variable_is_deferred():
+def test_lambda_capturing_scalar_let_value_is_lifted_statically():
     program = lower_program_source(
         "let scale = 2.0 in let xs = [1.0, 2.0] in map (\\x -> x * scale) xs"
+    )
+
+    lowered = defunctionalize(program)
+
+    assert len(lowered.functions) == 1
+    lifted = lowered.functions[0]
+    assert lifted.name == "__lambda_0"
+    assert [param.name for param in lifted.params] == ["x"]
+    assert isinstance(lifted.body, HIRPrimOp)
+    assert lifted.return_type == FLOAT
+
+
+def test_lambda_capturing_array_value_is_deferred():
+    program = lower_program_source(
+        "let bias = [1, 2] in map (\\x -> x + bias[0]) (iota 4)"
     )
 
     with pytest.raises(RemoraDefuncError, match="captures outer variables"):

@@ -1,0 +1,2 @@
+let scale = 2 in
+map (\x -> x * scale) (iota 4)

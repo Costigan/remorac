@@ -32,6 +32,7 @@ from remora.hir import (
     HIRDrop,
     HIRVar,
 )
+from remora.types import ScalarType
 
 
 class RemoraDefuncError(RemoraError):
@@ -57,35 +58,44 @@ class _Defunctionalizer:
     def _rewrite_function(self, function: HIRFunction) -> HIRFunction:
         return replace(function, body=self._rewrite_expr(function.body))
 
-    def _rewrite_expr(self, expr: HIRExpr) -> HIRExpr:
+    def _rewrite_expr(
+        self,
+        expr: HIRExpr,
+        scalar_env: dict[str, HIRExpr] | None = None,
+    ) -> HIRExpr:
+        scalar_env = scalar_env or {}
         if isinstance(expr, HIRMap):
             return HIRMap(
                 expr.frame_shape,
                 expr.cell_shape,
-                self._rewrite_callable(expr.func),
-                [self._rewrite_expr(array) for array in expr.arrays],
+                self._rewrite_callable(expr.func, scalar_env),
+                [self._rewrite_expr(array, scalar_env) for array in expr.arrays],
                 expr.result_type,
             )
         if isinstance(expr, HIRFold):
             return HIRFold(
                 expr.reduction_dim,
-                self._rewrite_callable(expr.func),
-                self._rewrite_expr(expr.init),
-                self._rewrite_expr(expr.array),
+                self._rewrite_callable(expr.func, scalar_env),
+                self._rewrite_expr(expr.init, scalar_env),
+                self._rewrite_expr(expr.array, scalar_env),
                 expr.result_type,
             )
         if isinstance(expr, HIRLet):
+            value = self._rewrite_expr(expr.value, scalar_env)
+            body_env = scalar_env
+            if isinstance(expr.value_type, ScalarType):
+                body_env = {**scalar_env, expr.name: value}
             return HIRLet(
                 expr.name,
                 expr.value_type,
-                self._rewrite_expr(expr.value),
-                self._rewrite_expr(expr.body),
+                value,
+                self._rewrite_expr(expr.body, body_env),
                 expr.result_type,
             )
         if isinstance(expr, HIRCall):
             return HIRCall(
                 expr.func_name,
-                [self._rewrite_expr(arg) for arg in expr.args],
+                [self._rewrite_expr(arg, scalar_env) for arg in expr.args],
                 expr.result_type,
             )
         if isinstance(expr, HIRLambda):
@@ -93,65 +103,72 @@ class _Defunctionalizer:
         if isinstance(expr, HIRPrimOp):
             return HIRPrimOp(
                 expr.op,
-                [self._rewrite_expr(arg) for arg in expr.args],
+                [self._rewrite_expr(arg, scalar_env) for arg in expr.args],
                 expr.result_type,
             )
         if isinstance(expr, HIRIf):
             return HIRIf(
-                self._rewrite_expr(expr.condition),
-                self._rewrite_expr(expr.then_branch),
-                self._rewrite_expr(expr.else_branch),
+                self._rewrite_expr(expr.condition, scalar_env),
+                self._rewrite_expr(expr.then_branch, scalar_env),
+                self._rewrite_expr(expr.else_branch, scalar_env),
                 expr.result_type,
             )
         if isinstance(expr, HIRCast):
             return HIRCast(
-                self._rewrite_expr(expr.value),
+                self._rewrite_expr(expr.value, scalar_env),
                 expr.from_type,
                 expr.to_type,
                 expr.result_type,
             )
         if isinstance(expr, HIRIndex):
             return HIRIndex(
-                self._rewrite_expr(expr.array),
-                [self._rewrite_expr(index) for index in expr.indices],
+                self._rewrite_expr(expr.array, scalar_env),
+                [self._rewrite_expr(index, scalar_env) for index in expr.indices],
                 expr.result_type,
             )
         if isinstance(expr, HIRSlice):
             return expr
         if isinstance(expr, HIRTranspose):
-            return HIRTranspose(self._rewrite_expr(expr.array), expr.result_type)
+            return HIRTranspose(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRReshape):
-            return HIRReshape(self._rewrite_expr(expr.array), expr.result_type)
+            return HIRReshape(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRRavel):
-            return HIRRavel(self._rewrite_expr(expr.array), expr.result_type)
+            return HIRRavel(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRTake):
-            return HIRTake(expr.count, self._rewrite_expr(expr.array), expr.result_type)
+            return HIRTake(expr.count, self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRDrop):
-            return HIRDrop(expr.count, self._rewrite_expr(expr.array), expr.result_type)
+            return HIRDrop(expr.count, self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRArrayLit):
             return HIRArrayLit(
-                [self._rewrite_expr(element) for element in expr.elements],
+                [self._rewrite_expr(element, scalar_env) for element in expr.elements],
                 expr.result_type,
             )
-        if isinstance(expr, (HIRIota, HIRVar, HIRLit)):
+        if isinstance(expr, HIRVar):
+            return scalar_env.get(expr.name, expr)
+        if isinstance(expr, (HIRIota, HIRLit)):
             return expr
         raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 
-    def _rewrite_callable(self, callable_: HIRCallable) -> HIRCallable:
+    def _rewrite_callable(
+        self,
+        callable_: HIRCallable,
+        scalar_env: dict[str, HIRExpr] | None = None,
+    ) -> HIRCallable:
+        scalar_env = scalar_env or {}
         if isinstance(callable_, HIRLambda):
-            return self._lift_lambda(callable_)
+            return self._lift_lambda(callable_, scalar_env)
         if isinstance(callable_, HIRPrimCallable):
             return HIRPrimCallable(
                 callable_.op,
                 callable_.params,
                 callable_.result_type,
                 left_arg=(
-                    self._rewrite_expr(callable_.left_arg)
+                    self._rewrite_expr(callable_.left_arg, scalar_env)
                     if callable_.left_arg is not None
                     else None
                 ),
                 right_arg=(
-                    self._rewrite_expr(callable_.right_arg)
+                    self._rewrite_expr(callable_.right_arg, scalar_env)
                     if callable_.right_arg is not None
                     else None
                 ),
@@ -160,9 +177,15 @@ class _Defunctionalizer:
             return callable_
         raise AssertionError(f"unknown HIR callable {type(callable_).__name__}")
 
-    def _lift_lambda(self, lambda_: HIRLambda) -> HIRVar:
+    def _lift_lambda(
+        self,
+        lambda_: HIRLambda,
+        scalar_env: dict[str, HIRExpr] | None = None,
+    ) -> HIRVar:
+        scalar_env = scalar_env or {}
+        body = self._rewrite_expr(lambda_.body, scalar_env)
         param_names = {param.name for param in lambda_.params}
-        free = _free_vars(lambda_.body) - param_names
+        free = _free_vars(body) - param_names
         if free:
             names = ", ".join(sorted(free))
             raise RemoraDefuncError(
@@ -171,7 +194,6 @@ class _Defunctionalizer:
 
         name = f"__lambda_{self._counter}"
         self._counter += 1
-        body = self._rewrite_expr(lambda_.body)
         self._lifted.append(
             HIRFunction(name, lambda_.params, body, lambda_.result_type.result)
         )

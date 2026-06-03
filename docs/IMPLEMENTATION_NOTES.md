@@ -288,14 +288,17 @@ Deferred HIR work:
   They do not need generated functions at this stage.
 - Existing named function references represented as `HIRVar` are already static
   and pass through unchanged.
-- Lambdas that capture outer variables are rejected with an explicit deferred
-  closure-conversion diagnostic.
+- Lambdas that capture scalar `let` values are specialized by substituting the
+  captured scalar expression before lifting. Captures that still require runtime
+  closure state, including array or function captures, are rejected with an
+  explicit deferred closure-conversion diagnostic.
 - A bare `HIRLambda` in expression position after defunctionalization is also
   rejected as a deferred dynamic higher-order function.
 
 Deferred defunctionalization work:
 
-- Closure conversion or lambda lifting with explicit captured scalar arguments.
+- Closure conversion or lambda lifting with explicit captured arguments beyond
+  scalar `let` capture substitution.
 - Monomorphization for higher-order top-level function parameters.
 - Static analysis for top-level function values once function definitions have
   real type checking.
@@ -674,9 +677,9 @@ Current tests cover:
 - Regression coverage for division callable operand validation, right operator
   sections, negative-stride numpy views, the current array-literal/index parse
   behavior, and definition-only HIR rejection.
-- Defunctionalization coverage for inline lambda lifting, primitive callables,
-  named static function references, operator sections, and rejection of captured
-  lambdas.
+- Defunctionalization coverage for inline lambda lifting, scalar `let` captures,
+  primitive callables, named static function references, operator sections, and
+  rejection of non-scalar captured lambdas.
 - Initial MLIR lowering coverage for type spelling/parsing, `iota` textual MLIR
   parse validation, primitive scalar section maps over direct `iota`, and
   simple lifted scalar lambda maps over direct `iota`, plus explicit deferral of
