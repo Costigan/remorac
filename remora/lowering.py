@@ -19,6 +19,7 @@ from remora.hir import (
     HIRExpr,
     HIRFold,
     HIRFunction,
+    HIRIf,
     HIRIndex,
     HIRSlice,
     HIRTranspose,
@@ -115,6 +116,7 @@ class MLIRLowering:
                 HIRPrimOp,
                 HIRLet,
                 HIRCall,
+                HIRIf,
                 HIRIndex,
                 HIRSlice,
                 HIRTranspose,
@@ -187,7 +189,7 @@ def _prepare_main_expr(expr: HIRExpr | None) -> HIRExpr | None:
 def _can_lower_as_scalar_expr(expr: HIRExpr | None) -> bool:
     if expr is None:
         return False
-    if isinstance(expr, (HIRLit, HIRCast, HIRPrimOp, HIRCall)):
+    if isinstance(expr, (HIRLit, HIRCast, HIRPrimOp, HIRCall, HIRIf)):
         return _is_scalar_type(expr.result_type if not isinstance(expr, HIRLit) else expr.type)
     if isinstance(expr, HIRLet):
         return (
@@ -238,6 +240,13 @@ def _inline_lets(expr: HIRExpr | None, env: dict[str, HIRExpr] | None = None) ->
         if any(arg is None for arg in args):
             raise RemoraLoweringError("primitive operands cannot be empty")
         return HIRPrimOp(expr.op, args, expr.result_type)  # type: ignore[arg-type]
+    if isinstance(expr, HIRIf):
+        condition = _inline_lets(expr.condition, env)
+        then_branch = _inline_lets(expr.then_branch, env)
+        else_branch = _inline_lets(expr.else_branch, env)
+        if condition is None or then_branch is None or else_branch is None:
+            raise RemoraLoweringError("conditional operands cannot be empty")
+        return HIRIf(condition, then_branch, else_branch, expr.result_type)
     if isinstance(expr, HIRIndex):
         array = _inline_lets(expr.array, env)
         indices = [_inline_lets(index, env) for index in expr.indices]
@@ -288,12 +297,12 @@ def _inline_callable(callable_: object, env: dict[str, HIRExpr]) -> object:
 
 
 def _lower_main_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop | HIRIota | HIRArrayLit | HIRMap | HIRFold,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIf | HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
         return _lower_tensor_let_module(node, functions)
-    if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall)):
+    if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall, HIRIf)):
         return _lower_scalar_module(node, functions)
     if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
         return _lower_view_module(node, functions)
@@ -606,7 +615,7 @@ def _lower_descriptor_export_wrapper(
 
 
 def _lower_scalar_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIf,
     functions: dict[str, HIRFunction] | None = None,
 ) -> str:
     functions = functions or {}
@@ -617,6 +626,8 @@ def _lower_scalar_module(
     elif isinstance(node, HIRLet):
         result_type = type_to_mlir(node.result_type)
     elif isinstance(node, HIRCall):
+        result_type = type_to_mlir(node.result_type)
+    elif isinstance(node, HIRIf):
         result_type = type_to_mlir(node.result_type)
     else:
         result_type = type_to_mlir(node.type)
@@ -2017,6 +2028,19 @@ class _RegionEmitter:
             return _Operand(cast_lines[-1].split(" = ", 1)[0].strip(), [], result_type)
         if isinstance(expr, HIRLet):
             return _lower_let(self, expr, env)
+        if isinstance(expr, HIRIf):
+            condition = self.emit_expr(expr.condition, env)
+            then_branch = self.emit_expr(expr.then_branch, env)
+            else_branch = self.emit_expr(expr.else_branch, env)
+            condition = self._coerce(condition, "i1")
+            result_type = type_to_mlir(expr.result_type)
+            then_branch = self._coerce(then_branch, result_type)
+            else_branch = self._coerce(else_branch, result_type)
+            result = self.temp()
+            self.lines.append(
+                f"      {result} = arith.select {condition.value}, {then_branch.value}, {else_branch.value} : {result_type}"
+            )
+            return _Operand(result, [], result_type)
         if isinstance(expr, HIRCall):
             return self._emit_call(expr, env)
         if isinstance(expr, HIRPrimOp):
