@@ -214,9 +214,9 @@ Known parser limitation:
   arrays with identical static shapes. This is the compiler-shaped CPU path used
   by the starter `dot` prelude helper. Mixed array/scalar binary maps and
   array-valued binary map cells are deferred.
-- `fold` supports scalar accumulator folds over rank-1 arrays with statically
-  known callables, and array-cell folds over rank-2/rank-3 arrays for the
-  primitive fold-callable subset.
+- `fold` supports scalar accumulator folds over rank-1 arrays with scalar init
+  expressions and statically known callables, and array-cell folds over
+  rank-2/rank-3 arrays for the primitive fold-callable subset.
 - Top-level value definitions are supported.
 - Top-level function definitions are supported when used as statically known
   direct call targets or unary `map` callables. The typechecker specializes the

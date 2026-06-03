@@ -534,9 +534,13 @@ def _lower_descriptor_scalar_result_body(
             {},
             tensor_env=tensor_env,
         )
-        init_value = _literal_value(expr.init, result_type) if isinstance(expr.init, HIRLit) else None
-        if init_value is None:
-            raise RemoraLoweringError("only literal fold initial values lower to MLIR so far")
+        init_code, init_value = _lower_scalar_value_for_fold_init(
+            expr.init,
+            result_type,
+            functions={},
+            env=scalar_env,
+            result_prefix="init_scalar",
+        )
         fold_body = _lower_fold_callable_body(
             expr.func,
             {},
@@ -547,8 +551,8 @@ def _lower_descriptor_scalar_result_body(
             result_type=result_type,
         )
         body = f"""{input_code}
-    %init_scalar = arith.constant {init_value} : {result_type}
-    %init = tensor.from_elements %init_scalar : tensor<{result_type}>
+{init_code}
+    %init = tensor.from_elements {init_value} : tensor<{result_type}>
     %folded = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
       iterator_types = [\"reduction\"]
@@ -1256,16 +1260,19 @@ def _lower_scalar_fold_result(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
-    if not isinstance(node.init, HIRLit):
-        raise RemoraLoweringError("only literal fold initial values lower to MLIR so far")
-
     input_code, input_name, input_type, input_element_type = _lower_fold_input(
         node.array,
         functions,
         tensor_env=tensor_env,
     )
     result_type = type_to_mlir(node.result_type)
-    init_value = _literal_value(node.init, result_type)
+    init_code, init_value = _lower_scalar_value_for_fold_init(
+        node.init,
+        result_type,
+        functions=functions,
+        env={},
+        result_prefix="init_scalar",
+    )
     fold_body = _lower_fold_callable_body(
         node.func,
         functions,
@@ -1277,8 +1284,8 @@ def _lower_scalar_fold_result(
     )
 
     body = f"""{input_code}
-    %init_scalar = arith.constant {init_value} : {result_type}
-    %init = tensor.from_elements %init_scalar : tensor<{result_type}>
+{init_code}
+    %init = tensor.from_elements {init_value} : tensor<{result_type}>
     %folded = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
       iterator_types = [\"reduction\"]
@@ -1962,6 +1969,22 @@ def _lower_fold_callable_body(
         return "\n".join(lines)
 
     raise RemoraLoweringError("only primitive and lifted scalar fold callables lower to MLIR so far")
+
+
+def _lower_scalar_value_for_fold_init(
+    expr: HIRExpr,
+    result_type: str,
+    *,
+    functions: dict[str, HIRFunction],
+    env: dict[str, "_Operand"],
+    result_prefix: str,
+) -> tuple[str, str]:
+    emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+    value = emitter.emit_expr(expr, env)
+    cast_name = f"%{result_prefix}_cast"
+    cast_lines = _cast_if_needed(value.value, value.type, result_type, cast_name)
+    result_value = cast_name if cast_lines else value.value
+    return "\n".join([*emitter.lines, *cast_lines]), result_value
 
 
 @dataclass

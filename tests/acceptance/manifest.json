@@ -72,6 +72,14 @@
     "expect_stdout": "6\n"
   },
   {
+    "name": "scalar_fold_init_expr",
+    "category": "supported",
+    "path": "pass/scalar_fold_init_expr.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "6\n"
+  },
+  {
     "name": "rank3_map",
     "category": "supported",
     "path": "pass/rank3_map.remora",
