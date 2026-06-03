@@ -216,7 +216,8 @@ Known parser limitation:
   array-valued binary map cells are deferred.
 - `fold` supports scalar accumulator folds over rank-1 arrays with scalar init
   expressions and statically known callables, and array-cell folds over
-  rank-2/rank-3 arrays for the primitive fold-callable subset.
+  rank-2/rank-3 arrays with lowerable tensor init operands for the primitive
+  fold-callable subset.
 - Top-level value definitions are supported.
 - Top-level function definitions are supported when used as statically known
   direct call targets or unary `map` callables. The typechecker specializes the
@@ -369,6 +370,8 @@ Deferred defunctionalization work:
 - For array-cell folds such as `fold (+) [0, 0] [[1, 2], [3, 4]]`, lowering
   emits a `linalg.generic` with an input identity map, an output map that drops
   the outer reduction dimension, and `iterator_types = ["reduction", ...]`.
+  Init operands can be tensor literals, let/top-level tensor values, mapped
+  tensors, or static views when their type matches the fold result.
 - For cell maps whose body is a fold over each rank-1 cell, lowering initializes
   the output with `linalg.fill` and emits a `linalg.generic` with parallel frame
   iterators and one reduction iterator for the cell dimension.
@@ -701,7 +704,8 @@ Current tests cover:
   to guard the `MAX_DENSE_RANK` path.
 - Fold lowering coverage for direct `iota` and the Phase 5 milestone-shaped
   `fold (+) 0.0 (map (* 2.0) (iota 10))` program.
-- Rank-2/rank-3/rank-4 array-cell fold coverage over static literals.
+- Rank-2/rank-3/rank-4 array-cell fold coverage over static literals, plus
+  mapped, top-level, and static-view init operands.
 - Rank-2/rank-3 rank-1-cell map coverage for lifted row/cell reduction
   lambdas.
 - Let/top-level value lowering coverage for iota aliases used by maps and folds.

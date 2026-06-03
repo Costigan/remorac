@@ -568,6 +568,36 @@ def test_compiled_cpu_array_folds_over_transpose_view():
     np.testing.assert_array_equal(result.value, np.array([3, 7], dtype=np.int32))
 
 
+def test_compiled_cpu_array_fold_accepts_mapped_init():
+    result = evaluate_source_compiled(
+        "let init = map (* 0) (iota 2) in "
+        "let xs = [[1, 2], [3, 4]] in "
+        "fold (+) init xs"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([4, 6], dtype=np.int32))
+
+
+def test_compiled_cpu_array_fold_accepts_top_level_init():
+    result = evaluate_source_compiled(
+        "def init = [0, 0]\n"
+        "let xs = [[1, 2], [3, 4]] in "
+        "fold (+) init xs"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([4, 6], dtype=np.int32))
+
+
+def test_compiled_cpu_array_fold_accepts_view_init():
+    result = evaluate_source_compiled(
+        "let init = [0, 0, 9][0:2] in "
+        "let xs = [[1, 2], [3, 4]] in "
+        "fold (+) init xs"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([4, 6], dtype=np.int32))
+
+
 def test_compiled_cpu_executes_slice():
     result = evaluate_source_compiled("(iota 10)[1:4]")
     np.testing.assert_array_equal(

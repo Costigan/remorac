@@ -80,6 +80,14 @@
     "expect_stdout": "6\n"
   },
   {
+    "name": "array_fold_mapped_init",
+    "category": "supported",
+    "path": "pass/array_fold_mapped_init.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[4, 6]\n"
+  },
+  {
     "name": "rank3_map",
     "category": "supported",
     "path": "pass/rank3_map.remora",
