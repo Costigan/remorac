@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+uv.lock
+
 # Emacs backup files
 **/*~
 docs/*~
