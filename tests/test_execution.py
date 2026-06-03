@@ -469,6 +469,20 @@ def test_compiled_cpu_maps_over_transpose_and_slice_views():
     np.testing.assert_array_equal(sliced.value, np.array([4, 6], dtype=np.int32))
 
 
+def test_compiled_cpu_folds_over_slice_view():
+    result = evaluate_source_compiled("let xs = [1, 2, 3, 4] in fold (+) 0 xs[1:3]")
+
+    assert result.value == 5
+
+
+def test_compiled_cpu_array_folds_over_transpose_view():
+    result = evaluate_source_compiled(
+        "let xs = [[1, 2], [3, 4]] in fold (+) [0, 0] (transpose xs)"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([3, 7], dtype=np.int32))
+
+
 def test_compiled_cpu_executes_slice():
     result = evaluate_source_compiled("(iota 10)[1:4]")
     np.testing.assert_array_equal(

@@ -676,15 +676,15 @@ def _lower_index_result(
     node: HIRIndex,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
+    prefix: str = "idx",
 ) -> tuple[str, str, str]:
     array_type = _expr_result_type(node.array)
     if not isinstance(array_type, ArrayType):
         raise RemoraLoweringError("indexing expects a tensor input")
 
-    prefix = "idx"
     array_code, array_value, array_mlir_type, _element_type = _lower_tensor_input(
         node.array,
-        "idx_in",
+        _join_prefix(prefix, "in"),
         functions,
         tensor_env,
     )
@@ -768,12 +768,12 @@ def _lower_view_result(
     node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
+    prefix: str = "view",
 ) -> tuple[str, str, str]:
     if isinstance(node, HIRIndex):
-        return _lower_index_result(node, functions, tensor_env)
+        return _lower_index_result(node, functions, tensor_env, prefix)
 
     # Use a common pattern for others: lower input tensor, then apply one MLIR op
-    prefix = "view"
     input_code, input_name, input_type, _input_element_type = _lower_tensor_input(
         node.array,
         _join_prefix(prefix, "in"),
@@ -789,7 +789,8 @@ def _lower_view_result(
             raise RemoraLoweringError("transpose expects an array of rank at least 2")
         permutation = [1, 0, *range(2, rank)]
         perm_attr = "[" + ", ".join(map(str, permutation)) + "]"
-        result_line = f"    {result_name} = linalg.transpose ins({input_name} : {input_type}) outs(%view_empty : {result_type}) permutation = {perm_attr}"
+        empty_name = f"%{_join_prefix(prefix, 'empty')}"
+        result_line = f"    {result_name} = linalg.transpose ins({input_name} : {input_type}) outs({empty_name} : {result_type}) permutation = {perm_attr}"
     
     elif isinstance(node, HIRReshape):
         # In MLIR 18, tensor.reshape usually requires a source and a shape tensor,
@@ -840,8 +841,9 @@ def _lower_view_result(
          raise AssertionError(f"unhandled view node type {type(node).__name__}")
 
     if "linalg.transpose" in result_line:
+         empty_name = f"%{_join_prefix(prefix, 'empty')}"
          body = f"""{input_code}
-    %view_empty = tensor.empty() : {result_type}
+    {empty_name} = tensor.empty() : {result_type}
 {result_line}
 """
     else:
@@ -857,7 +859,12 @@ def _lower_view_input(
     prefix: str,
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str, str]:
-    code, result_value, result_type = _lower_view_result(node, functions, tensor_env)
+    code, result_value, result_type = _lower_view_result(
+        node,
+        functions,
+        tensor_env,
+        prefix,
+    )
     element_type = type_to_mlir(node.result_type.element)
     return code, result_value, result_type, element_type
 
@@ -1349,6 +1356,9 @@ def _lower_fold_input(
     if isinstance(node, (HIRIota, HIRArrayLit)):
         return _lower_tensor_input(node, _join_prefix(prefix, "input"), functions, tensor_env)
     if isinstance(node, HIRVar):
+        return _lower_tensor_input(node, _join_prefix(prefix, "input"), functions, tensor_env)
+
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
         return _lower_tensor_input(node, _join_prefix(prefix, "input"), functions, tensor_env)
 
     if isinstance(node, HIRMap):

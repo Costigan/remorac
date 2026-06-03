@@ -112,6 +112,22 @@
     "expect_stdout": "2\n"
   },
   {
+    "name": "static_views",
+    "category": "supported",
+    "path": "pass/static_views.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[[1, 4],\n [2, 5],\n [3, 6]]\n"
+  },
+  {
+    "name": "fold_over_view",
+    "category": "supported",
+    "path": "pass/fold_over_view.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "5\n"
+  },
+  {
     "name": "prelude_sum",
     "category": "supported",
     "path": "pass/prelude_sum.remora",
