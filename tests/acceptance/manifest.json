@@ -64,6 +64,14 @@
     "expect_stdout": "[3.0, 7.0]\n"
   },
   {
+    "name": "scalar_fold_lambda",
+    "category": "supported",
+    "path": "pass/scalar_fold_lambda.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "6\n"
+  },
+  {
     "name": "rank3_map",
     "category": "supported",
     "path": "pass/rank3_map.remora",

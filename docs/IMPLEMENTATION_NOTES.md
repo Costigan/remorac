@@ -214,8 +214,9 @@ Known parser limitation:
   arrays with identical static shapes. This is the compiler-shaped CPU path used
   by the starter `dot` prelude helper. Mixed array/scalar binary maps and
   array-valued binary map cells are deferred.
-- `fold` supports scalar accumulator folds over rank-1 arrays and array-cell
-  folds over rank-2/rank-3 arrays for the primitive fold-callable subset.
+- `fold` supports scalar accumulator folds over rank-1 arrays with statically
+  known callables, and array-cell folds over rank-2/rank-3 arrays for the
+  primitive fold-callable subset.
 - Top-level value definitions are supported.
 - Top-level function definitions are supported when used as statically known
   direct call targets or unary `map` callables. The typechecker specializes the
@@ -458,8 +459,6 @@ Deferred MLIR lowering work:
   production-style path is the external standalone `mlir-opt-18` runner.
 
 Deferred pipeline/codegen work:
-
-- Install `ptxas` for standalone PTX assembly checks.
 - Lower Remora modules to explicit `gpu.module` / `gpu.func` kernels and
   validate a production NVIDIA NVVM pipeline against the descriptor ABI.
   The first parse-validated scaffold now lives in `remora.gpu_lowering` for the
@@ -496,8 +495,8 @@ Deferred pipeline/codegen work:
   `gpu.module` artifact and the executable descriptor-ABI PTX artifact from one
   HIR function.
 - `assemble_ptx_text` validates emitted PTX through `ptxas` and returns the
-  generated cubin bytes when the assembler is installed. Tests skip this check
-  in the current environment because `ptxas` is missing.
+  generated cubin bytes. The current local environment has CUDA 13.2 `ptxas`
+  installed, so ptxas-backed assembly tests run instead of skipping.
 - Replace the narrow hand-authored direct PTX slice with MLIR-generated
   `gpu.module` / `gpu.func` kernels.
 - Add bool-valued GPU maps after the descriptor element layout is pinned for
@@ -680,6 +679,8 @@ Current tests cover:
 - Defunctionalization coverage for inline lambda lifting, scalar `let` captures,
   primitive callables, named static function references, operator sections, and
   rejection of non-scalar captured lambdas.
+- Scalar fold lowering coverage for primitive callables, lifted lambdas, named
+  functions, and scalar captures.
 - Initial MLIR lowering coverage for type spelling/parsing, `iota` textual MLIR
   parse validation, primitive scalar section maps over direct `iota`, and
   simple lifted scalar lambda maps over direct `iota`, plus explicit deferral of

@@ -461,6 +461,16 @@ def test_lowers_fold_over_iota():
     assert ": i32" in lowered.text
 
 
+def test_lowers_scalar_fold_with_lifted_lambda():
+    program = hir_from_source("fold (\\acc x -> acc + x) 0 (iota 4)")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> i32" in lowered.text
+    assert 'iterator_types = ["reduction"]' in lowered.text
+    assert "arith.addi" in lowered.text
+    assert "linalg.yield" in lowered.text
+
+
 def test_lowers_fold_over_array_literal():
     program = hir_from_source("let xs = [1.0, 2.0, 3.0] in fold (+) 0.0 xs")
     lowered = MLIRLowering().lower_program(program)

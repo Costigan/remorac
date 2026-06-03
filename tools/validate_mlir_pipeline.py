@@ -117,6 +117,10 @@ def main() -> int:
             "docs/mlir-pipeline-nvidia.txt does not mention the descriptor-ABI executable slice"
         )
     print("nvidia pipeline artifact: scaffold plus direct descriptor-ABI executable slice")
+    if toolchain.ptxas is None:
+        print("nvidia PTX assembly validation: skipped (ptxas missing)")
+    else:
+        print("nvidia PTX assembly validation: available through ptxas-backed tests")
     return 0
 
 

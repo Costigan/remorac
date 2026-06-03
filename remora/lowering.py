@@ -539,6 +539,7 @@ def _lower_descriptor_scalar_result_body(
             raise RemoraLoweringError("only literal fold initial values lower to MLIR so far")
         fold_body = _lower_fold_callable_body(
             expr.func,
+            {},
             input_name="%in",
             input_type=input_element_type,
             acc_name="%acc",
@@ -1172,9 +1173,6 @@ def _lower_map_cell_result(
         raise RemoraLoweringError("only folds over the cell-map parameter lower to MLIR so far")
     if function.body.array.name != function.params[0].name:
         raise RemoraLoweringError("cell-map fold must reduce the cell-map parameter")
-    if not isinstance(function.body.func, HIRPrimCallable):
-        raise RemoraLoweringError("only primitive cell-fold callables lower to MLIR so far")
-
     input_remora_type = _expr_result_type(node.array)
     if not isinstance(input_remora_type, ArrayType):
         raise RemoraLoweringError("cell-map input must be an array")
@@ -1194,8 +1192,11 @@ def _lower_map_cell_result(
     if input_element_type != result_element_type:
         raise RemoraLoweringError("cell-map fold element type must match result element type")
     init_value = _literal_value(function.body.init, result_element_type)
+    if not isinstance(function.body.func, HIRPrimCallable):
+        raise RemoraLoweringError("only primitive cell-fold callables lower to MLIR so far")
     fold_body = _lower_fold_callable_body(
         function.body.func,
+        functions,
         input_name="%in",
         input_type=input_element_type,
         acc_name="%acc",
@@ -1255,8 +1256,6 @@ def _lower_scalar_fold_result(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
-    if not isinstance(node.func, HIRPrimCallable):
-        raise RemoraLoweringError("only primitive fold callables lower to MLIR so far")
     if not isinstance(node.init, HIRLit):
         raise RemoraLoweringError("only literal fold initial values lower to MLIR so far")
 
@@ -1269,6 +1268,7 @@ def _lower_scalar_fold_result(
     init_value = _literal_value(node.init, result_type)
     fold_body = _lower_fold_callable_body(
         node.func,
+        functions,
         input_name="%in",
         input_type=input_element_type,
         acc_name="%acc",
@@ -1337,6 +1337,7 @@ def _lower_array_fold_result(
     rank = input_remora_type.rank
     fold_body = _lower_fold_callable_body(
         node.func,
+        functions,
         input_name="%in",
         input_type=input_element_type,
         acc_name="%acc",
@@ -1892,28 +1893,75 @@ def _lower_primitive_callable_result(
 
 
 def _lower_fold_callable_body(
-    callable_: HIRPrimCallable,
+    callable_: object,
+    functions: dict[str, HIRFunction],
     input_name: str,
     input_type: str,
     acc_name: str,
     acc_type: str,
     result_type: str,
 ) -> str:
-    if callable_.left_arg is not None or callable_.right_arg is not None:
-        raise RemoraLoweringError("fold operator sections are deferred")
-    left_lines = _cast_if_needed(acc_name, acc_type, result_type, "%fold_left")
-    right_lines = _cast_if_needed(input_name, input_type, result_type, "%fold_right")
-    left_value = "%fold_left" if left_lines else acc_name
-    right_value = "%fold_right" if right_lines else input_name
-    op = _arith_op(callable_.op, result_type)
-    sep = ", " if "cmp" in op else " "
-    lines = [
-        *left_lines,
-        *right_lines,
-        f"      %fold_result = {op}{sep}{left_value}, {right_value} : {result_type}",
-        f"      linalg.yield %fold_result : {result_type}",
-    ]
-    return "\n".join(lines)
+    if isinstance(callable_, HIRPrimCallable):
+        if callable_.left_arg is not None or callable_.right_arg is not None:
+            raise RemoraLoweringError("fold operator sections are deferred")
+        left_lines = _cast_if_needed(acc_name, acc_type, result_type, "%fold_left")
+        right_lines = _cast_if_needed(input_name, input_type, result_type, "%fold_right")
+        left_value = "%fold_left" if left_lines else acc_name
+        right_value = "%fold_right" if right_lines else input_name
+        op = _arith_op(callable_.op, result_type)
+        sep = ", " if "cmp" in op else " "
+        lines = [
+            *left_lines,
+            *right_lines,
+            f"      %fold_result = {op}{sep}{left_value}, {right_value} : {result_type}",
+            f"      linalg.yield %fold_result : {result_type}",
+        ]
+        return "\n".join(lines)
+
+    if isinstance(callable_, HIRVar):
+        function = functions.get(callable_.name)
+        if function is None:
+            raise RemoraLoweringError(f"unknown fold function {callable_.name}")
+        if len(function.params) != 2:
+            raise RemoraLoweringError("fold functions must take two parameters")
+        emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+        value = emitter.emit_expr(
+            function.body,
+            {
+                function.params[0].name: _Operand(acc_name, [], acc_type),
+                function.params[1].name: _Operand(input_name, [], input_type),
+            },
+        )
+        cast_lines = _cast_if_needed(value.value, value.type, result_type, "%fold_result_cast")
+        result_value = "%fold_result_cast" if cast_lines else value.value
+        lines = [
+            *emitter.lines,
+            *cast_lines,
+            f"      linalg.yield {result_value} : {result_type}",
+        ]
+        return "\n".join(lines)
+
+    if isinstance(callable_, HIRLambda):
+        if len(callable_.params) != 2:
+            raise RemoraLoweringError("fold lambda functions must take two parameters")
+        emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+        value = emitter.emit_expr(
+            callable_.body,
+            {
+                callable_.params[0].name: _Operand(acc_name, [], acc_type),
+                callable_.params[1].name: _Operand(input_name, [], input_type),
+            },
+        )
+        cast_lines = _cast_if_needed(value.value, value.type, result_type, "%fold_result_cast")
+        result_value = "%fold_result_cast" if cast_lines else value.value
+        lines = [
+            *emitter.lines,
+            *cast_lines,
+            f"      linalg.yield {result_value} : {result_type}",
+        ]
+        return "\n".join(lines)
+
+    raise RemoraLoweringError("only primitive and lifted scalar fold callables lower to MLIR so far")
 
 
 @dataclass

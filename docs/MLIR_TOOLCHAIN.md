@@ -12,13 +12,44 @@ pipeline validation. IREE remains an inspection backend only.
 - OpenMP runtime: `libomp-18-dev` is installed in the current environment;
   threaded CPU execution with `--cpu-threads > 1` can link against the
   LLVM/MLIR 18-compatible `__kmpc` runtime
-- `ptxas`: not installed in the current environment; PTX assembly validation
-  is skipped when unavailable
+- `ptxas`: `/usr/local/cuda/bin/ptxas`, CUDA compilation tools 13.2; PTX
+  assembly validation is available
 - IREE inspection tools: `.venv/bin/iree-opt`, `.venv/bin/iree-compile`
 - IREE package: `iree-compiler==20241104.1068`
 
 The IREE tools report LLVM 20.0.0git and therefore must not be treated as the
 same production toolchain as the standalone LLVM/MLIR 18 tools.
+
+## Toolchain Policy
+
+The local toolchain has two intentionally separate roles:
+
+- **Standalone LLVM/MLIR** (`mlir-opt`, `mlir-translate`, `llc`) is the source
+  of truth for CPU pipeline validation and standalone PTX text generation.
+- **IREE** is an inspection/smoke backend only. IREE HAL PTX is not a Remora
+  runtime artifact and must not be counted as descriptor-ABI GPU completion.
+
+LLVM major mismatch policy:
+
+- Development validation allows IREE inspection tools to report a different
+  LLVM major than standalone MLIR, but the validator prints
+  `warning(dev-ok)`.
+- Release or pinned-toolchain validation should use:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python tools/validate_mlir_toolchain.py --require-unified-llvm
+```
+
+GPU validation policy:
+
+- Missing `ptxas` is a skip for CPU/Dense Core development validation.
+- Missing `ptxas` is a blocker for GPU release validation because generated PTX
+  has not been assembled.
+- GPU validation should use:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python tools/validate_mlir_toolchain.py --require-gpu-validation
+```
 
 ## Validation Commands
 
@@ -66,3 +97,74 @@ device body through NVVM/LLVM IR, emits PTX with `llc`, and launches through
 
 `remora.codegen.generate_ptx` remains only an IREE HAL PTX inspection path. Its
 launch ABI is not the Remora descriptor ABI.
+
+## Installing `ptxas`
+
+`ptxas` is part of the CUDA Toolkit developer tools. Runtime-only CUDA packages
+are not sufficient.
+
+Native Ubuntu/Debian with NVIDIA's CUDA apt repository:
+
+```bash
+sudo apt update
+sudo apt install cuda-toolkit
+```
+
+Pop!_OS/Ubuntu without NVIDIA's CUDA apt repository may expose Ubuntu's
+`nvidia-cuda-toolkit` package instead:
+
+```bash
+sudo apt update
+sudo apt install nvidia-cuda-toolkit
+```
+
+To pin a toolkit release instead of tracking the latest toolkit metapackage,
+install a versioned package, for example:
+
+```bash
+sudo apt install cuda-toolkit-13-2
+```
+
+WSL 2:
+
+- Install the NVIDIA Windows driver on Windows.
+- In the WSL Ubuntu instance, use NVIDIA's WSL-Ubuntu CUDA repository.
+- Prefer `cuda-toolkit-X-Y`; avoid packages such as `cuda`, `cuda-13`, or
+  `cuda-drivers` inside WSL because they may try to install a Linux display
+  driver.
+
+For Ubuntu 24.04 WSL, the current NVIDIA/Ubuntu example is:
+
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get -y install cuda-toolkit-13-2
+```
+
+Conda environment:
+
+```bash
+conda install cuda -c nvidia
+```
+
+or a smaller developer-tools subset:
+
+```bash
+conda install cuda-nvcc -c nvidia
+```
+
+After installation, ensure the CUDA `bin` directory is on `PATH`, for example:
+
+```bash
+export PATH=/usr/local/cuda/bin:$PATH
+which ptxas
+ptxas --version
+```
+
+Then rerun:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python tools/validate_mlir_toolchain.py --require-gpu-validation
+env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest tests/test_gpu_lowering.py tests/test_executor.py tests/test_cuda_runtime.py -q
+```

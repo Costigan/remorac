@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import importlib.metadata as metadata
 import re
@@ -16,6 +17,19 @@ from remora.pipeline import detect_toolchain  # noqa: E402
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--require-unified-llvm",
+        action="store_true",
+        help="fail if IREE inspection tools report a different LLVM major than standalone MLIR",
+    )
+    parser.add_argument(
+        "--require-gpu-validation",
+        action="store_true",
+        help="fail if ptxas is missing and PTX assembly validation cannot run",
+    )
+    args = parser.parse_args()
+
     toolchain = detect_toolchain()
     tools = {
         "mlir-opt": toolchain.mlir_opt,
@@ -62,14 +76,38 @@ def main() -> int:
 
     iree_majors = {versions[name] for name in ("iree-opt", "iree-compile") if versions[name] is not None}
     if iree_majors and iree_majors != {standalone_major}:
+        message = (
+            "IREE inspection tools use a different LLVM major "
+            f"({sorted(iree_majors)}) than standalone MLIR ({standalone_major})"
+        )
+        if args.require_unified_llvm:
+            print(f"error: {message}", file=sys.stderr)
+            return 1
+        print(f"warning(dev-ok): {message}", file=sys.stderr)
         print(
-            "warning: IREE inspection tools use a different LLVM major "
-            f"({sorted(iree_majors)}) than standalone MLIR ({standalone_major})",
+            "  policy: standalone LLVM/MLIR is the CPU pipeline source of truth; "
+            "IREE output is inspection/smoke-only in this environment.",
             file=sys.stderr,
         )
 
     if tools["ptxas"] is None:
-        print("warning: ptxas is missing; standalone PTX assembly checks are skipped", file=sys.stderr)
+        message = "ptxas is missing; standalone PTX assembly checks are skipped"
+        if args.require_gpu_validation:
+            print(f"error: {message}", file=sys.stderr)
+            print(
+                "  install CUDA Toolkit components that provide ptxas, then ensure "
+                "the CUDA bin directory is on PATH.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"skip(gpu-validation): {message}", file=sys.stderr)
+        print(
+            "  policy: CPU/MLIR development validation may pass, but GPU release "
+            "validation requires ptxas.",
+            file=sys.stderr,
+        )
+    else:
+        print("ptxas assembly validation: available")
 
     return 0
 
