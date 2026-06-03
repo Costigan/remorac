@@ -151,6 +151,24 @@ def test_compiled_cpu_executes_vector_sum_and_dot():
     assert dot.value == pytest.approx(32.0)
 
 
+def test_compiled_cpu_executes_scalar_fold_lambda():
+    result = evaluate_source_compiled("fold (\\acc x -> acc + x) 0 (iota 4)")
+
+    assert result.value == 6
+
+
+def test_compiled_cpu_executes_scalar_fold_named_function():
+    result = evaluate_source_compiled("def plus acc x = acc + x\nfold plus 0 (iota 4)")
+
+    assert result.value == 6
+
+
+def test_compiled_cpu_executes_scalar_fold_lambda_with_scalar_capture():
+    result = evaluate_source_compiled("let bias = 1 in fold (\\acc x -> acc + x + bias) 0 (iota 4)")
+
+    assert result.value == 10
+
+
 def test_compiled_cpu_executes_static_shape():
     result = evaluate_source_compiled("shape [[1, 2], [3, 4]]")
 

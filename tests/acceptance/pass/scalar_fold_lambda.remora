@@ -1,0 +1,1 @@
+fold (\acc x -> acc + x) 0 (iota 4)

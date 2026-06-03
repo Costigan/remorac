@@ -32,7 +32,8 @@ Implemented forms:
 - `shape` and `rank` as static metadata operations
 - full-rank and static partial indexing
 - `map` over statically known callables
-- `fold` over primitive accumulator callables
+- scalar `fold` over statically known accumulator callables
+- array-cell `fold` over primitive accumulator callables
 - top-level value definitions
 - top-level function definitions when statically specialized at direct use sites
 - starter prelude functions: `add`, `sub`, `mul`, `div`, `sum`, `product`,
@@ -127,4 +128,3 @@ Deferred until after Dense Core CPU/GPU performance gates:
 - scans and richer collective operators
 - standard library expansion beyond the starter prelude
 - AMD/ROCm backend
-
