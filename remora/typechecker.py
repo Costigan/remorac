@@ -25,10 +25,14 @@ from remora.ast_nodes import (
     OperatorFuncExpr,
     Program,
     RankExpr,
+    RavelExpr,
+    ReshapeExpr,
     RightSectionExpr,
     ShapeExpr,
     SliceRange,
+    TakeExpr,
     TransposeExpr,
+    DropExpr,
     ValDef,
     VarExpr,
 )
@@ -132,6 +136,37 @@ class TypedTranspose:
 
 
 @dataclass(frozen=True)
+class TypedReshape:
+    expr: ReshapeExpr
+    shape_expr: TypedExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedRavel:
+    expr: RavelExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedTake:
+    expr: TakeExpr
+    count: TypedExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedDrop:
+    expr: DropExpr
+    count: TypedExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedSlice:
     expr: SliceRange
     start: TypedExpr | None
@@ -210,6 +245,10 @@ TypedExpr: TypeAlias = (
     | TypedShape
     | TypedRank
     | TypedTranspose
+    | TypedReshape
+    | TypedRavel
+    | TypedTake
+    | TypedDrop
     | TypedSlice
     | TypedIndex
     | TypedLambda
@@ -291,6 +330,14 @@ class TypeChecker:
             return TypedRank(expr, typed_array, INT)
         if isinstance(expr, TransposeExpr):
             return self._infer_transpose(expr, env)
+        if isinstance(expr, ReshapeExpr):
+            return self._infer_reshape(expr, env)
+        if isinstance(expr, RavelExpr):
+            return self._infer_ravel(expr, env)
+        if isinstance(expr, TakeExpr):
+            return self._infer_take(expr, env)
+        if isinstance(expr, DropExpr):
+            return self._infer_drop(expr, env)
         if isinstance(expr, SliceRange):
             raise RemoraTypeError("slice range must be used within indexing", expr.loc)
         if isinstance(expr, IndexExpr):
@@ -578,8 +625,8 @@ class TypeChecker:
         return typed.type
 
     def _infer_transpose(self, expr: TransposeExpr, env: TypeEnv) -> TypedTranspose:
-        typed_array = self.infer(expr.array, env)
-        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 2:
+        typed_array = self._require_array(expr.array, "transpose", env)
+        if typed_array.type.rank < 2:
             raise RemoraTypeError("transpose expects an array of rank at least 2", expr.loc)
 
         shape = typed_array.type.shape
@@ -589,6 +636,86 @@ class TypeChecker:
             typed_array,
             ArrayType(typed_array.type.element, transposed_shape),
         )
+
+    def _infer_reshape(self, expr: ReshapeExpr, env: TypeEnv) -> TypedReshape:
+        typed_shape = self.infer(expr.shape, env)
+        typed_array = self._require_array(expr.array, "reshape", env)
+        
+        # In Dense Core, target shape must be literal to keep ArrayType static
+        if not isinstance(typed_shape, TypedArray) or not all(isinstance(e, TypedExprNode) and isinstance(e.expr, IntLit) for e in typed_shape.elements):
+             raise RemoraTypeError("reshape target shape must be a literal integer array", expr.loc)
+        
+        new_shape_values = [int(e.expr.value) for e in typed_shape.elements] # type: ignore
+        new_total = 1
+        for v in new_shape_values: new_total *= v
+        
+        old_total = 1
+        for dim in typed_array.type.shape:
+             old_total *= dim.value
+             
+        if new_total != old_total:
+             raise RemoraTypeError(f"reshape mismatch: target shape {new_shape_values} (size {new_total}) does not match input size {old_total}", expr.loc)
+             
+        return TypedReshape(
+            expr,
+            typed_shape,
+            typed_array,
+            ArrayType(typed_array.type.element, tuple(StaticDim(v) for v in new_shape_values))
+        )
+
+    def _infer_ravel(self, expr: RavelExpr, env: TypeEnv) -> TypedRavel:
+        typed_array = self._require_array(expr.array, "ravel", env)
+        total = 1
+        for dim in typed_array.type.shape: total *= dim.value
+        return TypedRavel(
+            expr,
+            typed_array,
+            ArrayType(typed_array.type.element, (StaticDim(total),))
+        )
+
+    def _infer_take(self, expr: TakeExpr, env: TypeEnv) -> TypedTake:
+        typed_count = self.infer(expr.count, env)
+        typed_array = self._require_array(expr.array, "take", env)
+        self._require(typed_count.type, INT, expr.loc)
+        
+        if typed_array.type.rank < 1:
+             raise RemoraTypeError("take expects a non-scalar array", expr.loc)
+             
+        if not (isinstance(typed_count, TypedExprNode) and isinstance(typed_count.expr, IntLit)):
+             raise RemoraTypeError("take count must be a literal integer", expr.loc)
+             
+        count = typed_count.expr.value
+        extent = typed_array.type.shape[0].value
+        if count < 0 or count > extent:
+             raise RemoraTypeError(f"take count {count} is out of bounds for axis 0 with extent {extent}", expr.loc)
+             
+        new_shape = (StaticDim(count),) + typed_array.type.shape[1:]
+        return TypedTake(expr, typed_count, typed_array, ArrayType(typed_array.type.element, new_shape))
+
+    def _infer_drop(self, expr: DropExpr, env: TypeEnv) -> TypedDrop:
+        typed_count = self.infer(expr.count, env)
+        typed_array = self._require_array(expr.array, "drop", env)
+        self._require(typed_count.type, INT, expr.loc)
+        
+        if typed_array.type.rank < 1:
+             raise RemoraTypeError("drop expects a non-scalar array", expr.loc)
+
+        if not (isinstance(typed_count, TypedExprNode) and isinstance(typed_count.expr, IntLit)):
+             raise RemoraTypeError("drop count must be a literal integer", expr.loc)
+             
+        count = typed_count.expr.value
+        extent = typed_array.type.shape[0].value
+        if count < 0 or count > extent:
+             raise RemoraTypeError(f"drop count {count} is out of bounds for axis 0 with extent {extent}", expr.loc)
+             
+        new_shape = (StaticDim(extent - count),) + typed_array.type.shape[1:]
+        return TypedDrop(expr, typed_count, typed_array, ArrayType(typed_array.type.element, new_shape))
+
+    def _require_array(self, expr: Expr, context: str, env: TypeEnv) -> TypedExpr:
+        typed = self.infer(expr, env)
+        if not isinstance(typed.type, ArrayType):
+            raise RemoraTypeError(f"{context} expects an array operand", expr.loc)
+        return typed
 
     def _infer_slice_range(
         self,

@@ -28,11 +28,15 @@ from remora.ast_nodes import (
     OperatorFuncExpr,
     Program,
     RankExpr,
+    RavelExpr,
+    ReshapeExpr,
     RightSectionExpr,
     ShapeExpr,
     SliceRange,
     SourceLoc,
+    TakeExpr,
     TransposeExpr,
+    DropExpr,
     ValDef,
     VarExpr,
 )
@@ -129,6 +133,18 @@ class ASTBuilder(Transformer):
     def transpose_expr(self, items: list[Any]) -> TransposeExpr:
         return TransposeExpr(items[0], self._loc_from(items))
 
+    def reshape_expr(self, items: list[Any]) -> ReshapeExpr:
+        return ReshapeExpr(items[0], items[1], self._loc_from(items))
+
+    def ravel_expr(self, items: list[Any]) -> RavelExpr:
+        return RavelExpr(items[0], self._loc_from(items))
+
+    def take_expr(self, items: list[Any]) -> TakeExpr:
+        return TakeExpr(items[0], items[1], self._loc_from(items))
+
+    def drop_expr(self, items: list[Any]) -> DropExpr:
+        return DropExpr(items[0], items[1], self._loc_from(items))
+
     def operator_func(self, items: list[Any]) -> OperatorFuncExpr:
         return OperatorFuncExpr(str(items[0]), self._loc_from(items))
 
@@ -138,7 +154,7 @@ class ASTBuilder(Transformer):
     def right_section(self, items: list[Any]) -> RightSectionExpr:
         return RightSectionExpr(items[0], str(items[1]), self._loc_from(items))
 
-    def paren(self, items: list[Any]) -> Expr:
+    def paren(self, items: list[Any]) -> Any:
         return items[0]
 
     def array_lit(self, items: list[Any]) -> ArrayLit:

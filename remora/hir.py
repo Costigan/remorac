@@ -30,10 +30,14 @@ from remora.typechecker import (
     TypedOperatorFunc,
     TypedProgram,
     TypedRank,
+    TypedRavel,
+    TypedReshape,
     TypedRightSection,
     TypedShape,
     TypedSlice,
+    TypedTake,
     TypedTranspose,
+    TypedDrop,
 )
 from remora.types import (
     BOOL,
@@ -152,6 +156,32 @@ class HIRTranspose:
 
 
 @dataclass(frozen=True)
+class HIRReshape:
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRRavel:
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRTake:
+    count: int
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRDrop:
+    count: int
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRIota:
     size: StaticDim
     result_type: ArrayType
@@ -193,6 +223,10 @@ HIRExpr: TypeAlias = (
     | HIRIndex
     | HIRSlice
     | HIRTranspose
+    | HIRReshape
+    | HIRRavel
+    | HIRTake
+    | HIRDrop
     | HIRIota
     | HIRCast
     | HIRArrayLit
@@ -271,6 +305,18 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedTranspose):
         return HIRTranspose(lower_expr(expr.array), expr.type)
+
+    if isinstance(expr, TypedReshape):
+        return HIRReshape(lower_expr(expr.array), expr.type)
+
+    if isinstance(expr, TypedRavel):
+        return HIRRavel(lower_expr(expr.array), expr.type)
+
+    if isinstance(expr, TypedTake):
+        return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore
+
+    if isinstance(expr, TypedDrop):
+        return HIRDrop(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore
 
     if isinstance(expr, TypedLambda):
         return HIRLambda(
@@ -421,6 +467,14 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRSlice):
         return expr.result_type
     if isinstance(expr, HIRTranspose):
+        return expr.result_type
+    if isinstance(expr, HIRReshape):
+        return expr.result_type
+    if isinstance(expr, HIRRavel):
+        return expr.result_type
+    if isinstance(expr, HIRTake):
+        return expr.result_type
+    if isinstance(expr, HIRDrop):
         return expr.result_type
     if isinstance(expr, HIRIota):
         return expr.result_type

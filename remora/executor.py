@@ -31,7 +31,13 @@ class RemoraExecutor:
             kernel.name: self._module.get_function(kernel.name) for kernel in kernels
         }
 
-    def execute(self, kernel_name: str, inputs: list[np.ndarray]) -> np.ndarray:
+    def execute(
+        self,
+        kernel_name: str,
+        inputs: list[np.ndarray],
+        *,
+        arena: Any | None = None,
+    ) -> np.ndarray:
         """Run one direct Remora ABI kernel and return the host output array."""
         try:
             meta = self._meta[kernel_name]
@@ -59,7 +65,11 @@ class RemoraExecutor:
                 self._rt.copy_host_to_device(host_input, ptr)
                 device_inputs.append(ptr)
 
-            output_ptr = self._rt.alloc(output.nbytes)
+            if arena is not None:
+                output_ptr = arena.alloc(output.nbytes)
+            else:
+                output_ptr = self._rt.alloc(output.nbytes)
+
             if meta.is_reduction:
                 # Initialize output to 0 (for atomicAdd)
                 # output.nbytes // 4 is the count of 32-bit words
@@ -101,15 +111,15 @@ class RemoraExecutor:
         finally:
             for ptr in device_inputs:
                 self._rt.free(ptr)
-            if output_ptr is not None:
+            if output_ptr is not None and arena is None:
                 self._rt.free(output_ptr)
 
         return output
 
-    def execute_main(self, inputs: list[np.ndarray] | None = None) -> np.ndarray:
+    def execute_main(self, inputs: list[np.ndarray] | None = None, *, arena: Any | None = None) -> np.ndarray:
         """Run the program entry kernel using the shared executor-style API."""
         kernel_name = self._main_kernel_name()
-        return self.execute(kernel_name, [] if inputs is None else inputs)
+        return self.execute(kernel_name, [] if inputs is None else inputs, arena=arena)
 
     def close(self) -> None:
         self._module.close()

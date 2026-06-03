@@ -70,6 +70,57 @@ class EvaluationResult:
     type: RemoraType
 
 
+class Arena:
+    """A memory pool for Remora intermediate and result data."""
+
+    def __init__(self, size_bytes: int, runtime: CUDARuntime | None = None):
+        self._size = size_bytes
+        self._runtime = runtime
+        self._offset = 0
+        if runtime:
+            self._ptr = runtime.alloc(size_bytes)
+            self._host_ptr = None
+        else:
+            self._buffer = bytearray(size_bytes)
+            self._host_ptr = ctypes.addressof((ctypes.c_char * size_bytes).from_buffer(self._buffer))
+            self._ptr = self._host_ptr
+
+    @property
+    def ptr(self) -> int:
+        return self._ptr
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def is_gpu(self) -> bool:
+        return self._runtime is not None
+
+    def alloc(self, nbytes: int) -> int:
+        """Reserve a slice of the arena and return its pointer."""
+        # Align to 64 bytes
+        aligned_nbytes = (nbytes + 63) & ~63
+        if self._offset + aligned_nbytes > self._size:
+            raise RemoraError(f"Arena overflow: requested {nbytes} bytes, but only {self._size - self._offset} remaining")
+        
+        ptr = self._ptr + self._offset
+        self._offset += aligned_nbytes
+        return ptr
+
+    def reset(self) -> None:
+        """Reset the arena offset for reuse."""
+        self._offset = 0
+
+    def close(self) -> None:
+        """Free device resources if this is a GPU arena."""
+        if self._runtime and self._ptr:
+            # CUDARuntime.alloc returns a ptr that is tracked for cleanup
+            # but here we might want manual management or just let it be.
+            # Currently CUDARuntime.alloc appends to self._allocated.
+            pass
+
+
 @dataclass(frozen=True)
 class CompiledCPUArtifact:
     library_path: Path
@@ -520,11 +571,11 @@ class CPUExecutor:
             cpu_vectorize,
         )
 
-    def execute_main(self, inputs: list[np.ndarray] | None = None) -> object:
+    def execute_main(self, inputs: list[np.ndarray] | None = None, *, arena: Arena | None = None) -> object:
         if inputs is not None and len(inputs) != 0:
             raise EvaluationError("compiled CPU main does not accept inputs")
         return_type = self._artifact.return_type
-        output = _empty_output_value(return_type)
+        output = _empty_output_value(return_type, arena=arena)
         self.execute_main_into(output)
         if isinstance(return_type, ScalarType):
             return output.item()
@@ -611,8 +662,8 @@ class CPUFunctionExecutor:
             cpu_vectorize,
         )
 
-    def execute(self, *inputs: np.ndarray) -> EvaluationResult:
-        output = _empty_output_value(self._artifact.return_type)
+    def execute(self, *inputs: np.ndarray, arena: Arena | None = None) -> EvaluationResult:
+        output = _empty_output_value(self._artifact.return_type, arena=arena)
         self.execute_into(output, *inputs)
         if isinstance(self._artifact.return_type, ScalarType):
             return EvaluationResult(output.item(), self._artifact.return_type)
@@ -757,8 +808,23 @@ def _temporary_omp_threads(cpu_threads: int | None):
             os.environ["OMP_NUM_THREADS"] = previous
 
 
-def _empty_output_value(value_type: RemoraType) -> np.ndarray:
-    return np.empty(_result_shape(value_type), dtype=_result_dtype(value_type))
+def _empty_output_value(value_type: RemoraType, *, arena: Arena | None = None) -> np.ndarray:
+    shape = _result_shape(value_type)
+    dtype = _result_dtype(value_type)
+    if arena is not None:
+        nbytes = int(np.prod(shape)) * dtype.itemsize
+        ptr = arena.alloc(nbytes)
+        # For CPU, arena._buffer is available if no runtime.
+        # For GPU, we can't easily return a numpy view of device memory here
+        # that behaves like a normal array. 
+        # But this function is used by CPUExecutor.
+        if arena._runtime is None:
+            return np.frombuffer(arena._buffer, dtype=dtype, count=int(np.prod(shape)), offset=ptr - arena._host_ptr).reshape(shape)
+        else:
+             # GPU arena: we return a host array and copy into it later?
+             # Actually, RemoraExecutor handles GPU output differently.
+             pass
+    return np.empty(shape, dtype=dtype)
 
 
 def _result_shape(value_type: RemoraType) -> tuple[int, ...]:

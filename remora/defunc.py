@@ -25,6 +25,10 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRProgram,
+    HIRReshape,
+    HIRRavel,
+    HIRTake,
+    HIRDrop,
     HIRVar,
 )
 
@@ -108,6 +112,14 @@ class _Defunctionalizer:
             return expr
         if isinstance(expr, HIRTranspose):
             return HIRTranspose(self._rewrite_expr(expr.array), expr.result_type)
+        if isinstance(expr, HIRReshape):
+            return HIRReshape(self._rewrite_expr(expr.array), expr.result_type)
+        if isinstance(expr, HIRRavel):
+            return HIRRavel(self._rewrite_expr(expr.array), expr.result_type)
+        if isinstance(expr, HIRTake):
+            return HIRTake(expr.count, self._rewrite_expr(expr.array), expr.result_type)
+        if isinstance(expr, HIRDrop):
+            return HIRDrop(expr.count, self._rewrite_expr(expr.array), expr.result_type)
         if isinstance(expr, HIRArrayLit):
             return HIRArrayLit(
                 [self._rewrite_expr(element) for element in expr.elements],

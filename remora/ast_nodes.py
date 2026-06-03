@@ -109,6 +109,33 @@ class TransposeExpr:
 
 
 @dataclass(frozen=True)
+class ReshapeExpr:
+    shape: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class RavelExpr:
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class TakeExpr:
+    count: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class DropExpr:
+    count: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class ComposeExpr:
     outer: Expr
     inner: Expr
@@ -190,6 +217,10 @@ Expr: TypeAlias = (
     | ShapeExpr
     | RankExpr
     | TransposeExpr
+    | ReshapeExpr
+    | RavelExpr
+    | TakeExpr
+    | DropExpr
     | ComposeExpr
     | OperatorFuncExpr
     | LeftSectionExpr

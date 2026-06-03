@@ -22,6 +22,10 @@ from remora.hir import (
     HIRIndex,
     HIRSlice,
     HIRTranspose,
+    HIRReshape,
+    HIRRavel,
+    HIRTake,
+    HIRDrop,
     HIRIota,
     HIRLambda,
     HIRLit,
@@ -112,16 +116,22 @@ class MLIRLowering:
                 HIRLet,
                 HIRCall,
                 HIRIndex,
+                HIRSlice,
                 HIRTranspose,
+                HIRReshape,
+                HIRRavel,
+                HIRTake,
+                HIRDrop,
                 HIRIota,
                 HIRArrayLit,
                 HIRMap,
                 HIRFold,
-            ),
-        ):
-            raise RemoraLoweringError(
-                "only scalar expressions, scalar lets/calls, full-rank indexing, transpose, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
-            )
+                ),
+                ):
+                raise RemoraLoweringError(
+                "only scalar expressions, scalar lets/calls, full-rank indexing, view operations, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
+                )
+
 
         text = _lower_main_module(main, functions)
         if export_output_descriptor:
@@ -278,17 +288,15 @@ def _inline_callable(callable_: object, env: dict[str, HIRExpr]) -> object:
 
 
 def _lower_main_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRTranspose | HIRIota | HIRArrayLit | HIRMap | HIRFold,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
         return _lower_tensor_let_module(node, functions)
     if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall)):
         return _lower_scalar_module(node, functions)
-    if isinstance(node, HIRIndex):
-        return _lower_index_module(node, functions)
-    if isinstance(node, HIRTranspose):
-        return _lower_transpose_module(node, functions)
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
+        return _lower_view_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):
@@ -352,10 +360,8 @@ def _lower_main_result_with_tensor_env(
         return _lower_iota_scalar_map_result(node, functions, tensor_env)
     if isinstance(node, HIRFold):
         return _lower_fold_result(node, functions, tensor_env)
-    if isinstance(node, HIRIndex):
-        return _lower_index_result(node, functions, tensor_env)
-    if isinstance(node, HIRTranspose):
-        return _lower_transpose_result(node, functions, tensor_env)
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
+        return _lower_view_result(node, functions, tensor_env)
     if isinstance(node, (HIRIota, HIRArrayLit)):
         code, value_name, value_type, _element_type = _lower_tensor_input(
             node,
@@ -742,6 +748,111 @@ def _lower_index_result(
     
     body = "\n".join(part for part in (array_code, result_line) if part)
     return body, "%result", result_mlir_type
+
+
+def _lower_view_module(
+    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> str:
+    code, result_value, result_type = _lower_view_result(node, functions, tensor_env)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(code)
+    return builder.render(result_value)
+
+
+def _lower_view_result(
+    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str]:
+    if isinstance(node, HIRIndex):
+        return _lower_index_result(node, functions, tensor_env)
+
+    # Use a common pattern for others: lower input tensor, then apply one MLIR op
+    input_code, input_name, input_type, _input_element_type = _lower_tensor_input(
+        node.array,
+        "view_in",
+        functions,
+        tensor_env,
+    )
+    result_type = type_to_mlir(node.result_type)
+    
+    if isinstance(node, HIRTranspose):
+        rank = node.result_type.rank
+        if rank < 2:
+            raise RemoraLoweringError("transpose expects an array of rank at least 2")
+        permutation = [1, 0, *range(2, rank)]
+        perm_attr = "[" + ", ".join(map(str, permutation)) + "]"
+        result_line = f"    %result = linalg.transpose ins({input_name} : {input_type}) outs(%view_empty : {result_type}) permutation = {perm_attr}"
+    
+    elif isinstance(node, HIRReshape):
+        # In MLIR 18, tensor.reshape usually requires a source and a shape tensor,
+        # but for static shapes we can often use tensor.collapse_shape or tensor.expand_shape
+        # or just a general tensor.reshape with literal attributes.
+        # Actually, tensor.reshape ins, shape_tensor is one way.
+        # But we want to avoid extra shape tensors.
+        # Let's try linalg.reshape-like logic or just emit tensor.reshape.
+        # Wait, MLIR 18 tensor.reshape: %0 = tensor.reshape %arg0(%shape) : (tensor<...>, tensor<...>) -> tensor<...>
+        # To avoid making a shape tensor, we can use tensor.collapse_shape/expand_shape
+        # if the reshape is just collapsing or expanding.
+        # For simplicity, we'll just materialize a tiny shape tensor for now.
+        rank = node.result_type.rank
+        shape_vals = ", ".join(str(d.value) for d in node.result_type.shape)
+        shape_code = f"    %reshape_shape = arith.constant dense<[{shape_vals}]> : tensor<{rank}xindex>"
+        input_code = f"{input_code}\n{shape_code}"
+        result_line = f"    %result = tensor.reshape {input_name}(%reshape_shape) : ({input_type}, tensor<{rank}xindex>) -> {result_type}"
+        
+    elif isinstance(node, HIRRavel):
+        rank = node.result_type.rank # always 1
+        total = node.result_type.shape[0].value
+        shape_code = f"    %ravel_shape = arith.constant dense<[{total}]> : tensor<1xindex>"
+        input_code = f"{input_code}\n{shape_code}"
+        result_line = f"    %result = tensor.reshape {input_name}(%ravel_shape) : ({input_type}, tensor<1xindex>) -> {result_type}"
+        
+    elif isinstance(node, (HIRTake, HIRDrop)):
+        # Both use tensor.extract_slice
+        array_type = _expr_result_type(node.array)
+        assert isinstance(array_type, ArrayType)
+        rank = array_type.rank
+        
+        if isinstance(node, HIRTake):
+            offsets = ["0"] * rank
+            sizes = [str(node.count)] + [str(d.value) for d in array_type.shape[1:]]
+        else:
+            offsets = [str(node.count)] + ["0"] * (rank - 1)
+            sizes = [str(array_type.shape[0].value - node.count)] + [str(d.value) for d in array_type.shape[1:]]
+        
+        strides = ["1"] * rank
+        result_line = (
+            f"    %result = tensor.extract_slice {input_name}"
+            f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
+            f"{input_type} to {result_type}"
+        )
+    else:
+         raise AssertionError(f"unhandled view node type {type(node).__name__}")
+
+    if "linalg.transpose" in result_line:
+         body = f"""{input_code}
+    %view_empty = tensor.empty() : {result_type}
+{result_line}
+"""
+    else:
+         body = f"""{input_code}
+{result_line}
+"""
+    return body.rstrip(), "%result", result_type
+
+
+def _lower_view_input(
+    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
+    functions: dict[str, HIRFunction],
+    prefix: str,
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str, str]:
+    code, result_value, result_type = _lower_view_result(node, functions, tensor_env)
+    element_type = type_to_mlir(node.result_type.element)
+    return code, result_value, result_type, element_type
 
 
 def _lower_transpose_module(
@@ -1384,8 +1495,8 @@ def _lower_tensor_input(
     if isinstance(node, HIRMap):
         return _lower_fold_input(node, functions, prefix, tensor_env=tensor_env)
 
-    if isinstance(node, HIRTranspose):
-        return _lower_transpose_input(node, functions, prefix, tensor_env=tensor_env)
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
+        return _lower_view_input(node, functions, prefix, tensor_env=tensor_env)
 
     raise RemoraLoweringError("only tensor literals and iota values lower as tensor inputs so far")
 
@@ -1433,6 +1544,14 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRIndex):
         return expr.result_type
     if isinstance(expr, HIRTranspose):
+        return expr.result_type
+    if isinstance(expr, HIRReshape):
+        return expr.result_type
+    if isinstance(expr, HIRRavel):
+        return expr.result_type
+    if isinstance(expr, HIRTake):
+        return expr.result_type
+    if isinstance(expr, HIRDrop):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 
