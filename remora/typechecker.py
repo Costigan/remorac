@@ -30,6 +30,7 @@ from remora.ast_nodes import (
     RightSectionExpr,
     ShapeExpr,
     SliceRange,
+    ReverseExpr,
     TakeExpr,
     TransposeExpr,
     DropExpr,
@@ -151,6 +152,13 @@ class TypedRavel:
 
 
 @dataclass(frozen=True)
+class TypedReverse:
+    expr: ReverseExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedTake:
     expr: TakeExpr
     count: TypedExpr
@@ -247,6 +255,7 @@ TypedExpr: TypeAlias = (
     | TypedTranspose
     | TypedReshape
     | TypedRavel
+    | TypedReverse
     | TypedTake
     | TypedDrop
     | TypedSlice
@@ -370,6 +379,8 @@ class TypeChecker:
             return self._infer_map(expr, env)
         if isinstance(expr, FoldExpr):
             return self._infer_fold(expr, env)
+        if isinstance(expr, ReverseExpr):
+            return self._infer_reverse(expr, env)
 
         raise RemoraTypeError(f"type checking for {type(expr).__name__} is deferred")
 
@@ -672,6 +683,12 @@ class TypeChecker:
             typed_array,
             ArrayType(typed_array.type.element, (StaticDim(total),))
         )
+
+    def _infer_reverse(self, expr: ReverseExpr, env: TypeEnv) -> TypedReverse:
+        typed_array = self._require_array(expr.array, "reverse", env)
+        if typed_array.type.rank < 1:
+            raise RemoraTypeError("reverse expects an array operand", expr.loc)
+        return TypedReverse(expr, typed_array, typed_array.type)
 
     def _infer_take(self, expr: TakeExpr, env: TypeEnv) -> TypedTake:
         typed_count = self.infer(expr.count, env)

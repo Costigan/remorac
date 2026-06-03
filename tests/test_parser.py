@@ -17,6 +17,7 @@ from remora.ast_nodes import (
     MapExpr,
     OperatorFuncExpr,
     Program,
+    ReverseExpr,
     ValDef,
     VarExpr,
 )
@@ -91,6 +92,14 @@ def test_iota_expression():
 
     assert isinstance(expr, IotaExpr)
     assert expr.size.value == 10
+
+
+def test_reverse_expression():
+    expr = parse_expr("reverse xs")
+
+    assert isinstance(expr, ReverseExpr)
+    assert isinstance(expr.array, VarExpr)
+    assert expr.array.name == "xs"
 
 
 def test_function_application_single_and_curried():

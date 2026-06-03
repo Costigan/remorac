@@ -549,12 +549,12 @@ Deferred pipeline/codegen work:
   rank-3 arrays through numpy rendering with Remora scalar formatting.
 - The interpreter covers the checked-in examples: scalar arithmetic, conditionals,
   top-level value definitions, direct top-level function calls, top-level
-  functions used as unary `map` callables, `iota`, `map`, `fold`, nested maps,
-  row reductions, rank-2/rank-3 literals, operator sections, and the narrow
-  direct local lambda application pattern.
+  functions used as unary `map` callables, `iota`, `map`, `fold`, `reverse`,
+  nested maps, row reductions, rank-2/rank-3 literals, operator sections, and
+  the narrow direct local lambda application pattern.
 - The compiled CPU executor covers the Dense Core acceptance subset and
-  additional tests for scalar values, vectors, matrices, rank-3 arrays, vector
-  sum, dot product, static `shape`/`rank`, and booleans.
+  additional tests for scalar values, vectors, matrices, rank-3 arrays,
+  `reverse`, vector sum, dot product, static `shape`/`rank`, and booleans.
 - `stdlib/prelude.rem` now contains the supported starter subset: `add`, `sub`,
   `mul`, `div`, `sum`, `product`, `scale`, and `dot`. These are loaded
   automatically by the compiler facade and CPU evaluator; the REPL initializes

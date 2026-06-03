@@ -74,6 +74,14 @@ def test_cpu_evaluates_indexing():
     assert let_item.value == 2
 
 
+def test_cpu_evaluates_reverse():
+    result = evaluate_source("reverse [1, 2, 3]")
+    matrix = evaluate_source("reverse [[1, 2], [3, 4]]")
+
+    np.testing.assert_array_equal(result.value, np.array([3, 2, 1], dtype=np.int32))
+    np.testing.assert_array_equal(matrix.value, np.array([[3, 4], [1, 2]], dtype=np.int32))
+
+
 def test_cpu_evaluates_row_reduction_map():
     source = "let xs = [[1.0, 2.0], [3.0, 4.0]] in map (\\row -> fold (+) 0.0 row) xs"
 

@@ -1,0 +1,98 @@
+You are working in the Remora compiler repository. Your goal is to continue implementation toward a highly performant Remora compiler and REPL that implement the full language and
+efficiently use multicore CPU and NVIDIA GPU backends.
+
+First read, in order:
+1. docs/IMPLEMENTATION_PLAN_UPDATE.md
+2. docs/IMPLEMENTATION_NOTES.md
+3. docs/MLIR_ARCHITECTURE.md
+4. docs/MLIR_TOOLCHAIN.md
+5. docs/MLIR_IMPLEMENTATION_PLAN.md
+6. docs/DENSE_CORE.md
+7. docs/ABI.md
+8. docs/BENCHMARK_BASELINES.json
+
+Then inspect the codebase, especially:
+- remora/pipeline.py
+- remora/runtime.py
+- remora/benchmark.py
+- remora/cli.py
+- remora/lowering.py
+- remora/compiler.py
+- remora/gpu_lowering.py
+- remora/codegen.py
+- remora/executor.py
+- tests/test_pipeline.py
+- tests/test_execution.py
+- tests/test_performance_smoke.py
+- tests/test_cli.py
+- tests/test_gpu_lowering.py
+- tests/test_executor.py
+
+Current implemented state:
+- Dense Core static subset is the current supported language.
+- CPU compiled execution is the default CLI target.
+- CPU threading is implemented with an experimental OpenMP path:
+  - `--cpu-threads N` / `REMORA_NUM_THREADS`
+  - `N > 1` selects threaded lowering.
+  - Requires LLVM 18-compatible libomp.
+  - Maps, scalar reductions, dot-shaped reductions, and row reductions now execute through `--cpu-threads > 1`.
+- CPU vectorization controls exist:
+  - `--cpu-vectorize`
+  - `--no-cpu-vectorize`
+  - runtime/benchmark option `cpu_vectorize`
+  - `CPU_VECTORIZED_PIPELINE` uses affine loop lowering plus `affine-super-vectorize`.
+  - It is experimental and single-threaded.
+  - Combining `--cpu-vectorize` with `--cpu-threads > 1` is deliberately rejected.
+- Benchmark harness exists:
+  - `remora-bench`
+  - emits JSON with compile/pipeline/execution timings, CPU thread count, vectorization mode, linalg counts, LLVM function count, and allocation count.
+  - `--baseline docs/BENCHMARK_BASELINES.json` enforces fusion/allocation ceilings.
+- GPU support is still narrow:
+  - descriptor-ABI CUDA path exists for rank-1 through rank-3 float32/int32 maps and rank-1 float32 reductions/dot-shaped reductions.
+  - Full GPU lowering and user-facing GPU CLI/REPL execution are not done.
+- Current tests were green after the last sprint:
+  - `350 passed, 14 skipped`
+  - MLIR validators passed
+  - known warning: `ptxas` missing
+
+Important constraints:
+- Do not revert unrelated work.
+- Untracked files `cnn.remora` and `uv.lock` may already exist; leave them alone unless explicitly needed.
+- Prefer small scoped changes with tests.
+- Preserve existing public behavior unless the implementation plan says otherwise.
+- If using shell tools, prefer `rg`.
+- Run validation before finishing:
+  - `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python -m compileall -q remora`
+  - `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python tools/validate_mlir_toolchain.py`
+  - `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run python tools/validate_mlir_pipeline.py`
+  - `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy uv run pytest -q`
+
+Recommended next sprint:
+1. Start buffer reuse / arena planning for intermediate tensors that survive fusion.
+2. Make benchmark baseline checks more useful:
+   - add a command or test that runs all baseline cases from `docs/BENCHMARK_BASELINES.json`;
+   - enforce `max_linalg_generic_after_fusion` and `max_allocation_count` for all cases;
+   - optionally add machine-local trend comparison later, but avoid flaky wall-clock gates for now.
+3. Broaden threaded/vectorized pipeline coverage to descriptor-input CPU function examples:
+   - `CPUFunctionExecutor.compile_source(..., cpu_threads=4)`
+   - `CPUFunctionExecutor.compile_source(..., cpu_vectorize=True)`
+   - maps, folds, dot, row-reduction-style function if supported.
+4. Document the buffer reuse plan in a new or existing doc section before implementing invasive allocator changes.
+5. Avoid broad language expansion until Dense Core CPU/GPU performance gates are stronger.
+
+A good first implementation target:
+- Add benchmark-suite support to `remora.benchmark`, for example:
+  - load `docs/BENCHMARK_BASELINES.json`;
+  - define or read source strings for each baseline case;
+  - run each case;
+  - return JSON list of results;
+  - fail with status 2 if any ceiling is exceeded.
+- Add tests in `tests/test_performance_smoke.py`.
+- Then add descriptor-input CPUFunctionExecutor tests for threaded and vectorized options if time permits.
+
+Be explicit in your final response:
+- summarize files changed;
+- report validation results;
+- mention any skipped tests or known toolchain warnings;
+- state the next remaining blocker.
+

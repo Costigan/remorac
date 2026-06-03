@@ -30,6 +30,7 @@ Implemented forms:
 - explicit numeric promotion from `int` to `float`
 - `iota` with a compile-time integer dimension
 - `shape` and `rank` as static metadata operations
+- `reverse` over statically shaped arrays, reversing the outermost axis
 - full-rank and static partial indexing
 - `map` over statically known callables
 - scalar `fold` over statically known accumulator callables

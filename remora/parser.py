@@ -34,6 +34,7 @@ from remora.ast_nodes import (
     ShapeExpr,
     SliceRange,
     SourceLoc,
+    ReverseExpr,
     TakeExpr,
     TransposeExpr,
     DropExpr,
@@ -138,6 +139,9 @@ class ASTBuilder(Transformer):
 
     def ravel_expr(self, items: list[Any]) -> RavelExpr:
         return RavelExpr(items[0], self._loc_from(items))
+
+    def reverse_expr(self, items: list[Any]) -> ReverseExpr:
+        return ReverseExpr(items[0], self._loc_from(items))
 
     def take_expr(self, items: list[Any]) -> TakeExpr:
         return TakeExpr(items[0], items[1], self._loc_from(items))

@@ -67,6 +67,7 @@ lambda_expr: LAMBDA NAME+ ARROW expr
           | "transpose" atom          -> transpose_expr
           | "reshape" primary atom    -> reshape_expr
           | "ravel" atom              -> ravel_expr
+          | "reverse" atom            -> reverse_expr
           | "take" primary atom       -> take_expr
           | "drop" primary atom       -> drop_expr
 

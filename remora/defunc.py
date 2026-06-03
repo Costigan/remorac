@@ -28,6 +28,7 @@ from remora.hir import (
     HIRProgram,
     HIRReshape,
     HIRRavel,
+    HIRReverse,
     HIRTake,
     HIRDrop,
     HIRVar,
@@ -134,6 +135,8 @@ class _Defunctionalizer:
             return HIRReshape(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRRavel):
             return HIRRavel(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
+        if isinstance(expr, HIRReverse):
+            return HIRReverse(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRTake):
             return HIRTake(expr.count, self._rewrite_expr(expr.array, scalar_env), expr.result_type)
         if isinstance(expr, HIRDrop):
@@ -215,6 +218,8 @@ def _free_vars(expr: HIRExpr) -> set[str]:
             | _free_vars(expr.init)
             | _free_vars(expr.array)
         )
+    if isinstance(expr, HIRReverse):
+        return _free_vars(expr.array)
     if isinstance(expr, HIRCall):
         return set().union(*(_free_vars(arg) for arg in expr.args))
     if isinstance(expr, HIRLambda):

@@ -47,6 +47,7 @@ from remora.typechecker import (
     TypedProgram,
     TypedRank,
     TypedRightSection,
+    TypedReverse,
     TypedShape,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, StaticDim
@@ -921,6 +922,12 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedLambda):
         return _lambda_callable(expr, env)
+
+    if isinstance(expr, TypedReverse):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("reverse expects an array value")
+        return np.flip(array, axis=0)
 
     if isinstance(expr, TypedApp):
         if isinstance(expr.func, TypedExprNode) and isinstance(expr.func.expr, VarExpr):

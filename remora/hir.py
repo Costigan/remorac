@@ -35,6 +35,7 @@ from remora.typechecker import (
     TypedRightSection,
     TypedShape,
     TypedSlice,
+    TypedReverse,
     TypedTake,
     TypedTranspose,
     TypedDrop,
@@ -176,6 +177,12 @@ class HIRRavel:
 
 
 @dataclass(frozen=True)
+class HIRReverse:
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRTake:
     count: int
     array: HIRExpr
@@ -234,6 +241,7 @@ HIRExpr: TypeAlias = (
     | HIRTranspose
     | HIRReshape
     | HIRRavel
+    | HIRReverse
     | HIRTake
     | HIRDrop
     | HIRIota
@@ -320,6 +328,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedRavel):
         return HIRRavel(lower_expr(expr.array), expr.type)
+
+    if isinstance(expr, TypedReverse):
+        return HIRReverse(lower_expr(expr.array), expr.type)
 
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore
@@ -485,6 +496,8 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRReshape):
         return expr.result_type
     if isinstance(expr, HIRRavel):
+        return expr.result_type
+    if isinstance(expr, HIRReverse):
         return expr.result_type
     if isinstance(expr, HIRTake):
         return expr.result_type

@@ -15,6 +15,7 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRProgram,
+    HIRReverse,
     HIRVar,
     lower_to_hir,
 )
@@ -35,6 +36,13 @@ def test_lowers_iota():
     assert isinstance(program.main, HIRIota)
     assert program.main.size == StaticDim(10)
     assert program.return_type == ArrayType(INT, (StaticDim(10),))
+
+
+def test_lowers_reverse():
+    program = lower_program_source("reverse [[1, 2], [3, 4]]")
+
+    assert isinstance(program.main, HIRReverse)
+    assert program.return_type == ArrayType(INT, (StaticDim(2), StaticDim(2)))
 
 
 def test_lowers_shape_and_rank_to_static_constants():
