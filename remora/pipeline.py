@@ -26,7 +26,7 @@ CPU_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-deallocation)",
+        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
         "convert-linalg-to-loops",
         "convert-scf-to-cf",
         "expand-strided-metadata",
@@ -43,7 +43,7 @@ CPU_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-deallocation)",
+        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
         "convert-linalg-to-affine-loops",
         "func.func(affine-super-vectorize{virtual-vector-size=4 vectorize-reductions})",
         "lower-affine",
@@ -62,7 +62,7 @@ CPU_THREADED_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-deallocation)",
+        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
         "convert-linalg-to-affine-loops",
         "func.func(affine-parallelize,affine-super-vectorize{virtual-vector-size=4 vectorize-reductions})",
         "lower-affine",
@@ -83,7 +83,7 @@ CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-deallocation)",
+        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
         "convert-scf-to-cf",
@@ -98,18 +98,18 @@ CPU_THREADED_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
-
 CPU_THREADED_PRE_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-deallocation)",
+        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
         "convert-linalg-to-parallel-loops",
         "convert-scf-to-openmp",
         "expand-strided-metadata",
         "lower-affine",
     ]
 ) + ")"
+
 
 CPU_THREADED_POST_PIPELINE = "builtin.module(" + ",".join(
     [

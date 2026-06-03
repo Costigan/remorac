@@ -514,6 +514,38 @@ def test_compiled_cpu_executes_slice_mixed():
     )
 
 
+def test_compiled_cpu_executes_reshape():
+    result = evaluate_source_compiled("reshape [2, 3] (iota 6)")
+    np.testing.assert_array_equal(
+        result.value,
+        np.arange(6, dtype=np.int32).reshape((2, 3)),
+    )
+
+
+def test_compiled_cpu_executes_ravel():
+    result = evaluate_source_compiled("ravel [[1, 2], [3, 4]]")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([1, 2, 3, 4], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_take():
+    result = evaluate_source_compiled("(take 2 [10, 20, 30, 40])")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([10, 20], dtype=np.int32),
+    )
+
+
+def test_compiled_cpu_executes_drop():
+    result = evaluate_source_compiled("(drop 2 [10, 20, 30, 40])")
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([30, 40], dtype=np.int32),
+    )
+
+
 def test_cpu_function_executor_runs_binary_descriptor_input_map():
     artifact = CPUFunctionExecutor.compile_source(
         "def add xs ys = map (+) xs ys",

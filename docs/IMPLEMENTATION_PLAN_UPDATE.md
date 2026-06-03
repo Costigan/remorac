@@ -428,4 +428,13 @@ Completed in the M4 GPU generalization sprint:
 5. Hardened the typechecker to support comparison and logical operators in unary sections and operator functions.
 6. Kept all validators and 374 tests green (test count adjusted during refactoring).
 
-The next sprint should focus on initial M3 buffer reuse implementation:
+Completed in the M3/M6 Arena and View Ops sprint:
+
+1. Added `Arena` allocator foundation in `remora.runtime` for both CPU and GPU targets.
+2. Integrated `buffer-hoisting` and `buffer-loop-hoisting` into all CPU MLIR pipelines to reduce dynamic allocation frequency.
+3. Updated `RemoraExecutor` and `CPUExecutor` to support optional arena-backed execution for results and intermediate data.
+4. Added surface syntax and full compiler support for `reshape`, `ravel`, `take`, and `drop`.
+5. Refactored the grammar to resolve precedence and ambiguity issues for view operations and parenthesized expressions.
+6. Kept all validators and 378 tests green.
+
+The next sprint should focus on full session-level arena management:
