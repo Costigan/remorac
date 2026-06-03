@@ -710,7 +710,20 @@ class TypeChecker:
             if expr.op in {"+", "-", "*"}:
                 result_type = common_numeric_type(cell_type, typed_arg.type)
                 return FuncType((cell_type,), result_type)
-            raise RemoraTypeError("operator section expects numeric operands", expr.loc)
+            if expr.op in {"==", "!=", "<", "<="}:
+                # For now, allow any scalar elements that match
+                # Wait, common_numeric_type would handle numeric promotion.
+                # If one is bool and other is not, it might fail.
+                if is_numeric(cell_type) and is_numeric(typed_arg.type):
+                    return FuncType((cell_type,), BOOL)
+                if cell_type == BOOL and typed_arg.type == BOOL:
+                    return FuncType((cell_type,), BOOL)
+                raise RemoraTypeError(f"operator {expr.op} expects matching types", expr.loc)
+            if expr.op in {"&&", "||"}:
+                self._require(cell_type, BOOL, expr.loc)
+                self._require(typed_arg.type, BOOL, expr.loc)
+                return FuncType((cell_type,), BOOL)
+            raise RemoraTypeError("operator section expects supported operands", expr.loc)
 
         if isinstance(expr, OperatorFuncExpr):
             raise RemoraTypeError("binary operator function is not a unary map callable", expr.loc)
@@ -767,6 +780,17 @@ class TypeChecker:
             self._require_numeric(expected_arg_type, expr.loc)
             self._require_numeric(typed_arg.type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
+        elif expr.op in {"==", "!=", "<", "<="}:
+            if is_numeric(expected_arg_type) and is_numeric(typed_arg.type):
+                self._require(expected_type.result, BOOL, expr.loc)
+            elif expected_arg_type == BOOL and typed_arg.type == BOOL:
+                self._require(expected_type.result, BOOL, expr.loc)
+            else:
+                 raise RemoraTypeError(f"operator {expr.op} expects matching types", expr.loc)
+        elif expr.op in {"&&", "||"}:
+            self._require(expected_arg_type, BOOL, expr.loc)
+            self._require(typed_arg.type, BOOL, expr.loc)
+            self._require(expected_type.result, BOOL, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} section is deferred", expr.loc)
         return TypedLeftSection(expr, typed_arg, expected_type)
@@ -783,6 +807,17 @@ class TypeChecker:
             self._require_numeric(typed_arg.type, expr.loc)
             self._require_numeric(expected_arg_type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
+        elif expr.op in {"==", "!=", "<", "<="}:
+            if is_numeric(expected_arg_type) and is_numeric(typed_arg.type):
+                self._require(expected_type.result, BOOL, expr.loc)
+            elif expected_arg_type == BOOL and typed_arg.type == BOOL:
+                self._require(expected_type.result, BOOL, expr.loc)
+            else:
+                 raise RemoraTypeError(f"operator {expr.op} expects matching types", expr.loc)
+        elif expr.op in {"&&", "||"}:
+            self._require(expected_arg_type, BOOL, expr.loc)
+            self._require(typed_arg.type, BOOL, expr.loc)
+            self._require(expected_type.result, BOOL, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} section is deferred", expr.loc)
         return TypedRightSection(expr, typed_arg, expected_type)

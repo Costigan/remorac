@@ -60,6 +60,11 @@ class RemoraExecutor:
                 device_inputs.append(ptr)
 
             output_ptr = self._rt.alloc(output.nbytes)
+            if meta.is_reduction:
+                # Initialize output to 0 (for atomicAdd)
+                # output.nbytes // 4 is the count of 32-bit words
+                self._rt.memset_d32(output_ptr, 0, output.nbytes // 4)
+
             input_descs = [
                 make_memref_descriptor(
                     ptr,
@@ -76,8 +81,15 @@ class RemoraExecutor:
                 output.dtype,
             )
             block_size = int(meta.block_size or 256)
-            element_count = max(1, int(np.prod(output.shape, dtype=np.int64)))
-            grid_size = int((element_count + block_size - 1) // block_size)
+            if meta.is_reduction and host_inputs:
+                # Base grid size on input size for better parallelism
+                input_count = int(np.prod(host_inputs[0].shape, dtype=np.int64))
+                grid_size = int((input_count + block_size - 1) // block_size)
+                # Limit grid size to avoid too many atomic operations if needed?
+                # For now, let's just go with it.
+            else:
+                element_count = max(1, int(np.prod(output.shape, dtype=np.int64)))
+                grid_size = int((element_count + block_size - 1) // block_size)
 
             kernel.launch(
                 (grid_size, 1, 1),

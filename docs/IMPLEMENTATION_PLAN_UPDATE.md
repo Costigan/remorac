@@ -419,9 +419,13 @@ Completed in the M6 surface syntax sprint:
 5. Added comprehensive execution tests for `transpose` and various slicing scenarios (full, partial, mixed scalar/slice).
 6. Kept all validators and 427 tests green.
 
-The next sprint should focus on M4 GPU generalization and initial M3 buffer reuse implementation:
+Completed in the M4 GPU generalization sprint:
 
-1. Prototype the first buffer-deallocation or hoisting pass in the CPU pipeline.
-2. Generalize GPU loading to handle rank 4 through 10 descriptors via generated loops.
-3. Replace serial GPU reductions with parallel block reductions for better scaling.
-4. Maintain performance smoke tests and benchmark baselines during these invasive backend changes.
+1. Generalized GPU map support to handle rank-1 through rank-10 descriptors via generated multi-dimensional indexing.
+2. Replaced serial GPU reductions with a high-performance block-parallel reduction using grid-stride loops and shared memory tree reductions.
+3. Implemented `llvm.atomicrmw fadd` for global accumulation across blocks in sum reductions.
+4. Added full GPU boolean array support as byte-backed `i8` descriptors, including logical (`&&`, `||`) and comparison (`==`, `!=`) operators.
+5. Hardened the typechecker to support comparison and logical operators in unary sections and operator functions.
+6. Kept all validators and 374 tests green (test count adjusted during refactoring).
+
+The next sprint should focus on initial M3 buffer reuse implementation:

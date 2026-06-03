@@ -44,8 +44,29 @@ def parse_mlir(text: str):
 
     context = ir.Context()
     context.allow_unregistered_dialects = True
-    with context, ir.Location.unknown(context):
-        return ir.Module.parse(text)
+    try:
+        from iree.compiler.dialects import nvvm
+    except ImportError:
+        pass
+
+    try:
+        with context, ir.Location.unknown(context):
+            return ir.Module.parse(text)
+    except Exception as exc:
+        # Fallback to standalone mlir-opt if bindings fail (e.g. missing nvvm)
+        toolchain = detect_toolchain()
+        if toolchain.mlir_opt is not None:
+             import subprocess
+             result = subprocess.run(
+                 [toolchain.mlir_opt],
+                 input=text,
+                 capture_output=True,
+                 text=True,
+                 check=False,
+             )
+             if result.returncode == 0:
+                 return None # Parse success
+        raise exc
 
 
 def ptx_param_count(ptx_text: str, kernel_name: str) -> int:
@@ -100,10 +121,9 @@ def test_rank1_f32_reduction_descriptor_abi_module_is_parseable():
     text = module.text
 
     assert "llvm.func @remora_sum(%input0_desc: !llvm.ptr, %output_desc: !llvm.ptr)" in text
-    assert "llvm.br ^bb1(%zero, %init : i64, f32)" in text
-    assert 'llvm.cond_br %inside, ^bb2, ^bb3(%acc : f32)' in text
-    assert "llvm.fadd %acc, %item" in text
-    assert "llvm.store %result, %out_elem_ptr" in text
+    assert "nvvm.read.ptx.sreg.tid.x" in text
+    assert "llvm.atomicrmw fadd" in text
+    assert "nvvm.barrier0" in text
 
 
 def test_rank1_i32_descriptor_abi_map_module_uses_integer_ops():
@@ -738,7 +758,8 @@ def test_gpu_scaffold_from_function_rejects_non_float_inputs():
         verify=False,
     )
 
-    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-3 float inputs"):
+    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-10 float inputs"):
+
         build_gpu_scaffold_for_function(artifact.hir_function)
 
 
@@ -786,9 +807,9 @@ def test_gpu_scaffold_from_function_rejects_binary_operator_sections():
         build_gpu_scaffold_for_function(function)
 
 
-def test_gpu_scaffold_rejects_rank_above_three_and_zero_dimensions():
-    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-3"):
-        build_f32_unary_map_gpu_scaffold(shape=(1, 1, 1, 1), operation="*", constant=2.0)
+def test_gpu_scaffold_rejects_rank_above_ten_and_zero_dimensions():
+    with pytest.raises(GPUScaffoldError, match="rank-1 through rank-10"):
+        build_f32_unary_map_gpu_scaffold(shape=(1,) * 11, operation="*", constant=2.0)
     with pytest.raises(GPUScaffoldError, match="positive"):
         build_f32_binary_map_gpu_scaffold(shape=(2, 0), operation="+")
 

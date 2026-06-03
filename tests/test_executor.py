@@ -3,13 +3,14 @@ import pytest
 
 from remora.codegen import CodegenUnavailable, KernelMeta
 from remora.compiler import (
+    compile_function_source,
     compile_function_source_to_direct_ptx,
     compile_function_source_to_mlir_gpu_ptx,
     compile_function_source_to_rank1_mlir_gpu_ptx,
 )
 from remora.executor import RemoraExecutor, RemoraExecutorError, compute_output_shape, kernel_output_dtype
 from remora.runtime import CUDARuntime, RuntimeUnavailable
-from remora.types import FLOAT, INT, ArrayType, StaticDim
+from remora.types import FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
 
 
 class FakeKernel:
@@ -277,14 +278,14 @@ def test_compile_function_source_to_direct_binary_rank2_and_rank3_map_ptx():
     assert rank3_kernels[0].num_inputs == 2
     assert rank3_kernels[0].output_shape == (2, 3, 4)
 
-
-def test_direct_ptx_rank4_maps_are_deferred_to_mlir_gpu_lowering():
-    with pytest.raises(CodegenUnavailable, match="rank-1 through rank-3"):
-        compile_function_source_to_direct_ptx(
+def test_rank11_maps_fail_in_typechecker():
+    # Remora Dense Core supports only up to rank 10
+    with pytest.raises(RemoraTypeError, match="expected numeric operands"):
+        shape = tuple(StaticDim(1) for _ in range(11))
+        compile_function_source(
             "def scale xs = map (* 2.0) xs",
             "scale",
-            (ArrayType(FLOAT, (StaticDim(1), StaticDim(1), StaticDim(1), StaticDim(1))),),
-            kernel_name="remora_scale4d",
+            (ArrayType(FLOAT, shape),),
         )
 
 
