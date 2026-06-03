@@ -169,6 +169,24 @@ def test_compiled_cpu_executes_scalar_fold_lambda_with_scalar_capture():
     assert result.value == 10
 
 
+def test_compiled_cpu_executes_scalar_fold_with_init_expression():
+    result = evaluate_source_compiled("fold (+) (1 - 1) (iota 4)")
+
+    assert result.value == 6
+
+
+def test_compiled_cpu_executes_scalar_fold_with_conditional_init():
+    result = evaluate_source_compiled("fold (+) (if true then 0 else 10) (iota 4)")
+
+    assert result.value == 6
+
+
+def test_compiled_cpu_executes_scalar_fold_with_float_init_expression():
+    result = evaluate_source_compiled("let xs = [1.0, 2.0, 3.0] in fold (+) (1.0 - 1.0) xs")
+
+    assert result.value == pytest.approx(6.0)
+
+
 def test_compiled_cpu_executes_static_shape():
     result = evaluate_source_compiled("shape [[1, 2], [3, 4]]")
 
