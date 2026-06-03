@@ -68,6 +68,28 @@ def test_compiled_cpu_executes_map_lambda_with_scalar_capture():
     np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
 
 
+def test_compiled_cpu_executes_map_lambda_with_top_level_scalar_capture():
+    result = evaluate_source_compiled("def scale = 2\nmap (\\x -> x * scale) (iota 4)")
+
+    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_compiled_cpu_executes_map_lambda_with_scalar_expression_capture():
+    result = evaluate_source_compiled(
+        "let scale = 1 + 1 in map (\\x -> x * scale) (iota 4)"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_compiled_cpu_executes_map_lambda_with_capture_in_conditional():
+    result = evaluate_source_compiled(
+        "let threshold = 2 in map (\\x -> if x < threshold then x else 0) (iota 4)"
+    )
+
+    np.testing.assert_array_equal(result.value, np.array([0, 1, 0, 0], dtype=np.int32))
+
+
 def test_compiled_cpu_executes_map_lambda_with_bool_capture():
     result = evaluate_source_compiled(
         "let keep = true in map (\\x -> (x < 2) && keep) (iota 4)"

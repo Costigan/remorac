@@ -40,6 +40,22 @@
     "expect_stdout": "[0, 2, 4, 6]\n"
   },
   {
+    "name": "bool_comparison_map",
+    "category": "supported",
+    "path": "pass/bool_comparison_map.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[true, true, false, false]\n"
+  },
+  {
+    "name": "bool_logic_map",
+    "category": "supported",
+    "path": "pass/bool_logic_map.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[true, false, true]\n"
+  },
+  {
     "name": "row_reduce",
     "category": "supported",
     "path": "pass/row_reduce.remora",
