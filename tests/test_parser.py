@@ -62,6 +62,13 @@ def test_map_expression_with_operator_section():
     assert isinstance(expr.array, VarExpr)
 
 
+def test_map_accepts_sliced_operand():
+    expr = parse_expr("map (* 2) xs[1:3]")
+
+    assert isinstance(expr, MapExpr)
+    assert isinstance(expr.array, IndexExpr)
+
+
 def test_binary_map_expression():
     expr = parse_expr("map (*) xs ys")
 

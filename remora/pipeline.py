@@ -308,7 +308,7 @@ def run_cpu_pipeline_text(
     vectorize: bool = False,
 ) -> str:
     if threaded and vectorize:
-        return run_external_pipeline_text(mlir_text, CPU_THREADED_VECTORIZED_PIPELINE, toolchain=toolchain)
+        raise PipelineUnavailable("threaded CPU vectorization is not supported yet")
     if vectorize:
         return run_external_pipeline_text(mlir_text, CPU_VECTORIZED_PIPELINE, toolchain=toolchain)
     if not threaded:
