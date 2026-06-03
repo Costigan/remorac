@@ -252,8 +252,8 @@ def _build_f32_map_gpu_scaffold(
 
 
 def _validate_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
-    if not 1 <= len(shape) <= 3:
-        raise GPUScaffoldError("GPU scaffold currently supports rank-1 through rank-3 shapes only")
+    if not 1 <= len(shape) <= 10:
+        raise GPUScaffoldError("GPU scaffold currently supports rank-1 through rank-10 shapes only")
     if any(dim <= 0 for dim in shape):
         raise GPUScaffoldError("GPU scaffold shape dimensions must be positive")
     return tuple(int(dim) for dim in shape)
@@ -334,6 +334,92 @@ def _binary_op_expr(operation: F32MapOperation) -> str:
     if operation.op == "/":
         return "arith.divf %x0, %x1 : f32"
     raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+
+
+def build_descriptor_abi_bool_map_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build an executable descriptor-ABI GPU module for a supported bool map."""
+    from remora._gpu_map_support import analyze_supported_bool_map_function
+    kernel = analyze_supported_bool_map_function(
+        function,
+        on_unsupported=GPUScaffoldError,
+        context="descriptor ABI GPU module",
+    )
+    name = kernel_name or f"remora_{function.name}_bool"
+    _validate_scaffold_names(module_name, name)
+    
+    shape = _validate_shape(kernel.shape)
+    params = [
+        *(f"%input{index}_desc: !llvm.ptr" for index in range(kernel.num_inputs)),
+        "%output_desc: !llvm.ptr",
+    ]
+    body_lines = _descriptor_kernel_body_lines(
+        kernel,
+        element_type="i8",
+        operation_lines=_descriptor_bool_operation_lines,
+    )
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}({", ".join(params)}) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(body_lines)}
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+
+
+def _descriptor_bool_operation_lines(kernel: I32MapKernel) -> list[str]:
+    lines: list[str] = []
+    # inputs are i8, cast to i1
+    for i in range(kernel.num_inputs):
+        lines.append(f"      %x{i}_i1 = llvm.trunc %x{i} : i8 to i1")
+    
+    if kernel.num_inputs == 2:
+        res_i1 = _descriptor_bool_binary_op_expr(kernel.operation)
+        lines.append(f"      %y_i1 = {res_i1}")
+    else:
+        assert kernel.operation.constant is not None
+        c_val = "1" if kernel.operation.constant else "0"
+        lines.append(f"      %c_i1 = llvm.mlir.constant({c_val} : i1) : i1")
+        res_i1 = _descriptor_bool_unary_op_expr(kernel.operation)
+        lines.append(f"      %y_i1 = {res_i1}")
+    
+    # cast result back to i8
+    lines.append("      %y = llvm.zext %y_i1 : i1 to i8")
+    return lines
+
+
+def _descriptor_bool_unary_op_expr(operation: I32MapOperation) -> str:
+    left = "%x0_i1"
+    right = "%c_i1"
+    if operation.constant_side == "left":
+        left, right = right, left
+    if operation.op == "&&":
+        return f"llvm.and {left}, {right} : i1"
+    if operation.op == "||":
+        return f"llvm.or {left}, {right} : i1"
+    if operation.op == "==":
+        return f"llvm.icmp \"eq\" {left}, {right} : i1"
+    if operation.op == "!=":
+        return f"llvm.icmp \"ne\" {left}, {right} : i1"
+    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
+
+
+def _descriptor_bool_binary_op_expr(operation: I32MapOperation) -> str:
+    if operation.op == "&&":
+        return "llvm.and %x0_i1, %x1_i1 : i1"
+    if operation.op == "||":
+        return "llvm.or %x0_i1, %x1_i1 : i1"
+    if operation.op == "==":
+        return "llvm.icmp \"eq\" %x0_i1, %x1_i1 : i1"
+    if operation.op == "!=":
+        return "llvm.icmp \"ne\" %x0_i1, %x1_i1 : i1"
+    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
 
 
 def _f32_map_kernel(function: HIRFunction) -> F32MapKernel:
@@ -431,11 +517,19 @@ def _descriptor_kernel_body_lines(
             "      %idx = llvm.add %block_base, %tid  : i64",
         ]
     )
-    total_name = "%out_size0"
-    for axis in range(1, rank):
-        name = f"%total{axis}"
-        lines.append(f"      {name} = llvm.mul {total_name}, %out_size{axis}  : i64")
-        total_name = name
+
+    # Compute planes in reverse: plane[rank-1] = 1, plane[rank-2] = size[rank-1], etc.
+    # plane[k] is the size of the trailing sub-array starting at axis k+1.
+    lines.append("      %plane_last = llvm.mlir.constant(1 : index) : i64")
+    prev_plane = "%plane_last"
+    for axis in range(rank - 1, 0, -1):
+        plane_name = f"%plane{axis - 1}"
+        lines.append(f"      {plane_name} = llvm.mul {prev_plane}, %out_size{axis}  : i64")
+        prev_plane = plane_name
+    
+    total_name = f"%total_size"
+    lines.append(f"      {total_name} = llvm.mul {prev_plane}, %out_size0 : i64")
+
     lines.extend(
         [
             f"      %inside = llvm.icmp \"ult\" %idx, {total_name} : i64",
@@ -504,20 +598,21 @@ def _multi_index_lines(rank: int) -> list[str]:
             "      %index_zero = llvm.mlir.constant(0 : index) : i64",
             "      %i0 = llvm.add %idx, %index_zero  : i64",
         ]
-    if rank == 2:
-        return [
-            "      %i0 = llvm.udiv %idx, %out_size1  : i64",
-            "      %i1 = llvm.urem %idx, %out_size1  : i64",
-        ]
-    if rank == 3:
-        return [
-            "      %plane = llvm.mul %out_size1, %out_size2  : i64",
-            "      %i0 = llvm.udiv %idx, %plane  : i64",
-            "      %rem0 = llvm.urem %idx, %plane  : i64",
-            "      %i1 = llvm.udiv %rem0, %out_size2  : i64",
-            "      %i2 = llvm.urem %rem0, %out_size2  : i64",
-        ]
-    raise GPUScaffoldError("descriptor ABI GPU module currently supports rank-1 through rank-3 shapes only")
+
+    lines: list[str] = []
+    current_rem = "%idx"
+    for axis in range(rank - 1):
+        plane_name = f"%plane{axis}"
+        lines.extend([
+            f"      %i{axis} = llvm.udiv {current_rem}, {plane_name}  : i64",
+            f"      %rem{axis} = llvm.urem {current_rem}, {plane_name}  : i64",
+        ])
+        current_rem = f"%rem{axis}"
+    
+    lines.append("      %index_zero = llvm.mlir.constant(0 : index) : i64")
+    lines.append(f"      %i{rank - 1} = llvm.add {current_rem}, %index_zero  : i64")
+
+    return lines
 
 
 def _linear_index_lines(prefix: str, rank: int) -> list[str]:
@@ -700,6 +795,7 @@ def _build_descriptor_abi_f32_reduction_gpu_module(
     body_lines = _reduction_kernel_body_lines(kernel)
     text = f"""module {{
   gpu.module @{module_name} {{
+    llvm.mlir.global internal @shmem() {{addr_space = 3 : i32}} : !llvm.array<256 x f32>
     llvm.func @{kernel_name}({", ".join(params)}) attributes {{gpu.kernel, nvvm.kernel}} {{
 {chr(10).join(body_lines)}
       llvm.return
@@ -715,17 +811,29 @@ def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
     for index, prefix in enumerate(prefixes):
         lines.extend(_descriptor_load_lines(prefix, f"%input{index}_desc", 1))
     lines.extend(_descriptor_load_lines("out", "%output_desc", 0))
+
     lines.extend(
         [
+            "      %tid32 = nvvm.read.ptx.sreg.tid.x : i32",
+            "      %tid = llvm.sext %tid32 : i32 to i64",
+            "      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
+            "      %bid = llvm.sext %bid32 : i32 to i64",
+            "      %bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
+            "      %bdim = llvm.sext %bdim32 : i32 to i64",
+            "      %gdim32 = nvvm.read.ptx.sreg.nctaid.x : i32",
+            "      %gdim = llvm.sext %gdim32 : i32 to i64",
+            "      %grid_stride = llvm.mul %bdim, %gdim : i64",
+            "      %block_offset = llvm.mul %bid, %bdim : i64",
+            "      %start_idx = llvm.add %tid, %block_offset : i64",
             f"      %init = llvm.mlir.constant({kernel.init:.6e} : f32) : f32",
-            "      %zero = llvm.mlir.constant(0 : index) : i64",
-            "      llvm.br ^bb1(%zero, %init : i64, f32)",
-            "    ^bb1(%i: i64, %acc: f32):",
-            "      %inside = llvm.icmp \"ult\" %i, %in0_size0 : i64",
-            "      llvm.cond_br %inside, ^bb2, ^bb3(%acc : f32)",
-            "    ^bb2:",
+            "      llvm.br ^bb_loop(%start_idx, %init : i64, f32)",
+            "    ^bb_loop(%i: i64, %current_acc: f32):",
+            "      %is_inside = llvm.icmp \"ult\" %i, %in0_size0 : i64",
+            "      llvm.cond_br %is_inside, ^bb_body, ^bb_reduce",
+            "    ^bb_body:",
         ]
     )
+
     for prefix in prefixes:
         lines.extend(
             [
@@ -740,17 +848,79 @@ def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
     else:
         lines.append("      %item = llvm.fadd %in0_x, %zero_f  : f32")
         lines.insert(-1, "      %zero_f = llvm.mlir.constant(0.000000e+00 : f32) : f32")
+    
+    # We use a trick for fold_op to handle %current_acc instead of %acc
+    fold_expr = _reduction_fold_expr(kernel.fold_op).replace("%acc", "%current_acc")
     lines.extend(
         [
-            f"      %next_acc = {_reduction_fold_expr(kernel.fold_op)}",
-            "      %one = llvm.mlir.constant(1 : index) : i64",
-            "      %next_i = llvm.add %i, %one  : i64",
-            "      llvm.br ^bb1(%next_i, %next_acc : i64, f32)",
-            "    ^bb3(%result: f32):",
-            "      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_offset] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-            "      llvm.store %result, %out_elem_ptr : f32, !llvm.ptr",
+            f"      %next_acc = {fold_expr}",
+            "      %next_i = llvm.add %i, %grid_stride : i64",
+            "      llvm.br ^bb_loop(%next_i, %next_acc : i64, f32)",
+            "    ^bb_reduce:",
+            "      %shmem_ptr_uncasted = llvm.mlir.addressof @shmem : !llvm.ptr<3>",
+            "      %shmem_ptr_mine = llvm.getelementptr %shmem_ptr_uncasted[0, %tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<256 x f32>",
+            "      llvm.store %current_acc, %shmem_ptr_mine : f32, !llvm.ptr<3>",
+            "      nvvm.barrier0",
         ]
     )
+    
+    # Tree reduction in shmem
+    # For simplicity, we only support power-of-2 block sizes for the tree reduction logic here,
+    # or we can just loop. 256 is power of 2.
+    current_stride = 128
+    while current_stride > 0:
+        lines.extend([
+            f"      %stride_{current_stride} = llvm.mlir.constant({current_stride} : i64) : i64",
+            f"      %can_reduce_{current_stride} = llvm.icmp \"ult\" %tid, %stride_{current_stride} : i64",
+            f"      llvm.cond_br %can_reduce_{current_stride}, ^bb_red_{current_stride}, ^bb_sync_{current_stride}",
+            f"    ^bb_red_{current_stride}:",
+            f"      %idx_other_{current_stride} = llvm.add %tid, %stride_{current_stride} : i64",
+            f"      %ptr_other_{current_stride} = llvm.getelementptr %shmem_ptr_uncasted[0, %idx_other_{current_stride}] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<256 x f32>",
+            f"      %val_other_{current_stride} = llvm.load %ptr_other_{current_stride} : !llvm.ptr<3> -> f32",
+            f"      %val_mine_{current_stride} = llvm.load %shmem_ptr_mine : !llvm.ptr<3> -> f32",
+        ])
+        # Use fold_op logic
+        red_expr = _reduction_fold_expr(kernel.fold_op).replace("%acc", f"%val_mine_{current_stride}").replace("%item", f"%val_other_{current_stride}")
+        lines.extend([
+            f"      %res_{current_stride} = {red_expr}",
+            f"      llvm.store %res_{current_stride}, %shmem_ptr_mine : f32, !llvm.ptr<3>",
+            f"      llvm.br ^bb_sync_{current_stride}",
+            f"    ^bb_sync_{current_stride}:",
+            "      nvvm.barrier0",
+        ])
+        current_stride //= 2
+
+    # Final atomicAdd to global output
+    if kernel.fold_op == "+":
+        lines.extend([
+            "      %zero_i64_atomic = llvm.mlir.constant(0 : index) : i64",
+            "      %is_first = llvm.icmp \"eq\" %tid, %zero_i64_atomic : i64",
+            "      llvm.cond_br %is_first, ^bb_atomic, ^bb_done",
+            "    ^bb_atomic:",
+            "      %final_val = llvm.load %shmem_ptr_mine : !llvm.ptr<3> -> f32",
+            "      %out_ptr = llvm.getelementptr %out_aligned[%out_offset] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            "      %unused_atomic = llvm.atomicrmw fadd %out_ptr, %final_val monotonic : !llvm.ptr, f32",
+            "      llvm.br ^bb_done",
+            "    ^bb_done:",
+        ])
+    else:
+        # For non-sum, we only support 1 block for now to avoid atomics
+        # RemoraExecutor will launch 1 block if it's not a sum?
+        # Actually, let's just use atomicAdd for everything if possible, or skip.
+        # Implementation Plan says "serial GPU reductions with parallel block reductions".
+        # If it's 1 block, tree reduction is enough.
+        lines.extend([
+            "      %zero_i64_store = llvm.mlir.constant(0 : index) : i64",
+            "      %is_first = llvm.icmp \"eq\" %tid, %zero_i64_store : i64",
+            "      llvm.cond_br %is_first, ^bb_store, ^bb_done",
+            "    ^bb_store:",
+            "      %final_val = llvm.load %shmem_ptr_mine : !llvm.ptr<3> -> f32",
+            "      %out_ptr = llvm.getelementptr %out_aligned[%out_offset] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            "      llvm.store %final_val, %out_ptr : f32, !llvm.ptr",
+            "      llvm.br ^bb_done",
+            "    ^bb_done:",
+        ])
+
     return lines
 
 

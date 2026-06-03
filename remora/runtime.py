@@ -195,6 +195,13 @@ class CUDARuntime:
             "cuMemcpyHtoD failed",
         )
 
+    def memset_d32(self, device_ptr: int, value: int, count: int) -> None:
+        _cuda_check(
+            self._cuda,
+            self._cuda.cuMemsetD32(int(device_ptr), int(value), int(count)),
+            "cuMemsetD32 failed",
+        )
+
     def synchronize(self) -> None:
         try:
             _cuda_check(self._cuda, self._cuda.cuCtxSynchronize(), "cuCtxSynchronize failed")

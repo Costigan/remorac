@@ -15,11 +15,13 @@ import tempfile
 from typing import Any
 
 from remora._gpu_map_support import (
+    analyze_supported_bool_map_function,
+    analyze_supported_f32_map_function,
+    analyze_supported_i32_map_function,
     F32MapKernel,
     F32MapOperation,
     I32MapKernel,
-    analyze_supported_f32_map_function,
-    analyze_supported_i32_map_function,
+    I32MapOperation,
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFunction
@@ -31,6 +33,7 @@ from remora.pipeline import (
 )
 from remora.gpu_lowering import (
     GPUScaffoldError,
+    build_descriptor_abi_bool_map_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_i32_map_gpu_module,
@@ -53,6 +56,7 @@ class KernelMeta:
     output_elem_types: list[str]
     output_shape: tuple[int, ...] | None = None
     output_dtype: str | None = None
+    is_reduction: bool = False
 
 
 def generate_ptx(
@@ -79,7 +83,6 @@ def generate_ptx(
             toolchain.iree_compile,
             "--iree-hal-target-backends=cuda",
             f"--iree-cuda-target={sm_version}",
-            f"--iree-cuda-target-features={ptx_features}",
             "--iree-hal-dump-executable-files-to",
             temp_dir,
             "--output-format=vm-asm",
@@ -155,9 +158,9 @@ def generate_mlir_descriptor_abi_ptx(
     try:
         map_kernel = _direct_f32_map_kernel(function)
         rank = len(map_kernel.shape)
-        if rank not in (1, 2, 3):
+        if rank < 1 or rank > 10:
             raise CodegenUnavailable(
-                "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 f32 maps only"
+                "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-10 f32 maps only"
             )
         if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
             raise CodegenUnavailable(
@@ -183,9 +186,9 @@ def generate_mlir_descriptor_abi_ptx(
         try:
             map_kernel = _direct_i32_map_kernel(function)
             rank = len(map_kernel.shape)
-            if rank not in (1, 2, 3):
+            if rank < 1 or rank > 10:
                 raise CodegenUnavailable(
-                    "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-3 i32 maps only"
+                    "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-10 i32 maps only"
                 )
             if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
                 raise CodegenUnavailable(
@@ -209,21 +212,41 @@ def generate_mlir_descriptor_abi_ptx(
             )
         except CodegenUnavailable as i32_map_error:
             try:
-                gpu_module = build_descriptor_abi_f32_reduction_gpu_module(function, kernel_name=name)
-                num_inputs = len(function.params)
+                map_kernel = analyze_supported_bool_map_function(
+                    function,
+                    on_unsupported=CodegenUnavailable,
+                    context="MLIR-derived descriptor-ABI PTX",
+                )
+                gpu_module = build_descriptor_abi_bool_map_gpu_module(function, kernel_name=name)
                 meta = KernelMeta(
                     name=name,
                     grid_dims=1,
-                    block_size=1,
-                    num_inputs=num_inputs,
+                    block_size=0,
+                    num_inputs=map_kernel.num_inputs,
                     num_outputs=1,
-                    input_elem_types=["f32"] * num_inputs,
-                    output_elem_types=["f32"],
-                    output_shape=(),
-                    output_dtype="float32",
+                    input_elem_types=["i8"] * map_kernel.num_inputs,
+                    output_elem_types=["i8"],
+                    output_shape=map_kernel.shape,
+                    output_dtype="bool",
                 )
-            except GPUScaffoldError as reduction_error:
-                raise CodegenUnavailable(str(f32_map_error)) from reduction_error
+            except CodegenUnavailable as bool_map_error:
+                try:
+                    gpu_module = build_descriptor_abi_f32_reduction_gpu_module(function, kernel_name=name)
+                    num_inputs = len(function.params)
+                    meta = KernelMeta(
+                        name=name,
+                        grid_dims=1,
+                        block_size=0,
+                        num_inputs=num_inputs,
+                        num_outputs=1,
+                        input_elem_types=["f32"] * num_inputs,
+                        output_elem_types=["f32"],
+                        output_shape=(),
+                        output_dtype="float32",
+                        is_reduction=True,
+                    )
+                except GPUScaffoldError as reduction_error:
+                    raise CodegenUnavailable(str(bool_map_error)) from reduction_error
 
     device_module = extract_gpu_module_body_as_module(gpu_module.text)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
@@ -420,9 +443,10 @@ def _unary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
 
 def _binary_f32_map_ptx(
     kernel_name: str,
-    kernel: _F32MapKernel,
+    kernel: F32MapKernel,
     block_size: int,
 ) -> str:
+
     index_lines = _binary_f32_map_index_lines(kernel.shape)
     op_line = _binary_f32_ptx_op(kernel.operation)
     return f""".version 6.0

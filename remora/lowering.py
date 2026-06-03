@@ -1706,28 +1706,40 @@ def _lower_primitive_callable_result(
     input_type: str,
     result_type: str,
 ) -> tuple[list[str], str]:
+    # For comparisons, we need the common numeric type of operands
+    op_type = result_type
+    if callable_.op in {"==", "!=", "<", "<="}:
+        # In unary map section, result_type is bool, but operands have cell_type
+        # We need to know what the operands are.
+        # Actually, input_type is the cell type.
+        op_type = input_type
+
     left = _lower_callable_operand(
-        callable_.left_arg, "%left", result_type
+        callable_.left_arg, "%left", op_type
     )
     right = _lower_callable_operand(
-        callable_.right_arg, "%right", result_type
+        callable_.right_arg, "%right", op_type
     )
     if callable_.left_arg is None:
         left.value = input_name
-        left.lines = _cast_if_needed(input_name, input_type, result_type, "%left_cast")
+        left.lines = _cast_if_needed(input_name, input_type, op_type, "%left_cast")
         if left.lines:
             left.value = "%left_cast"
     if callable_.right_arg is None:
         right.value = input_name
-        right.lines = _cast_if_needed(input_name, input_type, result_type, "%right_cast")
+        right.lines = _cast_if_needed(input_name, input_type, op_type, "%right_cast")
         if right.lines:
             right.value = "%right_cast"
 
-    op = _arith_op(callable_.op, result_type)
+    op = _arith_op(callable_.op, op_type)
+    
+    # Correct arith.cmpi syntax needs a comma
+    sep = ", " if "cmp" in op else " "
+    
     lines = [
         *left.lines,
         *right.lines,
-        f"      %result = {op} {left.value}, {right.value} : {result_type}",
+        f"      %result = {op}{sep}{left.value}, {right.value} : {op_type}",
     ]
     return lines, "%result"
 
@@ -1747,10 +1759,11 @@ def _lower_fold_callable_body(
     left_value = "%fold_left" if left_lines else acc_name
     right_value = "%fold_right" if right_lines else input_name
     op = _arith_op(callable_.op, result_type)
+    sep = ", " if "cmp" in op else " "
     lines = [
         *left_lines,
         *right_lines,
-        f"      %fold_result = {op} {left_value}, {right_value} : {result_type}",
+        f"      %fold_result = {op}{sep}{left_value}, {right_value} : {result_type}",
         f"      linalg.yield %fold_result : {result_type}",
     ]
     return "\n".join(lines)
@@ -1777,6 +1790,9 @@ def _lower_callable_operand(
         value = f"{float(expr.value):.6e}"
     elif result_type == "i32":
         value = str(int(expr.value))
+    elif result_type == "i1":
+        value = "true" if expr.value else "false"
+        return _Operand(name, [f"      {name} = arith.constant {value}"], result_type)
     else:
         raise RemoraLoweringError(f"cannot lower primitive operand of type {result_type}")
     return _Operand(name, [f"      {name} = arith.constant {value} : {result_type}"], result_type)
@@ -1792,9 +1808,34 @@ def _cast_if_needed(value_name: str, from_type: str, to_type: str, result_name: 
 
 def _arith_op(op: str, result_type: str) -> str:
     if result_type == "f32":
-        ops = {"+": "arith.addf", "-": "arith.subf", "*": "arith.mulf", "/": "arith.divf"}
+        ops = {
+            "+": "arith.addf",
+            "-": "arith.subf",
+            "*": "arith.mulf",
+            "/": "arith.divf",
+            "==": "arith.cmpf oeq",
+            "!=": "arith.cmpf une",
+            "<": "arith.cmpf olt",
+            "<=": "arith.cmpf ole",
+        }
     elif result_type == "i32":
-        ops = {"+": "arith.addi", "-": "arith.subi", "*": "arith.muli"}
+        ops = {
+            "+": "arith.addi",
+            "-": "arith.subi",
+            "*": "arith.muli",
+            "/": "arith.divsi",
+            "==": "arith.cmpi eq",
+            "!=": "arith.cmpi ne",
+            "<": "arith.cmpi slt",
+            "<=": "arith.cmpi sle",
+        }
+    elif result_type == "i1":
+        ops = {
+            "&&": "arith.andi",
+            "||": "arith.ori",
+            "==": "arith.cmpi eq",
+            "!=": "arith.cmpi ne",
+        }
     else:
         raise RemoraLoweringError(f"primitive result type {result_type} is deferred")
     try:
