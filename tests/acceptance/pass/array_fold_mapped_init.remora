@@ -1,0 +1,3 @@
+let init = map (* 0) (iota 2) in
+let xs = [[1, 2], [3, 4]] in
+fold (+) init xs

@@ -505,6 +505,21 @@ def test_lowers_fold_over_rank_2_array_literal():
     assert "tensor.extract" not in lowered.text
 
 
+def test_lowers_array_cell_fold_with_mapped_init():
+    program = hir_from_source(
+        "let init = map (* 0) (iota 2) in "
+        "let xs = [[1, 2], [3, 4]] in "
+        "fold (+) init xs"
+    )
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2xi32>" in lowered.text
+    assert lowered.text.count("linalg.generic") == 3
+    assert 'iterator_types = ["reduction", "parallel"]' in lowered.text
+    assert "arith.muli" in lowered.text
+    assert "arith.addi" in lowered.text
+
+
 def test_lowers_fold_over_rank_3_array_literal():
     program = hir_from_source(
         "let init = [[0], [0]] in "
