@@ -62,6 +62,23 @@ def test_compiled_cpu_executes_scalar_if_inside_map():
     np.testing.assert_array_equal(result.value, np.array([0, 1, 0, 0], dtype=np.int32))
 
 
+def test_compiled_cpu_executes_map_lambda_with_scalar_capture():
+    result = evaluate_source_compiled("let scale = 2 in map (\\x -> x * scale) (iota 4)")
+
+    np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6], dtype=np.int32))
+
+
+def test_compiled_cpu_executes_map_lambda_with_bool_capture():
+    result = evaluate_source_compiled(
+        "let keep = true in map (\\x -> (x < 2) && keep) (iota 4)"
+    )
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([True, True, False, False], dtype=np.bool_),
+    )
+
+
 def test_compiled_cpu_executes_vector_map():
     result = evaluate_source_compiled("map (* 2.0) (iota 5)")
 

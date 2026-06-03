@@ -32,6 +32,14 @@
     "expect_stdout": "[0, 2, 4, 6]\n"
   },
   {
+    "name": "scalar_capture_map",
+    "category": "supported",
+    "path": "pass/scalar_capture_map.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[0, 2, 4, 6]\n"
+  },
+  {
     "name": "row_reduce",
     "category": "supported",
     "path": "pass/row_reduce.remora",
