@@ -1,0 +1,124 @@
+;; To support the mathematics from the paper, we define a standard
+;; matrix/vector index-based sum-reduction and element-wise scalar
+;; additions.
+
+#lang remora
+
+;; Vector inner-product sum reduction (reduces an array to a scalar)
+(define sum
+  (fn [([x 0])] ; Expects a rank-0 scalar cell
+    ;; Combines all cells along the principal axes into an atomic sum
+    (reduce + 0 x)))
+
+;; Element-wise logistic function: 1 / (1 + e^-x)
+(define sigmoid
+  (fn [([in 0])] ; Expects rank-0 scalar cell (shape-preserving) [cite: 132]
+    (/ 1.0 (+ 1.0 (exp (- in))))))
+
+2. Forward Propagation
+A. Single-Channel Convolution (conv)The paper specifies conv by computing an inner-product over the overlapping windows of the input tensor I shifted by an offset index vector ov up to the shape of kernel k. In Remora, we can cleanly extract sub-tensors using windowing or index mapping over the slice bounding box $[ \text{shape}(I) - \text{shape}(k) + 1 ]$.
+
+;; conv expects an input matrix and a kernel matrix (both Rank 2) [cite: 120, 125]
+(define conv
+  (fn [([I 2] [k 2])]
+    (let ([I-shape (shape I)]
+          [k-shape (shape k)])
+      ;; Output bounding dimensions: shape(I) - shape(k) + 1 
+      (let ([out-shape (+ 1 (- I-shape k-shape))])
+        ;; Generate an array matching out-shape 
+        (array out-shape
+          (fn [iv] ; For each coordinate iv in the output matrix 
+            (sum
+              ;; Pointwise multiply kernel elements with shifted window slices [cite: 123]
+              (* k (slice I iv k-shape)))))))))
+
+B. Multiple Convolution with Biases (mconv)
+The paper uses mconv to handle multi-filter setups and apply individual vector biases. Because Remora is rank-polymorphic, we do not need explicit iteration : if we let mconv expect an input matrix, an item in the kernel array, and an item in the bias array, passing higher-order tensors will automatically map them.
+
+;; mconv computes multi-channel convolutions and adjusts biases 
+;; We declare it expecting a Rank 2 input, Rank 2 filter, and Rank 0 scalar bias cell
+(define mconv
+  (fn [([I 2] [k 2] [b 0])]
+    ;; Compute the raw convolution window matrix and add the scalar bias element-wise [cite: 124, 129]
+    (+ (conv I k) b)))
+
+Note on Remora execution: If I is a [28, 28] image, k is a [6, 5, 5] tensor, and b is a [6] vector, calling (mconv I k b) automatically scales along the outer dimension of size 6 , returning a [6, 24, 24] output tensor without explicit loops.
+
+;; Basic 2x2 average pool on a single matrix cell
+(define avgpool-matrix
+  (fn [([in 2])]
+    (let ([out-shape (/ (shape in) 2)]) ; Output shape is halved [cite: 145]
+      (array out-shape
+        (fn [iv]
+          ;; Extract 2x2 matrix cell matching forward step [cite: 145]
+          (/ (sum (slice in (* iv 2) [2 2])) 4.0))))))
+
+;; Polymorphic wrapper targeting the 2 innermost spatial axes [cite: 147]
+(define avgpool
+  (fn [([in 2])]
+    (avgpool-matrix in)))
+
+3. Backward Propagation
+A. Backpropagating Weights (backweights) & Biases (backbias)
+The error change on weights is computed as a convolution of the input step with the downstream matrix error (d_out). Bias errors are sum-reductions of the error space.
+
+;; Parameter updates via the chain rule [cite: 151, 152]
+(define backweights
+  (fn [([d_out 2] [in 2])]
+    (conv in d_out))) ; Swap target mappings directly 
+
+(define backbias
+  (fn [([d_out 2])]
+    (sum d_out))) ; Aggregates downstream gradient cells
+
+B. Backpropagating Error to Inputs (backin)
+As noted in the paper, computing individual checks for boundary conditions (if/else inside an inner loop) damages performance. In Remora, we can express the boundary logic cleanly by zero-padding the downstream d_out tensor before executing an inverse sliding window inner product.
+
+;; Pad an array with a border of zeros
+(define pad-matrix
+  (fn [([matrix 2] [pad-size 1])]
+    ;; Returns an enlarged matrix bordered by 0s
+    ;; Equivalent to standard array transformations
+    ...))
+
+;; Propagation of error back to the preceding layer inputs [cite: 158]
+(define backin
+  (fn [([d_out 2] [k 2] [in-shape 1])]
+    (let ([k-shape (shape k)])
+      ;; Pad d_out to ensure uniform matrix window multiplication at borders [cite: 161, 163]
+      (let ([padded-d_out (pad-matrix d_out (- k-shape 1))])
+        (array in-shape
+          (fn [iv]
+            ;; Compute inner product over padded boundary windows safely [cite: 160, 161]
+            (sum (* k (slice padded-d_out iv k-shape)))))))))
+
+C. Backpropagating Average Pooling (backavgpool)The incoming matrix error is distributed evenly back to the $2 \times 2$ indices that formed the original average. In Remora, we can express this by scaling the error value by $0.25$ and expanding the index grid.
+
+;; Distribute error back across 2x2 grids [cite: 165, 166]
+(define backavgpool
+  (fn [([d_out 2])]
+    (let ([out-shape (* (shape d_out) 2)]) ; Shape expands by 2x 
+      (array out-shape
+        (fn [iv]
+          ;; Map index using integer division to stretch the array 
+          (/ (ext-index d_out (/ iv 2)) 4.0))))))
+
+4. Complete Architecture Integration
+Using these rank-polymorphic building blocks, a full forward pass matches the structured sequence defined in the paper.
+
+;; Complete forward training execution 
+(define forward
+  (fn [([I 2]        ; Input image: [28, 28] [cite: 147]
+        [k1 3]       ; Layer 1 weights: [6, 5, 5] [cite: 147]
+        [b1 1]       ; Layer 1 biases: [6] [cite: 147]
+        [k2 4]       ; Layer 2 weights: [12, 6, 5, 5] [cite: 147]
+        [b2 1]       ; Layer 2 biases: [12] [cite: 147]
+        [fc 5]       ; Fully connected weights: [10, 12, 1, 4, 4] [cite: 147]
+        [b 1])]      ; Output biases: [10] [cite: 147]
+    (let* ([c1 (sigmoid (mconv I k1 b1))]   ; Layer C1: [6, 24, 24] 
+           [s1 (avgpool c1)]                ; Layer S1: [6, 12, 12] 
+           [c2 (sigmoid (mconv s1 k2 b2))]  ; Layer C2: [12, 1, 8, 8] 
+           [s2 (avgpool c2)])               ; Layer S2: [12, 1, 4, 4] 
+      ;; Final classification array projection 
+      (sigmoid (mconv s2 fc b)))))          ; Resulting probabilities: [10, 1, 1, 1, 1]
+

@@ -6,9 +6,12 @@ readme = "docs/MLIR_IMPLEMENTATION_PLAN.md"
 requires-python = ">=3.11"
 dependencies = [
     "cuda-python",
+    "ipython>=9.14.0",
     "iree-compiler",
+    "jupyterlab>=4.5.7",
     "lark",
     "numpy",
+    "pandas>=3.0.3",
 ]
 
 [project.scripts]
