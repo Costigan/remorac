@@ -221,3 +221,20 @@ Allowed syntactically, per remora/grammar.lark:5:
 
 Important caveat: normal REPL evaluation currently uses the interpreter (evaluate_source), not compiled execution. The :mlir <expr> command separately checks whether an expression can be
 lowered through the compiler path, via remora/repl.py:125. The REPL is also currently CPU-only; :target gpu-nvidia is rejected.
+
+------------------------------------------------------------------------------
+
+The next implementation step should be REPL/compiler alignment:
+
+1. Make the standard REPL execute through evaluate_source_compiled for :target cpu, matching the CLI and Jupyter magic. Right now remora/repl.py:71 still uses the interpreter for normal
+   expressions.
+
+2. Add an explicit :target interp mode for the reference evaluator, instead of having the REPL silently be interpreter-backed.
+3. Improve REPL parse errors. Your earlier map \x -> x [1,2,3] example failed partly because the grammar requires the lambda callable to be parenthesized: map (\\x -> x) [1,2,3]. But the
+   reported error is bad because parse_repl_input reports the failed definition parse instead of the expression parse.
+
+4. After that, continue Dense Core feature closure by auditing interpreter vs compiled CPU vs MLIR lowering gaps and turning each unsupported compiled expression into either support or a
+   crisp error.
+
+So the next sprint I would do is: compiled REPL by default + interp REPL target + better expression parse diagnostics + tests for REPL/compiler parity. That directly supports the real
+goal: a compiler-backed interactive Remora, not just another frontend around the interpreter.

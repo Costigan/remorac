@@ -9,6 +9,56 @@ def test_repl_evaluates_expression():
     assert session.eval_input("1 + 2.0") == "3.0"
 
 
+def test_repl_cpu_target_uses_compiled_execution(monkeypatch):
+    calls = []
+
+    def fake_evaluate_source_compiled(source, *, include_prelude=True):
+        calls.append((source, include_prelude))
+        from remora.runtime import EvaluationResult
+        from remora.types import INT
+
+        return EvaluationResult(7, INT)
+
+    monkeypatch.setattr("remora.repl.evaluate_source_compiled", fake_evaluate_source_compiled)
+
+    session = ReplSession()
+
+    assert session.eval_input("1 + 2") == "7"
+    assert len(calls) == 1
+    source, include_prelude = calls[0]
+    assert include_prelude is False
+    assert source.endswith("\n1 + 2")
+    assert "def sum xs = fold (+) 0.0 xs" in source
+
+
+def test_repl_interp_target_uses_reference_evaluator(monkeypatch):
+    compiled_calls = []
+    interp_calls = []
+
+    def fake_evaluate_source_compiled(source, *, include_prelude=True):
+        compiled_calls.append((source, include_prelude))
+        from remora.runtime import EvaluationResult
+        from remora.types import INT
+
+        return EvaluationResult(1, INT)
+
+    def fake_evaluate_source(source, *, include_prelude=True):
+        interp_calls.append((source, include_prelude))
+        from remora.runtime import EvaluationResult
+        from remora.types import INT
+
+        return EvaluationResult(2, INT)
+
+    monkeypatch.setattr("remora.repl.evaluate_source_compiled", fake_evaluate_source_compiled)
+    monkeypatch.setattr("remora.repl.evaluate_source", fake_evaluate_source)
+
+    session = ReplSession(target="interp")
+
+    assert session.eval_input("1 + 1") == "2"
+    assert compiled_calls == []
+    assert len(interp_calls) == 1
+
+
 def test_repl_persists_value_definition():
     session = ReplSession()
 
@@ -161,11 +211,37 @@ def test_repl_error_recovery():
     assert session.eval_input("1 + 1") == "2"
 
 
+def test_repl_reports_expression_parse_error_for_expression_like_input():
+    session = ReplSession()
+
+    message = session.eval_input("map \\x -> x [1,2,3]")
+
+    assert message is not None
+    assert message.startswith("Parse error:")
+    assert "Expected one of" in message
+    assert "* DEF" not in message
+    assert "Hint: parenthesize lambda callables" in message
+
+
+def test_repl_hints_parenthesized_array_literal_after_map_callable():
+    session = ReplSession()
+
+    message = session.eval_input("map (\\x -> x) [1,2,3]")
+
+    assert message is not None
+    assert message.startswith("Parse error:")
+    assert "Hint: parenthesize array literal arguments" in message
+    assert session.eval_input("map (\\x -> x) ([1,2,3])") == "[1, 2, 3]"
+
+
 def test_repl_target_command():
     session = ReplSession()
 
     assert session.eval_input(":target") == "Current target: cpu"
-    assert session.eval_input(":target gpu-nvidia") == "Error: only the cpu REPL target is currently available"
+    assert session.eval_input(":target interp") == "Target: interp"
+    assert session.eval_input(":target") == "Current target: interp"
+    assert session.eval_input(":target cpu") == "Target: cpu"
+    assert session.eval_input(":target gpu-nvidia") == "Error: available REPL targets: cpu, interp"
 
 
 def test_repl_quit_command_raises_system_exit():
@@ -179,4 +255,11 @@ def test_repl_main_accepts_cpu_target(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
 
     assert main(["--target", "cpu"]) == 0
+    assert "Remora REPL" in capsys.readouterr().out
+
+
+def test_repl_main_accepts_interp_target(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
+
+    assert main(["--target", "interp"]) == 0
     assert "Remora REPL" in capsys.readouterr().out

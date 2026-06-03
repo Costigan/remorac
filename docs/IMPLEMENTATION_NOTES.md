@@ -48,9 +48,9 @@ usability slice:
 - `remorac` is registered as a console script with compiled CPU execution by
   default, an explicit `--target interp` reference evaluator, MLIR/PTX
   inspection targets, and AST/typed-AST/HIR/MLIR/PTX emit flags.
-- `remora` is registered as a CPU-only REPL console script with persistent
-  value definitions, `:type`, `:mlir`, `:load`, `:reset`, `:target`, and
-  `:help`.
+- `remora` is registered as a REPL console script with compiled CPU execution by
+  default, an explicit `interp` reference target, persistent value definitions,
+  `:type`, `:mlir`, `:load`, `:reset`, `:target`, and `:help`.
 
 Full tensor/linalg-to-`gpu.module` lowering, dynamic shapes, dynamic rank, and
 automatic differentiation have not been implemented. A function-level
@@ -147,7 +147,9 @@ Deferred ABI/runtime work:
   - `parse_expr`
   - `parse_file`
   - `parse_repl_input`
-- `parse_repl_input` tries a definition first, then an expression.
+- `parse_repl_input` parses `def`-prefixed input as a definition. Other input
+  tries a definition first, then an expression, and reports expression parse
+  errors so expression-like REPL mistakes are not shown as definition errors.
 - Infix operators are parsed into `AppExpr(VarExpr(op), [left, right])`.
   This keeps primitive operation handling in the typechecker instead of adding
   many operator-specific AST nodes.
@@ -561,6 +563,9 @@ Deferred pipeline/codegen work:
   compiled CPU result. It also supports `--target interp`, `--emit-ast`,
   `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus
   `--target mlir` and `--target ptx` aliases for artifact inspection.
+- The `remora` REPL defaults to `:target cpu`, which recompiles each expression
+  through the compiled CPU path with the accumulated session definitions. The
+  `:target interp` command switches to the typed-AST reference evaluator.
 - CPU execution now accepts an explicit requested thread count through
   `--cpu-threads`, the public CPU compile helpers, and `REMORA_NUM_THREADS`.
   `cpu_threads > 1` selects the experimental OpenMP lowering path:
@@ -626,8 +631,9 @@ Deferred CUDA/runtime work:
 
 ## REPL Decisions
 
-- `remora.repl` implements the first interactive shell as a thin CPU-only layer
-  over the current parser, typechecker, compiler facade, and interim evaluator.
+- `remora.repl` implements the first interactive shell as a thin CPU/interp
+  layer over the current parser, typechecker, compiler facade, compiled CPU
+  executor, and reference evaluator.
 - Session state is stored as accumulated top-level value-definition source
   strings. Each expression is evaluated by building a full temporary source
   program from those definitions plus the current expression.
@@ -642,10 +648,11 @@ Deferred CUDA/runtime work:
 - `:prelude` prints the starter prelude definitions currently injected into new
   sessions. `:defs` prints only user-added definitions after the prelude.
 - `:load` loads top-level value/function definitions from a file and evaluates
-  the file body if present. This is intentionally simple and line-oriented for
-  current one-line `def` examples.
-- `:target` reports `cpu`; non-CPU targets are rejected until the CLI/REPL has
-  an input-binding model for invoking descriptor-input GPU functions.
+  the file body on the current REPL target if present. This is intentionally
+  simple and line-oriented for current one-line `def` examples.
+- `:target` reports or switches between `cpu` and `interp`. GPU targets are
+  rejected until the CLI/REPL has an input-binding model for invoking
+  descriptor-input GPU functions.
 
 Deferred REPL work:
 
