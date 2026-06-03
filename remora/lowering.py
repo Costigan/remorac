@@ -25,6 +25,7 @@ from remora.hir import (
     HIRTranspose,
     HIRReshape,
     HIRRavel,
+    HIRReverse,
     HIRTake,
     HIRDrop,
     HIRIota,
@@ -37,7 +38,7 @@ from remora.hir import (
     HIRProgram,
     HIRVar,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, FuncType, RemoraType, ScalarType
+from remora.types import BOOL, FLOAT, INT, ArrayType, FuncType, RemoraType, ScalarType, StaticDim
 
 
 class RemoraLoweringError(RemoraError):
@@ -122,6 +123,7 @@ class MLIRLowering:
                 HIRTranspose,
                 HIRReshape,
                 HIRRavel,
+                HIRReverse,
                 HIRTake,
                 HIRDrop,
                 HIRIota,
@@ -131,7 +133,7 @@ class MLIRLowering:
                 ),
                 ):
                 raise RemoraLoweringError(
-                "only scalar expressions, scalar lets/calls, full-rank indexing, view operations, iota, array literals, scalar maps, and scalar folds lower to MLIR so far"
+                "only scalar expressions, scalar lets/calls, full-rank indexing, view operations, iota, array literals, scalar maps, scalar folds, and reverse lower to MLIR so far"
                 )
 
 
@@ -297,14 +299,14 @@ def _inline_callable(callable_: object, env: dict[str, HIRExpr]) -> object:
 
 
 def _lower_main_module(
-    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIf | HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop | HIRIota | HIRArrayLit | HIRMap | HIRFold,
+    node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIf | HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRReverse | HIRTake | HIRDrop | HIRIota | HIRArrayLit | HIRMap | HIRFold,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
         return _lower_tensor_let_module(node, functions)
     if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall, HIRIf)):
         return _lower_scalar_module(node, functions)
-    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRReverse, HIRTake, HIRDrop)):
         return _lower_view_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
@@ -781,7 +783,7 @@ def _lower_view_module(
 
 
 def _lower_view_result(
-    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
+    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRReverse | HIRTake | HIRDrop,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
     prefix: str = "view",
@@ -833,6 +835,27 @@ def _lower_view_result(
         shape_code = f"    {shape_name} = arith.constant dense<[{total}]> : tensor<1xindex>"
         input_code = f"{input_code}\n{shape_code}"
         result_line = f"    {result_name} = tensor.reshape {input_name}({shape_name}) : ({input_type}, tensor<1xindex>) -> {result_type}"
+
+    elif isinstance(node, HIRReverse):
+        rank = node.result_type.rank
+        if rank < 1:
+            raise RemoraLoweringError("reverse expects an array of rank at least 1")
+        array_type = _expr_result_type(node.array)
+        if not isinstance(array_type, ArrayType):
+            raise RemoraLoweringError("reverse expects an array input")
+        reverse_map = _reverse_first_axis_affine_map(array_type)
+        identity = _identity_affine_map(rank)
+        iterators = _parallel_iterators(rank)
+        empty_name = f"%{_join_prefix(prefix, 'empty')}"
+        elem_type = type_to_mlir(node.result_type.element)
+        result_line = f"""    {empty_name} = tensor.empty() : {result_type}
+    {result_name} = linalg.generic {{
+      indexing_maps = [{reverse_map}, {identity}],
+      iterator_types = {iterators}
+    }} ins({input_name} : {input_type}) outs({empty_name} : {result_type}) {{
+    ^bb0(%in: {elem_type}, %out: {elem_type}):
+      linalg.yield %in : {elem_type}
+    }} -> {result_type}"""
         
     elif isinstance(node, (HIRTake, HIRDrop)):
         # Both use tensor.extract_slice
@@ -870,7 +893,7 @@ def _lower_view_result(
 
 
 def _lower_view_input(
-    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRTake | HIRDrop,
+    node: HIRIndex | HIRSlice | HIRTranspose | HIRReshape | HIRRavel | HIRReverse | HIRTake | HIRDrop,
     functions: dict[str, HIRFunction],
     prefix: str,
     tensor_env: TensorEnv | None = None,
@@ -1531,7 +1554,7 @@ def _lower_tensor_input(
     if isinstance(node, HIRMap):
         return _lower_fold_input(node, functions, prefix, tensor_env=tensor_env)
 
-    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRTake, HIRDrop)):
+    if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRReverse, HIRTake, HIRDrop)):
         return _lower_view_input(node, functions, prefix, tensor_env=tensor_env)
 
     raise RemoraLoweringError("only tensor literals and iota values lower as tensor inputs so far")
@@ -1585,6 +1608,8 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
         return expr.result_type
     if isinstance(expr, HIRRavel):
         return expr.result_type
+    if isinstance(expr, HIRReverse):
+        return expr.result_type
     if isinstance(expr, HIRTake):
         return expr.result_type
     if isinstance(expr, HIRDrop):
@@ -1637,6 +1662,17 @@ def _take_first_affine_map(rank: int, count: int) -> str:
     dims = ", ".join(f"d{axis}" for axis in range(rank))
     results = ", ".join(f"d{axis}" for axis in range(count))
     return f"affine_map<({dims}) -> ({results})>"
+
+
+def _reverse_first_axis_affine_map(array_type: ArrayType) -> str:
+    if array_type.rank < 1:
+        raise RemoraLoweringError("reverse expects an array of rank at least 1")
+    if not isinstance(array_type.shape[0], StaticDim):
+        raise RemoraLoweringError("reverse requires a static leading dimension")
+    dims = ", ".join(f"d{axis}" for axis in range(array_type.rank))
+    results = [f"d{axis}" for axis in range(array_type.rank)]
+    results[0] = f"{array_type.shape[0].value - 1} - d0"
+    return f"affine_map<({dims}) -> ({', '.join(results)})>"
 
 
 def _map_cell_iterators(frame_rank: int, cell_rank: int) -> str:

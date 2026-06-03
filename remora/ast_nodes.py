@@ -122,6 +122,12 @@ class RavelExpr:
 
 
 @dataclass(frozen=True)
+class ReverseExpr:
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class TakeExpr:
     count: Expr
     array: Expr
@@ -219,6 +225,7 @@ Expr: TypeAlias = (
     | TransposeExpr
     | ReshapeExpr
     | RavelExpr
+    | ReverseExpr
     | TakeExpr
     | DropExpr
     | ComposeExpr

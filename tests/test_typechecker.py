@@ -12,6 +12,7 @@ from remora.typechecker import (
     TypedMap,
     TypedRank,
     TypedRightSection,
+    TypedReverse,
     TypedShape,
 )
 from remora.limits import MAX_DENSE_RANK
@@ -69,6 +70,18 @@ def test_iota_has_static_rank_1_int_array_type():
     typed = infer("iota 10")
 
     assert typed.type == ArrayType(INT, (StaticDim(10),))
+
+
+def test_reverse_preserves_array_type():
+    typed = infer("reverse [[1, 2], [3, 4]]")
+
+    assert isinstance(typed, TypedReverse)
+    assert typed.type == ArrayType(INT, (StaticDim(2), StaticDim(2)))
+
+
+def test_reverse_rejects_scalars():
+    with pytest.raises(RemoraTypeError, match="reverse expects an array operand"):
+        infer("reverse 42")
 
 
 def test_type_errors_include_source_location():

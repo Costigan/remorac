@@ -185,6 +185,18 @@ def test_lowers_iota_to_parseable_linalg_mlir_module():
     assert ": tensor<10xi32>" in lowered.text
 
 
+def test_lowers_reverse_to_parseable_linalg_mlir_module():
+    program = hir_from_source("reverse [[1, 2], [3, 4]]")
+    lowered = MLIRLowering().lower_program(program)
+
+    assert "func.func @main() -> tensor<2x2xi32>" in lowered.text
+    assert "tensor.empty() : tensor<2x2xi32>" in lowered.text
+    assert "linalg.generic" in lowered.text
+    assert "affine_map<(d0, d1) -> (-d0 + 1, d1)>" in lowered.text
+    assert "return %" in lowered.text
+    assert ": tensor<2x2xi32>" in lowered.text
+
+
 def test_lowers_rank_1_array_literal():
     program = hir_from_source("[1, 2, 3]")
     lowered = MLIRLowering().lower_program(program)
