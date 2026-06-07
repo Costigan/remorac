@@ -1,0 +1,1 @@
+let x = 1 in let y = x + 1 in let z = y + 1 in map (\w -> w * z) (iota 3)
