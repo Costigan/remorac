@@ -1,13 +1,13 @@
 # Remora Dense Core: Complete Implementation Plan
 
 _Generated 2026-06-06 from evaluation and implementation notes._
-_Updated 2026-06-07 with completion status._
+_Updated 2026-06-07 with end-to-end builder API port completion._
 
-**Completion status**: 22 of 24 CPU/GPU capability targets achieved.
-2 items deferred: MLIR builder API port (18-day estimate, text-based works), text-processing MLIR hack (`_strip_trivial_memref_alloca_scopes`).
+**Completion status**: 23 of 24 CPU/GPU capability targets achieved.
+1 item deferred: MLIR builder API port for LLVM descriptor-ABI GPU path (`llvm.func` + `nvvm.*` dialect attributes don't round-trip cleanly through `ir.Operation.create`; text-based generation in `gpu_lowering.py` handles this correctly).
 2 items deferred per Dense Core scope: `compose`/`flip` (higher-order functions), `zipwith` (array closure conversion).
 
-**Test count**: 456 passed, 2 skipped (1 PTX validation test, 1 platform-dependent). 39 acceptance tests (35 CPU + 4 GPU).
+**Test count**: 470 passed, 1 skipped (OpenMP runtime unavailable — correct). 39 acceptance tests (35 CPU + 4 GPU).
 
 ---
 
@@ -59,7 +59,7 @@ A complete Dense Core implementation must satisfy the contract in
 
 | Capability | Current | Target |
 |---|---|---|
-| Text-based MLIR generation | Text-based (builder API available, deferred) | Replaced with builder API |
+| Text-based MLIR generation | ✓ Replaced with builder API (see Streams E2-E8) | Replaced with builder API |
 | `lowering.py` god module (2,286 lines) | ✓ Split into 7 focused modules under `remora/lowering/` | Split into focused modules |
 | Operator dispatch duplication | ✓ Centralized (`remora/operators.py`) | Single shared dispatch table |
 | Docstrings | ✓ Comprehensive (typechecker, gpu_lowering, codegen, all lowering modules) | Comprehensive |
@@ -110,7 +110,7 @@ A complete Dense Core implementation must satisfy the contract in
 
 ### 2.3 Technical Debt Blocking Progress
 
-1. **Text-based MLIR generation → Builder API.** DEFERRED — text-based emission works correctly; builder API port estimated at 18 days.
+1. ✓ **Text-based MLIR generation → Builder API.** Done — `_BuilderRegionEmitter` (`remora/lowering/_builder_emitter.py`) handles scalar ops; `lower_program_via_builder` (`remora/lowering/_builder_ops.py`) handles tensor ops (iota, map, fold, view ops); `build_f32_map_gpu_scaffold` (`remora/lowering/_gpu_builder.py`) handles simple GPU kernels. LLVM descriptor-ABI GPU path is deferred (see Section 6 risk).
 
 2. ✓ **God module `lowering.py`** — split into focused modules. Done — 7 modules under `remora/lowering/`.
 
@@ -120,7 +120,7 @@ A complete Dense Core implementation must satisfy the contract in
 
 5. ✓ **`isinstance` chains.** Done — `hir_dispatch.py` utility created; `defunc.py` refactored to use dispatch tables.
 
-6. **Text-processing MLIR hacks.** DEFERRED — `_strip_trivial_memref_alloca_scopes` still uses text manipulation.
+6. ✓ **Text-processing MLIR hacks.** Done — `_strip_trivial_memref_alloca_scopes` parses MLIR and walks `memref.alloca_scope` ops via the builder API. Legacy text-based fallback preserved for unparseable inputs.
 
 7. ✓ **Type alias duplication.** Done — `hir_dispatch.py` reduces new-node additions from 5+ files to ~3.
 
@@ -523,7 +523,7 @@ vectorized pipelines are stable. Buffer reuse is active.
 | **M-gpu-3** | Non-contiguous GPU views + whole-program GPU | B4, B5 |
 | **M-gpu-4** | Multi-kernel GPU programs | B6 |
 | **M-gpu-5** | GPU CLI + REPL with `.npy` input binding | B7, B8 |
-| **M-gpu-6** | Remove hand-written PTX + rank-1 special cases | B9, H2 |
+| **M-gpu-6** | ✓ Remove hand-written PTX + rank-1 special cases | B9, H2 |
 
 **Gate:** Every form in `docs/DENSE_CORE.md` executes on GPU. `remorac
 --target gpu-nvidia` works for body programs and named function calls. GPU

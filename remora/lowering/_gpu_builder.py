@@ -169,7 +169,10 @@ def _index_decomp(
     ir_mod: Any,
     index_t: Any,
 ) -> list[Any]:
-    """Decompose flat thread index into multi-dimensional indices."""
+    """Decompose flat thread index into multi-dimensional indices.
+
+    Handles rank 1–10 via a general row-major decomposition algorithm.
+    """
     rank = len(shape)
     if rank == 1:
         return [idx]
@@ -181,17 +184,29 @@ def _index_decomp(
         i1 = _op(ir_mod, "arith.remui", index_t, block,
                  operands=[idx, dim1_c])
         return [i0, i1]
-    # rank 3
-    plane = shape[1] * shape[2]
-    dim2_c = _op(ir_mod, "arith.constant", index_t, block,
-                 attributes={"value": ir_mod.IntegerAttr.get(index_t, shape[2])})
-    plane_c = _op(ir_mod, "arith.constant", index_t, block,
-                  attributes={"value": ir_mod.IntegerAttr.get(index_t, plane)})
-    i0 = _op(ir_mod, "arith.divui", index_t, block, operands=[idx, plane_c])
-    rem0 = _op(ir_mod, "arith.remui", index_t, block, operands=[idx, plane_c])
-    i1 = _op(ir_mod, "arith.divui", index_t, block, operands=[rem0, dim2_c])
-    i2 = _op(ir_mod, "arith.remui", index_t, block, operands=[rem0, dim2_c])
-    return [i0, i1, i2]
+    # General case: rank >= 3
+    # plane[k] = product of dimensions k+1 .. rank-1
+    plane_consts = []
+    for axis in range(1, rank):
+        plane = 1
+        for d in shape[axis:]:
+            plane *= d
+        pc = _op(ir_mod, "arith.constant", index_t, block,
+                 attributes={"value": ir_mod.IntegerAttr.get(index_t, plane)})
+        plane_consts.append(pc)
+
+    current = idx
+    indices: list[Any] = []
+    for axis in range(rank - 1):
+        i = _op(ir_mod, "arith.divui", index_t, block,
+                operands=[current, plane_consts[axis]])
+        rem = _op(ir_mod, "arith.remui", index_t, block,
+                  operands=[current, plane_consts[axis]])
+        indices.append(i)
+        current = rem
+    # Last axis
+    indices.append(current)
+    return indices
 
 
 def _compute(

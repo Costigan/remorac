@@ -281,28 +281,45 @@ def _product(shape: tuple[int, ...]) -> int:
 
 
 def _indexing_lines(shape: tuple[int, ...]) -> tuple[str, list[str]]:
-    """Return MLIR lines and index variable names for multi-dimensional indexing."""
-    if len(shape) == 1:
+    """Return MLIR lines and index variable names for multi-dimensional indexing.
+
+    Handles rank 1–10 by decomposing a flat index into row-major coordinates
+    via ``arith.divui`` / ``arith.remui``.
+    """
+    rank = len(shape)
+    if rank == 1:
         return "", ["%idx"]
-    if len(shape) == 2:
-        return "\n".join(
-            [
+    if rank == 2:
+        return (
+            "\n".join([
                 f"        %dim1 = arith.constant {shape[1]} : index",
                 "        %i0 = arith.divui %idx, %dim1 : index",
                 "        %i1 = arith.remui %idx, %dim1 : index",
-            ]
-        ), ["%i0", "%i1"]
-    plane = shape[1] * shape[2]
-    return "\n".join(
-        [
-            f"        %dim2 = arith.constant {shape[2]} : index",
-            f"        %plane = arith.constant {plane} : index",
-            "        %i0 = arith.divui %idx, %plane : index",
-            "        %rem0 = arith.remui %idx, %plane : index",
-            "        %i1 = arith.divui %rem0, %dim2 : index",
-            "        %i2 = arith.remui %rem0, %dim2 : index",
-        ]
-    ), ["%i0", "%i1", "%i2"]
+            ]),
+            ["%i0", "%i1"],
+        )
+    # General case: rank >= 3
+    # plane[k] = product of dimensions k+1 .. rank-1
+    lines: list[str] = []
+    for axis in range(1, rank):
+        plane = 1
+        for d in shape[axis:]:
+            plane *= d
+        lines.append(
+            f"        %plane{axis - 1} = arith.constant {plane} : index"
+        )
+    current = "%idx"
+    for axis in range(rank - 1):
+        lines.append(
+            f"        %i{axis} = arith.divui {current}, %plane{axis} : index"
+        )
+        lines.append(
+            f"        %rem{axis} = arith.remui {current}, %plane{axis} : index"
+        )
+        current = f"%rem{axis}"
+    # Last axis: use the final remainder directly
+    indices = [f"%i{axis}" for axis in range(rank - 1)] + [current]
+    return "\n".join(lines), indices
 
 
 def _operation_lines(kernel: F32MapKernel, memref_type: str, indices: list[str]) -> str:
@@ -696,11 +713,23 @@ def _descriptor_i32_binary_op_expr(operation: I32MapOperation) -> str:
 
 @dataclass(frozen=True)
 class F32ReductionKernel:
-    size: int
+    shape: tuple[int, ...]
     fold_op: str
     init: float
     input_op: str | None = None
     num_inputs: int = 1
+
+    @property
+    def size(self) -> int:
+        """Total number of elements (product of shape)."""
+        total = 1
+        for d in self.shape:
+            total *= d
+        return total
+
+    @property
+    def rank(self) -> int:
+        return len(self.shape)
 
 
 def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
@@ -724,9 +753,9 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
     if isinstance(function.body.array, HIRVar):
         if len(function.params) != 1 or function.body.array.name != function.params[0].name:
             raise GPUScaffoldError("descriptor ABI GPU reduction input must be the function parameter")
-        _require_rank1_f32_param(function.params[0].type)
-        size = function.params[0].type.shape[0].value  # type: ignore[union-attr]
-        return F32ReductionKernel(size, function.body.func.op, float(function.body.init.value))
+        param_type = _require_rank1_f32_param(function.params[0].type)
+        shape = tuple(int(d.value) for d in param_type.shape)
+        return F32ReductionKernel(shape, function.body.func.op, float(function.body.init.value))
 
     if isinstance(function.body.array, HIRMap):
         mapped = function.body.array
@@ -748,8 +777,9 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
         second_type = _require_rank1_f32_param(function.params[1].type)
         if first_type.shape != second_type.shape:
             raise GPUScaffoldError("descriptor ABI GPU dot reduction input shapes must match")
+        shape = tuple(int(d.value) for d in first_type.shape)
         return F32ReductionKernel(
-            first_type.shape[0].value,
+            shape,
             function.body.func.op,
             float(function.body.init.value),
             input_op=mapped.func.op,
@@ -760,13 +790,14 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
 
 
 def _require_rank1_f32_param(param_type: object) -> ArrayType:
-    """Validate param_type is a rank-1 float array; return it or raise GPUScaffoldError."""
+    """Deprecated: historically required rank-1; now accepts any-rank float arrays."""
     if not (
         isinstance(param_type, ArrayType)
         and param_type.element == FLOAT
-        and param_type.rank == 1
     ):
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports rank-1 float inputs only")
+        raise GPUScaffoldError(
+            "descriptor ABI GPU reduction currently supports float inputs only"
+        )
     return param_type
 
 
@@ -796,12 +827,15 @@ def _build_descriptor_abi_f32_reduction_gpu_module(
 
 def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
     """Return MLIR body lines for a grid-strided reduction kernel with shared-memory tree reduce."""
+    rank = kernel.rank
     prefixes = [f"in{index}" for index in range(kernel.num_inputs)]
     lines: list[str] = []
     for index, prefix in enumerate(prefixes):
-        lines.extend(_descriptor_load_lines(prefix, f"%input{index}_desc", 1))
+        lines.extend(_descriptor_load_lines(prefix, f"%input{index}_desc", rank))
     lines.extend(_descriptor_load_lines("out", "%output_desc", 0))
 
+    # Compute total size for bounds check (product of all dims)
+    total_size = kernel.size
     lines.extend(
         [
             "      %tid32 = nvvm.read.ptx.sreg.tid.x : i32",
@@ -816,23 +850,32 @@ def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
             "      %block_offset = llvm.mul %bid, %bdim : i64",
             "      %start_idx = llvm.add %tid, %block_offset : i64",
             f"      %init = llvm.mlir.constant({kernel.init:.6e} : f32) : f32",
+            f"      %total = llvm.mlir.constant({total_size} : index) : i64",
             "      llvm.br ^bb_loop(%start_idx, %init : i64, f32)",
             "    ^bb_loop(%i: i64, %current_acc: f32):",
-            "      %is_inside = llvm.icmp \"ult\" %i, %in0_size0 : i64",
-            "      llvm.cond_br %is_inside, ^bb_body, ^bb_reduce",
+            "      %is_inside_loop = llvm.icmp \"ult\" %i, %total : i64",
+            "      llvm.cond_br %is_inside_loop, ^bb_body, ^bb_reduce",
             "    ^bb_body:",
         ]
     )
 
+    if rank > 1:
+        lines.append("      %zero = llvm.mlir.constant(0 : index) : i64")
+        lines.append("      %idx = llvm.add %i, %zero  : i64")
+        lines.extend(_multi_index_lines(rank))
+
     for prefix in prefixes:
-        lines.extend(
-            [
+        if rank == 1:
+            lines.extend([
                 f"      %{prefix}_term = llvm.mul %i, %{prefix}_stride0  : i64",
                 f"      %{prefix}_linear = llvm.add %{prefix}_offset, %{prefix}_term  : i64",
-                f"      %{prefix}_elem_ptr = llvm.getelementptr %{prefix}_aligned[%{prefix}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-                f"      %{prefix}_x = llvm.load %{prefix}_elem_ptr : !llvm.ptr -> f32",
-            ]
-        )
+            ])
+        else:
+            lines.extend(_linear_index_lines(prefix, rank))
+        lines.extend([
+            f"      %{prefix}_elem_ptr = llvm.getelementptr %{prefix}_aligned[%{prefix}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %{prefix}_x = llvm.load %{prefix}_elem_ptr : !llvm.ptr -> f32",
+        ])
     if kernel.num_inputs == 2:
         lines.append(f"      %item = {_reduction_binary_input_expr(kernel.input_op)}")
     else:
