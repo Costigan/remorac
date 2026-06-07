@@ -833,3 +833,86 @@ def test_gpu_scaffold_rejects_manual_mismatched_binary_shapes():
 
     with pytest.raises(GPUScaffoldError, match="input and output shapes must match"):
         build_gpu_scaffold_for_function(function)
+
+
+# ---------------------------------------------------------------------------
+# GPU builder API tests (E6)
+# ---------------------------------------------------------------------------
+
+
+def test_gpu_builder_scaffold_rank1_produces_valid_mlir():
+    from remora._gpu_map_support import F32MapKernel, F32MapOperation
+    from remora.lowering._gpu_builder import build_f32_map_gpu_scaffold
+
+    kernel = F32MapKernel(
+        shape=(100,),
+        operation=F32MapOperation("*", constant=2.0, constant_side="right"),
+        num_inputs=1,
+    )
+    mlir = build_f32_map_gpu_scaffold(kernel, module_name="mod", kernel_name="kern")
+
+    assert "gpu.module @mod" in mlir
+    assert "gpu.func @kern" in mlir
+    assert "kernel" in mlir
+    assert "gpu.thread_id" in mlir
+    assert "gpu.block_id" in mlir
+    assert "gpu.block_dim" in mlir
+    assert "memref.load" in mlir
+    assert "memref.store" in mlir
+    assert "arith.mulf" in mlir
+
+
+def test_gpu_builder_scaffold_rank2_produces_valid_mlir():
+    from remora._gpu_map_support import F32MapKernel, F32MapOperation
+    from remora.lowering._gpu_builder import build_f32_map_gpu_scaffold
+
+    kernel = F32MapKernel(
+        shape=(10, 10),
+        operation=F32MapOperation("*", constant=2.0, constant_side="right"),
+        num_inputs=1,
+    )
+    mlir = build_f32_map_gpu_scaffold(kernel, module_name="mod", kernel_name="kern")
+
+    assert "arith.divui" in mlir
+    assert "arith.remui" in mlir
+    assert "arith.mulf" in mlir
+
+
+def test_gpu_builder_scaffold_binary_produces_valid_mlir():
+    from remora._gpu_map_support import F32MapKernel, F32MapOperation
+    from remora.lowering._gpu_builder import build_f32_map_gpu_scaffold
+
+    kernel = F32MapKernel(
+        shape=(100,),
+        operation=F32MapOperation("+"),
+        num_inputs=2,
+    )
+    mlir = build_f32_map_gpu_scaffold(kernel, module_name="mod", kernel_name="kern")
+
+    assert "arith.addf" in mlir
+    # Should have 2 memref.load ops (one per input)
+    assert mlir.count("memref.load") == 2
+
+
+def test_gpu_builder_scaffold_equivalent_to_text_based():
+    """Verify builder scaffold produces the same structure as text-based."""
+    from remora._gpu_map_support import F32MapKernel, F32MapOperation
+    from remora.lowering._gpu_builder import build_f32_map_gpu_scaffold
+
+    kernel = F32MapKernel(
+        shape=(100,),
+        operation=F32MapOperation("*", constant=2.0, constant_side="right"),
+        num_inputs=1,
+    )
+    builder_mlir = build_f32_map_gpu_scaffold(kernel, module_name="m", kernel_name="k")
+
+    from remora.gpu_lowering import build_f32_unary_map_gpu_scaffold
+    text_mlir = build_f32_unary_map_gpu_scaffold(
+        shape=(100,), operation="*", constant=2.0, constant_side="right",
+        module_name="m", kernel_name="k",
+    ).text
+
+    # Both should have the same structural elements
+    for token in ("gpu.module", "gpu.func", "gpu.thread_id", "memref.load", "memref.store"):
+        assert token in builder_mlir
+        assert token in text_mlir
