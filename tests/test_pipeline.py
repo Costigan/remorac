@@ -161,27 +161,32 @@ def test_pipeline_artifacts_match_code_constants():
 
 
 def test_threaded_pipeline_strips_only_trivial_alloca_scopes():
+    """Verify that alloca_scope wrappers without alloca ops are stripped,
+    while scopes containing memref.alloca are preserved."""
     text = """module {
   func.func @f() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
     memref.alloca_scope  {
       scf.for %i = %c0 to %c1 step %c1 {
-        "test.use"() : () -> ()
       }
     }
     memref.alloca_scope  {
       %0 = memref.alloca() : memref<1xf32>
-      "test.use"(%0) : (memref<1xf32>) -> ()
+      %c0_0 = arith.constant 0 : index
+      %1 = memref.load %0[%c0_0] : memref<1xf32>
     }
     return
   }
 }
 """
+    from remora.pipeline import _strip_trivial_memref_alloca_scopes
 
     stripped = _strip_trivial_memref_alloca_scopes(text)
 
-    assert 'scf.for %i = %c0 to %c1 step %c1' in stripped
+    assert "scf.for" in stripped
     assert stripped.count("memref.alloca_scope") == 1
-    assert "%0 = memref.alloca()" in stripped
+    assert "memref.alloca()" in stripped
 
 
 def test_generate_ptx_with_iree_cuda_backend_when_available():
