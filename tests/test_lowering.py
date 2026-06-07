@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from remora.compiler import compile_source_to_mlir
+from remora.compiler import compile_source_to_mlir, compile_source
 from remora.compiler import compile_function_source
 from remora.defunc import defunctionalize
+from remora.errors import RemoraError
 from remora.hir import (
     HIRCall,
     HIRFunction,
@@ -17,6 +18,7 @@ from remora.hir import (
     HIRVar,
     lower_to_hir,
 )
+from remora.runtime import evaluate_source_compiled
 from remora import lowering as lowering_module
 from remora.lowering import MLIRLowering, RemoraLoweringError, type_to_mlir
 from remora.parser import parse_program
@@ -938,3 +940,75 @@ def test_builder_iota_and_text_equivalent():
     assert "linalg.generic" in builder_text
     # Same return type
     assert "tensor<4xi32>" in builder_text
+
+
+# ---------------------------------------------------------------------------
+# Example program regression tests
+# ---------------------------------------------------------------------------
+
+
+_EXAMPLE_DIR = Path(__file__).parent.parent / "examples"
+
+_EXPECTED_FAILURES = {
+    # Known deferred features from plan
+    "function_application.remora": "dynamic higher-order functions are deferred",
+    "row_norms.remora": "lambda captures outer variables",
+}
+
+_EXAMPLE_GPU_EXPECTED = {
+    "chained_maps.remora",
+    "lift_map.remora",
+    "prelude_scale.remora",
+    "prelude_sum.remora",
+    "reduce_iota.remora",
+    "section_right.remora",
+    "threshold_mask.remora",
+    "top_level_value.remora",
+}
+
+
+@pytest.mark.parametrize("example_path", [
+    p for p in sorted(_EXAMPLE_DIR.glob("*.remora"))
+])
+def test_example_compiles_to_mlir(example_path):
+    """Every example either compiles or is a known deferred feature."""
+    source = example_path.read_text()
+    fname = example_path.name
+
+    if fname in _EXPECTED_FAILURES:
+        with pytest.raises(RemoraError, match=_EXPECTED_FAILURES[fname]):
+            compile_source(source, verify=False, include_prelude=True)
+        return
+
+    compile_source(source, verify=False, include_prelude=True)
+
+
+@pytest.mark.parametrize("example_path", [
+    p for p in sorted(_EXAMPLE_DIR.glob("*.remora"))
+    if p.name not in _EXPECTED_FAILURES
+])
+def test_example_executes_on_cpu(example_path):
+    """Every compilable example executes correctly on CPU."""
+    source = example_path.read_text()
+    result = evaluate_source_compiled(source)
+    assert result is not None
+    assert result.value is not None
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("iree") is None,
+    reason="IREE compiler MLIR bindings are not installed",
+)
+@pytest.mark.parametrize("example_path", [
+    p for p in sorted(_EXAMPLE_DIR.glob("*.remora"))
+    if p.name in _EXAMPLE_GPU_EXPECTED
+])
+def test_example_compiles_to_gpu_ptx(example_path):
+    """Examples expected to work on GPU produce valid PTX."""
+    from remora.codegen import generate_ptx
+
+    source = example_path.read_text()
+    artifact = compile_source(source, verify=False, include_prelude=True)
+    ptx, kernels = generate_ptx(artifact.mlir_module)
+    assert len(kernels) >= 1
+    assert ".version" in ptx
