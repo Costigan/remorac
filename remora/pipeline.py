@@ -14,7 +14,7 @@ from shutil import which
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from remora.errors import RemoraError
 
@@ -327,18 +327,59 @@ def run_cpu_pipeline_text(
 
 
 def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
-    """Remove no-allocation `memref.alloca_scope` wrappers from MLIR text.
+    """Remove no-allocation ``memref.alloca_scope`` wrappers from MLIR text.
 
     MLIR 18's linalg-to-parallel-loops path emits alloca scopes around loop
-    bodies even when they contain no stack allocations. Lowering nested
-    ``scf.for`` loops to CFG inside those wrappers can make the scope region
-    invalid. This function strips only wrappers whose body has no
-    ``memref.alloca`` operations.
+    bodies even when they contain no stack allocations.  Lowering nested
+    ``scf.for`` loops to CFG inside empty alloca scopes can make the scope
+    region invalid, so the threaded pipeline erases only trivial wrappers.
 
-    This is a text-based workaround for an MLIR 18 pipeline artifact. A
-    future MLIR version may remove the need for this by emitting tighter
-    alloca scopes.
+    Uses the MLIR builder API to parse the module, walk all
+    ``memref.alloca_scope`` operations, and strip those whose bodies contain
+    no ``memref.alloca`` calls.  Falls back to a text-based heuristic if the
+    MLIR cannot be parsed.
     """
+    try:
+        return _strip_trivial_alloca_scopes_api(mlir_text)
+    except Exception:
+        return _strip_trivial_alloca_scopes_text(mlir_text)
+
+
+def _strip_trivial_alloca_scopes_api(mlir_text: str) -> str:
+    """Strip trivial alloca scopes using the MLIR Python API."""
+    ir = import_module("iree.compiler.ir")
+    with ir.Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with ir.Location.unknown(ctx):
+            module = ir.Module.parse(mlir_text)
+
+    def _strip_in_block(block: Any) -> None:
+        for op in list(block.operations):
+            for region in op.regions:
+                for inner_block in region.blocks:
+                    _strip_in_block(inner_block)
+            if op.name != "memref.alloca_scope":
+                continue
+            scope_block = op.regions[0].blocks[0]
+            has_alloca = any(
+                scope_op.name == "memref.alloca"
+                for scope_op in scope_block.operations
+                if scope_op.name != "memref.alloca_scope.return"
+            )
+            if has_alloca:
+                continue
+            body_ops = list(scope_block.operations)
+            for body_op in body_ops:
+                if body_op.name != "memref.alloca_scope.return":
+                    body_op.move_before(op)
+            op.erase()
+
+    _strip_in_block(module.body)
+    return str(module)
+
+
+def _strip_trivial_alloca_scopes_text(mlir_text: str) -> str:
+    """Legacy text-processing fallback for stripping trivial alloca scopes."""
     lines = mlir_text.splitlines()
     output: list[str] = []
     index = 0
@@ -349,10 +390,10 @@ def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
             index += 1
             continue
 
-        depth = _brace_delta(line)
+        depth = line.count("{") - line.count("}")
         end = index + 1
         while end < len(lines) and depth > 0:
-            depth += _brace_delta(lines[end])
+            depth += lines[end].count("{") - lines[end].count("}")
             end += 1
         if depth != 0:
             output.append(line)
@@ -367,10 +408,6 @@ def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
             output.extend(body)
         index = end
     return "\n".join(output) + ("\n" if mlir_text.endswith("\n") else "")
-
-
-def _brace_delta(line: str) -> int:
-    return line.count("{") - line.count("}")
 
 
 def run_fusion_pipeline_text(

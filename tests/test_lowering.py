@@ -777,3 +777,84 @@ def test_lowers_descriptor_input_function_export():
     )
     assert "bufferization.to_tensor" in artifact.mlir_text
     assert "call @__remora_entry" in artifact.mlir_text
+
+
+def test_builder_region_emitter_produces_correct_text():
+    """Stream E2: verify _BuilderRegionEmitter produces equivalent text to
+    _RegionEmitter for basic scalar expressions."""
+    from importlib import import_module
+
+    ir = import_module("iree.compiler.ir")
+    from iree.compiler.dialects import func as func_dialect
+
+    from remora.lowering._builder_emitter import _BuilderRegionEmitter
+
+    ctx = ir.Context()
+    ctx.allow_unregistered_dialects = True
+    loc = ir.Location.unknown(ctx)
+
+    with ctx, loc:
+        module = ir.Module.create(loc)
+        fn_type = ir.FunctionType.get([], [ir.F32Type.get()])
+        main_op = func_dialect.FuncOp(
+            "main", fn_type, ip=ir.InsertionPoint(module.body)
+        )
+        entry_block = main_op.add_entry_block()
+        emitter = _BuilderRegionEmitter(entry_block)
+
+        # (3.14 + 2.0) * 2.0
+        a = emitter.emit_expr(HIRLit(3.14, FLOAT), {})
+        b = emitter.emit_expr(HIRLit(2.0, FLOAT), {})
+
+        lines = "\n".join(emitter.lines)
+        assert "arith.constant 3.140000e+00 : f32" in lines
+        assert "arith.constant 2.000000e+00 : f32" in lines
+        assert "%v0" in lines
+        assert "%v1" in lines
+        assert a.ir_value is not None
+        assert b.ir_value is not None
+
+        # Test a primitive op: +f
+        emitter2 = _BuilderRegionEmitter(entry_block, next_temp=emitter.next_temp)
+        add_expr = HIRPrimOp("+f", [HIRLit(1.0, FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        result = emitter2.emit_expr(add_expr, {})
+        assert "arith.addf" in "\n".join(emitter2.lines)
+        assert result.ir_value is not None
+        assert result.type == "f32"
+
+
+def test_builder_region_emitter_literal_types():
+    """Stream E2: verify _BuilderRegionEmitter handles all scalar literal types."""
+    from importlib import import_module
+
+    ir = import_module("iree.compiler.ir")
+    from iree.compiler.dialects import func as func_dialect
+
+    from remora.lowering._builder_emitter import _BuilderRegionEmitter
+
+    ctx = ir.Context()
+    ctx.allow_unregistered_dialects = True
+    loc = ir.Location.unknown(ctx)
+
+    with ctx, loc:
+        module = ir.Module.create(loc)
+        fn_type = ir.FunctionType.get([], [ir.F32Type.get()])
+        main_op = func_dialect.FuncOp(
+            "main", fn_type, ip=ir.InsertionPoint(module.body)
+        )
+        entry_block = main_op.add_entry_block()
+        emitter = _BuilderRegionEmitter(entry_block)
+
+        i32_lit = emitter.emit_expr(HIRLit(42, INT), {})
+        assert i32_lit.type == "i32"
+        assert "arith.constant 42 : i32" in "\n".join(emitter.lines)
+        assert i32_lit.ir_value is not None
+
+        f32_lit = emitter.emit_expr(HIRLit(3.14, FLOAT), {})
+        assert f32_lit.type == "f32"
+        assert f32_lit.ir_value is not None
+
+        bool_lit = emitter.emit_expr(HIRLit(True, BOOL), {})
+        assert bool_lit.type == "i1"
+        assert "arith.constant true" in "\n".join(emitter.lines)
+        assert bool_lit.ir_value is not None
