@@ -331,6 +331,7 @@ def _lower_main_module(
 def _lower_tensor_let_module(node: HIRLet, functions: dict[str, HIRFunction]) -> str:
     value_blocks: list[str] = []
     tensor_env: TensorEnv = {}
+    scalar_env: dict[str, HIRExpr] = {}
     body: HIRExpr = node
     ordinal = 0
     while isinstance(body, HIRLet) and isinstance(body.value_type, ArrayType):
@@ -344,6 +345,12 @@ def _lower_tensor_let_module(node: HIRLet, functions: dict[str, HIRFunction]) ->
         tensor_env[body.name] = _TensorValue(value_name, value_type, element_type)
         body = body.body
         ordinal += 1
+
+    # Inline any remaining scalar-valued lets before lowering the body
+    while isinstance(body, HIRLet) and _is_scalar_type(body.value_type):
+        scalar_env[body.name] = body.value
+        body = body.body
+    body = _inline_lets(body, scalar_env)
 
     body_code, result_value, result_type = _lower_main_result_with_tensor_env(
         body,
@@ -766,11 +773,14 @@ def _lower_index_result(
     if full_indexing:
         index_names: list[str] = []
         for position, index in enumerate(node.indices):
-            # confirmed in HIR lowering to be HIRLit(INT) for now
-            assert isinstance(index, HIRLit)
             name = f"%{prefix}_{position}"
             index_names.append(name)
-            index_lines.append(f"    {name} = arith.constant {index.value} : index")
+            if isinstance(index, HIRLit):
+                index_lines.append(f"    {name} = arith.constant {index.value} : index")
+            else:
+                index_code, index_value_name = _lower_scalar_index_expr(index, name, functions)
+                index_lines.append(index_code)
+                index_names[-1] = index_value_name
         
         result_type = type_to_mlir(node.result_type)
         indices = ", ".join(index_names)
@@ -783,16 +793,22 @@ def _lower_index_result(
     offsets: list[str] = []
     sizes: list[str] = []
     strides: list[str] = []
+    extra_lines: list[str] = []
     
     for position, index in enumerate(node.indices):
         if isinstance(index, HIRSlice):
             offsets.append(str(index.start))
             sizes.append(str(index.end - index.start))
             strides.append("1")
-        else:
-            # scalar index: offset=index, size=1
-            assert isinstance(index, HIRLit)
+        elif isinstance(index, HIRLit):
             offsets.append(str(index.value))
+            sizes.append("1")
+            strides.append("1")
+        else:
+            idx_name = f"%{prefix}_idx{position}"
+            code, val_name = _lower_scalar_index_expr(index, idx_name, functions)
+            extra_lines.append(code)
+            offsets.append(val_name)
             sizes.append("1")
             strides.append("1")
             
@@ -816,8 +832,37 @@ def _lower_index_result(
         f"{array_mlir_type} to {result_mlir_type}"
     )
     
-    body = "\n".join(part for part in (array_code, result_line) if part)
+    body = "\n".join(part for part in (array_code, *extra_lines, result_line) if part)
     return body, result_name, result_mlir_type
+
+
+def _lower_scalar_index_expr(
+    expr: HIRExpr,
+    name_hint: str,
+    functions: dict[str, HIRFunction],
+    env: dict[str, "_Operand"] | None = None,
+) -> tuple[str, str]:
+    """Lower an index expression to a scalar index SSA value."""
+    if isinstance(expr, HIRLit):
+        value = str(int(expr.value))
+        return f"    {name_hint} = arith.constant {value} : index", name_hint
+    if isinstance(expr, HIRIndex) and isinstance(expr.result_type, ScalarType):
+        inner_prefix = name_hint.lstrip("%")
+        index_code, index_val, _index_type = _lower_index_result(expr, functions, None, prefix=inner_prefix)
+        lines = [index_code]
+        lines.append(f"    {name_hint} = arith.index_cast {index_val} : i32 to index")
+        return "\n".join(lines), name_hint
+    emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+    value = emitter.emit_expr(expr, env or {})
+    cast_name = f"{name_hint}_idx"
+    lines = emitter.lines
+    if value.type != "index":
+        lines.append(f"    {cast_name} = arith.index_cast {value.value} : {value.type} to index")
+        return "\n".join(lines), cast_name
+    if value.value != name_hint:
+        lines.append(f"    {name_hint} = arith.index_cast {value.value} : {value.type} to index")
+        return "\n".join(lines), name_hint
+    return "\n".join(lines), value.value
 
 
 def _lower_view_module(
@@ -1045,16 +1090,14 @@ def _lower_functions(functions: dict[str, HIRFunction]) -> str:
 
 
 def _lower_function(function: HIRFunction) -> str:
-    if not _is_scalar_type(function.return_type):
-        raise RemoraLoweringError(
-            "only scalar-returning HIR functions lower to MLIR functions so far"
-        )
-    for param in function.params:
-        if not _is_scalar_type(param.type):
-            raise RemoraLoweringError(
-                "only scalar HIR function parameters lower to MLIR functions so far"
-            )
-
+    has_array_params = any(
+        isinstance(param.type, ArrayType) for param in function.params
+    )
+    has_array_return = isinstance(function.return_type, ArrayType)
+    
+    if has_array_params or has_array_return:
+        return _lower_function_with_tensor(function)
+    
     result_type = type_to_mlir(function.return_type)
     args = [
         f"%arg{index}: {type_to_mlir(param.type)}"
@@ -1080,7 +1123,71 @@ def _lower_function(function: HIRFunction) -> str:
     ]
     result_value = "%result_cast" if value.type != result_type else value.value
     body = "\n".join(lines)
+    return f"""  func.func private @{function.name}({", ".join(args)}) -> {result_type} {{
+{body}
+    return {result_value} : {result_type}
+  }}"""
 
+
+def _lower_function_with_tensor(function: HIRFunction) -> str:
+    """Lower a HIR function with array params or array return type."""
+    result_type = type_to_mlir(function.return_type)
+    args = [
+        f"%arg{index}: {type_to_mlir(param.type)}"
+        for index, param in enumerate(function.params)
+    ]
+    tensor_env: TensorEnv = {}
+    scalar_env: dict[str, _Operand] = {}
+    for index, param in enumerate(function.params):
+        param_type = type_to_mlir(param.type)
+        if isinstance(param.type, ScalarType):
+            scalar_env[param.name] = _Operand(f"%arg{index}", [], param_type)
+        elif isinstance(param.type, ArrayType):
+            tensor_env[param.name] = _TensorValue(
+                f"%arg{index}",
+                param_type,
+                type_to_mlir(param.type.element),
+            )
+        else:
+            raise RemoraLoweringError("function params must be scalar or array types")
+    
+    if isinstance(function.return_type, ArrayType):
+        code, result_name, lowered_result_type, _element_type = _lower_tensor_input(
+            function.body,
+            "result",
+            {function.name: function},
+            tensor_env,
+        )
+        if lowered_result_type != result_type:
+            raise RemoraLoweringError("lowered function result type mismatch")
+        body = code
+        result_value = result_name
+    elif isinstance(function.return_type, ScalarType):
+        body_expr = _inline_lets(function.body)
+        if isinstance(body_expr, HIRMap):
+            code, result_name, lowered_result_type, _element_type = _lower_tensor_input(
+                body_expr,
+                "result",
+                {function.name: function},
+                tensor_env,
+            )
+            body = code
+            result_value = result_name
+        elif isinstance(body_expr, HIRFold):
+            return _lower_descriptor_scalar_result_body(
+                body_expr,
+                result_type,
+                scalar_env,
+                tensor_env,
+            )[0] if len(function.params) > 0 else ""
+        else:
+            raise RemoraLoweringError("scalar-returning function with array params must have a map or fold body")
+        # Make body text have proper indentation
+        if not body.startswith("    "):
+            body = "    " + body.replace("\n", "\n    ")
+    else:
+        raise RemoraLoweringError("function return type must be scalar or array")
+    
     return f"""  func.func private @{function.name}({", ".join(args)}) -> {result_type} {{
 {body}
     return {result_value} : {result_type}

@@ -34,11 +34,13 @@ Implemented forms:
 - full-rank and static partial indexing
 - `map` over statically known callables
 - scalar `fold` over statically known accumulator callables
-- array-cell `fold` over primitive accumulator callables
+- array-cell `fold` over static callables (primitives, named functions, lambdas)
+- `if` over boolean tensors (element-wise conditional selection)
+- dynamic indexing with runtime-computed index expressions
 - top-level value definitions
 - top-level function definitions when statically specialized at direct use sites
-- starter prelude functions: `add`, `sub`, `mul`, `div`, `sum`, `product`,
-  `scale`, and `dot`
+- starter prelude functions: `add`, `sub`, `mul`, `div`, `neg`, `id`, `const`,
+  `sum`, `product`, `scale`, `dot`, `max`, `min`, `abs`, `any`, `all`
 
 Rejected or deferred forms must produce stable diagnostics. They should not be
 accepted by the parser/typechecker and then fail later with generic backend

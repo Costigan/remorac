@@ -272,6 +272,22 @@
     "expect_stdout": "[-1, -2, -3]\n"
   },
   {
+    "name": "dynamic_index_literal",
+    "category": "supported",
+    "path": "pass/dynamic_index_literal.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "20\n"
+  },
+  {
+    "name": "dynamic_index_var",
+    "category": "supported",
+    "path": "pass/dynamic_index_var.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "7\n"
+  },
+  {
     "name": "dynamic_shape",
     "category": "deferred",
     "path": "deferred/dynamic_shape.remora",
