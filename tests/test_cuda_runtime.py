@@ -6,6 +6,7 @@ import pytest
 
 from remora.abi import make_memref_descriptor
 from remora.runtime import CUDAKernel, CUDARuntime, RuntimeUnavailable, cuda_available
+from conftest import gpu_required_or_skip
 
 
 class FakeCuda:
@@ -72,6 +73,6 @@ def test_cuda_runtime_initialization_skips_without_live_driver():
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     else:
         runtime.close()

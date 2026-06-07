@@ -10,6 +10,7 @@ from remora.compiler import (
 from remora.executor import RemoraExecutor, RemoraExecutorError, compute_output_shape, kernel_output_dtype
 from remora.runtime import CUDARuntime, RuntimeUnavailable
 from remora.types import FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
+from conftest import gpu_required_or_skip
 
 
 class FakeKernel:
@@ -434,7 +435,7 @@ def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
@@ -446,7 +447,7 @@ def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
         executor = RemoraExecutor(ptx, kernels, runtime=runtime)
         result = executor.execute("remora_scale", [np.array([1, 2, 3, 4], dtype=np.float32)])
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -457,7 +458,7 @@ def test_remora_executor_runs_rank1_mlir_gpu_ptx_round_trip_when_available():
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
@@ -469,7 +470,7 @@ def test_remora_executor_runs_rank1_mlir_gpu_ptx_round_trip_when_available():
         executor = RemoraExecutor(ptx, kernels, runtime=runtime)
         result = executor.execute_main([np.array([1, 2, 3, 4], dtype=np.float32)])
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -480,7 +481,7 @@ def test_remora_executor_runs_rank1_binary_mlir_gpu_ptx_round_trip_when_availabl
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_rank1_mlir_gpu_ptx(
@@ -500,7 +501,7 @@ def test_remora_executor_runs_rank1_binary_mlir_gpu_ptx_round_trip_when_availabl
             ]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -511,7 +512,7 @@ def test_remora_executor_runs_rank1_sum_mlir_gpu_ptx_round_trip_when_available()
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -524,7 +525,7 @@ def test_remora_executor_runs_rank1_sum_mlir_gpu_ptx_round_trip_when_available()
         executor = RemoraExecutor(ptx, kernels, runtime=runtime)
         result = executor.execute_main([np.array([1, 2, 3, 4], dtype=np.float32)])
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -535,7 +536,7 @@ def test_remora_executor_runs_rank1_dot_mlir_gpu_ptx_round_trip_when_available()
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -556,7 +557,7 @@ def test_remora_executor_runs_rank1_dot_mlir_gpu_ptx_round_trip_when_available()
             ]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -567,7 +568,7 @@ def test_remora_executor_runs_rank1_i32_unary_mlir_gpu_ptx_round_trip_when_avail
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -580,7 +581,7 @@ def test_remora_executor_runs_rank1_i32_unary_mlir_gpu_ptx_round_trip_when_avail
         executor = RemoraExecutor(ptx, kernels, runtime=runtime)
         result = executor.execute_main([np.array([1, 2, 3, 4], dtype=np.int32)])
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -591,7 +592,7 @@ def test_remora_executor_runs_rank1_i32_binary_mlir_gpu_ptx_round_trip_when_avai
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -612,7 +613,7 @@ def test_remora_executor_runs_rank1_i32_binary_mlir_gpu_ptx_round_trip_when_avai
             ]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -623,7 +624,7 @@ def test_remora_executor_runs_rank2_unary_mlir_gpu_ptx_round_trip_when_available
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -635,7 +636,7 @@ def test_remora_executor_runs_rank2_unary_mlir_gpu_ptx_round_trip_when_available
         executor = RemoraExecutor(ptx, kernels, runtime=runtime)
         result = executor.execute_main([np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)])
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -649,7 +650,7 @@ def test_remora_executor_runs_rank2_binary_mlir_gpu_ptx_round_trip_when_availabl
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -669,7 +670,7 @@ def test_remora_executor_runs_rank2_binary_mlir_gpu_ptx_round_trip_when_availabl
             ]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -683,7 +684,7 @@ def test_remora_executor_runs_rank3_mlir_gpu_ptx_round_trips_when_available():
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     try:
         unary_ptx, unary_kernels, _unary_artifact = compile_function_source_to_mlir_gpu_ptx(
@@ -713,7 +714,7 @@ def test_remora_executor_runs_rank3_mlir_gpu_ptx_round_trips_when_available():
             ]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
@@ -731,7 +732,7 @@ def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_av
     try:
         runtime = CUDARuntime()
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA driver/device is not available: {exc}")
+        gpu_required_or_skip(str(exc))
 
     rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
@@ -755,7 +756,7 @@ def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_av
             [np.array([[[1], [2]], [[3], [4]]], dtype=np.float32)]
         )
     except RuntimeUnavailable as exc:
-        pytest.skip(f"CUDA PTX execution is not available: {exc}")
+        gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
 
