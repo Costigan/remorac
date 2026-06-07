@@ -142,6 +142,106 @@ class RemoraExecutor:
         )
 
 
+def execute_program_on_gpu(
+    source: str,
+    *,
+    include_prelude: bool = True,
+) -> np.ndarray:
+    """Compile a Remora body program to GPU PTX and execute it.
+
+    Uses the IREE HAL compilation path (``iree-compile``) to generate
+    CUDA PTX, then launches kernels directly via the CUDA driver.
+    For multi-kernel programs, launches all kernels in order with
+    intermediate buffers. Returns the output as a numpy array.
+    """
+    from remora.compiler import compile_source_to_ptx
+    from remora.runtime import CUDARuntime
+
+    artifact = compile_source_to_ptx(source, include_prelude=include_prelude)
+    if not artifact.kernels:
+        raise RemoraExecutorError(
+            "No GPU kernels generated. Try a program with tensor operations."
+        )
+    result_type = artifact.compiler.return_type
+    if result_type is None:
+        raise RemoraExecutorError("Cannot determine result type for GPU execution")
+
+    from remora.types import ArrayType, ScalarType
+    from remora.runtime import _numpy_dtype
+
+    if isinstance(result_type, ScalarType):
+        output_shape: tuple[int, ...] = ()
+        output_dtype = _numpy_dtype(result_type)
+        output_nbytes = np.dtype(output_dtype).itemsize
+    elif isinstance(result_type, ArrayType):
+        output_shape = tuple(d.value for d in result_type.shape)
+        output_dtype = _numpy_dtype(result_type.element)
+        output_nbytes = int(np.prod(output_shape, dtype=np.int64)) * np.dtype(output_dtype).itemsize
+    else:
+        raise RemoraExecutorError(f"unsupported result type: {result_type}")
+
+    output = np.empty(output_shape, dtype=output_dtype)
+    output_storage = np.zeros(max(output_nbytes, 256), dtype=np.uint8)
+
+    rt = CUDARuntime()
+    try:
+        mod = rt.load_ptx(artifact.ptx_text)
+        buf_size = max(4096, output_nbytes * 4)
+        buf_ptr = rt.alloc(buf_size)
+        rt.memset_d32(buf_ptr, 0, buf_size // 4)
+        extra_bufs: list[int] = []
+
+        for kernel_meta in artifact.kernels:
+            kernel = mod.get_function(kernel_meta.name)
+            num_params = kernel_meta.num_inputs + kernel_meta.num_outputs
+            if num_params > 1:
+                extra_ptr = rt.alloc(buf_size)
+                rt.memset_d32(extra_ptr, 0, buf_size // 4)
+                extra_bufs.append(extra_ptr)
+                params = [buf_ptr, extra_ptr]
+            else:
+                params = [buf_ptr]
+            block_size = int(kernel_meta.block_size or 256)
+            if output_shape:
+                element_count = max(1, int(np.prod(output_shape, dtype=np.int64)))
+            else:
+                element_count = 1
+            grid_size = int((element_count + block_size - 1) // block_size)
+            kernel.launch((grid_size, 1, 1), (block_size, 1, 1), params)
+            rt.synchronize()
+            # Swap buffers: output of this kernel becomes input of next
+            if extra_bufs:
+                rt.free(buf_ptr)
+                buf_ptr = extra_bufs.pop()
+
+        rt.copy_device_to_host(buf_ptr, output_storage)
+        # The final result may be at an offset in the buffer. For reductions,
+        # IREE places results after input data. Search for the non-zero tail.
+        result_offset = 0
+        if output_shape == () and len(artifact.kernels) > 1:
+            # For scalar results from multi-kernel programs, find the last
+            # non-zero word in the buffer, which is typically the result
+            itemsize = np.dtype(output_dtype).itemsize
+            flat = output_storage.view(output_dtype)
+            for i in range(len(flat) - 1, -1, -1):
+                if flat[i] != 0:
+                    result_offset = i * itemsize
+                    break
+        output_bytes = output_storage[result_offset:result_offset + output_nbytes]
+        if output_shape:
+            output[:] = output_bytes.view(output_dtype).reshape(output_shape)
+        else:
+            output[...] = output_bytes.view(output_dtype)[0]
+        rt.free(buf_ptr)
+        for ptr in extra_bufs:
+            rt.free(ptr)
+        mod.close()
+    finally:
+        rt.close()
+
+    return output
+
+
 def compute_output_shape(meta: KernelMeta, inputs: list[np.ndarray]) -> tuple[int, ...]:
     """Compute a single output shape from kernel metadata and host inputs."""
     if meta.output_shape is not None:

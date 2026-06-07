@@ -109,25 +109,29 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _handle_gpu_target(source: str) -> None:
-    """Compile a Remora body program to GPU and print diagnostics."""
+    """Compile a Remora body program to GPU, execute it, and print the result."""
+    from remora.executor import execute_program_on_gpu
+    from remora.display import format_result
+    from remora.compiler import compile_source
+    from remora.codegen import CodegenUnavailable
+
     try:
-        artifact = compile_source_to_ptx(source)
+        result = execute_program_on_gpu(source)
+        artifact = compile_source(source)
+        from remora.types import ArrayType, ScalarType
+        from remora.runtime import _result_dtype
+        rtype = artifact.return_type
+        if rtype is None:
+            raise CodegenUnavailable("Cannot determine result type")
+        print(format_result(result, rtype))
     except CodegenUnavailable as exc:
         raise CodegenUnavailable(
-            f"GPU compilation failed: {exc}\n\n"
+            f"GPU execution failed: {exc}\n\n"
             "This program may use operations not supported on GPU. "
             "Currently supported GPU operations: element-wise maps (f32/i32/bool), "
             "and scalar reductions. Views, indexing, and scalar-only programs are "
             "not supported on GPU."
         ) from exc
-    kernels = artifact.kernels
-    if not kernels:
-        raise CodegenUnavailable(
-            "No GPU kernels were generated. This program may contain only "
-            "scalar operations with no tensor-level parallelism. "
-            "GPU target requires tensor operations (map, fold, etc.)."
-        )
-    print(f"GPU compilation succeeded — {len(kernels)} kernel(s) generated")
 
 
 if __name__ == "__main__":
