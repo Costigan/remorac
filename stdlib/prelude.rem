@@ -1,12 +1,22 @@
 -- Dense Core starter prelude.
--- Keep this file limited to helpers supported by the current static CPU path.
 
 def add x y = x + y
 def sub x y = x - y
 def mul x y = x * y
 def div x y = x / y
 
+def neg x = 0 - x
+def id x = x
+def const a b = a
+
 def sum xs = fold (+) 0.0 xs
 def product xs = fold (*) 1.0 xs
 def scale s xs = map (* s) xs
 def dot a b = sum (map (*) a b)
+
+def max a b = if a < b then b else a
+def min a b = if a < b then a else b
+def abs x = if x < 0 then 0 - x else x
+
+def any xs = fold (\a x -> a || x) false xs
+def all xs = fold (\a x -> a && x) true xs

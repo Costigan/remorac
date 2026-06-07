@@ -2023,7 +2023,7 @@ def _lower_fold_callable_body(
             right_lines = _cast_if_needed(input_name, input_type, result_type, "%fold_right")
             left_value = "%fold_left" if left_lines else acc_name
             right_value = "%fold_right" if right_lines else input_name
-            op = _arith_op(function.body.op[0], result_type)
+            op = _arith_op(function.body.op[:-1], result_type)
             sep = ", " if "cmp" in op else " "
             lines = [
                 *left_lines,
