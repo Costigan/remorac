@@ -193,10 +193,10 @@ def test_rank3_f32_unary_map_gpu_scaffold_supports_left_section_division():
     assert "gpu.func @remora_inv3d" in text
     assert "memref<2x3x4xf32>" in text
     assert "arith.constant 24 : index" in text
-    assert "arith.divui %idx, %plane : index" in text
-    assert "arith.remui %rem0, %dim2 : index" in text
+    assert "arith.divui %idx, %plane0 : index" in text
+    assert "arith.remui %rem0, %plane1 : index" in text
     assert "%y = arith.divf %c, %x0 : f32" in text
-    assert "memref.store %y, %output[%i0, %i1, %i2]" in text
+    assert "memref.store %y, %output[%i0, %i1, %rem1]" in text
 
 
 def test_rank1_through_rank3_binary_map_gpu_scaffolds_are_parseable():
