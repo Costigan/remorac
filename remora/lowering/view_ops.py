@@ -85,9 +85,23 @@ def _lower_view_result(
                 "transpose expects an array of rank at least 2"
             )
         permutation = [1, 0, *range(2, rank)]
-        perm_attr = "[" + ", ".join(map(str, permutation)) + "]"
+        from remora.lowering.tensor_ops import (
+            _identity_affine_map,
+            _parallel_iterators,
+        )
+        transposed_map = _transpose_affine_map(rank, permutation)
+        identity = _identity_affine_map(rank)
+        iterators = _parallel_iterators(rank)
         empty_name = f"%{_join_prefix(prefix, 'empty')}"
-        result_line = f"    {result_name} = linalg.transpose ins({input_name} : {input_type}) outs({empty_name} : {result_type}) permutation = {perm_attr}"
+        elem_type = type_to_mlir(node.result_type.element)
+        result_line = f"""    {empty_name} = tensor.empty() : {result_type}
+    {result_name} = linalg.generic {{
+      indexing_maps = [{transposed_map}, {identity}],
+      iterator_types = {iterators}
+    }} ins({input_name} : {input_type}) outs({empty_name} : {result_type}) {{
+    ^bb0(%in: {elem_type}, %out: {elem_type}):
+      linalg.yield %in : {elem_type}
+    }} -> {result_type}"""
 
     elif isinstance(node, HIRReshape):
         rank = node.result_type.rank
@@ -161,10 +175,8 @@ def _lower_view_result(
             f"unhandled view node type {type(node).__name__}"
         )
 
-    if "linalg.transpose" in result_line:
-        empty_name = f"%{_join_prefix(prefix, 'empty')}"
+    if "linalg.generic" in result_line:
         body = f"""{input_code}
-    {empty_name} = tensor.empty() : {result_type}
 {result_line}
 """
     else:
@@ -172,6 +184,21 @@ def _lower_view_result(
 {result_line}
 """
     return body.rstrip(), result_name, result_type
+
+
+def _transpose_affine_map(rank: int, permutation: list[int]) -> str:
+    dims = ", ".join(f"d{axis}" for axis in range(rank))
+    results = ", ".join(f"d{p}" for p in permutation)
+    return f"affine_map<({dims}) -> ({results})>"
+
+
+def _slice_affine_map(input_rank: int, result_rank: int, offset: int) -> str:
+    dims = ", ".join(f"d{axis}" for axis in range(result_rank))
+    results = ", ".join(f"d{axis} + {offset if axis == 0 else 0}" for axis in range(result_rank))
+    # Pad with unused dims if input_rank > result_rank
+    if input_rank > result_rank:
+        results += ", " + ", ".join("0" for _ in range(input_rank - result_rank))
+    return f"affine_map<({dims}) -> ({results})>"
 
 
 def _lower_view_input(

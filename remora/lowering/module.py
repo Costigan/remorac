@@ -518,6 +518,7 @@ def _lower_main_result_with_tensor_env(
             HIRTranspose,
             HIRReshape,
             HIRRavel,
+            HIRReverse,
             HIRTake,
             HIRDrop,
         ),
