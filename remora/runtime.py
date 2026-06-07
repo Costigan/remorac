@@ -438,9 +438,14 @@ def _cuda_value(cuda_driver: Any, result: object, message: str) -> Any:
     return values
 
 
-def evaluate_source(source: str, *, include_prelude: bool = True) -> EvaluationResult:
-    program_source = with_prelude(source) if include_prelude else source
-    typed = TypeChecker().check_program(parse_program(program_source))
+def evaluate_source(source: str, *, include_prelude: bool = True, syntax: str = "ml") -> EvaluationResult:
+    _maybe_include_prelude = include_prelude and syntax == "ml"
+    program_source = with_prelude(source) if _maybe_include_prelude else source
+    if syntax == "lisp":
+        from remora.lisp_reader import parse_lisp as parse_lisp_program
+        typed = TypeChecker().check_program(parse_lisp_program(program_source))
+    else:
+        typed = TypeChecker().check_program(parse_program(program_source))
     return evaluate_typed_program(typed)
 
 
@@ -450,12 +455,14 @@ def evaluate_source_compiled(
     include_prelude: bool = True,
     cpu_threads: int | None = None,
     cpu_vectorize: bool = False,
+    syntax: str = "ml",
 ) -> EvaluationResult:
     artifact = CPUExecutor.compile_source(
         source,
         include_prelude=include_prelude,
         cpu_threads=cpu_threads,
         cpu_vectorize=cpu_vectorize,
+        syntax=syntax,
     )
     try:
         value = CPUExecutor(artifact).execute_main([])
@@ -490,6 +497,7 @@ class CPUExecutor:
         toolchain: PipelineToolchain | None = None,
         cpu_threads: int | None = None,
         cpu_vectorize: bool = False,
+        syntax: str = "ml",
     ) -> CompiledCPUArtifact:
         resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_source(
@@ -497,6 +505,7 @@ class CPUExecutor:
             verify=False,
             include_prelude=include_prelude,
             export_output_descriptor=True,
+            syntax=syntax,
         )
         if compiler_artifact.return_type is None:
             raise EvaluationError("definition-only programs cannot be compiled for CPU execution")

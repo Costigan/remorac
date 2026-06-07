@@ -15,12 +15,19 @@ from remora.defunc import defunctionalize
 from remora.hir import HIRFunction, HIRParam, HIRProgram, lower_expr, lower_to_hir
 from remora.lowering import MLIRLowering
 from remora.parser import parse_program
+from remora.lisp_reader import parse_lisp as parse_lisp_program
 from remora.pipeline import run_validation_pipeline, verify_module_text
 from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
 from remora.types import FuncType, RemoraType
-from remora.ast_nodes import FuncDef
+from remora.ast_nodes import FuncDef, Program
+
+
+def _parse_source(source: str, syntax: str = "ml") -> Program:
+    if syntax == "lisp":
+        return parse_lisp_program(source)
+    return parse_program(source)
 from remora.gpu_lowering import (
     GPUModuleScaffold,
     GPUScaffoldError,
@@ -77,9 +84,12 @@ def compile_source(
     verify: bool = True,
     include_prelude: bool = True,
     export_output_descriptor: bool = False,
+    syntax: str = "ml",
 ) -> CompilerArtifact:
-    program_source = with_prelude(source) if include_prelude else source
-    typed = TypeChecker().check_program(parse_program(program_source))
+    _maybe_include_prelude = include_prelude and syntax == "ml"
+    program_source = with_prelude(source) if _maybe_include_prelude else source
+    ast = _parse_source(program_source, syntax)
+    typed = TypeChecker().check_program(ast)
     hir = defunctionalize(lower_to_hir(typed))
     mlir_module = MLIRLowering().lower_program(
         hir,
@@ -102,12 +112,14 @@ def compile_source_to_mlir(
     *,
     verify: bool = True,
     include_prelude: bool = True,
+    syntax: str = "ml",
 ) -> str:
     return compile_source(
         source,
         verify=verify,
         include_prelude=include_prelude,
         export_output_descriptor=False,
+        syntax=syntax,
     ).mlir_text
 
 
@@ -116,12 +128,14 @@ def compile_source_to_ptx(
     *,
     verify: bool = True,
     include_prelude: bool = True,
+    syntax: str = "ml",
 ) -> PTXArtifact:
     artifact = compile_source(
         source,
         verify=verify,
         include_prelude=include_prelude,
         export_output_descriptor=False,
+        syntax=syntax,
     )
     ptx_text, kernels = generate_ptx(artifact.mlir_module)
     return PTXArtifact(artifact, ptx_text, kernels)
@@ -228,10 +242,12 @@ def compile_function_source(
     verify: bool = True,
     include_prelude: bool = True,
     export_name: str = "remora_call",
+    syntax: str = "ml",
 ) -> FunctionCompilerArtifact:
     """Compile one top-level function with explicit static parameter types."""
-    program_source = with_prelude(source) if include_prelude else source
-    program = parse_program(program_source)
+    _maybe_include_prelude = include_prelude and syntax == "ml"
+    program_source = with_prelude(source) if _maybe_include_prelude else source
+    program = _parse_source(program_source, syntax)
     checker = TypeChecker()
     env = TypeEnv()
     function_def: FuncDef | None = None

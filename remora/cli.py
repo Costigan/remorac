@@ -14,6 +14,7 @@ from remora.display import format_result
 from remora.errors import RemoraError
 from remora.hir import lower_to_hir
 from remora.parser import parse_program
+from remora.lisp_reader import parse_lisp as parse_lisp_program
 from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.runtime import evaluate_source, evaluate_source_compiled
@@ -23,6 +24,12 @@ from remora.typechecker import TypeChecker
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Remora Dense Core compiler")
     parser.add_argument("file", type=Path, help="Remora source file")
+    parser.add_argument(
+        "--syntax",
+        choices=("ml", "lisp"),
+        default="ml",
+        help="syntax for reading source files; ml (default) or lisp",
+    )
     parser.add_argument(
         "--target",
         choices=("cpu", "interp", "mlir", "ptx", "gpu-nvidia"),
@@ -75,23 +82,24 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         source = args.file.read_text(encoding="utf-8")
+        syntax: str = args.syntax
         if args.call is not None:
             return _handle_function_call(args, source)
         if args.emit_ast:
-            print(pformat(parse_program(source, str(args.file))))
+            print(pformat(_parse(source, str(args.file), syntax)))
             return 0
         if args.emit_typed_ast:
-            print(pformat(TypeChecker().check_program(parse_program(with_prelude(source), str(args.file)))))
+            print(pformat(TypeChecker().check_program(_parse(with_prelude(source), str(args.file), syntax))))
             return 0
         if args.emit_hir:
-            typed = TypeChecker().check_program(parse_program(with_prelude(source), str(args.file)))
+            typed = TypeChecker().check_program(_parse(with_prelude(source), str(args.file), syntax))
             print(pformat(defunctionalize(lower_to_hir(typed))))
             return 0
         if args.emit_mlir:
-            print(compile_source(source).mlir_text)
+            print(compile_source(source, syntax=syntax).mlir_text)
             return 0
         if args.emit_ptx:
-            artifact = compile_source_to_ptx(source)
+            artifact = compile_source_to_ptx(source, syntax=syntax)
             print(artifact.ptx_text)
             return 0
 
@@ -100,27 +108,34 @@ def main(argv: list[str] | None = None) -> int:
                 source,
                 cpu_threads=args.cpu_threads,
                 cpu_vectorize=args.cpu_vectorize,
+                syntax=syntax,
             )
             print(format_result(result.value, result.type))
             return 0
         if args.target == "interp":
-            result = evaluate_source(source)
+            result = evaluate_source(source, syntax=syntax)
             print(format_result(result.value, result.type))
             return 0
         if args.target == "mlir":
-            print(compile_source(source).mlir_text)
+            print(compile_source(source, syntax=syntax).mlir_text)
             return 0
         if args.target == "ptx":
-            artifact = compile_source_to_ptx(source)
+            artifact = compile_source_to_ptx(source, syntax=syntax)
             print(artifact.ptx_text)
             return 0
         if args.target == "gpu-nvidia":
-            _handle_gpu_target(source)
+            _handle_gpu_target(source, syntax=syntax)
             return 0
         raise AssertionError(f"unknown target {args.target}")
     except (OSError, RemoraError, CodegenUnavailable, PipelineUnavailable) as exc:
         print(f"remorac: {exc}", file=sys.stderr)
         return 1
+
+
+def _parse(source: str, filename: str = "<input>", syntax: str = "ml"):
+    if syntax == "lisp":
+        return parse_lisp_program(source, filename)
+    return parse_program(source, filename)
 
 
 def _handle_function_call(args, source: str) -> int:
@@ -172,12 +187,11 @@ def _handle_function_call(args, source: str) -> int:
         return 1
 
 
-def _handle_gpu_target(source: str) -> None:
+def _handle_gpu_target(source: str, syntax: str = "ml") -> None:
     """Compile a Remora body program to GPU, execute it, and print the result."""
     from remora.executor import execute_program_on_gpu
     from remora.display import format_result
     from remora.compiler import compile_source
-    from remora.codegen import CodegenUnavailable
 
     try:
         result = execute_program_on_gpu(source)

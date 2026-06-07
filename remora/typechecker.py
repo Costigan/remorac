@@ -100,7 +100,7 @@ class TypedArray:
 @dataclass(frozen=True)
 class TypedMap:
     """A typed map (lifted) application over one or two arrays."""
-    expr: MapExpr
+    expr: Expr
     func: TypedExpr
     arrays: list[TypedExpr]
     frame_shape: tuple[DimExpr, ...]
@@ -464,6 +464,14 @@ class TypeChecker:
                 env,
             )
 
+        if isinstance(expr, VarExpr) and expr.name in ALL_PRIMITIVE_OPS:
+            if len(expected_type.params) != 2:
+                raise RemoraTypeError(
+                    f"primitive operator {expr.name} must be binary", expr.loc
+                )
+            op_expr = OperatorFuncExpr(expr.name, expr.loc)
+            return self._check_operator_func(op_expr, expected_type)
+
         typed = self.infer(expr, env)
         self._require(typed.type, expected_type, expr.loc)
         return typed
@@ -489,6 +497,18 @@ class TypeChecker:
         return TypedArray(expr, typed_elements, array_type)
 
     def _infer_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
+        # Implicit rank-polymorphic map: for primitive ops and lambdas applied
+        # to arrays, attempt to lift the application to a map.
+        # Named functions use explicit type matching (existing behavior).
+        is_primitive = isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS
+        is_lambda = isinstance(expr.func, LambdaExpr)
+        if is_primitive or is_lambda:
+            typed_args = [self.infer(arg, env) for arg in expr.args]
+            if any(isinstance(a.type, ArrayType) for a in typed_args):
+                result = self._try_implicit_map(expr, typed_args, env)
+                if result is not None:
+                    return result
+
         if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
             return self._infer_primitive_app(expr, env)
         if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
@@ -505,6 +525,81 @@ class TypeChecker:
             for arg, param_type in zip(expr.args, typed_func.type.params)
         ]
         return TypedApp(expr, typed_func, typed_args, typed_func.type.result)
+
+    def _try_implicit_map(
+        self, expr: AppExpr, typed_args: list[TypedExpr], env: TypeEnv
+    ) -> TypedExpr | None:
+        """Attempt implicit rank-polymorphic map lifting for array arguments."""
+
+        if len(typed_args) == 2:
+            return self._try_implicit_binary_map(expr, typed_args, env)
+        if len(typed_args) == 1:
+            return self._try_implicit_unary_map(expr, typed_args, env)
+        return None
+
+    def _try_implicit_unary_map(
+        self, expr: AppExpr, typed_args: list[TypedExpr], env: TypeEnv
+    ) -> TypedExpr | None:
+        typed_array = typed_args[0]
+        if not isinstance(typed_array.type, ArrayType):
+            return None
+
+        candidates = self._cell_type_candidates(typed_array.type)
+        for cell_type in candidates:
+            try:
+                func_type = self._infer_callable_type_for_map(
+                    expr.func, cell_type, env
+                )
+                typed_func = self.check_callable(expr.func, func_type, env)
+                frame_shape, result_type = infer_lifting(func_type, typed_array.type)
+                cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
+                return TypedMap(
+                    expr,
+                    typed_func,
+                    typed_args,
+                    frame_shape,
+                    cell_shape,
+                    result_type,
+                )
+            except RemoraTypeError:
+                continue
+        return None
+
+    def _try_implicit_binary_map(
+        self, expr: AppExpr, typed_args: list[TypedExpr], env: TypeEnv
+    ) -> TypedExpr | None:
+        left = typed_args[0]
+        right = typed_args[1]
+        if not isinstance(left.type, ArrayType) and not isinstance(right.type, ArrayType):
+            return None
+
+        left_cell, left_frame = self._scalar_cell_and_frame(left.type, expr.loc)
+        right_cell, right_frame = self._scalar_cell_and_frame(right.type, expr.loc)
+
+        # Both args must be arrays with matching shapes for now
+        # (broadcasting/scalar-array replication deferred)
+        if not isinstance(left.type, ArrayType) or not isinstance(right.type, ArrayType):
+            return None
+        if left_frame != right_frame:
+            return None
+
+        try:
+            func_type = self._infer_binary_map_callable_type(
+                expr.func, left_cell, right_cell, env
+            )
+            typed_func = self.check_callable(expr.func, func_type, env)
+            result_type = func_type.result
+            if left_frame:
+                if isinstance(result_type, FuncType):
+                    return None
+                if isinstance(result_type, ArrayType):
+                    return None
+                result_type = ArrayType(result_type, left_frame)
+            return TypedMap(
+                expr, typed_func, typed_args, left_frame, (), result_type,
+            )
+        except RemoraTypeError:
+            return None
 
     def _infer_primitive_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
         if len(expr.args) != 2:
@@ -648,6 +743,11 @@ class TypeChecker:
                 return FuncType((BOOL, BOOL), BOOL)
             raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
 
+        if isinstance(expr, VarExpr) and expr.name in ALL_PRIMITIVE_OPS:
+            return self._infer_binary_callable_type_for_primitive(
+                expr.name, left_cell, right_cell, expr.loc
+            )
+
         if isinstance(expr, LambdaExpr):
             if len(expr.params) != 2:
                 raise RemoraTypeError("binary map expects a binary callable", expr.loc)
@@ -674,6 +774,25 @@ class TypeChecker:
         self._require(typed.type.params[0], left_cell, expr.loc)
         self._require(typed.type.params[1], right_cell, expr.loc)
         return typed.type
+
+    def _infer_binary_callable_type_for_primitive(
+        self, op: str, left_cell: ScalarType, right_cell: ScalarType, loc
+    ) -> FuncType:
+        if op in {"+", "-", "*"}:
+            result = common_numeric_type(left_cell, right_cell)
+            return FuncType((result, result), result)
+        if op == "/":
+            self._require_numeric(left_cell, loc)
+            self._require_numeric(right_cell, loc)
+            return FuncType((FLOAT, FLOAT), FLOAT)
+        if op in {"<", "<=", "==", "!="}:
+            result = common_numeric_type(left_cell, right_cell)
+            return FuncType((result, result), BOOL)
+        if op in {"&&", "||"}:
+            self._require(left_cell, BOOL, loc)
+            self._require(right_cell, BOOL, loc)
+            return FuncType((BOOL, BOOL), BOOL)
+        raise RemoraTypeError(f"operator {op} cannot be used in binary map", loc)
 
     def _infer_transpose(self, expr: TransposeExpr, env: TypeEnv) -> TypedTranspose:
         typed_array = self._require_array(expr.array, "transpose", env)
@@ -948,6 +1067,13 @@ class TypeChecker:
             self._require_numeric(params[0], expr.loc)
             self._require_numeric(params[1], expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
+        elif expr.op in {"<", "<=", "==", "!="}:
+            _common = common_numeric_type(params[0], params[1])
+            self._require(expected_type.result, BOOL, expr.loc)
+        elif expr.op in {"&&", "||"}:
+            self._require(params[0], BOOL, expr.loc)
+            self._require(params[1], BOOL, expr.loc)
+            self._require(expected_type.result, BOOL, expr.loc)
         else:
             raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
         return TypedOperatorFunc(expr, expected_type)
