@@ -25,6 +25,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFunction
+from remora.operators import ptx_op
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
@@ -565,28 +566,15 @@ def _binary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
 
 
 def _unary_f32_ptx_op(operation: F32MapOperation) -> str:
-    if operation.op == "*":
-        return "mul.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "+":
-        return "add.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "-":
-        if operation.constant_side == "left":
-            return "sub.rn.f32 %f3, %f2, %f1;"
-        return "sub.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "/":
-        if operation.constant_side == "left":
-            return "div.rn.f32 %f3, %f2, %f1;"
-        return "div.rn.f32 %f3, %f1, %f2;"
-    raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
+    ptx = ptx_op(operation.op)
+    if operation.op in {"-", "/"} and operation.constant_side == "left":
+        return f"{ptx} %f3, %f2, %f1;"
+    return f"{ptx} %f3, %f1, %f2;"
 
 
 def _binary_f32_ptx_op(operation: F32MapOperation) -> str:
-    if operation.op == "*":
-        return "mul.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "+":
-        return "add.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "-":
-        return "sub.rn.f32 %f3, %f1, %f2;"
-    if operation.op == "/":
-        return "div.rn.f32 %f3, %f1, %f2;"
-    raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
+    return f"{ptx_op(operation.op)} %f3, %f1, %f2;"

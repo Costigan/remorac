@@ -38,6 +38,7 @@ from remora.hir import (
     HIRProgram,
     HIRVar,
 )
+from remora.operators import arith_op, comparison_mlir_op, comparison_predicate
 from remora.types import BOOL, FLOAT, INT, ArrayType, FuncType, RemoraType, ScalarType, StaticDim
 
 
@@ -304,6 +305,8 @@ def _lower_main_module(
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(node.value_type, ArrayType):
         return _lower_tensor_let_module(node, functions)
+    if isinstance(node, HIRIf) and isinstance(_expr_result_type(node.condition), ArrayType):
+        return _lower_tensor_if_module(node)
     if isinstance(node, (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall, HIRIf)):
         return _lower_scalar_module(node, functions)
     if isinstance(node, (HIRIndex, HIRSlice, HIRTranspose, HIRReshape, HIRRavel, HIRReverse, HIRTake, HIRDrop)):
@@ -381,6 +384,8 @@ def _lower_main_result_with_tensor_env(
             tensor_env,
         )
         return code, value_name, value_type
+    if isinstance(node, HIRIf) and isinstance(_expr_result_type(node.condition), ArrayType):
+        return _lower_tensor_if_result(node, functions, tensor_env)
     raise RemoraLoweringError("unsupported tensor let body for MLIR lowering")
 
 
@@ -648,6 +653,50 @@ def _lower_scalar_module(
     builder = _MLIRMainModuleBuilder(result_type, functions=functions)
     builder.add_block("\n".join(lines))
     return builder.render(result_value)
+
+
+def _lower_tensor_if_module(node: HIRIf) -> str:
+    body, result_value, result_type = _lower_tensor_if_result(node, {}, None)
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_tensor_if_result(
+    node: HIRIf,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None,
+) -> tuple[str, str, str]:
+    cond_code, cond_name, cond_type, cond_elem = _lower_tensor_input(
+        node.condition, "cond", functions, tensor_env
+    )
+    then_code, then_name, then_type, then_elem = _lower_tensor_input(
+        node.then_branch, "then_val", functions, tensor_env
+    )
+    else_code, else_name, else_type, else_elem = _lower_tensor_input(
+        node.else_branch, "else_val", functions, tensor_env
+    )
+    result_type = type_to_mlir(node.result_type)
+    if then_type != result_type or else_type != result_type:
+        raise RemoraLoweringError("tensor if branches must have matching types")
+    rank = node.result_type.rank if isinstance(node.result_type, ArrayType) else 1
+    identity = _identity_affine_map(rank)
+    iterators = _parallel_iterators(rank)
+    result_name = "%if_result"
+    body = f"""{cond_code}
+{then_code}
+{else_code}
+    %if_empty = tensor.empty() : {result_type}
+    {result_name} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}, {identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({cond_name}, {then_name}, {else_name} : {cond_type}, {then_type}, {else_type}) outs(%if_empty : {result_type}) {{
+    ^bb0(%c: {cond_elem}, %t: {then_elem}, %e: {else_elem}, %out: {then_elem}):
+      %selected = arith.select %c, %t, %e : {then_elem}
+      linalg.yield %selected : {then_elem}
+    }} -> {result_type}
+"""
+    return body.rstrip(), result_name, result_type
 
 
 def _lower_iota_module(node: HIRIota) -> str:
@@ -1337,8 +1386,6 @@ def _lower_array_fold_result(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
-    if not isinstance(node.func, HIRPrimCallable):
-        raise RemoraLoweringError("only primitive array-cell fold callables lower to MLIR so far")
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("array fold lowering requires an array result")
 
@@ -1967,6 +2014,39 @@ def _lower_fold_callable_body(
             raise RemoraLoweringError(f"unknown fold function {callable_.name}")
         if len(function.params) != 2:
             raise RemoraLoweringError("fold functions must take two parameters")
+        param_names = {function.params[0].name, function.params[1].name}
+        if isinstance(function.body, HIRPrimOp) and all(
+            isinstance(arg, HIRVar) and arg.name in param_names
+            for arg in function.body.args
+        ):
+            left_lines = _cast_if_needed(acc_name, acc_type, result_type, "%fold_left")
+            right_lines = _cast_if_needed(input_name, input_type, result_type, "%fold_right")
+            left_value = "%fold_left" if left_lines else acc_name
+            right_value = "%fold_right" if right_lines else input_name
+            op = _arith_op(function.body.op[0], result_type)
+            sep = ", " if "cmp" in op else " "
+            lines = [
+                *left_lines,
+                *right_lines,
+                f"      %fold_result = {op}{sep}{left_value}, {right_value} : {result_type}",
+                f"      linalg.yield %fold_result : {result_type}",
+            ]
+            return "\n".join(lines)
+        if isinstance(function.body, HIRMap) and not function.body.cell_shape:
+            if isinstance(function.body.func, HIRPrimCallable) and function.body.func.left_arg is None and function.body.func.right_arg is None:
+                op = _arith_op(function.body.func.op, result_type)
+                sep = ", " if "cmp" in op else " "
+                left_lines = _cast_if_needed(acc_name, acc_type, result_type, "%fold_left")
+                right_lines = _cast_if_needed(input_name, input_type, result_type, "%fold_right")
+                left_value = "%fold_left" if left_lines else acc_name
+                right_value = "%fold_right" if right_lines else input_name
+                lines = [
+                    *left_lines,
+                    *right_lines,
+                    f"      %fold_result = {op}{sep}{left_value}, {right_value} : {result_type}",
+                    f"      linalg.yield %fold_result : {result_type}",
+                ]
+                return "\n".join(lines)
         emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
         value = emitter.emit_expr(
             function.body,
@@ -2061,41 +2141,10 @@ def _cast_if_needed(value_name: str, from_type: str, to_type: str, result_name: 
 
 
 def _arith_op(op: str, result_type: str) -> str:
-    if result_type == "f32":
-        ops = {
-            "+": "arith.addf",
-            "-": "arith.subf",
-            "*": "arith.mulf",
-            "/": "arith.divf",
-            "==": "arith.cmpf oeq",
-            "!=": "arith.cmpf une",
-            "<": "arith.cmpf olt",
-            "<=": "arith.cmpf ole",
-        }
-    elif result_type == "i32":
-        ops = {
-            "+": "arith.addi",
-            "-": "arith.subi",
-            "*": "arith.muli",
-            "/": "arith.divsi",
-            "==": "arith.cmpi eq",
-            "!=": "arith.cmpi ne",
-            "<": "arith.cmpi slt",
-            "<=": "arith.cmpi sle",
-        }
-    elif result_type == "i1":
-        ops = {
-            "&&": "arith.andi",
-            "||": "arith.ori",
-            "==": "arith.cmpi eq",
-            "!=": "arith.cmpi ne",
-        }
-    else:
-        raise RemoraLoweringError(f"primitive result type {result_type} is deferred")
     try:
-        return ops[op]
+        return arith_op(op, result_type)
     except KeyError as exc:
-        raise RemoraLoweringError(f"primitive operator {op} is deferred") from exc
+        raise RemoraLoweringError(str(exc)) from exc
 
 
 class _RegionEmitter:
@@ -2262,19 +2311,11 @@ def _hir_prim_op(op: str, result_type: str) -> str:
 
 
 def _comparison_op(op: str, operand_type: str) -> tuple[str, str]:
-    if operand_type == "i32":
-        predicates = {"<b": "slt", "<=b": "sle", "==b": "eq", "!=b": "ne"}
-        try:
-            return "arith.cmpi", predicates[op]
-        except KeyError as exc:
-            raise RemoraLoweringError(f"comparison HIR op {op} is deferred") from exc
-    if operand_type == "f32":
-        predicates = {"<b": "olt", "<=b": "ole", "==b": "oeq", "!=b": "one"}
-        try:
-            return "arith.cmpf", predicates[op]
-        except KeyError as exc:
-            raise RemoraLoweringError(f"comparison HIR op {op} is deferred") from exc
-    raise RemoraLoweringError(f"comparison operand type {operand_type} is deferred")
+    base_op = op[:-1] if op.endswith("b") else op
+    try:
+        return comparison_mlir_op(base_op, operand_type), comparison_predicate(base_op, operand_type)
+    except KeyError as exc:
+        raise RemoraLoweringError(str(exc)) from exc
 
 
 def _load_iree_ir() -> Any:

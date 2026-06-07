@@ -19,6 +19,7 @@ from remora.compiler import compile_function_source, compile_source
 from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
+from remora.operators import ALL_PRIMITIVE_OPS
 from remora.parser import parse_program
 from remora.pipeline import (
     PipelineToolchain,
@@ -931,7 +932,7 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedApp):
         if isinstance(expr.func, TypedExprNode) and isinstance(expr.func.expr, VarExpr):
-            if expr.func.expr.name in _OPS:
+            if expr.func.expr.name in ALL_PRIMITIVE_OPS:
                 args = [_eval_expr(arg, env) for arg in expr.args]
                 return _coerce_runtime_value(_apply_op(expr.func.expr.name, *args), expr.type)
         func = _eval_expr(expr.func, env)
@@ -1137,6 +1138,3 @@ def _numpy_dtype(element_type: ScalarType) -> np.dtype:
     if element_type == BOOL:
         return np.dtype(np.bool_)
     raise EvaluationError(f"unsupported array element type {element_type}")
-
-
-_OPS = {"+", "-", "*", "/", "<", "<=", "==", "!=", "&&", "||"}

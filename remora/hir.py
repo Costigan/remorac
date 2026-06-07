@@ -13,6 +13,7 @@ from remora.ast_nodes import (
     VarExpr,
 )
 from remora.errors import RemoraError
+from remora.operators import ALL_PRIMITIVE_OPS, is_primitive_op
 from remora.typechecker import (
     TypedApp,
     TypedArray,
@@ -346,7 +347,7 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
         )
 
     if isinstance(expr, TypedApp):
-        if _typed_node_var_name(expr.func) in _PRIMITIVE_OPS:
+        if _typed_node_var_name(expr.func) in ALL_PRIMITIVE_OPS:
             return HIRPrimOp(
                 _prim_op_name(_typed_node_var_name(expr.func), expr.type),
                 [lower_expr(arg) for arg in expr.args],
@@ -410,7 +411,7 @@ def lower_callable(expr: TypedExpr) -> HIRCallable:
             expr.expr.op,
             expr.type.params,
             expr.type.result,
-            left_arg=lower_expr(expr.arg),
+            right_arg=lower_expr(expr.arg),
         )
     if isinstance(expr, TypedRightSection):
         return HIRPrimCallable(
@@ -541,6 +542,8 @@ def _operator_like_expr(expr: TypedExprNode) -> str | None:
 def _prim_op_name(op: str | None, result_type: RemoraType) -> str:
     if op is None:
         raise HIRLoweringError("missing primitive operator name")
+    if isinstance(result_type, ArrayType):
+        result_type = result_type.element
     if result_type == FLOAT:
         suffix = "f"
     elif result_type == INT:
@@ -550,6 +553,3 @@ def _prim_op_name(op: str | None, result_type: RemoraType) -> str:
     else:
         raise HIRLoweringError(f"unsupported primitive result type {result_type}")
     return f"{op}{suffix}"
-
-
-_PRIMITIVE_OPS = {"+", "-", "*", "/", "<", "<=", "==", "!=", "&&", "||"}

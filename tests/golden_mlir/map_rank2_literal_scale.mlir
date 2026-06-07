@@ -10,7 +10,7 @@ module {
     %1 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel"]} ins(%from_elements : tensor<2x2xf32>) outs(%0 : tensor<2x2xf32>) {
     ^bb0(%in: f32, %out: f32):
       %cst_3 = arith.constant 2.000000e+00 : f32
-      %2 = arith.mulf %cst_3, %in : f32
+      %2 = arith.mulf %in, %cst_3 : f32
       linalg.yield %2 : f32
     } -> tensor<2x2xf32>
     return %1 : tensor<2x2xf32>

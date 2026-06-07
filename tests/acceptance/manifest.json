@@ -216,6 +216,14 @@
     "expect_stderr_contains": "rank limit exceeded in Dense Core"
   },
   {
+    "name": "array_fold_named",
+    "category": "supported",
+    "path": "pass/array_fold_named.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[4, 6]\n"
+  },
+  {
     "name": "dynamic_shape",
     "category": "deferred",
     "path": "deferred/dynamic_shape.remora",

@@ -12,9 +12,9 @@ module {
     %2 = tensor.empty() : tensor<10xf32>
     %3 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel"]} ins(%1 : tensor<10xi32>) outs(%2 : tensor<10xf32>) {
     ^bb0(%in: i32, %out: f32):
-      %cst_0 = arith.constant 2.000000e+00 : f32
       %5 = arith.sitofp %in : i32 to f32
-      %6 = arith.mulf %cst_0, %5 : f32
+      %cst_0 = arith.constant 2.000000e+00 : f32
+      %6 = arith.mulf %5, %cst_0 : f32
       linalg.yield %6 : f32
     } -> tensor<10xf32>
     %cst = arith.constant 0.000000e+00 : f32

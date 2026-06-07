@@ -37,6 +37,7 @@ from remora.ast_nodes import (
     ValDef,
     VarExpr,
 )
+from remora.operators import ALL_PRIMITIVE_OPS
 from remora.types import (
     BOOL,
     FLOAT,
@@ -360,7 +361,11 @@ class TypeChecker:
             return TypedLet(expr, expr.name, typed_value, typed_body, typed_body.type)
         if isinstance(expr, IfExpr):
             condition = self.infer(expr.condition, env)
-            self._require(condition.type, BOOL, expr.loc)
+            if isinstance(condition.type, ArrayType):
+                if condition.type.element != BOOL:
+                    raise RemoraTypeError("if condition array must have boolean elements", expr.loc)
+            elif condition.type != BOOL:
+                self._require(condition.type, BOOL, expr.loc)
             then_branch = self.infer(expr.then_branch, env)
             else_branch = self.infer(expr.else_branch, env)
             self._require(then_branch.type, else_branch.type, expr.loc)
@@ -449,7 +454,7 @@ class TypeChecker:
         return TypedArray(expr, typed_elements, array_type)
 
     def _infer_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
-        if isinstance(expr.func, VarExpr) and expr.func.name in _INFIX_OPERATORS:
+        if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
             return self._infer_primitive_app(expr, env)
         if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
             return self._infer_top_level_function_app(expr, env)
@@ -474,13 +479,13 @@ class TypeChecker:
         op = expr.func.name
 
         if op in {"+", "-", "*"}:
-            result_type = common_numeric_type(left.type, right.type)
+            result_type = self._common_fold_operator_type(left.type, right.type, expr.loc)
             return TypedApp(
                 expr,
                 TypedExprNode(expr.func, FuncType((result_type, result_type), result_type)),
                 [
-                    self._coerce(left, result_type, expr.loc),
-                    self._coerce(right, result_type, expr.loc),
+                    self._coerce(left, result_type, expr.loc) if not isinstance(left.type, ArrayType) else left,
+                    self._coerce(right, result_type, expr.loc) if not isinstance(right.type, ArrayType) else right,
                 ],
                 result_type,
             )
@@ -918,7 +923,7 @@ class TypeChecker:
         typed_arg = self.infer(expr.arg, env)
         expected_arg_type = expected_type.params[0]
         if expr.op in {"+", "-", "*"}:
-            result = common_numeric_type(expected_arg_type, typed_arg.type)
+            result = self._common_fold_operator_type(expected_arg_type, typed_arg.type, expr.loc)
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
             self._require_numeric(expected_arg_type, expr.loc)
@@ -945,7 +950,7 @@ class TypeChecker:
         typed_arg = self.infer(expr.arg, env)
         expected_arg_type = expected_type.params[0]
         if expr.op in {"+", "-", "*"}:
-            result = common_numeric_type(typed_arg.type, expected_arg_type)
+            result = self._common_fold_operator_type(typed_arg.type, expected_arg_type, expr.loc)
             self._require(result, expected_type.result, expr.loc)
         elif expr.op == "/":
             self._require_numeric(typed_arg.type, expr.loc)
@@ -973,6 +978,12 @@ class TypeChecker:
         for rank in range(1, value_type.rank + 1):
             candidates.append(ArrayType(value_type.element, value_type.shape[-rank:]))
         return candidates
+
+    def check_definition(
+        self, definition: Definition, env: TypeEnv
+    ) -> tuple[TypedDefinition, TypeEnv]:
+        """Type-check a single definition and return it with the extended environment."""
+        return self._check_definition(definition, env)
 
     def _check_definition(
         self, definition: Definition, env: TypeEnv
@@ -1004,6 +1015,15 @@ class TypeChecker:
         ]
         return TypedApp(expr, typed_func, typed_args, func_type.result)
 
+    def infer_top_level_function_type(
+        self,
+        function: FuncDef,
+        param_types: tuple[RemoraType, ...],
+        env: TypeEnv,
+    ) -> FuncType:
+        """Infer the result type of a top-level function given concrete parameter types."""
+        return self._infer_top_level_function_type(function, param_types, env)
+
     def _infer_top_level_function_type(
         self,
         function: FuncDef,
@@ -1019,6 +1039,17 @@ class TypeChecker:
             infer_result=True,
         )
         return typed_func.type
+
+    def typed_top_level_function(
+        self,
+        function: FuncDef,
+        func_type: FuncType,
+        env: TypeEnv,
+        *,
+        infer_result: bool = False,
+    ) -> TypedLambda:
+        """Build a typed lambda for a top-level function given concrete parameter types."""
+        return self._typed_top_level_function(function, func_type, env, infer_result=infer_result)
 
     def _typed_top_level_function(
         self,
@@ -1129,6 +1160,3 @@ class TypeChecker:
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()
-
-
-_INFIX_OPERATORS = {"+", "-", "*", "/", "<", "<=", "==", "!=", "&&", "||"}
