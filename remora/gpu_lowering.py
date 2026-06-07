@@ -15,6 +15,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
 
 
@@ -313,27 +314,17 @@ def _unary_op_expr(operation: F32MapOperation) -> str:
     right = "%c"
     if operation.constant_side == "left":
         left, right = right, left
-    if operation.op == "*":
-        return f"arith.mulf {left}, {right} : f32"
-    if operation.op == "+":
-        return f"arith.addf {left}, {right} : f32"
-    if operation.op == "-":
-        return f"arith.subf {left}, {right} : f32"
-    if operation.op == "/":
-        return f"arith.divf {left}, {right} : f32"
-    raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+    mlir_op = arith_op(operation.op, "f32")
+    return f"{mlir_op} {left}, {right} : f32"
 
 
 def _binary_op_expr(operation: F32MapOperation) -> str:
-    if operation.op == "*":
-        return "arith.mulf %x0, %x1 : f32"
-    if operation.op == "+":
-        return "arith.addf %x0, %x1 : f32"
-    if operation.op == "-":
-        return "arith.subf %x0, %x1 : f32"
-    if operation.op == "/":
-        return "arith.divf %x0, %x1 : f32"
-    raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
+    mlir_op = arith_op(operation.op, "f32")
+    return f"{mlir_op} %x0, %x1 : f32"
 
 
 def build_descriptor_abi_bool_map_gpu_module(
@@ -399,27 +390,17 @@ def _descriptor_bool_unary_op_expr(operation: I32MapOperation) -> str:
     right = "%c_i1"
     if operation.constant_side == "left":
         left, right = right, left
-    if operation.op == "&&":
-        return f"llvm.and {left}, {right} : i1"
-    if operation.op == "||":
-        return f"llvm.or {left}, {right} : i1"
-    if operation.op == "==":
-        return f"llvm.icmp \"eq\" {left}, {right} : i1"
-    if operation.op == "!=":
-        return f"llvm.icmp \"ne\" {left}, {right} : i1"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
+    if operation.op not in {"&&", "||", "==", "!="}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
+    mlir_op = llvm_op(operation.op, "i1")
+    return f"{mlir_op} {left}, {right} : i1"
 
 
 def _descriptor_bool_binary_op_expr(operation: I32MapOperation) -> str:
-    if operation.op == "&&":
-        return "llvm.and %x0_i1, %x1_i1 : i1"
-    if operation.op == "||":
-        return "llvm.or %x0_i1, %x1_i1 : i1"
-    if operation.op == "==":
-        return "llvm.icmp \"eq\" %x0_i1, %x1_i1 : i1"
-    if operation.op == "!=":
-        return "llvm.icmp \"ne\" %x0_i1, %x1_i1 : i1"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
+    if operation.op not in {"&&", "||", "==", "!="}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
+    mlir_op = llvm_op(operation.op, "i1")
+    return f"{mlir_op} %x0_i1, %x1_i1 : i1"
 
 
 def _f32_map_kernel(function: HIRFunction) -> F32MapKernel:
@@ -648,27 +629,17 @@ def _descriptor_unary_op_expr(operation: F32MapOperation) -> str:
     right = "%c"
     if operation.constant_side == "left":
         left, right = right, left
-    if operation.op == "*":
-        return f"llvm.fmul {left}, {right}  : f32"
-    if operation.op == "+":
-        return f"llvm.fadd {left}, {right}  : f32"
-    if operation.op == "-":
-        return f"llvm.fsub {left}, {right}  : f32"
-    if operation.op == "/":
-        return f"llvm.fdiv {left}, {right}  : f32"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    mlir_op = llvm_op(operation.op, "f32")
+    return f"{mlir_op} {left}, {right}  : f32"
 
 
 def _descriptor_binary_op_expr(operation: F32MapOperation) -> str:
-    if operation.op == "*":
-        return "llvm.fmul %x0, %x1  : f32"
-    if operation.op == "+":
-        return "llvm.fadd %x0, %x1  : f32"
-    if operation.op == "-":
-        return "llvm.fsub %x0, %x1  : f32"
-    if operation.op == "/":
-        return "llvm.fdiv %x0, %x1  : f32"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    mlir_op = llvm_op(operation.op, "f32")
+    return f"{mlir_op} %x0, %x1  : f32"
 
 
 def _descriptor_i32_operation_lines(kernel: I32MapKernel) -> list[str]:
@@ -685,27 +656,17 @@ def _descriptor_i32_unary_op_expr(operation: I32MapOperation) -> str:
     right = "%c"
     if operation.constant_side == "left":
         left, right = right, left
-    if operation.op == "*":
-        return f"llvm.mul {left}, {right}  : i32"
-    if operation.op == "+":
-        return f"llvm.add {left}, {right}  : i32"
-    if operation.op == "-":
-        return f"llvm.sub {left}, {right}  : i32"
-    if operation.op == "/":
-        return f"llvm.sdiv {left}, {right}  : i32"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    mlir_op = llvm_op(operation.op, "i32")
+    return f"{mlir_op} {left}, {right}  : i32"
 
 
 def _descriptor_i32_binary_op_expr(operation: I32MapOperation) -> str:
-    if operation.op == "*":
-        return "llvm.mul %x0, %x1  : i32"
-    if operation.op == "+":
-        return "llvm.add %x0, %x1  : i32"
-    if operation.op == "-":
-        return "llvm.sub %x0, %x1  : i32"
-    if operation.op == "/":
-        return "llvm.sdiv %x0, %x1  : i32"
-    raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    if operation.op not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
+    mlir_op = llvm_op(operation.op, "i32")
+    return f"{mlir_op} %x0, %x1  : i32"
 
 
 @dataclass(frozen=True)
@@ -925,20 +886,14 @@ def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
 
 
 def _reduction_binary_input_expr(operation: str | None) -> str:
-    if operation == "*":
-        return "llvm.fmul %in0_x, %in1_x  : f32"
-    if operation == "+":
-        return "llvm.fadd %in0_x, %in1_x  : f32"
-    if operation == "-":
-        return "llvm.fsub %in0_x, %in1_x  : f32"
-    if operation == "/":
-        return "llvm.fdiv %in0_x, %in1_x  : f32"
-    raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support map operator {operation}")
+    if operation not in {"*", "+", "-", "/"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support map operator {operation}")
+    mlir_op = llvm_op(operation, "f32")
+    return f"{mlir_op} %in0_x, %in1_x  : f32"
 
 
 def _reduction_fold_expr(operation: str) -> str:
-    if operation == "+":
-        return "llvm.fadd %acc, %item  : f32"
-    if operation == "*":
-        return "llvm.fmul %acc, %item  : f32"
-    raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support fold operator {operation}")
+    if operation not in {"+", "*"}:
+        raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support fold operator {operation}")
+    mlir_op = llvm_op(operation, "f32")
+    return f"{mlir_op} %acc, %item  : f32"

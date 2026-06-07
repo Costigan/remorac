@@ -1,0 +1,5 @@
+def addCells acc x = map (+) acc x
+
+let xs = [[1, 2], [3, 4]] in
+let init = [0, 0] in
+fold addCells init xs

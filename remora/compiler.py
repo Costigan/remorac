@@ -266,15 +266,15 @@ def compile_function_source(
     env = TypeEnv()
     function_def: FuncDef | None = None
     for definition in program.definitions:
-        typed_definition, env = checker._check_definition(definition, env)
+        typed_definition, env = checker.check_definition(definition, env)
         if isinstance(definition, FuncDef) and definition.name == function_name:
             function_def = definition
 
     if function_def is None:
         raise ValueError(f"function {function_name!r} is not defined")
 
-    function_type = checker._infer_top_level_function_type(function_def, param_types, env)
-    typed_function = checker._typed_top_level_function(function_def, function_type, env)
+    function_type = checker.infer_top_level_function_type(function_def, param_types, env)
+    typed_function = checker.typed_top_level_function(function_def, function_type, env)
     hir_function = HIRFunction(
         function_name,
         [HIRParam(name, param_type) for name, param_type in typed_function.params],

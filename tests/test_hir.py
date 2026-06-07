@@ -186,8 +186,8 @@ def test_lowers_operator_section_bound_argument():
     assert isinstance(program.main, HIRMap)
     assert isinstance(program.main.func, HIRPrimCallable)
     assert program.main.func.op == "*"
-    assert isinstance(program.main.func.left_arg, HIRLit)
-    assert program.main.func.left_arg.value == 2.0
+    assert isinstance(program.main.func.right_arg, HIRLit)
+    assert program.main.func.right_arg.value == 2.0
     assert program.main.result_type == ArrayType(FLOAT, (StaticDim(10),))
 
 
