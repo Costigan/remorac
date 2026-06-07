@@ -331,9 +331,13 @@ def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
 
     MLIR 18's linalg-to-parallel-loops path emits alloca scopes around loop
     bodies even when they contain no stack allocations. Lowering nested
-    `scf.for` loops to CFG inside those wrappers can make the scope region
-    invalid, so the threaded pipeline erases only wrappers whose body has no
-    `memref.alloca` operations.
+    ``scf.for`` loops to CFG inside those wrappers can make the scope region
+    invalid. This function strips only wrappers whose body has no
+    ``memref.alloca`` operations.
+
+    This is a text-based workaround for an MLIR 18 pipeline artifact. A
+    future MLIR version may remove the need for this by emitting tighter
+    alloca scopes.
     """
     lines = mlir_text.splitlines()
     output: list[str] = []
@@ -547,4 +551,10 @@ def _find_executable(*names: str) -> str | None:
         sibling = Path(sys.executable).parent / name
         if sibling.is_file():
             return str(sibling)
+
+        if name == "ptxas":
+            for base in ("/usr/local/cuda/bin", "/usr/local/cuda-13/bin", "/usr/local/cuda-13.2/bin"):
+                cuda_path = Path(base) / name
+                if cuda_path.is_file():
+                    return str(cuda_path)
     return None
