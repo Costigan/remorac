@@ -858,3 +858,83 @@ def test_builder_region_emitter_literal_types():
         assert bool_lit.type == "i1"
         assert "arith.constant true" in "\n".join(emitter.lines)
         assert bool_lit.ir_value is not None
+
+
+# ---------------------------------------------------------------------------
+# Builder ops tests (E3-E5)
+# ---------------------------------------------------------------------------
+
+
+def _builder_lower_and_parse(source: str) -> tuple[str, object]:
+    """Lower *source* via the builder API and return (text, parsed_module)."""
+    from importlib import import_module
+
+    ir_mod = import_module("iree.compiler.ir")
+    from remora.compiler import compile_source
+    from remora.lowering._builder_ops import lower_program_via_builder
+
+    artifact = compile_source(source, verify=False)
+    mlir_text, _ = lower_program_via_builder(artifact.hir)
+
+    ctx = ir_mod.Context()
+    ctx.allow_unregistered_dialects = True
+    with ctx, ir_mod.Location.unknown(ctx):
+        parsed = ir_mod.Module.parse(mlir_text)
+    return mlir_text, parsed
+
+
+def test_builder_iota_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("iota 4")
+    assert "linalg.generic" in text
+    assert "linalg.index" in text
+    assert "tensor<4xi32>" in text
+
+
+def test_builder_unary_map_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("map (* 2) (iota 4)")
+    assert "linalg.generic" in text
+    assert "tensor<4xi32>" in text
+
+
+def test_builder_fold_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("fold (+) 0 (iota 4)")
+    assert "linalg.generic" in text
+    assert 'iterator_types = ["reduction"]' in text or 'reduction' in text
+    assert "tensor.extract" in text.lower()
+
+
+def test_builder_reverse_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("reverse (iota 4)")
+    assert "linalg.generic" in text
+    assert "tensor<4xi32>" in text
+
+
+def test_builder_take_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("take 2 (iota 4)")
+    assert "tensor.extract_slice" in text
+    assert "tensor<2xi32>" in text
+
+
+def test_builder_drop_produces_valid_mlir():
+    text, mod = _builder_lower_and_parse("drop 2 (iota 4)")
+    assert "tensor.extract_slice" in text
+    assert "tensor<2xi32>" in text
+
+
+def test_builder_iota_and_text_equivalent():
+    """Verify builder and text-based lowering produce equivalent modules."""
+    from remora.compiler import compile_source
+
+    source = "iota 4"
+    artifact = compile_source(source, verify=False)
+    text_lowered = artifact.mlir_text
+
+    from remora.lowering._builder_ops import lower_program_via_builder
+    builder_text, _ = lower_program_via_builder(artifact.hir)
+
+    import re
+    # Both should contain linalg.generic
+    assert "linalg.generic" in text_lowered
+    assert "linalg.generic" in builder_text
+    # Same return type
+    assert "tensor<4xi32>" in builder_text

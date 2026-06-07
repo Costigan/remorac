@@ -88,6 +88,9 @@ def _ir_type_for(text_type: str, context: Any) -> Any:
         return ir.IntegerType.get_signless(1)
     if text_type == "index":
         return ir.IndexType.get()
+    # For tensor / memref / other complex types, parse from string
+    if "tensor" in text_type or "memref" in text_type or "<" in text_type:
+        return ir.Type.parse(text_type, context)
     raise RemoraLoweringError(f"cannot create builder type for '{text_type}'")
 
 
