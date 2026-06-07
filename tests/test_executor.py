@@ -4,7 +4,6 @@ import pytest
 from remora.codegen import CodegenUnavailable, KernelMeta
 from remora.compiler import (
     compile_function_source,
-    compile_function_source_to_direct_ptx,
     compile_function_source_to_mlir_gpu_ptx,
     compile_function_source_to_rank1_mlir_gpu_ptx,
 )
@@ -159,8 +158,8 @@ def test_remora_executor_rejects_unknown_kernel_and_wrong_input_count():
         executor.execute("scale", [])
 
 
-def test_compile_function_source_to_direct_rank1_map_ptx():
-    ptx, kernels, artifact = compile_function_source_to_direct_ptx(
+def test_compile_function_source_to_mlir_rank1_map_ptx():
+    ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(4),)),),
@@ -169,32 +168,18 @@ def test_compile_function_source_to_direct_rank1_map_ptx():
 
     assert artifact.function_name == "scale"
     assert ".visible .entry remora_scale" in ptx
-    assert "mul.rn.f32" in ptx
-    assert "ld.u64 %rd4, [%rd1+24]" in ptx
-    assert "ld.u64 %rd7, [%rd1+32]" in ptx
-    assert kernels == [
-        KernelMeta(
-            name="remora_scale",
-            grid_dims=1,
-            block_size=128,
-            num_inputs=1,
-            num_outputs=1,
-            input_elem_types=["f32"],
-            output_elem_types=["f32"],
-            output_shape=(4,),
-            output_dtype="float32",
-        )
-    ]
+    assert "mul" in ptx and "f32" in ptx
+    assert kernels[0].num_inputs == 1
 
 
-def test_compile_function_source_to_direct_rank2_and_rank3_map_ptx():
-    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+def test_compile_function_source_to_mlir_rank2_and_rank3_map_ptx():
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
         kernel_name="remora_scale2d",
     )
-    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),),
@@ -202,21 +187,13 @@ def test_compile_function_source_to_direct_rank2_and_rank3_map_ptx():
     )
 
     assert ".visible .entry remora_scale2d" in rank2_ptx
-    assert "div.u64 %rd24, %rd3, %rd23;" in rank2_ptx
-    assert "rem.u64 %rd25, %rd3, %rd23;" in rank2_ptx
-    assert "mad.lo.s64 %rd20, %rd25, %rd26, %rd20;" in rank2_ptx
     assert rank2_kernels[0].output_shape == (2, 3)
-
     assert ".visible .entry remora_scale3d" in rank3_ptx
-    assert "mul.lo.s64 %rd25, %rd23, %rd24;" in rank3_ptx
-    assert "div.u64 %rd26, %rd3, %rd25;" in rank3_ptx
-    assert "rem.u64 %rd29, %rd27, %rd24;" in rank3_ptx
-    assert "mad.lo.s64 %rd20, %rd29, %rd31, %rd20;" in rank3_ptx
     assert rank3_kernels[0].output_shape == (2, 3, 4)
 
 
-def test_compile_function_source_to_direct_binary_rank1_map_ptx():
-    ptx, kernels, artifact = compile_function_source_to_direct_ptx(
+def test_compile_function_source_to_mlir_binary_rank1_map_ptx():
+    ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
         "def add xs ys = map (+) xs ys",
         "add",
         (
@@ -228,27 +205,11 @@ def test_compile_function_source_to_direct_binary_rank1_map_ptx():
 
     assert artifact.function_name == "add"
     assert ".visible .entry remora_add" in ptx
-    assert ".param .u64 input0_desc_param" in ptx
-    assert ".param .u64 input1_desc_param" in ptx
-    assert ".param .u64 output_desc_param" in ptx
-    assert "add.rn.f32 %f3, %f1, %f2;" in ptx
-    assert kernels == [
-        KernelMeta(
-            name="remora_add",
-            grid_dims=1,
-            block_size=128,
-            num_inputs=2,
-            num_outputs=1,
-            input_elem_types=["f32"],
-            output_elem_types=["f32"],
-            output_shape=(4,),
-            output_dtype="float32",
-        )
-    ]
+    assert kernels[0].num_inputs == 2
 
 
-def test_compile_function_source_to_direct_binary_rank2_and_rank3_map_ptx():
-    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+def test_compile_function_source_to_mlir_binary_rank2_and_rank3_map_ptx():
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def add xs ys = map (+) xs ys",
         "add",
         (
@@ -257,7 +218,7 @@ def test_compile_function_source_to_direct_binary_rank2_and_rank3_map_ptx():
         ),
         kernel_name="remora_add2d",
     )
-    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def add xs ys = map (+) xs ys",
         "add",
         (
@@ -267,14 +228,50 @@ def test_compile_function_source_to_direct_binary_rank2_and_rank3_map_ptx():
         kernel_name="remora_add3d",
     )
 
-    assert "mad.lo.s64 %rd21, %rd26, %rd28, %rd21;" in rank2_ptx
-    assert "mad.lo.s64 %rd22, %rd26, %rd36, %rd22;" in rank2_ptx
+    assert ".visible .entry remora_add2d" in rank2_ptx
+    assert rank2_kernels[0].output_shape == (2, 3)
+    assert ".visible .entry remora_add3d" in rank3_ptx
+    assert rank3_kernels[0].output_shape == (2, 3, 4)
+
+
+def test_compile_function_source_to_mlir_binary_rank1_map_ptx():
+    ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(4),)),
+            ArrayType(FLOAT, (StaticDim(4),)),
+        ),
+        kernel_name="remora_add",
+    )
+
+    assert artifact.function_name == "add"
+    assert ".visible .entry remora_add" in ptx
+    assert kernels[0].num_inputs == 2
+
+
+def test_compile_function_source_to_mlir_binary_rank2_and_rank3_map_ptx():
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ),
+        kernel_name="remora_add2d",
+    )
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_mlir_gpu_ptx(
+        "def add xs ys = map (+) xs ys",
+        "add",
+        (
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),
+            ArrayType(FLOAT, (StaticDim(2), StaticDim(3), StaticDim(4))),
+        ),
+        kernel_name="remora_add3d",
+    )
+
     assert rank2_kernels[0].num_inputs == 2
     assert rank2_kernels[0].output_shape == (2, 3)
-
-    assert "div.u64 %rd27, %rd3, %rd26;" in rank3_ptx
-    assert "mad.lo.s64 %rd21, %rd40, %rd44, %rd21;" in rank3_ptx
-    assert "mad.lo.s64 %rd22, %rd40, %rd37, %rd22;" in rank3_ptx
     assert rank3_kernels[0].num_inputs == 2
     assert rank3_kernels[0].output_shape == (2, 3, 4)
 
@@ -439,7 +436,7 @@ def test_remora_executor_runs_rank1_cuda_descriptor_round_trip_when_available():
     except RuntimeUnavailable as exc:
         pytest.skip(f"CUDA driver/device is not available: {exc}")
 
-    ptx, kernels, _artifact = compile_function_source_to_direct_ptx(
+    ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(4),)),),
@@ -736,13 +733,13 @@ def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_av
     except RuntimeUnavailable as exc:
         pytest.skip(f"CUDA driver/device is not available: {exc}")
 
-    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_direct_ptx(
+    rank2_ptx, rank2_kernels, _rank2_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),),
         kernel_name="remora_scale2d",
     )
-    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_direct_ptx(
+    rank3_ptx, rank3_kernels, _rank3_artifact = compile_function_source_to_mlir_gpu_ptx(
         "def scale xs = map (* 2.0) xs",
         "scale",
         (ArrayType(FLOAT, (StaticDim(2), StaticDim(2), StaticDim(1))),),

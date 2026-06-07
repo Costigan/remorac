@@ -8,7 +8,6 @@ from remora.codegen import (
     CodegenUnavailable,
     KernelMeta,
     generate_mlir_descriptor_abi_ptx,
-    generate_direct_remora_ptx,
     generate_ptx,
     generate_rank1_f32_unary_mlir_descriptor_abi_ptx,
 )
@@ -128,29 +127,6 @@ def compile_source_to_ptx(
     return PTXArtifact(artifact, ptx_text, kernels)
 
 
-def compile_function_source_to_direct_ptx(
-    source: str,
-    function_name: str,
-    param_types: tuple[RemoraType, ...],
-    *,
-    include_prelude: bool = True,
-    kernel_name: str | None = None,
-) -> tuple[str, list[KernelMeta], FunctionCompilerArtifact]:
-    """Compile a named function to direct Remora ABI PTX for supported GPU slices."""
-    artifact = compile_function_source(
-        source,
-        function_name,
-        param_types,
-        verify=False,
-        include_prelude=include_prelude,
-    )
-    ptx, kernels = generate_direct_remora_ptx(
-        artifact.hir_function,
-        kernel_name=kernel_name,
-    )
-    return ptx, kernels, artifact
-
-
 def compile_function_source_to_rank1_mlir_gpu_ptx(
     source: str,
     function_name: str,
@@ -221,16 +197,10 @@ def compile_function_source_to_supported_gpu_artifacts(
         include_prelude=include_prelude,
     )
     kernel = kernel_name or f"remora_{function_name}"
-    try:
-        ptx_text, kernels = generate_mlir_descriptor_abi_ptx(
-            artifact.hir_function,
-            kernel_name=kernel,
-        )
-    except (CodegenUnavailable, PipelineUnavailable):
-        ptx_text, kernels = generate_direct_remora_ptx(
-            artifact.hir_function,
-            kernel_name=kernel,
-        )
+    ptx_text, kernels = generate_mlir_descriptor_abi_ptx(
+        artifact.hir_function,
+        kernel_name=kernel,
+    )
     try:
         scaffold = build_gpu_scaffold_for_function(
             artifact.hir_function,
