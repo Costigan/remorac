@@ -58,10 +58,25 @@ def main(argv: list[str] | None = None) -> int:
         help="use the scalar CPU lowering pipeline (default)",
     )
     parser.set_defaults(cpu_vectorize=False)
+    parser.add_argument(
+        "--call",
+        type=str,
+        default=None,
+        help="call a named function with descriptor ABI (requires --input for each param)",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        action="append",
+        default=None,
+        help="load a .npy file as input to a --call function",
+    )
     args = parser.parse_args(argv)
 
     try:
         source = args.file.read_text(encoding="utf-8")
+        if args.call is not None:
+            return _handle_function_call(args, source)
         if args.emit_ast:
             print(pformat(parse_program(source, str(args.file))))
             return 0
@@ -105,6 +120,55 @@ def main(argv: list[str] | None = None) -> int:
         raise AssertionError(f"unknown target {args.target}")
     except (OSError, RemoraError, CodegenUnavailable, PipelineUnavailable) as exc:
         print(f"remorac: {exc}", file=sys.stderr)
+        return 1
+
+
+def _handle_function_call(args, source: str) -> int:
+    """Compile and execute a named function with .npy input arrays."""
+    import numpy as np
+    from remora.compiler import compile_function_source_to_supported_gpu_artifacts
+    from remora.executor import RemoraExecutor
+    from remora.types import ArrayType, FLOAT, INT, StaticDim
+    from remora.display import format_result
+
+    if args.input is None:
+        print("remorac: --call requires at least one --input FILE.npy", file=sys.stderr)
+        return 1
+
+    arrays = []
+    for path in args.input:
+        arr = np.load(str(path))
+        arrays.append(arr)
+
+    param_types = tuple(
+        ArrayType(
+            FLOAT if arr.dtype == np.float32 else INT,
+            tuple(StaticDim(d) for d in arr.shape),
+        )
+        for arr in arrays
+    )
+
+    try:
+        artifact = compile_function_source_to_supported_gpu_artifacts(
+            source,
+            args.call,
+            param_types,
+        )
+    except Exception as exc:
+        print(f"remorac: GPU function compilation failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        executor = RemoraExecutor(artifact.ptx_text, artifact.kernels)
+        kernel_name = args.call
+        if kernel_name not in executor._kernels:
+            kernel_name = next(iter(executor._kernels))
+        result = executor.execute(kernel_name, arrays)
+        print(format_result(result, artifact.compiler.return_type))
+        executor.close()
+        return 0
+    except Exception as exc:
+        print(f"remorac: GPU execution failed: {exc}", file=sys.stderr)
         return 1
 
 
