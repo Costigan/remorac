@@ -288,6 +288,14 @@
     "expect_stdout": "7\n"
   },
   {
+    "name": "cell_map_index",
+    "category": "supported",
+    "path": "pass/cell_map_index.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[3, 7]\n"
+  },
+  {
     "name": "dynamic_shape",
     "category": "deferred",
     "path": "deferred/dynamic_shape.remora",

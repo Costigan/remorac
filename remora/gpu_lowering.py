@@ -85,6 +85,7 @@ def build_f32_unary_map_gpu_scaffold(
     module_name: str = "remora_gpu",
     kernel_name: str = "remora_map_f32",
 ) -> GPUModuleScaffold:
+    """Build a gpu.module scaffold for a rank-N f32 unary map kernel."""
     _validate_scaffold_names(module_name, kernel_name)
     return _build_f32_map_gpu_scaffold(
         F32MapKernel(
@@ -108,6 +109,7 @@ def build_f32_binary_map_gpu_scaffold(
     module_name: str = "remora_gpu",
     kernel_name: str = "remora_map_f32_binary",
 ) -> GPUModuleScaffold:
+    """Build a gpu.module scaffold for a rank-N f32 binary map kernel."""
     _validate_scaffold_names(module_name, kernel_name)
     return _build_f32_map_gpu_scaffold(
         F32MapKernel(
@@ -121,6 +123,7 @@ def build_f32_binary_map_gpu_scaffold(
 
 
 def _matching_brace_index(text: str, open_index: int) -> int:
+    """Return the index of the closing brace matching the brace at `open_index`."""
     depth = 0
     for index in range(open_index, len(text)):
         char = text[index]
@@ -134,6 +137,7 @@ def _matching_brace_index(text: str, open_index: int) -> int:
 
 
 def _dedent_gpu_module_body(body: str) -> str:
+    """Strip leading/trailing blank lines and remove 4-space indentation."""
     lines = body.splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -212,6 +216,7 @@ def build_descriptor_abi_f32_reduction_gpu_module(
 
 
 def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
+    """Raise GPUScaffoldError if module or kernel name is not a valid identifier."""
     if not module_name.isidentifier() or not kernel_name.isidentifier():
         raise GPUScaffoldError("GPU scaffold names must be valid identifiers")
 
@@ -222,6 +227,7 @@ def _build_f32_map_gpu_scaffold(
     module_name: str,
     kernel_name: str,
 ) -> GPUModuleScaffold:
+    """Assemble an MLIR gpu.module scaffold string for an f32 map kernel."""
     _validate_scaffold_names(module_name, kernel_name)
     shape = _validate_shape(kernel.shape)
     memref_type = _memref_type(shape)
@@ -253,6 +259,7 @@ def _build_f32_map_gpu_scaffold(
 
 
 def _validate_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Validate rank 1-10 with positive dimensions; return normalized int tuple."""
     if not 1 <= len(shape) <= 10:
         raise GPUScaffoldError("GPU scaffold currently supports rank-1 through rank-10 shapes only")
     if any(dim <= 0 for dim in shape):
@@ -261,10 +268,12 @@ def _validate_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def _memref_type(shape: tuple[int, ...]) -> str:
+    """Return a memref<...xf32> type string for the given shape."""
     return f"memref<{'x'.join(str(dim) for dim in shape)}xf32>"
 
 
 def _product(shape: tuple[int, ...]) -> int:
+    """Return the product of all dimensions in the shape."""
     total = 1
     for dim in shape:
         total *= dim
@@ -272,6 +281,7 @@ def _product(shape: tuple[int, ...]) -> int:
 
 
 def _indexing_lines(shape: tuple[int, ...]) -> tuple[str, list[str]]:
+    """Return MLIR lines and index variable names for multi-dimensional indexing."""
     if len(shape) == 1:
         return "", ["%idx"]
     if len(shape) == 2:
@@ -296,6 +306,7 @@ def _indexing_lines(shape: tuple[int, ...]) -> tuple[str, list[str]]:
 
 
 def _operation_lines(kernel: F32MapKernel, memref_type: str, indices: list[str]) -> str:
+    """Return MLIR lines loading inputs, applying the map op, and storing the result."""
     index_text = ", ".join(indices)
     lines = [f"        %x0 = memref.load %input0[{index_text}] : {memref_type}"]
     if kernel.num_inputs == 2:
@@ -310,6 +321,7 @@ def _operation_lines(kernel: F32MapKernel, memref_type: str, indices: list[str])
 
 
 def _unary_op_expr(operation: F32MapOperation) -> str:
+    """Return the MLIR arith expression for a unary f32 map operation."""
     left = "%x0"
     right = "%c"
     if operation.constant_side == "left":
@@ -321,6 +333,7 @@ def _unary_op_expr(operation: F32MapOperation) -> str:
 
 
 def _binary_op_expr(operation: F32MapOperation) -> str:
+    """Return the MLIR arith expression for a binary f32 map operation."""
     if operation.op not in {"*", "+", "-", "/"}:
         raise GPUScaffoldError(f"GPU scaffold does not support operator {operation.op}")
     mlir_op = arith_op(operation.op, "f32")
@@ -365,6 +378,7 @@ def build_descriptor_abi_bool_map_gpu_module(
 
 
 def _descriptor_bool_operation_lines(kernel: I32MapKernel) -> list[str]:
+    """Return LLVM IR lines for bool-valued map operations via the descriptor ABI."""
     lines: list[str] = []
     # inputs are i8, cast to i1
     for i in range(kernel.num_inputs):
@@ -386,6 +400,7 @@ def _descriptor_bool_operation_lines(kernel: I32MapKernel) -> list[str]:
 
 
 def _descriptor_bool_unary_op_expr(operation: I32MapOperation) -> str:
+    """Return the LLVM expression for a unary bool operation."""
     left = "%x0_i1"
     right = "%c_i1"
     if operation.constant_side == "left":
@@ -397,6 +412,7 @@ def _descriptor_bool_unary_op_expr(operation: I32MapOperation) -> str:
 
 
 def _descriptor_bool_binary_op_expr(operation: I32MapOperation) -> str:
+    """Return the LLVM expression for a binary bool operation."""
     if operation.op not in {"&&", "||", "==", "!="}:
         raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op} for bool")
     mlir_op = llvm_op(operation.op, "i1")
@@ -404,6 +420,7 @@ def _descriptor_bool_binary_op_expr(operation: I32MapOperation) -> str:
 
 
 def _f32_map_kernel(function: HIRFunction) -> F32MapKernel:
+    """Analyze the HIR function and return an F32MapKernel or raise GPUScaffoldError."""
     return analyze_supported_f32_map_function(
         function,
         on_unsupported=GPUScaffoldError,
@@ -412,6 +429,7 @@ def _f32_map_kernel(function: HIRFunction) -> F32MapKernel:
 
 
 def _i32_map_kernel(function: HIRFunction) -> I32MapKernel:
+    """Analyze the HIR function and return an I32MapKernel or raise GPUScaffoldError."""
     return analyze_supported_i32_map_function(
         function,
         on_unsupported=GPUScaffoldError,
@@ -425,6 +443,7 @@ def _build_descriptor_abi_f32_map_gpu_module(
     module_name: str,
     kernel_name: str,
 ) -> GPUModuleScaffold:
+    """Assemble a descriptor-ABI GPU module scaffold for an f32 map kernel."""
     shape = _validate_shape(kernel.shape)
     rank = len(shape)
     params = [
@@ -449,6 +468,7 @@ def _build_descriptor_abi_i32_map_gpu_module(
     module_name: str,
     kernel_name: str,
 ) -> GPUModuleScaffold:
+    """Assemble a descriptor-ABI GPU module scaffold for an i32 map kernel."""
     shape = _validate_shape(kernel.shape)
     params = [
         *(f"%input{index}_desc: !llvm.ptr" for index in range(kernel.num_inputs)),
@@ -476,6 +496,7 @@ def _descriptor_kernel_body_lines(
     element_type: str = "f32",
     operation_lines: Callable[[F32MapKernel | I32MapKernel], list[str]] | None = None,
 ) -> list[str]:
+    """Return MLIR body lines for a descriptor-ABI kernel (descriptor loads, thread indexing, map op)."""
     rank = len(kernel.shape)
     operation_builder = _descriptor_operation_lines if operation_lines is None else operation_lines
     descriptor_names = [f"%input{index}_desc" for index in range(kernel.num_inputs)] + [
@@ -542,11 +563,13 @@ def _descriptor_kernel_body_lines(
 
 
 def _descriptor_type(rank: int) -> str:
+    """Return the LLVM struct type string for a cuda data descriptor of given rank."""
     fields = ["ptr", "ptr", "i64", *(["i64"] * rank), *(["i64"] * rank)]
     return f"!llvm.struct<({', '.join(fields)})>"
 
 
 def _descriptor_load_lines(prefix: str, descriptor_name: str, rank: int) -> list[str]:
+    """Return MLIR lines that load aligned pointer, offset, sizes, and strides from a descriptor."""
     descriptor_type = _descriptor_type(rank)
     lines = [
         f"      %{prefix}_aligned_ptr = llvm.getelementptr {descriptor_name}[0, 1] : (!llvm.ptr) -> !llvm.ptr, {descriptor_type}",
@@ -574,12 +597,7 @@ def _descriptor_load_lines(prefix: str, descriptor_name: str, rank: int) -> list
 
 
 def _multi_index_lines(rank: int) -> list[str]:
-    if rank == 1:
-        return [
-            "      %index_zero = llvm.mlir.constant(0 : index) : i64",
-            "      %i0 = llvm.add %idx, %index_zero  : i64",
-        ]
-
+    """Return MLIR lines computing multi-dimensional indices from a flat thread index."""
     lines: list[str] = []
     current_rem = "%idx"
     for axis in range(rank - 1):
@@ -597,6 +615,7 @@ def _multi_index_lines(rank: int) -> list[str]:
 
 
 def _linear_index_lines(prefix: str, rank: int) -> list[str]:
+    """Return MLIR lines computing a linear index from multi-dimensional indices and strides."""
     lines = [
         f"      %{prefix}_term0 = llvm.mul %i0, %{prefix}_stride0  : i64",
         f"      %{prefix}_linear0 = llvm.add %{prefix}_offset, %{prefix}_term0  : i64",
@@ -616,6 +635,7 @@ def _linear_index_lines(prefix: str, rank: int) -> list[str]:
 
 
 def _descriptor_operation_lines(kernel: F32MapKernel) -> list[str]:
+    """Return LLVM IR lines for f32 map operations using the descriptor ABI."""
     if kernel.num_inputs == 2:
         return [f"      %y = {_descriptor_binary_op_expr(kernel.operation)}"]
     assert kernel.operation.constant is not None
@@ -625,6 +645,7 @@ def _descriptor_operation_lines(kernel: F32MapKernel) -> list[str]:
 
 
 def _descriptor_unary_op_expr(operation: F32MapOperation) -> str:
+    """Return the LLVM expression for a unary f32 operation."""
     left = "%x0"
     right = "%c"
     if operation.constant_side == "left":
@@ -636,6 +657,7 @@ def _descriptor_unary_op_expr(operation: F32MapOperation) -> str:
 
 
 def _descriptor_binary_op_expr(operation: F32MapOperation) -> str:
+    """Return the LLVM expression for a binary f32 operation."""
     if operation.op not in {"*", "+", "-", "/"}:
         raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
     mlir_op = llvm_op(operation.op, "f32")
@@ -643,6 +665,7 @@ def _descriptor_binary_op_expr(operation: F32MapOperation) -> str:
 
 
 def _descriptor_i32_operation_lines(kernel: I32MapKernel) -> list[str]:
+    """Return LLVM IR lines for i32 map operations using the descriptor ABI."""
     if kernel.num_inputs == 2:
         return [f"      %y = {_descriptor_i32_binary_op_expr(kernel.operation)}"]
     assert kernel.operation.constant is not None
@@ -652,6 +675,7 @@ def _descriptor_i32_operation_lines(kernel: I32MapKernel) -> list[str]:
 
 
 def _descriptor_i32_unary_op_expr(operation: I32MapOperation) -> str:
+    """Return the LLVM expression for a unary i32 operation."""
     left = "%x0"
     right = "%c"
     if operation.constant_side == "left":
@@ -663,6 +687,7 @@ def _descriptor_i32_unary_op_expr(operation: I32MapOperation) -> str:
 
 
 def _descriptor_i32_binary_op_expr(operation: I32MapOperation) -> str:
+    """Return the LLVM expression for a binary i32 operation."""
     if operation.op not in {"*", "+", "-", "/"}:
         raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
     mlir_op = llvm_op(operation.op, "i32")
@@ -679,6 +704,7 @@ class F32ReductionKernel:
 
 
 def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
+    """Analyze a HIR fold/map+fold function and return an F32ReductionKernel or raise."""
     if not isinstance(function.body, HIRFold):
         raise GPUScaffoldError("descriptor ABI GPU reduction currently supports fold bodies only")
     if function.return_type != FLOAT:
@@ -734,6 +760,7 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
 
 
 def _require_rank1_f32_param(param_type: object) -> ArrayType:
+    """Validate param_type is a rank-1 float array; return it or raise GPUScaffoldError."""
     if not (
         isinstance(param_type, ArrayType)
         and param_type.element == FLOAT
@@ -749,6 +776,7 @@ def _build_descriptor_abi_f32_reduction_gpu_module(
     module_name: str,
     kernel_name: str,
 ) -> GPUModuleScaffold:
+    """Assemble a descriptor-ABI GPU module scaffold for an f32 reduction kernel."""
     params = [
         *(f"%input{index}_desc: !llvm.ptr" for index in range(kernel.num_inputs)),
         "%output_desc: !llvm.ptr",
@@ -767,6 +795,7 @@ def _build_descriptor_abi_f32_reduction_gpu_module(
 
 
 def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
+    """Return MLIR body lines for a grid-strided reduction kernel with shared-memory tree reduce."""
     prefixes = [f"in{index}" for index in range(kernel.num_inputs)]
     lines: list[str] = []
     for index, prefix in enumerate(prefixes):
@@ -886,6 +915,7 @@ def _reduction_kernel_body_lines(kernel: F32ReductionKernel) -> list[str]:
 
 
 def _reduction_binary_input_expr(operation: str | None) -> str:
+    """Return the LLVM expression for a binary input operation in a reduction."""
     if operation not in {"*", "+", "-", "/"}:
         raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support map operator {operation}")
     mlir_op = llvm_op(operation, "f32")
@@ -893,6 +923,7 @@ def _reduction_binary_input_expr(operation: str | None) -> str:
 
 
 def _reduction_fold_expr(operation: str) -> str:
+    """Return the LLVM expression for a fold (accumulate) operation in a reduction."""
     if operation not in {"+", "*"}:
         raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support fold operator {operation}")
     mlir_op = llvm_op(operation, "f32")

@@ -37,10 +37,20 @@ Implemented forms:
 - array-cell `fold` over static callables (primitives, named functions, lambdas)
 - `if` over boolean tensors (element-wise conditional selection)
 - dynamic indexing with runtime-computed index expressions
+- cell maps with index-based body expressions accessing cell elements
 - top-level value definitions
 - top-level function definitions when statically specialized at direct use sites
 - starter prelude functions: `add`, `sub`, `mul`, `div`, `neg`, `id`, `const`,
   `sum`, `product`, `scale`, `dot`, `max`, `min`, `abs`, `any`, `all`
+- multicore threading (`--cpu-threads`) validated across all 35 acceptance tests
+- vectorization (`--cpu-vectorize`) validated across all 35 acceptance tests
+
+Deferred or not yet implemented:
+- `compose`, `flip`, and higher-order combinators (require function-typed parameters)
+- `zipwith` / `zip` implemented via indexing (requires closure conversion for arrays)
+- GPU whole-program execution (descriptor-ABI lowering infrastructure in place and
+  PTX validation works via `--target gpu-nvidia`; full execution needs CUDA hardware)
+- AMD/ROCm backend
 
 Rejected or deferred forms must produce stable diagnostics. They should not be
 accepted by the parser/typechecker and then fail later with generic backend

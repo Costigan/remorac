@@ -49,13 +49,13 @@ def main(argv: list[str] | None = None) -> int:
         "--cpu-vectorize",
         dest="cpu_vectorize",
         action="store_true",
-        help="use the experimental affine/vector CPU lowering pipeline",
+        help="use the affine/vector CPU lowering pipeline",
     )
     vectorize_group.add_argument(
         "--no-cpu-vectorize",
         dest="cpu_vectorize",
         action="store_false",
-        help="use the scalar CPU lowering pipeline",
+        help="use the scalar CPU lowering pipeline (default)",
     )
     parser.set_defaults(cpu_vectorize=False)
     args = parser.parse_args(argv)

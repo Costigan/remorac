@@ -270,6 +270,7 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
 
 
 def _extract_kernel_metadata(ptx_text: str) -> list[KernelMeta]:
+    """Parse PTX text to extract kernel entry names, block sizes, and param counts."""
     metas: list[KernelMeta] = []
     entry_matches = list(re.finditer(r"\.visible\s+\.entry\s+([A-Za-z_.$][\w.$]*)\s*\(", ptx_text))
     for index, match in enumerate(entry_matches):
@@ -291,6 +292,7 @@ def _extract_kernel_metadata(ptx_text: str) -> list[KernelMeta]:
 
 
 def _extract_block_size(ptx_entry_text: str) -> int:
+    """Extract the .maxntid block size from a PTX entry body, returning 0 if absent."""
     match = re.search(r"\.maxntid\s+(\d+)", ptx_entry_text)
     if match is None:
         return 0
@@ -298,10 +300,12 @@ def _extract_block_size(ptx_entry_text: str) -> int:
 
 
 def _count_ptx_params(ptx_entry_text: str) -> int:
+    """Count .param declarations in a PTX entry body."""
     return len(re.findall(r"\.param\s+\.\w+\s+[A-Za-z_.$][\w.$]*", ptx_entry_text))
 
 
 def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:
+    """Analyze an HIRFunction into a supported F32MapKernel or raise CodegenUnavailable."""
     try:
         return analyze_supported_f32_map_function(
             function,
@@ -320,6 +324,7 @@ def _direct_f32_map_kernel(function: HIRFunction) -> F32MapKernel:
 
 
 def _direct_i32_map_kernel(function: HIRFunction) -> I32MapKernel:
+    """Analyze an HIRFunction into a supported I32MapKernel or raise CodegenUnavailable."""
     try:
         return analyze_supported_i32_map_function(
             function,
@@ -342,6 +347,7 @@ def _f32_map_ptx(
     kernel: F32MapKernel,
     block_size: int,
 ) -> str:
+    """Emit descriptor-ABI PTX assembly for a unary f32 map kernel."""
     if kernel.num_inputs == 2:
         return _binary_f32_map_ptx(kernel_name, kernel, block_size)
     op_line = _unary_f32_ptx_op(kernel.operation)
@@ -397,6 +403,7 @@ DONE:
 
 
 def _unary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
+    """Return PTX index-computation lines for a unary f32 map of the given shape."""
     if len(shape) == 1:
         return """    ld.u64 %rd4, [%rd1+24];
     ld.u64 %rd7, [%rd1+32];
@@ -447,6 +454,7 @@ def _binary_f32_map_ptx(
     kernel: F32MapKernel,
     block_size: int,
 ) -> str:
+    """Emit descriptor-ABI PTX assembly for a binary f32 map kernel."""
 
     index_lines = _binary_f32_map_index_lines(kernel.shape)
     op_line = _binary_f32_ptx_op(kernel.operation)
@@ -508,6 +516,7 @@ DONE:
 
 
 def _binary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
+    """Return PTX index-computation lines for a binary f32 map of the given shape."""
     if len(shape) == 1:
         return """    ld.u64 %rd4, [%rd1+24];
     ld.u64 %rd7, [%rd1+32];
@@ -566,6 +575,7 @@ def _binary_f32_map_index_lines(shape: tuple[int, ...]) -> str:
 
 
 def _unary_f32_ptx_op(operation: F32MapOperation) -> str:
+    """Return the PTX instruction line for a unary f32 map operation."""
     if operation.op not in {"*", "+", "-", "/"}:
         raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
     ptx = ptx_op(operation.op)
@@ -575,6 +585,7 @@ def _unary_f32_ptx_op(operation: F32MapOperation) -> str:
 
 
 def _binary_f32_ptx_op(operation: F32MapOperation) -> str:
+    """Return the PTX instruction line for a binary f32 map operation."""
     if operation.op not in {"*", "+", "-", "/"}:
         raise CodegenUnavailable(f"direct PTX does not support operator {operation.op}")
     return f"{ptx_op(operation.op)} %f3, %f1, %f2;"
