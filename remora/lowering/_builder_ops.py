@@ -131,7 +131,12 @@ def lower_program_via_builder(
                 [result_val], ip=ir_mod.InsertionPoint(entry_block)
             )
 
-        return str(module), module
+        # Re-parse to get custom-form output (dialects load during parse)
+        raw_text = str(module)
+        fresh_ctx = ir_mod.Context()
+        with fresh_ctx, ir_mod.Location.unknown(fresh_ctx):
+            fresh_module = ir_mod.Module.parse(raw_text)
+        return str(fresh_module), fresh_module
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +492,15 @@ def _build_unary_map(
     shape = [int(d.value) for d in expr.result_type.shape]
     tensor_t = ir_mod.RankedTensorType.get(shape, ir_elem)
 
+    # Determine input element type from the array expression
+    input_remora_type = _expr_result_type(expr.array)
+    input_elem_type = (
+        type_to_mlir(input_remora_type.element)
+        if isinstance(input_remora_type, ArrayType)
+        else elem_type
+    )
+    ir_input_elem = _ir_type_for(input_elem_type, ctx)
+
     input_val = _build_expr(
         expr.array, block, functions, ctx, ir_mod, tensor_env
     )
@@ -516,11 +530,23 @@ def _build_unary_map(
         ip=ir_mod.InsertionPoint(block),
     )
 
-    body_block = ir_mod.Block.create_at_start(generic_op.regions[0], [ir_elem, ir_elem])
+    body_block = ir_mod.Block.create_at_start(generic_op.regions[0], [ir_input_elem, ir_elem])
     body_ip = ir_mod.InsertionPoint(body_block)
 
+    # Coerce input to result type if they differ (e.g., i32 → f32)
+    input_arg = body_block.arguments[0]
+    if ir_input_elem != ir_elem:
+        if str(ir_input_elem) == "i32" and str(ir_elem) == "f32":
+            cast_op = ir_mod.Operation.create(
+                "arith.sitofp",
+                operands=[input_arg],
+                results=[ir_elem],
+                ip=body_ip,
+            )
+            input_arg = cast_op.result
+
     yield_val = _build_map_callable_body(
-        expr.func, functions, body_block.arguments[0],
+        expr.func, functions, input_arg,
         ir_elem, body_block, ir_mod,
     )
     from iree.compiler.dialects import linalg as linalg_d
@@ -741,14 +767,11 @@ def _build_scalar_fold(
     rank = input_remora_type.rank if isinstance(input_remora_type, ArrayType) else 1
 
     # Init scalar
-    init_val = _build_literal(
-        HIRLit(0, expr.result_type), block, ir_mod
-    )
     if isinstance(expr.init, HIRLit):
-        try:
-            init_val = _build_literal(expr.init, block, ir_mod)
-        except Exception:
-            pass
+        init_val = _build_literal(expr.init, block, ir_mod)
+    else:
+        # Non-literal init: build the expression
+        init_val = _build_expr(expr.init, block, functions, ctx, ir_mod, {})
 
     # 0-d init tensor
     scalar_tensor_t = ir_mod.RankedTensorType.get([], ir_result)
@@ -989,7 +1012,7 @@ def _build_reshape(
     shape_const = ir_mod.Operation.create(
         "arith.constant",
         results=[shape_tensor_t],
-        attributes={"value": ir_mod.DenseElementsAttr.get(shape_attrs, index_t)},
+        attributes={"value": ir_mod.DenseElementsAttr.get(shape_attrs, shape_tensor_t)},
         ip=ir_mod.InsertionPoint(block),
     )
 
@@ -1025,7 +1048,7 @@ def _build_ravel(
         "arith.constant",
         results=[shape_tensor_t],
         attributes={"value": ir_mod.DenseElementsAttr.get(
-            [ir_mod.IntegerAttr.get(index_t, total)], index_t
+            [ir_mod.IntegerAttr.get(index_t, total)], shape_tensor_t
         )},
         ip=ir_mod.InsertionPoint(block),
     )

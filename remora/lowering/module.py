@@ -92,6 +92,15 @@ from remora.lowering.view_ops import (
 )
 
 
+def _lower_via_builder(
+    program: HIRProgram, functions: dict[str, HIRFunction]
+) -> tuple[str, Any]:
+    """Lower *program* via the MLIR builder API path (Stream E7)."""
+    from remora.lowering._builder_ops import lower_program_via_builder
+
+    return lower_program_via_builder(program)
+
+
 @dataclass(frozen=True)
 class LoweredModule:
     text: str
@@ -175,8 +184,22 @@ class MLIRLowering:
             ),
         ):
             raise RemoraLoweringError(
-                "only scalar expressions, scalar lets/calls, full-rank indexing, view operations, iota, array literals, scalar maps, scalar folds, and reverse lower to MLIR so far"
+                "only scalar expressions, scalar lets/calls, full-rank indexing, "
+                "view operations, iota, array literals, scalar maps, scalar folds, "
+                "and reverse lower to MLIR so far"
             )
+
+        # Prefer builder API path; fall back to text-based if unsupported node types
+        try:
+            text, module_obj = _lower_via_builder(program, functions)
+            if export_output_descriptor and program.return_type is not None:
+                text = _add_output_descriptor_export(text, program.return_type)
+                with self.context, self.ir.Location.unknown(self.context):
+                    module_obj = self.ir.Module.parse(text)
+                text = str(module_obj)
+            return LoweredModule(text, module_obj)
+        except Exception:
+            pass
 
         text = _lower_main_module(main, functions)
         if export_output_descriptor:
