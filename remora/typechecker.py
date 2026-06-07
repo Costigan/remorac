@@ -59,6 +59,7 @@ from remora.types import (
 
 @dataclass(frozen=True)
 class TypedProgram:
+    """A fully typed program with top-level definitions and an optional body."""
     definitions: list[TypedDefinition]
     body: TypedExpr | None
     type: RemoraType | None
@@ -66,6 +67,7 @@ class TypedProgram:
 
 @dataclass(frozen=True)
 class TypedDefinition:
+    """A typed top-level definition with an optional value and type."""
     definition: Definition
     value: TypedExpr | None
     type: RemoraType | None
@@ -73,12 +75,14 @@ class TypedDefinition:
 
 @dataclass(frozen=True)
 class TypedExprNode:
+    """Leaf typed expression wrapping an AST node and its inferred type."""
     expr: Expr
     type: RemoraType
 
 
 @dataclass(frozen=True)
 class TypedCast:
+    """A typed integer-to-float numeric coercion."""
     value: TypedExpr
     from_type: ScalarType
     to_type: ScalarType
@@ -87,6 +91,7 @@ class TypedCast:
 
 @dataclass(frozen=True)
 class TypedArray:
+    """A typed array literal with recursively typed elements."""
     expr: ArrayLit
     elements: list[TypedExpr]
     type: ArrayType
@@ -94,6 +99,7 @@ class TypedArray:
 
 @dataclass(frozen=True)
 class TypedMap:
+    """A typed map (lifted) application over one or two arrays."""
     expr: MapExpr
     func: TypedExpr
     arrays: list[TypedExpr]
@@ -108,6 +114,7 @@ class TypedMap:
 
 @dataclass(frozen=True)
 class TypedFold:
+    """A typed fold (prefix reduction) over an array."""
     expr: FoldExpr
     func: TypedExpr
     init: TypedExpr
@@ -118,6 +125,7 @@ class TypedFold:
 
 @dataclass(frozen=True)
 class TypedShape:
+    """A typed shape operator applied to an array."""
     expr: ShapeExpr
     array: TypedExpr
     type: ArrayType
@@ -125,6 +133,7 @@ class TypedShape:
 
 @dataclass(frozen=True)
 class TypedRank:
+    """A typed rank operator returning the dimensionality of an array."""
     expr: RankExpr
     array: TypedExpr
     type: ScalarType
@@ -132,6 +141,7 @@ class TypedRank:
 
 @dataclass(frozen=True)
 class TypedTranspose:
+    """A typed transpose swapping the first two axes of an array."""
     expr: TransposeExpr
     array: TypedExpr
     type: ArrayType
@@ -139,6 +149,7 @@ class TypedTranspose:
 
 @dataclass(frozen=True)
 class TypedReshape:
+    """A typed reshape giving an array a new shape with the same total size."""
     expr: ReshapeExpr
     shape_expr: TypedExpr
     array: TypedExpr
@@ -147,6 +158,7 @@ class TypedReshape:
 
 @dataclass(frozen=True)
 class TypedRavel:
+    """A typed ravel (flatten) reducing an array to a single dimension."""
     expr: RavelExpr
     array: TypedExpr
     type: ArrayType
@@ -154,6 +166,7 @@ class TypedRavel:
 
 @dataclass(frozen=True)
 class TypedReverse:
+    """A typed reverse along the first axis of an array."""
     expr: ReverseExpr
     array: TypedExpr
     type: ArrayType
@@ -161,6 +174,7 @@ class TypedReverse:
 
 @dataclass(frozen=True)
 class TypedTake:
+    """A typed take (prefix truncation) of an array along its first axis."""
     expr: TakeExpr
     count: TypedExpr
     array: TypedExpr
@@ -169,6 +183,7 @@ class TypedTake:
 
 @dataclass(frozen=True)
 class TypedDrop:
+    """A typed drop (prefix removal) from an array along its first axis."""
     expr: DropExpr
     count: TypedExpr
     array: TypedExpr
@@ -177,6 +192,7 @@ class TypedDrop:
 
 @dataclass(frozen=True)
 class TypedSlice:
+    """A typed slice range within an indexing expression."""
     expr: SliceRange
     start: TypedExpr | None
     end: TypedExpr | None
@@ -185,6 +201,7 @@ class TypedSlice:
 
 @dataclass(frozen=True)
 class TypedIndex:
+    """A typed indexing expression on an array with scalar and/or slice indices."""
     expr: IndexExpr
     array: TypedExpr
     indices: list[TypedExpr | TypedSlice]
@@ -193,6 +210,7 @@ class TypedIndex:
 
 @dataclass(frozen=True)
 class TypedLambda:
+    """A typed lambda expression or top-level function definition."""
     expr: LambdaExpr | FuncDef
     params: list[tuple[str, RemoraType]]
     body: TypedExpr
@@ -201,12 +219,14 @@ class TypedLambda:
 
 @dataclass(frozen=True)
 class TypedOperatorFunc:
+    """A typed operator function value with a binary function type."""
     expr: OperatorFuncExpr
     type: FuncType
 
 
 @dataclass(frozen=True)
 class TypedLeftSection:
+    """A typed left operator section with a partially applied argument."""
     expr: LeftSectionExpr
     arg: TypedExpr
     type: FuncType
@@ -214,6 +234,7 @@ class TypedLeftSection:
 
 @dataclass(frozen=True)
 class TypedRightSection:
+    """A typed right operator section with a partially applied argument."""
     expr: RightSectionExpr
     arg: TypedExpr
     type: FuncType
@@ -221,6 +242,7 @@ class TypedRightSection:
 
 @dataclass(frozen=True)
 class TypedApp:
+    """A typed function application with typed arguments."""
     expr: AppExpr
     func: TypedExpr
     args: list[TypedExpr]
@@ -229,6 +251,7 @@ class TypedApp:
 
 @dataclass(frozen=True)
 class TypedLet:
+    """A typed let-expression binding a name to a value within a body."""
     expr: LetExpr
     name: str
     value: TypedExpr
@@ -238,6 +261,7 @@ class TypedLet:
 
 @dataclass(frozen=True)
 class TypedIf:
+    """A typed conditional expression with then and else branches."""
     expr: IfExpr
     condition: TypedExpr
     then_branch: TypedExpr
@@ -272,13 +296,18 @@ TypedExpr: TypeAlias = (
 
 
 class TypeEnv:
+    """Immutable type environment mapping variable names to their types."""
+
     def __init__(self, bindings: dict[str, RemoraType] | None = None):
+        """Create a type environment with optional initial variable bindings."""
         self._bindings = dict(bindings or {})
 
     def extend(self, name: str, value_type: RemoraType) -> TypeEnv:
+        """Return a new environment with the given name-type binding added."""
         return TypeEnv({**self._bindings, name: value_type})
 
     def lookup(self, name: str) -> RemoraType:
+        """Return the type bound to a variable name, or raise an error."""
         try:
             return self._bindings[name]
         except KeyError as exc:
@@ -286,11 +315,15 @@ class TypeEnv:
 
 
 class TypeChecker:
+    """Dense Core type checker that infers types for expressions and programs."""
+
     def __init__(self) -> None:
+        """Create a new type checker with empty function registries."""
         self._functions: dict[str, FuncDef] = {}
         self._active_functions: set[str] = set()
 
     def check_program(self, program: Program) -> TypedProgram:
+        """Type-check an entire program and return a typed program."""
         env = self._build_prelude_env()
         typed_definitions: list[TypedDefinition] = []
         self._functions = {
@@ -311,6 +344,7 @@ class TypeChecker:
         return TypedProgram(typed_definitions, typed_body, typed_body.type)
 
     def infer(self, expr: Expr, env: TypeEnv | None = None) -> TypedExpr:
+        """Infer the type of an expression and return a typed expression."""
         env = env or self._build_prelude_env()
 
         if isinstance(expr, IntLit):
@@ -392,6 +426,7 @@ class TypeChecker:
     def check_callable(
         self, expr: Expr, expected_type: FuncType, env: TypeEnv
     ) -> TypedExpr:
+        """Type-check a callable expression against an expected function type."""
         if isinstance(expr, LambdaExpr):
             if len(expr.params) != len(expected_type.params):
                 raise RemoraTypeError("lambda arity does not match expected type", expr.loc)

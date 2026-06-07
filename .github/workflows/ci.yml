@@ -344,9 +344,33 @@ jobs:
       - test-library
       - package-library
       - package-samples
+      - python-tests
     runs-on: ubuntu-latest
     steps:
       - run: echo "All required checks done"
+
+  # Run the Python (Remora) test suite.
+  python-tests:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'push' || github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate MLIR toolchain
+        run: uv run python tools/validate_mlir_toolchain.py
+
+      - name: Run Python tests
+        run: uv run pytest -q
 
   # Publish a preview version of the NuGet packages on feedz.io when there is
   # a push to master.

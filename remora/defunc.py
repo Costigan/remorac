@@ -10,13 +10,12 @@ from remora.hir import (
     HIRCall,
     HIRCallable,
     HIRCast,
+    HIRDrop,
     HIRExpr,
     HIRFold,
     HIRFunction,
     HIRIf,
     HIRIndex,
-    HIRSlice,
-    HIRTranspose,
     HIRIota,
     HIRLambda,
     HIRLet,
@@ -26,13 +25,15 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRProgram,
-    HIRReshape,
     HIRRavel,
+    HIRReshape,
     HIRReverse,
+    HIRSlice,
     HIRTake,
-    HIRDrop,
+    HIRTranspose,
     HIRVar,
 )
+from remora.hir_dispatch import hir_dispatch
 from remora.types import ScalarType
 
 
@@ -44,6 +45,22 @@ def defunctionalize(program: HIRProgram) -> HIRProgram:
     """Lift inline lambdas used by HOF sites into named HIR functions."""
     pass_ = _Defunctionalizer()
     return pass_.run(program)
+
+
+def _rewrite_let(
+    defunc: _Defunctionalizer,
+    expr: HIRLet,
+    scalar_env: dict[str, HIRExpr],
+) -> HIRLet:
+    value = defunc._rewrite_expr(expr.value, scalar_env)
+    body_env = scalar_env
+    if isinstance(expr.value_type, ScalarType):
+        body_env = {**scalar_env, expr.name: value}
+    return HIRLet(
+        expr.name, expr.value_type, value,
+        defunc._rewrite_expr(expr.body, body_env),
+        expr.result_type,
+    )
 
 
 class _Defunctionalizer:
@@ -65,92 +82,74 @@ class _Defunctionalizer:
         scalar_env: dict[str, HIRExpr] | None = None,
     ) -> HIRExpr:
         scalar_env = scalar_env or {}
-        if isinstance(expr, HIRMap):
-            return HIRMap(
-                expr.frame_shape,
-                expr.cell_shape,
-                self._rewrite_callable(expr.func, scalar_env),
-                [self._rewrite_expr(array, scalar_env) for array in expr.arrays],
-                expr.result_type,
-            )
-        if isinstance(expr, HIRFold):
-            return HIRFold(
-                expr.reduction_dim,
-                self._rewrite_callable(expr.func, scalar_env),
-                self._rewrite_expr(expr.init, scalar_env),
-                self._rewrite_expr(expr.array, scalar_env),
-                expr.result_type,
-            )
-        if isinstance(expr, HIRLet):
-            value = self._rewrite_expr(expr.value, scalar_env)
-            body_env = scalar_env
-            if isinstance(expr.value_type, ScalarType):
-                body_env = {**scalar_env, expr.name: value}
-            return HIRLet(
-                expr.name,
-                expr.value_type,
-                value,
-                self._rewrite_expr(expr.body, body_env),
-                expr.result_type,
-            )
-        if isinstance(expr, HIRCall):
-            return HIRCall(
-                expr.func_name,
-                [self._rewrite_expr(arg, scalar_env) for arg in expr.args],
-                expr.result_type,
-            )
-        if isinstance(expr, HIRLambda):
-            raise RemoraDefuncError("dynamic higher-order functions are deferred")
-        if isinstance(expr, HIRPrimOp):
-            return HIRPrimOp(
-                expr.op,
-                [self._rewrite_expr(arg, scalar_env) for arg in expr.args],
-                expr.result_type,
-            )
-        if isinstance(expr, HIRIf):
-            return HIRIf(
-                self._rewrite_expr(expr.condition, scalar_env),
-                self._rewrite_expr(expr.then_branch, scalar_env),
-                self._rewrite_expr(expr.else_branch, scalar_env),
-                expr.result_type,
-            )
-        if isinstance(expr, HIRCast):
-            return HIRCast(
-                self._rewrite_expr(expr.value, scalar_env),
-                expr.from_type,
-                expr.to_type,
-                expr.result_type,
-            )
-        if isinstance(expr, HIRIndex):
-            return HIRIndex(
-                self._rewrite_expr(expr.array, scalar_env),
-                [self._rewrite_expr(index, scalar_env) for index in expr.indices],
-                expr.result_type,
-            )
-        if isinstance(expr, HIRSlice):
-            return expr
-        if isinstance(expr, HIRTranspose):
-            return HIRTranspose(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRReshape):
-            return HIRReshape(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRRavel):
-            return HIRRavel(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRReverse):
-            return HIRReverse(self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRTake):
-            return HIRTake(expr.count, self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRDrop):
-            return HIRDrop(expr.count, self._rewrite_expr(expr.array, scalar_env), expr.result_type)
-        if isinstance(expr, HIRArrayLit):
-            return HIRArrayLit(
-                [self._rewrite_expr(element, scalar_env) for element in expr.elements],
-                expr.result_type,
-            )
-        if isinstance(expr, HIRVar):
-            return scalar_env.get(expr.name, expr)
-        if isinstance(expr, (HIRIota, HIRLit)):
-            return expr
-        raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
+        return hir_dispatch(expr, {
+            HIRMap: lambda e: HIRMap(
+                e.frame_shape, e.cell_shape,
+                self._rewrite_callable(e.func, scalar_env),
+                [self._rewrite_expr(a, scalar_env) for a in e.arrays],
+                e.result_type,
+            ),
+            HIRFold: lambda e: HIRFold(
+                e.reduction_dim,
+                self._rewrite_callable(e.func, scalar_env),
+                self._rewrite_expr(e.init, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRLet: lambda e: _rewrite_let(self, e, scalar_env),
+            HIRCall: lambda e: HIRCall(
+                e.func_name,
+                [self._rewrite_expr(a, scalar_env) for a in e.args],
+                e.result_type,
+            ),
+            HIRLambda: lambda e: (_ for _ in ()).throw(
+                RemoraDefuncError("dynamic higher-order functions are deferred")
+            ),
+            HIRPrimOp: lambda e: HIRPrimOp(
+                e.op,
+                [self._rewrite_expr(a, scalar_env) for a in e.args],
+                e.result_type,
+            ),
+            HIRIf: lambda e: HIRIf(
+                self._rewrite_expr(e.condition, scalar_env),
+                self._rewrite_expr(e.then_branch, scalar_env),
+                self._rewrite_expr(e.else_branch, scalar_env),
+                e.result_type,
+            ),
+            HIRCast: lambda e: HIRCast(
+                self._rewrite_expr(e.value, scalar_env),
+                e.from_type, e.to_type, e.result_type,
+            ),
+            HIRIndex: lambda e: HIRIndex(
+                self._rewrite_expr(e.array, scalar_env),
+                [self._rewrite_expr(i, scalar_env) for i in e.indices],
+                e.result_type,
+            ),
+            HIRSlice: lambda e: e,
+            HIRTranspose: lambda e: HIRTranspose(
+                self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRReshape: lambda e: HIRReshape(
+                self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRRavel: lambda e: HIRRavel(
+                self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRReverse: lambda e: HIRReverse(
+                self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRTake: lambda e: HIRTake(
+                e.count, self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRDrop: lambda e: HIRDrop(
+                e.count, self._rewrite_expr(e.array, scalar_env), e.result_type,
+            ),
+            HIRArrayLit: lambda e: HIRArrayLit(
+                [self._rewrite_expr(el, scalar_env) for el in e.elements],
+                e.result_type,
+            ),
+            HIRVar: lambda e: scalar_env.get(e.name, e),
+        }, default=lambda e: e)
 
     def _rewrite_callable(
         self,
@@ -204,58 +203,34 @@ class _Defunctionalizer:
 
 
 def _free_vars(expr: HIRExpr) -> set[str]:
-    if isinstance(expr, HIRVar):
-        return {expr.name}
-    if isinstance(expr, HIRLet):
-        return _free_vars(expr.value) | (_free_vars(expr.body) - {expr.name})
-    if isinstance(expr, HIRMap):
-        return _free_vars_callable(expr.func) | set().union(
-            *(_free_vars(array) for array in expr.arrays)
-        )
-    if isinstance(expr, HIRFold):
-        return (
-            _free_vars_callable(expr.func)
-            | _free_vars(expr.init)
-            | _free_vars(expr.array)
-        )
-    if isinstance(expr, HIRReverse):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRCall):
-        return set().union(*(_free_vars(arg) for arg in expr.args))
-    if isinstance(expr, HIRLambda):
-        params = {param.name for param in expr.params}
-        return _free_vars(expr.body) - params
-    if isinstance(expr, HIRPrimOp):
-        return set().union(*(_free_vars(arg) for arg in expr.args))
-    if isinstance(expr, HIRIf):
-        return (
-            _free_vars(expr.condition)
-            | _free_vars(expr.then_branch)
-            | _free_vars(expr.else_branch)
-        )
-    if isinstance(expr, HIRCast):
-        return _free_vars(expr.value)
-    if isinstance(expr, HIRIndex):
-        return _free_vars(expr.array) | set().union(
-            *(_free_vars(index) for index in expr.indices)
-        )
-    if isinstance(expr, HIRSlice):
-        return set()
-    if isinstance(expr, HIRTranspose):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRReshape):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRRavel):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRTake):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRDrop):
-        return _free_vars(expr.array)
-    if isinstance(expr, HIRArrayLit):
-        return set().union(*(_free_vars(element) for element in expr.elements))
-    if isinstance(expr, (HIRIota, HIRLit)):
-        return set()
-    raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
+    """Return the set of free variable names in *expr*."""
+    return hir_dispatch(expr, {
+        HIRVar: lambda e: {e.name},
+        HIRLet: lambda e: _free_vars(e.value) | (_free_vars(e.body) - {e.name}),
+        HIRMap: lambda e: _free_vars_callable(e.func) | set().union(
+            *(_free_vars(a) for a in e.arrays)
+        ),
+        HIRFold: lambda e: (
+            _free_vars_callable(e.func)
+            | _free_vars(e.init) | _free_vars(e.array)
+        ),
+        HIRReverse: lambda e: _free_vars(e.array),
+        HIRCall: lambda e: set().union(*(_free_vars(a) for a in e.args)),
+        HIRLambda: lambda e: _free_vars(e.body) - {p.name for p in e.params},
+        HIRPrimOp: lambda e: set().union(*(_free_vars(a) for a in e.args)),
+        HIRIf: lambda e: _free_vars(e.condition) | _free_vars(e.then_branch) | _free_vars(e.else_branch),
+        HIRCast: lambda e: _free_vars(e.value),
+        HIRIndex: lambda e: _free_vars(e.array) | set().union(
+            *(_free_vars(i) for i in e.indices)
+        ),
+        HIRSlice: lambda e: set(),
+        HIRTranspose: lambda e: _free_vars(e.array),
+        HIRReshape: lambda e: _free_vars(e.array),
+        HIRRavel: lambda e: _free_vars(e.array),
+        HIRTake: lambda e: _free_vars(e.array),
+        HIRDrop: lambda e: _free_vars(e.array),
+        HIRArrayLit: lambda e: set().union(*(_free_vars(el) for el in e.elements)),
+    }, default=lambda e: set())
 
 
 def _free_vars_callable(callable_: HIRCallable) -> set[str]:
