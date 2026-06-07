@@ -12,7 +12,7 @@ def test_repl_evaluates_expression():
 def test_repl_cpu_target_uses_compiled_execution(monkeypatch):
     calls = []
 
-    def fake_evaluate_source_compiled(source, *, include_prelude=True):
+    def fake_evaluate_source_compiled(source, *, include_prelude=True, cpu_threads=None, cpu_vectorize=False, syntax="ml"):
         calls.append((source, include_prelude))
         from remora.runtime import EvaluationResult
         from remora.types import INT
@@ -35,14 +35,14 @@ def test_repl_interp_target_uses_reference_evaluator(monkeypatch):
     compiled_calls = []
     interp_calls = []
 
-    def fake_evaluate_source_compiled(source, *, include_prelude=True):
+    def fake_evaluate_source_compiled(source, *, include_prelude=True, cpu_threads=None, cpu_vectorize=False, syntax="ml"):
         compiled_calls.append((source, include_prelude))
         from remora.runtime import EvaluationResult
         from remora.types import INT
 
         return EvaluationResult(1, INT)
 
-    def fake_evaluate_source(source, *, include_prelude=True):
+    def fake_evaluate_source(source, *, include_prelude=True, syntax="ml"):
         interp_calls.append((source, include_prelude))
         from remora.runtime import EvaluationResult
         from remora.types import INT

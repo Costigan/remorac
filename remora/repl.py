@@ -12,17 +12,20 @@ from remora.compiler import compile_source_to_mlir
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program, parse_repl_input
+from remora.lisp_reader import parse_lisp as parse_lisp_program
 from remora.prelude import prelude_definition_sources
 from remora.runtime import EvaluationResult, evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
 
 REPL_TARGETS = ("cpu", "interp", "gpu-nvidia")
+REPL_SYNTAXES = ("ml", "lisp")
 
 
 @dataclass
 class ReplState:
     target: str = "cpu"
     debug: bool = False
+    syntax: str = "ml"
     definition_sources: list[str] = field(default_factory=prelude_definition_sources)
 
 
@@ -50,7 +53,7 @@ class ReplSession:
             return self._handle_command(text)
 
         try:
-            item = parse_repl_input(text)
+            item = self._parse_repl_input(text)
         except (LarkError, RemoraError) as exc:
             return _format_parse_error(text, exc)
 
@@ -61,10 +64,29 @@ class ReplSession:
         except RemoraError as exc:
             return f"Error: {exc}"
 
+    def _parse_repl_input(self, text: str):
+        """Parse REPL input with the current syntax."""
+        if self.state.syntax == "lisp":
+            return self._parse_repl_input_lisp(text)
+        return parse_repl_input(text)
+
+    def _parse_repl_input_lisp(self, text: str):
+        try:
+            program = parse_lisp_program(text, "<repl>")
+            if program.definitions:
+                return program.definitions[0]
+            if program.body is not None:
+                return program.body
+            raise LarkError("empty input")
+        except Exception:
+            raise LarkError("parse error")
+
     def _process_definition(self, source: str, definition: FuncDef | ValDef) -> str:
         candidate_definitions = [*self.state.definition_sources, source]
         program_source = _program_source(candidate_definitions, "0")
-        typed = TypeChecker().check_program(parse_program(program_source, "<repl>"))
+        typed = TypeChecker().check_program(
+            self._parse_program(program_source, "<repl>")
+        )
         self.state.definition_sources.append(source)
         if isinstance(definition, FuncDef):
             return f"Defined: {definition.name} : <function>"
@@ -75,16 +97,27 @@ class ReplSession:
         result = self._evaluate_program_source(program_source)
         return format_result(result.value, result.type)
 
+    def _parse_program(self, source: str, filename: str = "<repl>"):
+        if self.state.syntax == "lisp":
+            return parse_lisp_program(source, filename)
+        return parse_program(source, filename)
+
     def _evaluate_program_source(self, program_source: str) -> EvaluationResult:
         if self.state.target == "cpu":
-            return evaluate_source_compiled(program_source, include_prelude=False)
+            return evaluate_source_compiled(
+                program_source, include_prelude=False, syntax=self.state.syntax
+            )
         if self.state.target == "interp":
-            return evaluate_source(program_source, include_prelude=False)
+            return evaluate_source(
+                program_source, include_prelude=False, syntax=self.state.syntax
+            )
         if self.state.target == "gpu-nvidia":
             from remora.compiler import compile_source_to_ptx
             from remora.codegen import CodegenUnavailable
             try:
-                artifact = compile_source_to_ptx(program_source, include_prelude=False)
+                artifact = compile_source_to_ptx(
+                    program_source, include_prelude=False, syntax=self.state.syntax
+                )
                 kernels = artifact.kernels
                 if not kernels:
                     raise CodegenUnavailable(
@@ -111,6 +144,8 @@ class ReplSession:
                 return f"Debug mode: {'on' if self.state.debug else 'off'}"
             if name == ":target":
                 return self._target_command(arg)
+            if name == ":syntax":
+                return self._syntax_command(arg)
             if name == ":type":
                 return self._type_command(arg)
             if name == ":mlir":
@@ -138,10 +173,20 @@ class ReplSession:
         self.state.target = arg
         return f"Target: {arg}"
 
+    def _syntax_command(self, arg: str) -> str:
+        if not arg:
+            return f"Current syntax: {self.state.syntax}"
+        if arg not in REPL_SYNTAXES:
+            return "Error: available syntaxes: ml, lisp"
+        self.state.syntax = arg
+        return f"Syntax: {arg}"
+
     def _type_command(self, arg: str) -> str:
         if not arg:
             return "Usage: :type <expr>"
-        program = parse_program(_program_source(self.state.definition_sources, arg), "<repl>")
+        program = self._parse_program(
+            _program_source(self.state.definition_sources, arg), "<repl>"
+        )
         typed = TypeChecker().check_program(program)
         return f"{arg} : {typed.type}"
 
@@ -151,6 +196,7 @@ class ReplSession:
         return compile_source_to_mlir(
             _program_source(self.state.definition_sources, arg),
             include_prelude=False,
+            syntax=self.state.syntax,
         )
 
     def _prelude_command(self) -> str:
@@ -167,10 +213,17 @@ class ReplSession:
 
         path = Path(arg)
         source = path.read_text(encoding="utf-8")
-        program = parse_program(source, str(path))
+        # Auto-detect syntax from file extension
+        detected_syntax = self.state.syntax
+        if path.suffix == ".lisp":
+            detected_syntax = "lisp"
+        elif path.suffix == ".remora":
+            detected_syntax = "ml"
+
+        program = self._parse_program(source, str(path)) if detected_syntax == "ml" else parse_lisp_program(source, str(path))
         messages: list[str] = []
         for definition_source in _top_level_definition_lines(source):
-            item = parse_repl_input(definition_source, str(path))
+            item = self._parse_repl_input(definition_source)
             if not isinstance(item, (FuncDef, ValDef)):
                 continue
             message = self._process_definition(definition_source, item)
@@ -192,7 +245,7 @@ class ReplSession:
         return _balanced(text, "(", ")") and _balanced(text, "[", "]")
 
     def run(self) -> None:
-        print(f"Remora REPL [target: {self.state.target}]")
+        print(f"Remora REPL [target: {self.state.target}, syntax: {self.state.syntax}]")
         print("Type :help for commands, :quit to exit.")
         while True:
             try:
@@ -297,6 +350,8 @@ Remora REPL commands:
   :reset         Clear accumulated definitions
   :target [cpu|interp|gpu-nvidia]
                  Show or set the current target
+  :syntax [ml|lisp]
+                 Show or set the current syntax
   :debug         Toggle debug mode
   :help          Show this message
 """

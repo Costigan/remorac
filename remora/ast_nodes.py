@@ -26,6 +26,7 @@ class FuncDef:
     params: list[str]
     body: Expr
     loc: SourceLoc
+    param_ranks: list[int | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class LambdaExpr:
     params: list[str]
     body: Expr
     loc: SourceLoc
+    param_ranks: list[int | None] | None = None
 
 
 @dataclass(frozen=True)
