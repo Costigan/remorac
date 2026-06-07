@@ -224,6 +224,54 @@
     "expect_stdout": "[4, 6]\n"
   },
   {
+    "name": "prelude_any",
+    "category": "supported",
+    "path": "pass/prelude_any.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "true\n"
+  },
+  {
+    "name": "prelude_all",
+    "category": "supported",
+    "path": "pass/prelude_all.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "false\n"
+  },
+  {
+    "name": "prelude_max",
+    "category": "supported",
+    "path": "pass/prelude_max.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "7\n"
+  },
+  {
+    "name": "prelude_min",
+    "category": "supported",
+    "path": "pass/prelude_min.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "3\n"
+  },
+  {
+    "name": "prelude_abs",
+    "category": "supported",
+    "path": "pass/prelude_abs.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "5\n"
+  },
+  {
+    "name": "prelude_neg",
+    "category": "supported",
+    "path": "pass/prelude_neg.remora",
+    "target": "cpu",
+    "expect_exit": 0,
+    "expect_stdout": "[-1, -2, -3]\n"
+  },
+  {
     "name": "dynamic_shape",
     "category": "deferred",
     "path": "deferred/dynamic_shape.remora",

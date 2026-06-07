@@ -16,7 +16,7 @@ from remora.prelude import prelude_definition_sources
 from remora.runtime import EvaluationResult, evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
 
-REPL_TARGETS = ("cpu", "interp")
+REPL_TARGETS = ("cpu", "interp", "gpu-nvidia")
 
 
 @dataclass
@@ -28,7 +28,7 @@ class ReplState:
 
 def make_initial_state(target: str = "cpu") -> ReplState:
     if target not in REPL_TARGETS:
-        raise ReplError("available REPL targets: cpu, interp")
+        raise ReplError("available REPL targets: cpu, interp, gpu-nvidia")
     return ReplState(target=target)
 
 
@@ -80,6 +80,20 @@ class ReplSession:
             return evaluate_source_compiled(program_source, include_prelude=False)
         if self.state.target == "interp":
             return evaluate_source(program_source, include_prelude=False)
+        if self.state.target == "gpu-nvidia":
+            from remora.compiler import compile_source_to_ptx
+            from remora.codegen import CodegenUnavailable
+            try:
+                artifact = compile_source_to_ptx(program_source, include_prelude=False)
+                kernels = artifact.kernels
+                if not kernels:
+                    raise CodegenUnavailable(
+                        "No GPU kernels generated. Try a program with tensor operations like map or fold."
+                    )
+                info = f"GPU: {len(kernels)} kernel(s) generated"
+                return EvaluationResult(info, None)
+            except CodegenUnavailable as exc:
+                raise ReplError(str(exc)) from exc
         raise ReplError(f"unknown REPL target: {self.state.target}")
 
     def _handle_command(self, command: str) -> str:
@@ -281,7 +295,7 @@ Remora REPL commands:
   :defs          Show user definitions in this session
   :load <file>   Load definitions and evaluate the file body
   :reset         Clear accumulated definitions
-  :target [cpu|interp]
+  :target [cpu|interp|gpu-nvidia]
                  Show or set the current target
   :debug         Toggle debug mode
   :help          Show this message

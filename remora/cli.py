@@ -14,6 +14,7 @@ from remora.display import format_result
 from remora.errors import RemoraError
 from remora.hir import lower_to_hir
 from remora.parser import parse_program
+from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.runtime import evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
@@ -24,9 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", type=Path, help="Remora source file")
     parser.add_argument(
         "--target",
-        choices=("cpu", "interp", "mlir", "ptx"),
+        choices=("cpu", "interp", "mlir", "ptx", "gpu-nvidia"),
         default="cpu",
-        help="output target; cpu runs compiled CPU code, interp uses the reference evaluator",
+        help="output target; cpu runs compiled CPU code, interp uses the reference evaluator, gpu-nvidia validates GPU compilation",
     )
     parser.add_argument("--emit-ast", action="store_true", help="print parsed AST and exit")
     parser.add_argument(
@@ -98,10 +99,35 @@ def main(argv: list[str] | None = None) -> int:
             artifact = compile_source_to_ptx(source)
             print(artifact.ptx_text)
             return 0
+        if args.target == "gpu-nvidia":
+            _handle_gpu_target(source)
+            return 0
         raise AssertionError(f"unknown target {args.target}")
-    except (OSError, RemoraError, CodegenUnavailable) as exc:
+    except (OSError, RemoraError, CodegenUnavailable, PipelineUnavailable) as exc:
         print(f"remorac: {exc}", file=sys.stderr)
         return 1
+
+
+def _handle_gpu_target(source: str) -> None:
+    """Compile a Remora body program to GPU and print diagnostics."""
+    try:
+        artifact = compile_source_to_ptx(source)
+    except CodegenUnavailable as exc:
+        raise CodegenUnavailable(
+            f"GPU compilation failed: {exc}\n\n"
+            "This program may use operations not supported on GPU. "
+            "Currently supported GPU operations: element-wise maps (f32/i32/bool), "
+            "and scalar reductions. Views, indexing, and scalar-only programs are "
+            "not supported on GPU."
+        ) from exc
+    kernels = artifact.kernels
+    if not kernels:
+        raise CodegenUnavailable(
+            "No GPU kernels were generated. This program may contain only "
+            "scalar operations with no tensor-level parallelism. "
+            "GPU target requires tensor operations (map, fold, etc.)."
+        )
+    print(f"GPU compilation succeeded — {len(kernels)} kernel(s) generated")
 
 
 if __name__ == "__main__":

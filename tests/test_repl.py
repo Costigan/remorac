@@ -241,7 +241,7 @@ def test_repl_target_command():
     assert session.eval_input(":target interp") == "Target: interp"
     assert session.eval_input(":target") == "Current target: interp"
     assert session.eval_input(":target cpu") == "Target: cpu"
-    assert session.eval_input(":target gpu-nvidia") == "Error: available REPL targets: cpu, interp"
+    assert session.eval_input(":target gpu-nvidia") == "Target: gpu-nvidia"
 
 
 def test_repl_quit_command_raises_system_exit():
