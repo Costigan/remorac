@@ -38,6 +38,7 @@ from remora.ast_nodes import (
     SelectExpr,
     ShapeExpr,
     SliceRange,
+    SubarrayExpr,
     ReverseExpr,
     TakeExpr,
     TraceExpr,
@@ -329,6 +330,16 @@ class TypedRotate:
     type: ArrayType
 
 
+@dataclass(frozen=True)
+class TypedSubarray:
+    """A typed subarray extraction."""
+    expr: SubarrayExpr
+    array: TypedExpr
+    offsets: tuple[DimExpr, ...]
+    sizes: tuple[DimExpr, ...]
+    type: ArrayType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -355,6 +366,7 @@ TypedExpr: TypeAlias = (
     | TypedApp
     | TypedAppend
     | TypedRotate
+    | TypedSubarray
     | TypedLet
     | TypedIf
 )
@@ -508,6 +520,8 @@ class TypeChecker:
             return TypedRotate(expr, typed_array, shift_dim, typed_array.type)
         if isinstance(expr, RerankExpr):
             return self._infer_rerank(expr, env)
+        if isinstance(expr, SubarrayExpr):
+            return self._infer_subarray(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1286,6 +1300,30 @@ class TypeChecker:
             expr.loc,
             param_ranks=param_ranks if any(r != 0 for r in param_ranks) else None,
         )
+
+        return TypedExprNode(
+            lambda_expr,
+            FuncType(tuple(INT for _ in range(n)), INT),
+        )
+
+    def _infer_subarray(self, expr: SubarrayExpr, env: TypeEnv) -> TypedExpr:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("subarray expects an array", expr.loc)
+        if len(expr.offsets) != typed_array.type.rank:
+            raise RemoraTypeError(
+                f"subarray offset count {len(expr.offsets)} != rank {typed_array.type.rank}",
+                expr.loc,
+            )
+        if len(expr.shape) != typed_array.type.rank:
+            raise RemoraTypeError(
+                f"subarray shape count {len(expr.shape)} != rank {typed_array.type.rank}",
+                expr.loc,
+            )
+        offsets = tuple(eval_static_dim(o, expr.loc) for o in expr.offsets)
+        sizes = tuple(eval_static_dim(s, expr.loc) for s in expr.shape)
+        result_type = ArrayType(typed_array.type.element, sizes)
+        return TypedSubarray(expr, typed_array, offsets, sizes, result_type)
 
         # Return as a callable-ready node; concrete type is resolved by context
         return TypedExprNode(

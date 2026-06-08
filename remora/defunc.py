@@ -34,6 +34,7 @@ from remora.hir import (
     HIRRotate,
     HIRScan,
     HIRSlice,
+    HIRSubarray,
     HIRTake,
     HIRTranspose,
     HIRVar,
@@ -133,6 +134,12 @@ class _Defunctionalizer:
             HIRRotate: lambda e: HIRRotate(
                 self._rewrite_expr(e.array, scalar_env),
                 e.shift,
+                e.result_type,
+            ),
+            HIRSubarray: lambda e: HIRSubarray(
+                self._rewrite_expr(e.array, scalar_env),
+                e.offsets,
+                e.sizes,
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

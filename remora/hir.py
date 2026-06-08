@@ -44,6 +44,7 @@ from remora.typechecker import (
     TypedScan,
     TypedShape,
     TypedSlice,
+    TypedSubarray,
     TypedReverse,
     TypedTake,
     TypedTranspose,
@@ -157,6 +158,15 @@ class HIRRotate:
     """Circular rotation of an array along the leading dimension."""
     array: HIRExpr
     shift: StaticDim
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRSubarray:
+    """Extract a rectangular sub-region."""
+    array: HIRExpr
+    offsets: tuple[StaticDim, ...]
+    sizes: tuple[StaticDim, ...]
     result_type: ArrayType
 
 
@@ -299,6 +309,7 @@ HIRExpr: TypeAlias = (
     | HIRFoldRight
     | HIRScan
     | HIRRotate
+    | HIRSubarray
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -427,6 +438,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedRotate):
         return HIRRotate(lower_expr(expr.array), expr.shift, expr.type)
+
+    if isinstance(expr, TypedSubarray):
+        return HIRSubarray(lower_expr(expr.array), expr.offsets, expr.sizes, expr.type)
 
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore

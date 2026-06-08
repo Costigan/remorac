@@ -70,6 +70,7 @@ from remora.ast_nodes import (
     SelectExpr,
     ShapeExpr,
     SourceLoc,
+    SubarrayExpr,
     TakeExpr,
     TraceExpr,
     TransposeExpr,
@@ -109,6 +110,7 @@ array_lit: "[" sexpr* "]"
            | trace_form
            | append_form
            | rotate_form
+           | subarray_form
            | iota_form
            | shape_form
            | length_form
@@ -147,6 +149,7 @@ trace_form: "trace" sexpr sexpr sexpr -> trace_expr
            | "trace-right" sexpr sexpr sexpr -> trace_right_expr
 append_form: "append" sexpr sexpr -> append_expr
 rotate_form: "rotate" sexpr sexpr -> rotate_expr
+subarray_form: "subarray" sexpr sexpr sexpr -> subarray_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
@@ -319,6 +322,16 @@ class LispASTBuilder(Transformer):
         ranks = [int(item) for item in items[:-1]]
         func = items[-1]
         return RerankExpr(ranks, func, self._loc_from(items))
+
+    def subarray_expr(self, items: list[Any]) -> SubarrayExpr:
+        array = items[0]
+        offsets = (
+            list(items[1].elements) if isinstance(items[1], ArrayLit) else [items[1]]
+        )
+        shape = (
+            list(items[2].elements) if isinstance(items[2], ArrayLit) else [items[2]]
+        )
+        return SubarrayExpr(array, offsets, shape, self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 
