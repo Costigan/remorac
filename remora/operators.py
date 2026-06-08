@@ -127,6 +127,8 @@ _CMP_PREDICATES: dict[str, tuple[str, str | None]] = {
     # (i32_predicate, f32_predicate)
     "<": ("slt", "olt"),
     "<=": ("sle", "ole"),
+    ">": ("sgt", "ogt"),
+    ">=": ("sge", "oge"),
     "==": ("eq", "oeq"),
     "!=": ("ne", "one"),
 }

@@ -936,7 +936,7 @@ class TypeChecker:
                 ],
                 FLOAT,
             )
-        if op in {"<", "<=", "==", "!="}:
+        if op in {"<", "<=", ">", ">=", "==", "!="}:
             result_type = common_numeric_type(left.type, right.type)
             return TypedApp(
                 expr,
@@ -1090,7 +1090,7 @@ class TypeChecker:
             self._require_numeric(left_cell, loc)
             self._require_numeric(right_cell, loc)
             return FuncType((FLOAT, FLOAT), FLOAT)
-        if op in {"<", "<=", "==", "!="}:
+        if op in {"<", "<=", ">", ">=", "==", "!="}:
             result = common_numeric_type(left_cell, right_cell)
             return FuncType((result, result), BOOL)
         if op in {"&&", "||"}:

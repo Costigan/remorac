@@ -292,7 +292,7 @@ class _RegionEmitter:
             )
             return _Operand(result, [], result_type)
 
-        if op in {"<b", "<=b", "==b", "!=b"}:
+        if op in {"<b", "<=b", ">b", ">=b", "==b", "!=b"}:
             left, right = args
             if left.type != right.type:
                 raise RemoraLoweringError(
