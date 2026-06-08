@@ -181,12 +181,12 @@ def execute_program_on_gpu(
         raise RemoraExecutorError(f"unsupported result type: {result_type}")
 
     output = np.empty(output_shape, dtype=output_dtype)
-    output_storage = np.zeros(max(output_nbytes, 256), dtype=np.uint8)
 
     rt = CUDARuntime()
     try:
         mod = rt.load_ptx(artifact.ptx_text)
-        buf_size = max(4096, output_nbytes * 4)
+        buf_size = max(4096, output_nbytes * 4, 1024 * 1024)  # up to 256K i32 elements
+        output_storage = np.zeros(buf_size, dtype=np.uint8)
         buf_ptr = rt.alloc(buf_size)
         rt.memset_d32(buf_ptr, 0, buf_size // 4)
         extra_bufs: list[int] = []
@@ -205,7 +205,7 @@ def execute_program_on_gpu(
             if output_shape:
                 element_count = max(1, int(np.prod(output_shape, dtype=np.int64)))
             else:
-                element_count = 1
+                element_count = max(1, buf_size // np.dtype(output_dtype).itemsize)
             grid_size = int((element_count + block_size - 1) // block_size)
             kernel.launch((grid_size, 1, 1), (block_size, 1, 1), params)
             rt.synchronize()
