@@ -983,15 +983,22 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         if not isinstance(array, np.ndarray):
             raise EvaluationError("scan expects an array value")
         result = np.empty_like(array)
-        for i in range(len(array)):
-            if expr.exclusive:
-                result[i] = acc
-                acc = fn(acc, array[i])
-            else:
-                acc = fn(acc, array[i])
-                result[i] = acc
         if expr.right:
-            result = result[::-1]
+            for i in range(len(array) - 1, -1, -1):
+                if expr.exclusive:
+                    result[i] = acc
+                    acc = fn(acc, array[i])
+                else:
+                    acc = fn(acc, array[i])
+                    result[i] = acc
+        else:
+            for i in range(len(array)):
+                if expr.exclusive:
+                    result[i] = acc
+                    acc = fn(acc, array[i])
+                else:
+                    acc = fn(acc, array[i])
+                    result[i] = acc
         return _coerce_runtime_value(result, expr.type)
 
     if isinstance(expr, TypedFoldRight):

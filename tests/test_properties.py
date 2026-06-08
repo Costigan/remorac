@@ -316,3 +316,137 @@ class TestPhase4Operators:
     def test_box_unbox_with_fold(self):
         r = _evaluate_lisp("(unbox (box [10 20 30]) (len xs) (fold + 0 xs))")
         assert r.value == 60
+
+
+def _assert_lisp_compiled_matches_interp(source: str):
+    """Assert that Lisp-syntax compiled CPU and interpreter produce the same result."""
+    interp = evaluate_source(source, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(source, include_prelude=False, syntax="lisp")
+    if interp.type != compiled.type:
+        pytest.fail(f"type mismatch: {interp.type} vs {compiled.type}")
+    if isinstance(compiled.value, np.ndarray) and compiled.value.dtype.kind == 'f':
+        np.testing.assert_allclose(compiled.value, interp.value, rtol=1e-5)
+    elif isinstance(compiled.value, float):
+        assert abs(compiled.value - interp.value) < 1e-5, \
+            f"float mismatch: {compiled.value} vs {interp.value}"
+    else:
+        np.testing.assert_equal(compiled.value, interp.value)
+
+
+class TestCompiledVsInterpreter:
+    """Systematic compiled-vs-interpreter comparison for all operators."""
+
+    # ── Arithmetic ───────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(+ 10 20)",
+        "(- 30 7)",
+        "(* 6 7)",
+        "(/ 10.0 3.0)",
+        "(< 5 10)",
+        "(> 10 5)",
+        "(<= 5 5)",
+        "(>= 10 5)",
+        "(== 7 7)",
+        "(!= 3 4)",
+        "(&& #t #t)",
+        "(&& #t #f)",
+        "(|| #f #t)",
+        "(|| #f #f)",
+    ])
+    def test_scalar_ops(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Array arithmetic (rank polymorphism) ─────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(+ [1 2 3] [4 5 6])",
+        "((lambda (x) (* x 2)) [1 2 3])",
+    ])
+    def test_rank_polymorphism(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Map and fold ─────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(map (lambda (x) (* x 3)) [1 2 3])",
+        "(map + [1 2 3] [4 5 6])",
+        "(fold + 0 [1 2 3 4 5])",
+        "(fold (+) 0.0 (iota 5))",
+    ])
+    def test_map_fold(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Scan family ──────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(iscan + 0 [2 10 5])",
+        "(escan + 0 [2 10 5])",
+        "(trace + 0 [2 10 5])",
+        "(trace-right + 0 [2 10 5])",
+        "(fold-right + 0 [1 2 3 4])",
+        "(scan + 0 [2 10 5])",
+        "(iscan/zero + 0 [2 10 5])",
+        "(escan/zero + 0 [2 10 5])",
+    ])
+    def test_scan_family(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Reduce family ────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(reduce + 0 (iota 5))",
+        "(reduce/zero + 0 (iota 5))",
+        "(reduce/1 + 0 (iota 5))",
+    ])
+    def test_reduce_family(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Views and primitives ─────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(length [1 2 3 4 5])",
+        "(length [[1 2] [3 4] [5 6]])",
+        "(rotate [1 2 3 4 5] 2)",
+        "(rotate [1 2 3 4 5] 0)",
+        "(subarray [[1 2 3] [4 5 6] [7 8 9]] [1 0] [2 2])",
+        "(append [1 2] [3 4 5])",
+        "(indices-of [10 20 30])",
+        "(indices-of [[1 2] [3 4]])",
+        "(with-shape 5 [3 2])",
+        "(with-shape 7 [1 4])",
+        "(select #t 42 99)",
+        "(select #f 42 99)",
+    ])
+    def test_views_primitives(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Box/unbox ────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(unbox (box [1 2 3]) (len v) v)",
+        "(unbox (box [10 20 30]) (len xs) (fold + 0 xs))",
+        "(unbox (iota1 5) (len v) v)",
+        "(unbox (iota1 6) (len xs) (fold + 0 xs))",
+    ])
+    def test_box_ops(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── Interpreter-only ops (no compiled path yet) ──────────────────────
+    # These just verify the interpreter produces expected results
+
+    def test_sort_interpreter(self):
+        r = evaluate_source("(sort < [3 1 4 1])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [1, 1, 3, 4])
+
+    def test_grade_interpreter(self):
+        r = evaluate_source("(grade < [3 1 4 1])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [1, 3, 0, 2])
+
+    def test_filter_interpreter(self):
+        r = evaluate_source("(filter (> 0) [1 -2 3 -4])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [1, 3])
+
+    def test_replicate_interpreter(self):
+        r = evaluate_source("(replicate [2 1 3] [10 20 30])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [10, 10, 20, 30, 30, 30])
