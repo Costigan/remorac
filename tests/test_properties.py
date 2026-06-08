@@ -226,3 +226,93 @@ class TestRankPolymorphismErrors:
             tc = TypeChecker()
             prog = parse_lisp("(+ [1 2] [[1] [2] [3]])")
             tc.check_program(prog)
+
+
+class TestPhase3Operators:
+    """Property tests for Phase 3: reduce/scan/fold/trace."""
+
+    def test_reduce_same_as_fold(self):
+        r_fold = _evaluate_lisp("(fold + 0 (iota 10))")
+        r_reduce = _evaluate_lisp("(reduce + 0 (iota 10))")
+        assert r_fold.value == r_reduce.value
+
+    def test_iscan_correctness(self):
+        r = _evaluate_lisp("(iscan + 0 [2 10 5])")
+        np.testing.assert_array_equal(r.value, [2, 12, 17])
+
+    def test_escan_correctness(self):
+        r = _evaluate_lisp("(escan + 0 [2 10 5])")
+        np.testing.assert_array_equal(r.value, [0, 2, 12])
+
+    def test_trace_same_as_iscan(self):
+        r_iscan = _evaluate_lisp("(iscan + 0 [2 10 5])")
+        r_trace = _evaluate_lisp("(trace + 0 [2 10 5])")
+        np.testing.assert_array_equal(r_iscan.value, r_trace.value)
+
+    def test_trace_right_correctness(self):
+        r = _evaluate_lisp("(trace-right + 0 [2 10 5])")
+        np.testing.assert_array_equal(r.value, [17, 15, 5])
+
+    def test_fold_right_same_for_associative(self):
+        r = _evaluate_lisp("(fold-right + 0 [1 2 3 4])")
+        assert r.value == 10
+
+    def test_scan_variants_aliases(self):
+        r1 = _evaluate_lisp("(iscan + 0 [2 10 5])")
+        r2 = _evaluate_lisp("(scan + 0 [2 10 5])")
+        np.testing.assert_array_equal(r1.value, r2.value)
+
+        r3 = _evaluate_lisp("(iscan/zero + 0 [2 10 5])")
+        np.testing.assert_array_equal(r1.value, r3.value)
+
+        r4 = _evaluate_lisp("(escan/zero + 0 [2 10 5])")
+        r5 = _evaluate_lisp("(escan + 0 [2 10 5])")
+        np.testing.assert_array_equal(r4.value, r5.value)
+
+    @pytest.mark.parametrize("size", [1, 3, 7, 15])
+    def test_scan_identity(self, size):
+        arr = " ".join(str(i) for i in range(size))
+        r = _evaluate_lisp(f"(iscan + 0 [{arr}])")
+        # Prefix sum of [0, 1, ..., size-1] should be [0, 1, 3, 6, 10, ...]
+        expected = np.cumsum(np.arange(size))
+        np.testing.assert_array_equal(r.value, expected)
+
+
+class TestPhase4Operators:
+    """Property tests for Phase 4: additional primitives."""
+
+    def test_length_correctness(self):
+        assert _evaluate_lisp("(length [1 2 3 4 5])").value == 5
+        assert _evaluate_lisp("(length [[1 2] [3 4] [5 6]])").value == 3
+
+    def test_rotate_correctness(self):
+        r = _evaluate_lisp("(rotate [1 2 3 4 5] 2)")
+        np.testing.assert_array_equal(r.value, [3, 4, 5, 1, 2])
+
+    def test_rotate_identity(self):
+        r = _evaluate_lisp("(rotate [1 2 3 4 5] 0)")
+        np.testing.assert_array_equal(r.value, [1, 2, 3, 4, 5])
+
+    def test_subarray_correctness(self):
+        r = _evaluate_lisp("(subarray [[1 2 3] [4 5 6] [7 8 9]] [1 0] [2 2])")
+        np.testing.assert_array_equal(r.value, [[4, 5], [7, 8]])
+
+    def test_append_correctness(self):
+        r = _evaluate_lisp("(append [1 2] [3 4 5])")
+        np.testing.assert_array_equal(r.value, [1, 2, 3, 4, 5])
+
+    def test_select_correctness(self):
+        assert _evaluate_lisp("(select #t 10 20)").value == 10
+        assert _evaluate_lisp("(select #f 10 20)").value == 20
+
+    def test_with_shape_correctness(self):
+        r = _evaluate_lisp("(with-shape 5 [3 2])")
+        np.testing.assert_array_equal(r.value, [[5, 5], [5, 5], [5, 5]])
+
+    def test_box_unbox_passthrough(self):
+        r = _evaluate_lisp("(unbox (box [1 2 3]) (len v) v)")
+        np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+    def test_box_unbox_with_fold(self):
+        r = _evaluate_lisp("(unbox (box [10 20 30]) (len xs) (fold + 0 xs))")
+        assert r.value == 60
