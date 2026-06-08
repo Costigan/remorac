@@ -1965,17 +1965,16 @@ def _lower_scan_module(
         raise RemoraLoweringError("scan lowering requires an array result")
     if node.result_type.rank != 1:
         raise RemoraLoweringError("only rank-1 scan lowers to MLIR so far")
-    if not isinstance(node.func, HIRPrimCallable):
-        raise RemoraLoweringError("only primitive scan callables lower to MLIR so far")
 
-    input_code, input_name, input_type, input_element_type = _lower_tensor_input(
-        node.array, "input", functions
-    )
     result_type = type_to_mlir(node.result_type)
     result_element_type = type_to_mlir(node.result_type.element)
     init_value_str = _literal_value(node.init, result_element_type)
     op_name = _arith_op(node.func.op, result_element_type)
     N = node.reduction_dim.value
+
+    input_code, input_name, input_type, input_element_type = _lower_tensor_input(
+        node.array, "input", functions
+    )
 
     if node.right:
         body = f"""{input_code}
@@ -2340,4 +2339,52 @@ def _lower_replicate_module(node: HIRReplicate, functions: dict[str, HIRFunction
         f"  func.func private @{rt}_fill(memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<{big_n}x{result_elem}>)"
     )
     builder.add_block(replicate_body)
+    return builder.render("%result")
+
+
+def _lower_rank2_c_unary(node, functions, c_base_name):
+    """Per-row rank-2 lowering for unary array→array ops via C _1d wrappers."""
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    R = node.result_type.shape[0].value
+    C = node.result_type.shape[1].value
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+
+    input_code, input_name, input_type, input_elem = _lower_tensor_input(
+        node.array, "input", functions, tensor_env=None
+    )
+
+    rt = f"{c_base_name}_{input_elem}_1d"
+
+    body = f"""{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cR = arith.constant {R} : index
+    %cC = arith.constant {C} : index
+    %in_mem = memref.alloc() : memref<{R}x{C}x{input_elem}>
+    %out_mem = memref.alloc() : memref<{R}x{C}x{result_elem}>
+    scf.for %i = %c0 to %cR step %c1 {{
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = tensor.extract {input_name}[%i, %j] : {input_type}
+        memref.store %v, %in_mem[%i, %j] : memref<{R}x{C}x{input_elem}>
+      }}
+    }}
+    scf.for %r = %c0 to %cR step %c1 {{
+      %row_in = memref.alloc() : memref<{C}x{input_elem}>
+      %row_out = memref.alloc() : memref<{C}x{result_elem}>
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %in_mem[%r, %j] : memref<{R}x{C}x{input_elem}>
+        memref.store %v, %row_in[%j] : memref<{C}x{input_elem}>
+      }}
+      func.call @{rt}(%row_in, %row_out) : (memref<{C}x{input_elem}>, memref<{C}x{result_elem}>) -> ()
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %row_out[%j] : memref<{C}x{result_elem}>
+        memref.store %v, %out_mem[%r, %j] : memref<{R}x{C}x{result_elem}>
+      }}
+    }}
+    %result = bufferization.to_tensor %out_mem restrict writable : memref<{R}x{C}x{result_elem}>"""
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_extern(f"  func.func private @{rt}(memref<{C}x{input_elem}>, memref<{C}x{result_elem}>)")
+    builder.add_block(body)
     return builder.render("%result")
