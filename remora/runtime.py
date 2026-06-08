@@ -907,9 +907,9 @@ def _result_shape(value_type: RemoraType) -> tuple[int, ...]:
     if isinstance(value_type, SigmaType):
         body = value_type.body
         if isinstance(body, ArrayType):
-            # Allocate worst-case: input size + 2 (for count + shift safety)
+            # Over-allocate for dynamic output (same as MLIR's worst-case)
             n = tuple(dim.value for dim in body.shape)
-            return (n[0] + 2,) if n else ()
+            return (n[0] * 100 + 2,) if n else ()
         return ()
     if isinstance(value_type, ArrayType):
         return tuple(dim.value for dim in value_type.shape)

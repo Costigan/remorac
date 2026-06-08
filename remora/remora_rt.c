@@ -31,6 +31,14 @@ static int _cmp_f32_asc(const void* a, const void* b) {
 /* ── Sort (in-place) ────────────────────────────────────────────────────── */
 /* LLVM ABI: (allocated, aligned, offset, size, stride) */
 
+static void _remora_sort_i32_impl(int32_t* data, int64_t n) {
+    qsort(data, (size_t)n, sizeof(int32_t), _cmp_i32_asc);
+}
+
+static void _remora_sort_f32_impl(float* data, int64_t n) {
+    qsort(data, (size_t)n, sizeof(float), _cmp_f32_asc);
+}
+
 void remora_sort_i32(
     int32_t* allocated, int32_t* aligned, int64_t offset, int64_t size, int64_t stride
 ) {
@@ -188,6 +196,48 @@ int64_t remora_replicate_f32_count(
     return total;
 }
 
+/* ── Replicate fill (void, for second phase after count) ───────────────── */
+
+void remora_replicate_i32_fill(
+    int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
+    int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str,
+    int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)cnt_alloc; (void)cnt_n; (void)cnt_str;
+    (void)dst_alloc; (void)dst_str; (void)dst_n;
+    int32_t* src_data = (int32_t*)_mr_data(src_align, src_off);
+    int32_t* cnt_data = (int32_t*)_mr_data(cnt_align, cnt_off);
+    int32_t* dst_data = (int32_t*)_mr_data(dst_align, dst_off);
+    int64_t n = src_n;
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int32_t count = cnt_data[i];
+        for (int32_t r = 0; r < count; r++) {
+            dst_data[out_n++] = src_data[i];
+        }
+    }
+}
+
+void remora_replicate_f32_fill(
+    float* src_alloc, float* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
+    int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str,
+    float* dst_alloc, float* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)cnt_alloc; (void)cnt_n; (void)cnt_str;
+    (void)dst_alloc; (void)dst_str; (void)dst_n;
+    float*   src_data = (float*)_mr_data(src_align, src_off);
+    int32_t* cnt_data = (int32_t*)_mr_data(cnt_align, cnt_off);
+    float*   dst_data = (float*)_mr_data(dst_align, dst_off);
+    int64_t n = src_n;
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int32_t count = cnt_data[i];
+        for (int32_t r = 0; r < count; r++) {
+            dst_data[out_n++] = src_data[i];
+        }
+    }
+}
+
 /* ── Replicate (dynamic output size, returns actual count) ──────────────── */
 
 int64_t remora_replicate_i32(
@@ -233,3 +283,10 @@ int64_t remora_replicate_f32(
     }
     return out_n;
 }
+
+/* ── Per-row aliases for rank > 1 lowering ─────────────────────────────── */
+
+void remora_sort_1d_i32(int32_t* a, int32_t* b, int64_t o, int64_t n, int64_t s) { remora_sort_i32(a, b, o, n, s); }
+void remora_sort_1d_f32(float* a, float* b, int64_t o, int64_t n, int64_t s)   { remora_sort_f32(a, b, o, n, s); }
+void remora_grade_1d_i32(int32_t* sa, int32_t* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_i32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
+void remora_grade_1d_f32(float* sa, float* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_f32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }

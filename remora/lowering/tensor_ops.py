@@ -2046,32 +2046,67 @@ def _sort_runtime_func(result_elem: str) -> str:
 def _lower_sort_module(node: HIRSort, functions: dict[str, HIRFunction]) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
-    if not isinstance(node.result_type, ArrayType) or node.result_type.rank != 1:
-        raise RemoraLoweringError("sort lowering only supports rank-1 arrays")
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("sort lowering requires array result type")
+    rank = node.result_type.rank
+    if rank < 1 or rank > 2:
+        raise RemoraLoweringError("sort lowering supports ranks 1 and 2")
 
     input_code, input_name, input_type, input_element_type = _lower_tensor_input(
         node.array, "sort_input", functions, tensor_env=None
     )
     result_type = type_to_mlir(node.result_type)
     result_elem = type_to_mlir(node.result_type.element)
-    n = node.result_type.shape[0].value
     rt_func = _sort_runtime_func(result_elem)
 
-    sort_body = f"""{input_code}
+    if rank == 1:
+        n = node.result_type.shape[0].value
+        sort_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c{n} = arith.constant {n} : index
+    %cN{n} = arith.constant {n} : index
     %buf = memref.alloc() : memref<{n}x{result_elem}>
-    scf.for %i = %c0 to %c{n} step %c1 {{
+    scf.for %i = %c0 to %cN{n} step %c1 {{
       %val = tensor.extract {input_name}[%i] : {result_type}
       memref.store %val, %buf[%i] : memref<{n}x{result_elem}>
     }}
     func.call @{rt_func}(%buf) : (memref<{n}x{result_elem}>) -> ()
     %sorted = bufferization.to_tensor %buf restrict writable : memref<{n}x{result_elem}>"""
+        builder = _MLIRMainModuleBuilder(result_type)
+        builder.add_extern(f"  func.func private @{rt_func}(memref<{n}x{result_elem}>)")
+        builder.add_block(sort_body)
+        return builder.render("%sorted")
+
+    # Rank 2: per-row sort using memref operations
+    R = node.result_type.shape[0].value
+    C = node.result_type.shape[1].value
+    sort_body = f"""{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cR = arith.constant {R} : index
+    %cC = arith.constant {C} : index
+    %in_mem = memref.alloc() : memref<{R}x{C}x{result_elem}>
+    scf.for %i = %c0 to %cR step %c1 {{
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = tensor.extract {input_name}[%i, %j] : {result_type}
+        memref.store %v, %in_mem[%i, %j] : memref<{R}x{C}x{result_elem}>
+      }}
+    }}
+    scf.for %r = %c0 to %cR step %c1 {{
+      %row_buf = memref.alloc() : memref<{C}x{result_elem}>
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %in_mem[%r, %j] : memref<{R}x{C}x{result_elem}>
+        memref.store %v, %row_buf[%j] : memref<{C}x{result_elem}>
+      }}
+      func.call @remora_sort_1d_{result_elem}(%row_buf) : (memref<{C}x{result_elem}>) -> ()
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %row_buf[%j] : memref<{C}x{result_elem}>
+        memref.store %v, %in_mem[%r, %j] : memref<{R}x{C}x{result_elem}>
+      }}
+    }}
+    %sorted = bufferization.to_tensor %in_mem restrict writable : memref<{R}x{C}x{result_elem}>"""
     builder = _MLIRMainModuleBuilder(result_type)
-    builder.add_extern(
-        f"  func.func private @{rt_func}(memref<{n}x{result_elem}>)"
-    )
+    builder.add_extern(f"  func.func private @remora_sort_1d_{result_elem}(memref<{C}x{result_elem}>)")
     builder.add_block(sort_body)
     return builder.render("%sorted")
 
@@ -2079,34 +2114,76 @@ def _lower_sort_module(node: HIRSort, functions: dict[str, HIRFunction]) -> str:
 def _lower_grade_module(node: HIRGrade, functions: dict[str, HIRFunction]) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
-    if not isinstance(node.result_type, ArrayType) or node.result_type.rank != 1:
-        raise RemoraLoweringError("grade lowering only supports rank-1 arrays")
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("grade result must be array type")
+    rank = node.result_type.rank
+    if rank < 1 or rank > 2:
+        raise RemoraLoweringError("grade lowering supports ranks 1 and 2")
 
     input_code, input_name, input_type, input_element_type = _lower_tensor_input(
         node.array, "grade_input", functions, tensor_env=None
     )
-    del input_type  # not needed below
+    del input_type
     n = node.result_type.shape[0].value
     result_type = type_to_mlir(node.result_type)
     result_elem = type_to_mlir(node.result_type.element)
-    rt_func = "remora_grade_i32" if input_element_type == "i32" else "remora_grade_f32"
 
-    grade_body = f"""{input_code}
+    if rank == 1:
+        rt_func = "remora_grade_i32" if input_element_type == "i32" else "remora_grade_f32"
+        grade_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c{n} = arith.constant {n} : index
+    %cN{n} = arith.constant {n} : index
     %buf_in = memref.alloc() : memref<{n}x{input_element_type}>
     %buf_out = memref.alloc() : memref<{n}x{result_elem}>
-    scf.for %i = %c0 to %c{n} step %c1 {{
+    scf.for %i = %c0 to %cN{n} step %c1 {{
       %val = tensor.extract {input_name}[%i] : tensor<{n}x{input_element_type}>
       memref.store %val, %buf_in[%i] : memref<{n}x{input_element_type}>
     }}
     func.call @{rt_func}(%buf_in, %buf_out) : (memref<{n}x{input_element_type}>, memref<{n}x{result_elem}>) -> ()
     %sorted_indices = bufferization.to_tensor %buf_out restrict writable : memref<{n}x{result_elem}>
     memref.dealloc %buf_in : memref<{n}x{input_element_type}>"""
+        builder = _MLIRMainModuleBuilder(result_type)
+        builder.add_extern(
+            f"  func.func private @{rt_func}(memref<{n}x{input_element_type}>, memref<{n}x{result_elem}>)"
+        )
+        builder.add_block(grade_body)
+        return builder.render("%sorted_indices")
+
+    # Rank 2: per-row grade
+    R = node.result_type.shape[0].value
+    C = node.result_type.shape[1].value
+    rt_1d = f"remora_grade_1d_{input_element_type}"
+    grade_body = f"""{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cR = arith.constant {R} : index
+    %cC = arith.constant {C} : index
+    %in_mem = memref.alloc() : memref<{R}x{C}x{input_element_type}>
+    %out_mem = memref.alloc() : memref<{R}x{C}x{result_elem}>
+    scf.for %i = %c0 to %cR step %c1 {{
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = tensor.extract {input_name}[%i, %j] : tensor<{R}x{C}x{input_element_type}>
+        memref.store %v, %in_mem[%i, %j] : memref<{R}x{C}x{input_element_type}>
+      }}
+    }}
+    scf.for %r = %c0 to %cR step %c1 {{
+      %row_in = memref.alloc() : memref<{C}x{input_element_type}>
+      %row_out = memref.alloc() : memref<{C}x{result_elem}>
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %in_mem[%r, %j] : memref<{R}x{C}x{input_element_type}>
+        memref.store %v, %row_in[%j] : memref<{C}x{input_element_type}>
+      }}
+      func.call @{rt_1d}(%row_in, %row_out) : (memref<{C}x{input_element_type}>, memref<{C}x{result_elem}>) -> ()
+      scf.for %j = %c0 to %cC step %c1 {{
+        %v = memref.load %row_out[%j] : memref<{C}x{result_elem}>
+        memref.store %v, %out_mem[%r, %j] : memref<{R}x{C}x{result_elem}>
+      }}
+    }}
+    %sorted_indices = bufferization.to_tensor %out_mem restrict writable : memref<{R}x{C}x{result_elem}>"""
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_extern(
-        f"  func.func private @{rt_func}(memref<{n}x{input_element_type}>, memref<{n}x{result_elem}>)"
+        f"  func.func private @{rt_1d}(memref<{C}x{input_element_type}>, memref<{C}x{result_elem}>)"
     )
     builder.add_block(grade_body)
     return builder.render("%sorted_indices")
@@ -2156,8 +2233,8 @@ def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> 
     filter_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c{n} = arith.constant {n} : index
-    %c{n}p2 = arith.constant {n+2} : index
+    %cN{n} = arith.constant {n} : index
+    %cBig = arith.constant {n+2} : index
     %mask_empty = tensor.empty() : tensor<{n}xi32>
     %mask = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
@@ -2172,7 +2249,7 @@ def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> 
     %buf_src = memref.alloc() : memref<{n}x{input_elem}>
     %buf_mask = memref.alloc() : memref<{n}xi32>
     %buf_dst = memref.alloc() : memref<{n+2}x{result_elem}>
-    scf.for %i = %c0 to %c{n} step %c1 {{
+    scf.for %i = %c0 to %cN{n} step %c1 {{
       %v = tensor.extract {input_name}[%i] : {input_type}
       memref.store %v, %buf_src[%i] : memref<{n}x{input_elem}>
       %m = tensor.extract %mask[%i] : tensor<{n}xi32>
@@ -2211,7 +2288,6 @@ def _lower_replicate_module(node: HIRReplicate, functions: dict[str, HIRFunction
     if not isinstance(body_type, ArrayType) or body_type.rank != 1:
         raise RemoraLoweringError("replicate only supports rank-1 arrays")
 
-    # Lower array and counts
     arr_code, arr_name, arr_type, arr_elem = _lower_tensor_input(
         node.array, "rep_arr", functions, tensor_env=None
     )
@@ -2219,6 +2295,7 @@ def _lower_replicate_module(node: HIRReplicate, functions: dict[str, HIRFunction
         node.counts, "rep_cnt", functions, tensor_env=None
     )
     n = body_type.shape[0].value
+    big_n = n * 100
     result_elem = type_to_mlir(body_type.element)
 
     rt = "remora_replicate_i32" if arr_elem == "i32" else "remora_replicate_f32"
@@ -2227,30 +2304,40 @@ def _lower_replicate_module(node: HIRReplicate, functions: dict[str, HIRFunction
 {cnt_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c{n} = arith.constant {n} : index
+    %cN{n} = arith.constant {n} : index
     %buf_src = memref.alloc() : memref<{n}x{arr_elem}>
     %buf_cnt = memref.alloc() : memref<{n}xi32>
-    scf.for %i = %c0 to %c{n} step %c1 {{
+    scf.for %i = %c0 to %cN{n} step %c1 {{
       %v = tensor.extract {arr_name}[%i] : {arr_type}
       memref.store %v, %buf_src[%i] : memref<{n}x{arr_elem}>
       %c = tensor.extract {cnt_name}[%i] : {cnt_type}
       memref.store %c, %buf_cnt[%i] : memref<{n}xi32>
     }}
-    %total_count_i64 = func.call @{rt}_count(%buf_src, %buf_cnt) : (memref<{n}x{arr_elem}>, memref<{n}xi32>) -> i64
-    %total_count = arith.index_cast %total_count_i64 : i64 to index
-    %buf_dst = memref.alloc(%total_count) : memref<?x{result_elem}>
-    func.call @{rt}(%buf_src, %buf_cnt, %buf_dst) : (memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<?x{result_elem}>) -> ()
-    %result = bufferization.to_tensor %buf_dst restrict writable : memref<?x{result_elem}>
+    %count = func.call @{rt}_count(%buf_src, %buf_cnt) : (memref<{n}x{arr_elem}>, memref<{n}xi32>) -> i64
+    %count_idx = arith.index_cast %count : i64 to index
+    %count_p1 = arith.addi %count_idx, %c1 : index
+    %c{big_n} = arith.constant {big_n} : index
+    %buf_dst = memref.alloc() : memref<{big_n}x{result_elem}>
+    func.call @{rt}_fill(%buf_src, %buf_cnt, %buf_dst) : (memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<{big_n}x{result_elem}>) -> ()
+    scf.for %k = %c0 to %count_idx step %c1 {{
+      %offset = arith.subi %count_idx, %k : index
+      %src_minus_1 = arith.subi %offset, %c1 : index
+      %val = memref.load %buf_dst[%src_minus_1] : memref<{big_n}x{result_elem}>
+      memref.store %val, %buf_dst[%offset] : memref<{big_n}x{result_elem}>
+    }}
+    %count_i32 = arith.trunci %count : i64 to i32
+    memref.store %count_i32, %buf_dst[%c0] : memref<{big_n}x{result_elem}>
+    %view = memref.subview %buf_dst[0] [%count_p1] [1] : memref<{big_n}x{result_elem}> to memref<?x{result_elem}, strided<[1]>>
+    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}, strided<[1]>>
     memref.dealloc %buf_src : memref<{n}x{arr_elem}>
-    memref.dealloc %buf_cnt : memref<{n}xi32>
-    memref.dealloc %buf_dst : memref<?x{result_elem}>"""
+    memref.dealloc %buf_cnt : memref<{n}xi32>"""
     result_type_str = f"tensor<?x{result_elem}>"
     builder = _MLIRMainModuleBuilder(result_type_str)
     builder.add_extern(
         f"  func.func private @{rt}_count(memref<{n}x{arr_elem}>, memref<{n}xi32>) -> i64"
     )
     builder.add_extern(
-        f"  func.func private @{rt}(memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<?x{result_elem}>)"
+        f"  func.func private @{rt}_fill(memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<{big_n}x{result_elem}>)"
     )
     builder.add_block(replicate_body)
     return builder.render("%result")

@@ -443,6 +443,19 @@ class TestCompiledVsInterpreter:
         r = evaluate_source("(grade < [3 1 4 1])", include_prelude=False, syntax="lisp")
         np.testing.assert_array_equal(r.value, [1, 3, 0, 2])
 
+    # ── Filter / Replicate (compiled path) ────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(filter (> 0) [1 -2 3 -4])",
+        "(filter (> 0) [5 1 3])",
+        "(filter (> 0) [-1 -2])",
+        "(replicate [2 1 3] [10 20 30])",
+        "(replicate [3] [42])",
+        "(replicate [0 1 0] [7 8 9])",
+    ])
+    def test_filter_replicate_compiled(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
     # ── Sort / Grade (compiled path) ──────────────────────────────────────
 
     @pytest.mark.parametrize("src", [
