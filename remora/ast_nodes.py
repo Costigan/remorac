@@ -92,6 +92,7 @@ class ReduceExpr:
     init: Expr
     array: Expr
     loc: SourceLoc
+    require_nonempty: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,16 @@ class ScanExpr:
     array: Expr
     loc: SourceLoc
     exclusive: bool = False
+    require_nonempty: bool = False
+
+
+@dataclass(frozen=True)
+class TraceExpr:
+    func: Expr
+    init: Expr
+    array: Expr
+    loc: SourceLoc
+    right: bool = False
 
 
 @dataclass(frozen=True)
@@ -249,6 +260,7 @@ Expr: TypeAlias = (
     | ReduceExpr
     | FoldRightExpr
     | ScanExpr
+    | TraceExpr
     | IotaExpr
     | ShapeExpr
     | RankExpr

@@ -35,6 +35,7 @@ from remora.ast_nodes import (
     SliceRange,
     ReverseExpr,
     TakeExpr,
+    TraceExpr,
     TransposeExpr,
     DropExpr,
     ValDef,
@@ -452,6 +453,8 @@ class TypeChecker:
             return self._infer_fold_right(expr, env)
         if isinstance(expr, ScanExpr):
             return self._infer_scan(expr, env)
+        if isinstance(expr, TraceExpr):
+            return self._infer_trace(expr, env)
         if isinstance(expr, ReverseExpr):
             return self._infer_reverse(expr, env)
 
@@ -1073,6 +1076,8 @@ class TypeChecker:
         typed_array = self.infer(expr.array, env)
         if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 1:
             raise RemoraTypeError("reduce expects a non-scalar array", expr.loc)
+        if expr.require_nonempty and isinstance(typed_array.type.shape[0], StaticDim) and typed_array.type.shape[0].value == 0:
+            raise RemoraTypeError("reduce/1 expects a non-empty leading dimension", expr.loc)
 
         element_type = typed_array.type.drop_outer(1)
         if isinstance(element_type, ArrayType):
@@ -1129,6 +1134,28 @@ class TypeChecker:
             typed_array,
             typed_array.type.shape[0],
             expr.exclusive,
+            typed_array.type,
+        )
+
+    def _infer_trace(self, expr: TraceExpr, env: TypeEnv) -> TypedScan:
+        typed_init = self.infer(expr.init, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 1:
+            raise RemoraTypeError("trace expects a non-scalar array", expr.loc)
+
+        element_type = typed_array.type.drop_outer(1)
+        if isinstance(element_type, ArrayType):
+            self._require(typed_init.type, element_type, expr.loc)
+
+        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        typed_func = self.check_callable(expr.func, expected_func_type, env)
+        return TypedScan(
+            expr,  # type: ignore[arg-type]
+            typed_func,
+            typed_init,
+            typed_array,
+            typed_array.type.shape[0],
+            False,
             typed_array.type,
         )
 

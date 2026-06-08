@@ -62,10 +62,17 @@ lambda_expr: LAMBDA NAME+ ARROW expr
            | "map" callable atom       -> map_expr
            | "fold" callable atom atom -> fold_expr
            | "reduce" callable atom atom -> reduce_expr
+           | "reduce/zero" callable atom atom -> reduce_zero_expr
+           | "reduce/1" callable atom atom -> reduce_one_expr
            | "fold-right" callable atom atom -> fold_right_expr
            | "scan" callable atom atom -> scan_expr
            | "iscan" callable atom atom -> scan_expr
+           | "iscan/zero" callable atom atom -> scan_expr
+           | "iscan/1" callable atom atom -> scan_one_expr
            | "escan" callable atom atom -> escan_expr
+           | "escan/zero" callable atom atom -> escan_expr
+           | "trace" callable atom atom -> trace_expr
+           | "trace-right" callable atom atom -> trace_right_expr
            | "iota" atom               -> iota_expr
           | "shape" atom              -> shape_expr
           | "rank" atom               -> rank_expr

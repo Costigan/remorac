@@ -39,6 +39,7 @@ from remora.ast_nodes import (
     SourceLoc,
     ReverseExpr,
     TakeExpr,
+    TraceExpr,
     TransposeExpr,
     DropExpr,
     ValDef,
@@ -128,14 +129,29 @@ class ASTBuilder(Transformer):
     def reduce_expr(self, items: list[Any]) -> ReduceExpr:
         return ReduceExpr(items[0], items[1], items[2], self._loc_from(items))
 
+    def reduce_zero_expr(self, items: list[Any]) -> ReduceExpr:
+        return ReduceExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def reduce_one_expr(self, items: list[Any]) -> ReduceExpr:
+        return ReduceExpr(items[0], items[1], items[2], self._loc_from(items), require_nonempty=True)
+
     def fold_right_expr(self, items: list[Any]) -> FoldRightExpr:
         return FoldRightExpr(items[0], items[1], items[2], self._loc_from(items))
 
     def scan_expr(self, items: list[Any]) -> ScanExpr:
         return ScanExpr(items[0], items[1], items[2], self._loc_from(items), exclusive=False)
 
+    def scan_one_expr(self, items: list[Any]) -> ScanExpr:
+        return ScanExpr(items[0], items[1], items[2], self._loc_from(items), exclusive=False, require_nonempty=True)
+
     def escan_expr(self, items: list[Any]) -> ScanExpr:
         return ScanExpr(items[0], items[1], items[2], self._loc_from(items), exclusive=True)
+
+    def trace_expr(self, items: list[Any]) -> TraceExpr:
+        return TraceExpr(items[0], items[1], items[2], self._loc_from(items), right=False)
+
+    def trace_right_expr(self, items: list[Any]) -> TraceExpr:
+        return TraceExpr(items[0], items[1], items[2], self._loc_from(items), right=True)
 
     def iota_expr(self, items: list[Any]) -> IotaExpr:
         return IotaExpr(items[0], self._loc_from(items))
