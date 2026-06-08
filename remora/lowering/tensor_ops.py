@@ -1733,8 +1733,9 @@ def _lower_rotate_module(
 
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("rotate lowering requires an array result")
-    if node.result_type.rank != 1:
-        raise RemoraLoweringError("only rank-1 rotate lowers to MLIR so far")
+    result_rank = node.result_type.rank
+    if result_rank < 1:
+        raise RemoraLoweringError("rotate lowering requires at least rank-1 array")
 
     input_code, input_name, input_type, input_element_type = _lower_tensor_input(
         node.array, "input", functions
@@ -1744,20 +1745,35 @@ def _lower_rotate_module(
     shift = node.shift.value
     N = node.result_type.shape[0].value
 
+    # Build N-D affine map and iterator types
+    dims = ", ".join(f"d{i}" for i in range(result_rank))
+    affine_map = f"affine_map<({dims}) -> ({dims})>"
+    iterator_types = ", ".join(['"parallel"'] * result_rank)
+
+    # Build trailing dimension indices and extract indices
+    trailing_indices = ""
+    extract_indices = "%wrapped"
+    if result_rank > 1:
+        trailing_defs = "\n".join(
+            f"      %d{i} = linalg.index {i} : index" for i in range(1, result_rank)
+        )
+        trailing_indices = "\n" + trailing_defs
+        extract_indices = "%wrapped, " + ", ".join(f"%d{i}" for i in range(1, result_rank))
+
     body = f"""{input_code}
     %rot_zero = arith.constant 0 : index
     %rot_N = arith.constant {N} : index
     %rot_shift = arith.constant {shift} : index
     %empty = tensor.empty() : {result_type}
     %rotated = linalg.generic {{
-      indexing_maps = [affine_map<(d0) -> (d0)>],
-      iterator_types = [\"parallel\"]
+      indexing_maps = [{affine_map}],
+      iterator_types = [{iterator_types}]
     }} outs(%empty : {result_type}) {{
     ^bb0(%out: {result_element_type}):
       %idx = linalg.index 0 : index
       %shifted = arith.addi %idx, %rot_shift : index
-      %wrapped = arith.remsi %shifted, %rot_N : index
-      %elem = tensor.extract {input_name}[%wrapped] : {input_type}
+      %wrapped = arith.remsi %shifted, %rot_N : index{trailing_indices}
+      %elem = tensor.extract {input_name}[{extract_indices}] : {input_type}
       linalg.yield %elem : {result_element_type}
     }} -> {result_type}"""
 
@@ -1934,17 +1950,27 @@ def _lower_append_module(
     result_type_mlir = type_to_mlir(node.result_type)
     result_rank = node.result_type.rank
 
-    if result_rank != 1:
-        raise RemoraLoweringError("only rank-1 append lowers to MLIR so far")
+    left_remora = _expr_result_type(node.left)
+    right_remora = _expr_result_type(node.right)
+    left_shape = left_remora.shape if isinstance(left_remora, ArrayType) else ()
+    right_shape = right_remora.shape if isinstance(right_remora, ArrayType) else ()
 
-    left_dim = _expr_result_type(node.left).shape[0].value if isinstance(_expr_result_type(node.left), ArrayType) else 0
-    right_dim = _expr_result_type(node.right).shape[0].value if isinstance(_expr_result_type(node.right), ArrayType) else 0
+    left_dim = left_shape[0].value
+    right_dim = right_shape[0].value
+
+    # Build N-D offsets, sizes, and strides for tensor.insert_slice
+    zero_offsets = ", ".join(["0"] * result_rank)
+    left_sizes = ", ".join(str(d.value) for d in left_shape)
+    right_sizes = ", ".join(str(d.value) for d in right_shape)
+    strides = ", ".join(["1"] * result_rank)
+
+    right_offsets = f"{left_dim}" + (", 0" * (result_rank - 1) if result_rank > 1 else "")
 
     body = f"""{left_code}
 {right_code}
     %empty = tensor.empty() : {result_type_mlir}
-    %tmp = tensor.insert_slice {left_name} into %empty[0] [{left_dim}] [1] : {left_type} into {result_type_mlir}
-    %result = tensor.insert_slice {right_name} into %tmp[{left_dim}] [{right_dim}] [1] : {right_type} into {result_type_mlir}"""
+    %tmp = tensor.insert_slice {left_name} into %empty[{zero_offsets}] [{left_sizes}] [{strides}] : {left_type} into {result_type_mlir}
+    %result = tensor.insert_slice {right_name} into %tmp[{right_offsets}] [{right_sizes}] [{strides}] : {right_type} into {result_type_mlir}"""
 
     builder = _MLIRMainModuleBuilder(result_type_mlir)
     builder.add_block(body)

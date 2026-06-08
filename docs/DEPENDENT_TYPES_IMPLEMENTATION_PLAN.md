@@ -374,7 +374,7 @@ Acceptance criteria:
 
 Estimate: 4-6 weeks after 7.0.
 
-Current implementation checkpoint (June 8, 2026):
+Implementation status: **Phase 7.1 complete on June 8, 2026.**
 
 - 7.0 index expressions, substitution, normalization, typed-core checkpoint,
   verifier, compiler routing, and erasure are implemented.
@@ -387,9 +387,31 @@ Current implementation checkpoint (June 8, 2026):
 - Explicit `iapp` now records concrete specialization evidence as
   `CoreIndexApplication`, supports dependent result shapes, and erases to HIR
   and MLIR identical to the equivalent monomorphic program.
-- Remaining 7.1 work includes broader bidirectional checking,
-  specialization caching/naming, and replacing the compatibility-shell core
-  with a fully structural typed core.
+- Dependent bodies are checked bidirectionally against their declared result
+  under symbolic parameter types when the definition is processed.
+- Concrete instances are cached and named deterministically, for example
+  `dot__n_2`; inferred and explicit applications share the same specialization.
+- The core records deduplicated `CoreSpecialization` entries and verifies that
+  every explicit index application resolves to a matching concrete instance.
+- `CoreProgram` is now structural: definitions, expressions, explicit index
+  applications, and concrete specialization bodies are represented and
+  verified independently of `TypedProgram`.
+- Core-to-HIR erasure walks the structural core and rejects free index
+  variables before backend lowering.
+- `TypeEnv` has separate value and index namespaces.
+- `compile_function_source` uses the same specialization path and exposes the
+  deterministic specialization name and concrete index arguments.
+
+Phase 7.1 intentionally ends at exact fixed-rank dimension polymorphism:
+
+- only `Dim` binders are accepted by `define/pi`
+- explicit `iapp` arguments must be non-negative dimension literals
+- all dimensions must be concrete before HIR lowering
+- cross-module specialization is not applicable yet because the language has
+  no separate module/import system; standalone function compilation from a
+  source unit is supported
+- shape variables, shape concatenation, rest shapes, and dimension arithmetic
+  begin in Phases 7.3 and 7.4
 
 ### 7.2 Shared Frame/Cell Elaboration (3-5 weeks)
 
@@ -408,6 +430,61 @@ Acceptance criteria:
 - Dependent and non-dependent applications use the same frame/cell decision code.
 
 Estimate: 3-5 weeks.
+
+Implementation status: **Phase 7.2 substantially complete on June 8, 2026.**
+
+- `remora/frame.py` created as the single owner of frame/cell decomposition:
+  - `scalar_cell_and_frame` – simple element+frame decomposition
+  - `cell_matches_array_suffix` – suffix matching
+  - `cell_type_candidates` – generates valid cell types for lifting
+  - `decompose_argument` – central frame/cell decomposition from function type
+  - `apply_frame` – result-type framing
+  - `principal_frame` – principal-frame selection for broadcasting
+  - `infer_lifting` – legacy-compatible wrapper
+  - `validate_cell_rank` – cell-rank validation
+  - `broadcasting_obligations` – binary broadcasting resolution
+  - `FrameCell` record for downstream reuse
+
+- `remora/typechecker.py` migrated to route through `remora/frame.py`:
+  - `_scalar_cell_and_frame` delegates to `scalar_cell_and_frame`
+  - `_cell_type_candidates` delegates to `cell_type_candidates`
+  - `_principal_frame` delegates to `principal_frame`
+  - Map and implicit-application inference calls `frame_infer_lifting` and `apply_frame`
+
+- `FrameCellDecision` added to `remora/elaborated.py` typed core:
+  - Records `frame_shape`, `cell_shape`, `cell_type`, `is_implicit`, `is_binary`
+  - `CoreExpr` carries an optional `frame` field
+  - `remora/elaborate.py` extracts frame decisions from `TypedMap` nodes
+  - `remora/core_verify.py` verifies frame/cell shapes are concrete
+
+- Rank-N append lowering (`remora/lowering/tensor_ops.py`):
+  - Removed `rank != 1` guard
+  - Generates N-D offsets, sizes, and strides for `tensor.insert_slice`
+  - Tested at rank-2 through interpreter and compiled CPU path
+
+- Rank-N rotate lowering (`remora/lowering/tensor_ops.py`):
+  - Removed `rank != 1` guard
+  - Generates N-D affine maps, iterator types, and multi-dimensional extracts
+  - `linalg.index` collects all trailing dimension indices
+  - Tested at rank-2 through interpreter and compiled CPU path
+
+- Rank-N scan lowering: **investigated, deferred.**
+  - The interpreter correctly handles scan at rank-2+.
+  - Lowering requires array-typed carries (`tensor.extract_slice`/`tensor.insert_slice`)
+    and nested linalg operations for carry updates, which is a larger effort.
+  - The `rank != 1` guard remains with a clear diagnostic.
+
+- GPU scan/append rank-1 guards (`remora/gpu_lowering.py`) remain unchanged;
+  those paths are independent work streams.
+
+- 28 unit tests for `remora/frame.py` in `tests/test_frame.py`.
+- 4 integration tests for rank-2 append and rotate (correctness + compiled).
+- Full regression suite: **771 passed, 1 skipped.**
+
+Remaining Phase 7.2 work:
+- Rank-N compiled scan support (requires cell-typed carry lowering).
+- GPU rank-N support for scan and append (independent GPU work stream).
+
 
 ### 7.3 Shape Variables And Concatenation (5-8 weeks)
 

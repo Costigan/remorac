@@ -18,6 +18,9 @@ def test_monomorphic_program_elaborates_and_erases_to_existing_hir():
     core = elaborate_source("iota 4")
     hir = erase_to_hir(core)
 
+    assert core.body is not None
+    assert core.body.kind == "TypedExprNode"
+    assert not hasattr(core, "typed")
     assert hir.return_type == ArrayType(INT, (StaticDim(4),))
     assert isinstance(hir.main, HIRIota)
 
@@ -30,7 +33,13 @@ def test_core_verifier_accepts_definition_only_program_without_result_type():
 
 def test_core_verifier_rejects_inconsistent_program_type():
     core = elaborate_source("1")
-    broken = type(core)(type(core.typed)(core.typed.definitions, core.typed.body, ArrayType(INT, (StaticDim(1),))))
+    broken = type(core)(
+        core.definitions,
+        core.body,
+        ArrayType(INT, (StaticDim(1),)),
+        core.index_applications,
+        core.specializations,
+    )
 
     with pytest.raises(CoreVerificationError, match="body type"):
         verify_core_program(broken)
