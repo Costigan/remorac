@@ -51,6 +51,10 @@ def _cast_if_needed(
         return []
     if from_type == "i32" and to_type == "f32":
         return [f"      {result_name} = arith.sitofp {value_name} : i32 to f32"]
+    if from_type == "i32" and to_type == "i64":
+        return [f"      {result_name} = arith.extsi {value_name} : i32 to i64"]
+    if from_type == "i64" and to_type == "i32":
+        return [f"      {result_name} = arith.trunci {value_name} : i64 to i32"]
     raise RemoraLoweringError(
         f"cannot cast {from_type} to {to_type} in map lowering"
     )

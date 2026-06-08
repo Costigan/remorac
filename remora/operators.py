@@ -51,6 +51,17 @@ _ARITH_OPS_I32: dict[str, str] = {
     "<=": "arith.cmpi sle",
 }
 
+_ARITH_OPS_I64: dict[str, str] = {
+    "+": "arith.addi",
+    "-": "arith.subi",
+    "*": "arith.muli",
+    "/": "arith.divsi",
+    "==": "arith.cmpi eq",
+    "!=": "arith.cmpi ne",
+    "<": "arith.cmpi slt",
+    "<=": "arith.cmpi sle",
+}
+
 _ARITH_OPS_I1: dict[str, str] = {
     "&&": "arith.andi",
     "||": "arith.ori",
@@ -61,6 +72,7 @@ _ARITH_OPS_I1: dict[str, str] = {
 _ARITH_OPS_BY_TYPE: dict[str, dict[str, str]] = {
     "f32": _ARITH_OPS_F32,
     "i32": _ARITH_OPS_I32,
+    "i64": _ARITH_OPS_I64,
     "i1": _ARITH_OPS_I1,
 }
 

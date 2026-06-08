@@ -938,9 +938,18 @@ def _lower_scalar_fold_result(
         tensor_env=tensor_env,
     )
     result_type = type_to_mlir(node.result_type)
+    # Promote i32 accumulator to i64 for primitive fold callables
+    # to avoid overflow on large reductions. HIRLambda bodies retain
+    # their original types since the lambda operates in the Remora type system.
+    acc_type = result_type
+    truncate = False
+    if result_type == "i32" and isinstance(node.func, HIRPrimCallable):
+        acc_type = "i64"
+        truncate = True
+
     init_code, init_value = _lower_scalar_value_for_fold_init(
         node.init,
-        result_type,
+        acc_type,
         functions=functions,
         env={},
         result_prefix="init_scalar",
@@ -951,21 +960,37 @@ def _lower_scalar_fold_result(
         input_name="%in",
         input_type=input_element_type,
         acc_name="%acc",
-        acc_type=result_type,
-        result_type=result_type,
+        acc_type=acc_type,
+        result_type=acc_type,
     )
 
-    body = f"""{input_code}
+    trunc_block = ""
+    if truncate:
+        body = f"""{input_code}
 {init_code}
-    %init = tensor.from_elements {init_value} : tensor<{result_type}>
+    %init = tensor.from_elements {init_value} : tensor<{acc_type}>
     %folded = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
       iterator_types = [\"reduction\"]
-    }} ins({input_name} : {input_type}) outs(%init : tensor<{result_type}>) {{
-    ^bb0(%in: {input_element_type}, %acc: {result_type}):
+    }} ins({input_name} : {input_type}) outs(%init : tensor<{acc_type}>) {{
+    ^bb0(%in: {input_element_type}, %acc: {acc_type}):
 {fold_body}
-    }} -> tensor<{result_type}>
-    %result = tensor.extract %folded[] : tensor<{result_type}>
+    }} -> tensor<{acc_type}>
+    %wide = tensor.extract %folded[] : tensor<{acc_type}>
+    %result = arith.trunci %wide : {acc_type} to {result_type}
+"""
+    else:
+        body = f"""{input_code}
+{init_code}
+    %init = tensor.from_elements {init_value} : tensor<{acc_type}>
+    %folded = linalg.generic {{
+      indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
+      iterator_types = [\"reduction\"]
+    }} ins({input_name} : {input_type}) outs(%init : tensor<{acc_type}>) {{
+    ^bb0(%in: {input_element_type}, %acc: {acc_type}):
+{fold_body}
+    }} -> tensor<{acc_type}>
+    %result = tensor.extract %folded[] : tensor<{acc_type}>
 """
     return body.rstrip(), "%result", result_type
 
