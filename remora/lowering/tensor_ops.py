@@ -2031,8 +2031,16 @@ def _lower_scan_module(
 
 
 # ---------------------------------------------------------------------------
-# Sort / Grade lowering (insertion sort for rank-1)
+# Sort / Grade lowering (C runtime qsort)
 # ---------------------------------------------------------------------------
+
+
+def _sort_runtime_func(result_elem: str) -> str:
+    if result_elem == "i32":
+        return "remora_sort_i32"
+    if result_elem == "f32":
+        return "remora_sort_f32"
+    raise RemoraLoweringError(f"sort not supported for type {result_elem}")
 
 
 def _lower_sort_module(node: HIRSort, functions: dict[str, HIRFunction]) -> str:
@@ -2047,35 +2055,23 @@ def _lower_sort_module(node: HIRSort, functions: dict[str, HIRFunction]) -> str:
     result_type = type_to_mlir(node.result_type)
     result_elem = type_to_mlir(node.result_type.element)
     n = node.result_type.shape[0].value
+    rt_func = _sort_runtime_func(result_elem)
 
-    # Insertion sort: for i from 1 to n-1, insert arr[i] into sorted prefix.
-    # Use forward inner loop with reversed index to avoid negative step issues.
     sort_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c{n} = arith.constant {n} : index
-    %sorted = scf.for %i = %c1 to %c{n} step %c1 iter_args(%arr = {input_name}) -> {result_type} {{
-      %key = tensor.extract %arr[%i] : {result_type}
-      %i_plus_1 = arith.addi %i, %c1 : index
-      %inner:2 = scf.for %k = %c1 to %i_plus_1 step %c1 iter_args(%arr2 = %arr, %ins_pos = %i) -> ({result_type}, index) {{
-        %j = arith.subi %i, %k : index
-        %j_plus_1 = arith.addi %j, %c1 : index
-        %prev = tensor.extract %arr2[%j] : {result_type}
-        %cmp = arith.cmpi sgt, %prev, %key : {result_elem}
-        %arr3 = scf.if %cmp -> {result_type} {{
-          %arr4 = tensor.insert %prev into %arr2[%j_plus_1] : {result_type}
-          scf.yield %arr4 : {result_type}
-        }} else {{
-          scf.yield %arr2 : {result_type}
-        }}
-        %dec_pos = arith.subi %ins_pos, %c1 : index
-        %next_pos = arith.select %cmp, %dec_pos, %ins_pos : index
-        scf.yield %arr3, %next_pos : {result_type}, index
-      }}
-      %arr_final = tensor.insert %key into %inner#0[%inner#1] : {result_type}
-      scf.yield %arr_final : {result_type}
-    }}"""
+    %buf = memref.alloc() : memref<{n}x{result_elem}>
+    scf.for %i = %c0 to %c{n} step %c1 {{
+      %val = tensor.extract {input_name}[%i] : {result_type}
+      memref.store %val, %buf[%i] : memref<{n}x{result_elem}>
+    }}
+    func.call @{rt_func}(%buf) : (memref<{n}x{result_elem}>) -> ()
+    %sorted = bufferization.to_tensor %buf restrict writable : memref<{n}x{result_elem}>"""
     builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_extern(
+        f"  func.func private @{rt_func}(memref<{n}x{result_elem}>)"
+    )
     builder.add_block(sort_body)
     return builder.render("%sorted")
 
@@ -2089,54 +2085,28 @@ def _lower_grade_module(node: HIRGrade, functions: dict[str, HIRFunction]) -> st
     input_code, input_name, input_type, input_element_type = _lower_tensor_input(
         node.array, "grade_input", functions, tensor_env=None
     )
+    del input_type  # not needed below
     n = node.result_type.shape[0].value
     result_type = type_to_mlir(node.result_type)
-
-    # Generate index array [0, 1, ..., n-1]
-    rank = 1
-    identity = _identity_affine_map(rank)
-    iterators = _parallel_iterators(rank)
-    indices_elem = "i32"
+    result_elem = type_to_mlir(node.result_type.element)
+    rt_func = "remora_grade_i32" if input_element_type == "i32" else "remora_grade_f32"
 
     grade_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c{n} = arith.constant {n} : index
-    %indices_empty = tensor.empty() : {result_type}
-    %indices = linalg.generic {{
-      indexing_maps = [{identity}],
-      iterator_types = {iterators}
-    }} outs(%indices_empty : {result_type}) {{
-    ^bb0(%out: {indices_elem}):
-      %idx = linalg.index 0 : index
-      %val = arith.index_cast %idx : index to {indices_elem}
-      linalg.yield %val : {indices_elem}
-    }} -> {result_type}
-    %sorted_indices = scf.for %i = %c1 to %c{n} step %c1 iter_args(%arr = %indices) -> {result_type} {{
-      %key_idx = tensor.extract %arr[%i] : {result_type}
-      %key_idx_i = arith.index_cast %key_idx : {indices_elem} to index
-      %key_val = tensor.extract {input_name}[%key_idx_i] : {input_type}
-      %i_plus_1 = arith.addi %i, %c1 : index
-      %inner:2 = scf.for %k = %c1 to %i_plus_1 step %c1 iter_args(%arr2 = %arr, %ins_pos = %i) -> ({result_type}, index) {{
-        %j = arith.subi %i, %k : index
-        %j_plus_1 = arith.addi %j, %c1 : index
-        %prev_idx = tensor.extract %arr2[%j] : {result_type}
-        %prev_idx_i = arith.index_cast %prev_idx : {indices_elem} to index
-        %prev_val = tensor.extract {input_name}[%prev_idx_i] : {input_type}
-        %cmp = arith.cmpi sgt, %prev_val, %key_val : {input_element_type}
-        %arr3 = scf.if %cmp -> {result_type} {{
-          %arr4 = tensor.insert %prev_idx into %arr2[%j_plus_1] : {result_type}
-          scf.yield %arr4 : {result_type}
-        }} else {{
-          scf.yield %arr2 : {result_type}
-        }}
-        %dec_pos = arith.subi %ins_pos, %c1 : index
-        %next_pos = arith.select %cmp, %dec_pos, %ins_pos : index
-        scf.yield %arr3, %next_pos : {result_type}, index
-      }}
-      %arr_final = tensor.insert %key_idx into %inner#0[%inner#1] : {result_type}
-      scf.yield %arr_final : {result_type}
-    }}"""
+    %buf_in = memref.alloc() : memref<{n}x{input_element_type}>
+    %buf_out = memref.alloc() : memref<{n}x{result_elem}>
+    scf.for %i = %c0 to %c{n} step %c1 {{
+      %val = tensor.extract {input_name}[%i] : tensor<{n}x{input_element_type}>
+      memref.store %val, %buf_in[%i] : memref<{n}x{input_element_type}>
+    }}
+    func.call @{rt_func}(%buf_in, %buf_out) : (memref<{n}x{input_element_type}>, memref<{n}x{result_elem}>) -> ()
+    %sorted_indices = bufferization.to_tensor %buf_out restrict writable : memref<{n}x{result_elem}>
+    memref.dealloc %buf_in : memref<{n}x{input_element_type}>"""
     builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_extern(
+        f"  func.func private @{rt_func}(memref<{n}x{input_element_type}>, memref<{n}x{result_elem}>)"
+    )
     builder.add_block(grade_body)
     return builder.render("%sorted_indices")

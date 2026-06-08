@@ -14,6 +14,34 @@ from typing import Any, Callable
 
 import numpy as np
 
+_remora_rt_o_path: str | None = None
+_remora_rt_temp_dir: tempfile.TemporaryDirectory | None = None
+
+
+def _get_remora_rt_o() -> str:
+    """Compile remora_rt.c once and return the path to the cached object file."""
+    global _remora_rt_o_path, _remora_rt_temp_dir
+    if _remora_rt_o_path is not None:
+        return _remora_rt_o_path
+
+    rt_c = Path(__file__).parent / "remora_rt.c"
+    if not rt_c.exists():
+        raise FileNotFoundError(f"runtime source not found: {rt_c}")
+
+    cc = which("gcc") or which("cc")
+    if cc is None:
+        raise PipelineUnavailable("gcc or cc is required for Remora runtime")
+
+    _remora_rt_temp_dir = tempfile.TemporaryDirectory(prefix="remora-rt-")
+    o_path = Path(_remora_rt_temp_dir.name) / "remora_rt.o"
+    _run_checked(
+        [cc, "-O2", "-fPIC", "-c", str(rt_c), "-o", str(o_path)],
+        "failed to compile remora runtime",
+        _remora_rt_temp_dir,
+    )
+    _remora_rt_o_path = str(o_path)
+    return _remora_rt_o_path
+
 from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_function_source, compile_source
 from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, IfExpr, IntLit, IotaExpr, ReplicateExpr, SortExpr, VarExpr
@@ -597,6 +625,7 @@ class CPUExecutor:
                 linker,
                 "-shared",
                 str(obj_path),
+                str(Path(_get_remora_rt_o())),
                 "-o",
                 str(so_path),
                 *_openmp_link_args(threaded),
