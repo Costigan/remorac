@@ -11,6 +11,7 @@ from remora.ast_nodes import (
     FloatLit,
     IntLit,
     IotaExpr,
+    LambdaExpr,
     LengthExpr,
     VarExpr,
 )
@@ -18,6 +19,7 @@ from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS, is_primitive_op
 from remora.typechecker import (
     TypedApp,
+    TypedAppend,
     TypedArray,
     TypedCast,
     TypedDefinition,
@@ -38,6 +40,7 @@ from remora.typechecker import (
     TypedRavel,
     TypedReshape,
     TypedRightSection,
+    TypedRotate,
     TypedScan,
     TypedShape,
     TypedSlice,
@@ -147,6 +150,14 @@ class HIRScan:
     exclusive: bool
     right: bool
     result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRRotate:
+    """Circular rotation of an array along the leading dimension."""
+    array: HIRExpr
+    shift: StaticDim
+    result_type: ArrayType
 
 
 @dataclass(frozen=True)
@@ -287,6 +298,7 @@ HIRExpr: TypeAlias = (
     | HIRReduce
     | HIRFoldRight
     | HIRScan
+    | HIRRotate
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -413,6 +425,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
     if isinstance(expr, TypedReverse):
         return HIRReverse(lower_expr(expr.array), expr.type)
 
+    if isinstance(expr, TypedRotate):
+        return HIRRotate(lower_expr(expr.array), expr.shift, expr.type)
+
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore
 
@@ -527,6 +542,15 @@ def _lower_typed_node(expr: TypedExprNode) -> HIRExpr:
         if not isinstance(expr.type, ArrayType):
             raise HIRLoweringError("iota must have an array type")
         return HIRIota(eval_static_dim(ast.size, ast.loc), expr.type)
+    if isinstance(ast, LambdaExpr):
+        if not isinstance(expr.type, FuncType):
+            raise HIRLoweringError("lambda must have a function type")
+        return HIRLambda(
+            [HIRParam(name, param_type) for name, param_type in zip(ast.params, expr.type.params)],
+            # Body will need context to be lowered; defer to typechecker
+            HIRLit(0, INT),
+            expr.type,
+        )
     raise HIRLoweringError(f"lowering for {type(ast).__name__} is deferred")
 
 

@@ -30,8 +30,10 @@ from remora.ast_nodes import (
     RankExpr,
     RavelExpr,
     ReduceExpr,
+    RerankExpr,
     ReshapeExpr,
     RightSectionExpr,
+    RotateExpr,
     ScanExpr,
     SelectExpr,
     ShapeExpr,
@@ -318,6 +320,15 @@ class TypedAppend:
     type: ArrayType
 
 
+@dataclass(frozen=True)
+class TypedRotate:
+    """A typed circular rotation of an array along the leading dimension."""
+    expr: RotateExpr
+    array: TypedExpr
+    shift: DimExpr
+    type: ArrayType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -343,6 +354,7 @@ TypedExpr: TypeAlias = (
     | TypedRightSection
     | TypedApp
     | TypedAppend
+    | TypedRotate
     | TypedLet
     | TypedIf
 )
@@ -488,6 +500,14 @@ class TypeChecker:
             new_leading = StaticDim(left.type.shape[0].value + right.type.shape[0].value)
             result_shape = (new_leading,) + left.type.shape[1:]
             return TypedAppend(expr, left, right, ArrayType(left.type.element, result_shape))
+        if isinstance(expr, RotateExpr):
+            typed_array = self.infer(expr.array, env)
+            if not isinstance(typed_array.type, ArrayType):
+                raise RemoraTypeError("rotate expects an array", expr.loc)
+            shift_dim = eval_static_dim(expr.shift, expr.loc)
+            return TypedRotate(expr, typed_array, shift_dim, typed_array.type)
+        if isinstance(expr, RerankExpr):
+            return self._infer_rerank(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -549,6 +569,9 @@ class TypeChecker:
                 raise RemoraTypeError("right operator section must be unary")
             return self._check_right_section(expr, expected_type, env)
 
+        if isinstance(expr, RerankExpr):
+            return self._check_rerank(expr, expected_type, env)
+
         if isinstance(expr, VarExpr) and expr.name in self._functions:
             return self._typed_top_level_function(
                 self._functions[expr.name],
@@ -567,6 +590,37 @@ class TypeChecker:
         typed = self.infer(expr, env)
         self._require(typed.type, expected_type, expr.loc)
         return typed
+
+    def _check_rerank(
+        self, expr: RerankExpr, expected_type: FuncType, env: TypeEnv
+    ) -> TypedExpr:
+        """Check ~(r1 r2) f → desugared lambda against expected type."""
+        n = len(expr.ranks)
+        if n != len(expected_type.params):
+            raise RemoraTypeError(
+                f"reranking expects {n} params but callable expects {len(expected_type.params)}",
+                expr.loc,
+            )
+        param_names = [f"__r{i}" for i in range(n)]
+
+        inner_env = env
+        for name, param_type in zip(param_names, expected_type.params):
+            inner_env = inner_env.extend(name, param_type)
+
+        app_expr = AppExpr(
+            expr.func,
+            [VarExpr(name, expr.loc) for name in param_names],
+            expr.loc,
+        )
+        typed_body = self.infer(app_expr, inner_env)
+        typed_body = self._coerce(typed_body, expected_type.result, expr.loc)
+
+        return TypedLambda(
+            LambdaExpr(param_names, app_expr, expr.loc, param_ranks=expr.ranks),
+            list(zip(param_names, expected_type.params)),
+            typed_body,
+            expected_type,
+        )
 
     def _infer_array(self, expr: ArrayLit, env: TypeEnv) -> TypedExpr:
         if not expr.elements:
@@ -1214,6 +1268,29 @@ class TypeChecker:
             False,  # exclusive
             expr.right,  # right
             typed_array.type,
+        )
+
+    def _infer_rerank(self, expr: RerankExpr, env: TypeEnv) -> TypedExpr:
+        """Desugar ~(r1 r2) f → lambda with rank-annotated params."""
+        n = len(expr.ranks)
+        param_names = [f"__r{i}" for i in range(n)]
+        param_ranks = expr.ranks
+
+        lambda_expr = LambdaExpr(
+            param_names,
+            AppExpr(
+                expr.func,
+                [VarExpr(name, expr.loc) for name in param_names],
+                expr.loc,
+            ),
+            expr.loc,
+            param_ranks=param_ranks if any(r != 0 for r in param_ranks) else None,
+        )
+
+        # Return as a callable-ready node; concrete type is resolved by context
+        return TypedExprNode(
+            lambda_expr,
+            FuncType(tuple(INT for _ in range(n)), INT),
         )
 
     def _infer_callable_type_for_map(

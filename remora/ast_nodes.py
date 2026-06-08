@@ -68,6 +68,20 @@ class AppendExpr:
 
 
 @dataclass(frozen=True)
+class RotateExpr:
+    array: Expr
+    shift: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class RerankExpr:
+    ranks: list[int]
+    func: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class LambdaExpr:
     params: list[str]
     body: Expr
@@ -276,6 +290,8 @@ Expr: TypeAlias = (
     | IfExpr
     | SelectExpr
     | AppendExpr
+    | RotateExpr
+    | RerankExpr
     | LambdaExpr
     | AppExpr
     | MapExpr
