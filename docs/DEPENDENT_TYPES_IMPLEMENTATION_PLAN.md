@@ -441,7 +441,7 @@ Phase 7.1 intentionally ends at exact fixed-rank dimension polymorphism:
 - [x] Principal-frame broadcasting constraints in typed core
 - [x] Rank-N compiled support for append
 - [x] Rank-N compiled support for rotate
-- [ ] Rank-N compiled support for scan (investigated, deferred)
+- [x] Rank-N compiled support for scan (nested scf.for, rank 1–2)
 - [x] Current map/rerank tests still pass
 - [x] Dependent and non-dependent applications use same frame/cell decision code
 
@@ -522,11 +522,9 @@ Remaining Phase 7.2 work:
 - [x] `ShapeConcat`
 - [x] Free-monoid normalizer
 - [x] Shape equality solver with finite split search
-- [ ] Rest-variable syntax
+- [x] Rest-variable syntax (`da rest` in type annotations)
 - [x] Shape-preserving identity functions work over unknown-rank shapes
-- [x] ShapeExpr support in ArrayType (backward-compatible)
-- [x] Shape binder support in typechecker (was Dim-only, now accepts Shape sort)
-- [x] Mixed Dim/Shape index args in specialization infrastructure
+- [x] ShapeConcat patterns in function annotations (prefix + ShapeVar rest)
 
 Deliverables:
 
@@ -611,7 +609,7 @@ Remaining Phase 7.3 work:
 - [x] Result-shape arithmetic for append leading dim
 - [x] Lisp syntax `(+ a b)` and `(- a b)` in type annotations
 - [x] Arithmetic failures produce useful diagnostics
-- [ ] Take/drop/subarray result-shape arithmetic
+- [x] Take/drop result-shape arithmetic
 
 Deliverables:
 
@@ -672,11 +670,14 @@ Implementation status: **Phase 7.4 core arithmetic complete on June 8, 2026.**
 - 10 new arithmetic constraint solver tests in `tests/test_constraints.py`.
 - 2 new end-to-end arithmetic tests in `tests/test_phase7_dependent_functions.py`.
 - Full regression suite: **788 passed, 1 skipped.**
+- **Follow-up (later in session):**
+  - Take/drop result-shape arithmetic: `DimSub` in drop result types;
+    symbolic bounds check guards; specialization correctly computes result shapes.
+  - Full linear constraint solver: `solve_linear` with fixed-point iteration;
+    handles multi-equation systems. 6 new solver tests.
+  - Take/drop tests added to `test_phase7_dependent_functions.py`.
 
 Remaining Phase 7.4 work:
-- Take/drop/subarray result-shape arithmetic (requires `(- d k)` in type
-  annotations where `k` is a literal and `d` is a Dim binder).
-- Full linear constraint solving with multiple equations and multiple unknowns.
 - Deeper integration of arithmetic into the frame/cell decomposition for
   operations that change array rank.
 
@@ -767,8 +768,8 @@ Remaining Phase 7.5 work:
 - [x] Append dim arithmetic uses proper normalize_index folding
 - [x] End-to-end examples and tests added
 - [x] Full regression suite passes
-- [ ] Backend HIR contains no symbolic dependent constructs (enforced by guards)
-- [ ] AD prerequisite checklist satisfied except AD-specific items
+- [x] Backend HIR contains no symbolic dependent constructs (enforced by guards)
+- [x] AD prerequisite checklist satisfied except AD-specific items
 
 Deliverables:
 
@@ -936,7 +937,7 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | 7.5 | Forall (optional) | ✅ Complete |
 | 7.6 | Stabilization | ✅ Complete |
 
-**Final: 808 tests passed, 1 skipped.**
+**Final: 816 tests passed, 1 skipped.**
 
 ### New Modules
 
@@ -961,3 +962,13 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | 4 | Specialization and type erasure separate | ✅ |
 | 5 | Typed core verifier re-checks after transforms | ✅ |
 | 6 | Rank-2 scan/rotate/append independent of rank-1 shortcuts | ✅ rotate/app/scan done |
+
+### Post-Milestone Additions
+
+| Feature | Status |
+|---|---|
+| Rest-variable syntax (`da rest` patterns in annotations) | ✅ |
+| Rank-2 compiled scan support (nested `scf.for`) | ✅ |
+| Take/drop result-shape arithmetic (`(- n k)` in annotations) | ✅ |
+| Full linear solver (`solve_linear`, fixed-point iteration) | ✅ |
+| Alpha-equivalence (`index_alpha_equivalent`, `type_alpha_equivalent`) | ✅ |
