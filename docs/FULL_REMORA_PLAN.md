@@ -490,13 +490,13 @@ Total calendar time (1 engineer):
 - [x] `length` — size of leading dimension (`tensor.dim`)
 - [x] `rotate` — circular shift with per-axis rotation vector
 - [x] `indices-of` — coordinate array for each position
-- [ ] `with-shape` — replicate scalar/array to match target shape
+- [x] `with-shape` — replicate scalar/array to match target shape
 - [x] `subarray` — extract rectangular region by offset and shape
 - [ ] `filter` — select subarrays by boolean mask (→ boxes)
 - [x] `select` — element-wise ternary (already via tensor `if`)
 - [ ] `replicate` — repeat items by count vector (→ boxes)
 - [x] `sort` / `grade` — AST/parser/typechecker done, MLIR lowering deferred
-- [ ] `index-item` — index by scalar along leading dimension
+- [x] `index-item` — index by scalar along leading dimension
 - [x] Tests: `(length xs)` returns correct leading dimension size
 
 ### Phase 5: Reranking
@@ -515,8 +515,7 @@ Total calendar time (1 engineer):
 - [ ] `boxes` — constructs arrays of boxes with per-box witnesses
 - [x] `unbox` — opens box, binds contents and witnesses, evaluates body
 - [x] `iota1` — produces boxed vector `(Σ (len) [int len])`
-- [ ] `iota2` — produces boxed matrix
-- [ ] `iota0` through `iota9` — rank-monomorphic boxed iota
+- [x] `iota2` through `iota9` — rank-monomorphic boxed iota (typechecker done)
 - [x] `filter` result is boxed (unknown count)
 - [x] `replicate` result is boxed
 - [x] Typechecker: witness information cannot leak into result type

@@ -115,6 +115,13 @@ class Iota1Expr:
 
 
 @dataclass(frozen=True)
+class IotaNExpr:
+    rank: int
+    sizes: list[Expr]
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class FilterExpr:
     predicate: Expr
     array: Expr
@@ -368,6 +375,7 @@ Expr: TypeAlias = (
     | BoxExpr
     | UnboxExpr
     | Iota1Expr
+    | IotaNExpr
     | FilterExpr
     | ReplicateExpr
     | SortExpr

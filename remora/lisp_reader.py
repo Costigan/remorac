@@ -56,6 +56,7 @@ from remora.ast_nodes import (
     IntLit,
     Iota1Expr,
     IotaExpr,
+    IotaNExpr,
     LambdaExpr,
     LeftSectionExpr,
     LengthExpr,
@@ -126,6 +127,7 @@ array_lit: "[" sexpr* "]"
            | unbox_form
            | iota_form
            | iota1_form
+           | iota_n_form
            | filter_form
            | replicate_form
            | sort_form
@@ -175,6 +177,10 @@ box_form: "box" sexpr -> box_expr
 unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
 iota_form: "iota" sexpr -> iota_expr
 iota1_form: "iota1" sexpr -> iota1_expr
+iota_n_form: "iota2" sexpr sexpr -> iota2_expr
+           | "iota3" sexpr sexpr sexpr -> iota3_expr
+           | "iota4" sexpr sexpr sexpr sexpr -> iota4_expr
+           | "iota5" sexpr sexpr sexpr sexpr sexpr -> iota5_expr
 filter_form: "filter" sexpr sexpr -> filter_expr
 replicate_form: "replicate" sexpr sexpr -> replicate_expr
 sort_form: "sort" sexpr sexpr -> sort_expr
@@ -382,6 +388,18 @@ class LispASTBuilder(Transformer):
 
     def iota1_expr(self, items: list[Any]) -> Iota1Expr:
         return Iota1Expr(items[0], self._loc_from(items))
+
+    def iota2_expr(self, items: list[Any]) -> IotaNExpr:
+        return IotaNExpr(2, list(items), self._loc_from(items))
+
+    def iota3_expr(self, items: list[Any]) -> IotaNExpr:
+        return IotaNExpr(3, list(items), self._loc_from(items))
+
+    def iota4_expr(self, items: list[Any]) -> IotaNExpr:
+        return IotaNExpr(4, list(items), self._loc_from(items))
+
+    def iota5_expr(self, items: list[Any]) -> IotaNExpr:
+        return IotaNExpr(5, list(items), self._loc_from(items))
 
     def filter_expr(self, items: list[Any]) -> FilterExpr:
         return FilterExpr(items[0], items[1], self._loc_from(items))
