@@ -482,12 +482,7 @@ class TestCompiledVsInterpreter:
         "(map (+ 1) (with-shape 5 [3]))",
         "(fold + 0 (with-shape 2 [4]))",
         "(fold * 1 (with-shape 3 [3]))",
+        "(with-shape (with-shape 1 [2]) [3])",
     ])
     def test_with_shape_subexpr(self, src):
         _assert_lisp_compiled_matches_interp(src)
-
-    # ── With-shape edge cases (interpreter only) ──────────────────────────
-
-    def test_with_shape_nested_interp(self):
-        r = evaluate_source("(with-shape (with-shape 1 [2]) [3])", include_prelude=False, syntax="lisp")
-        np.testing.assert_array_equal(r.value, [[1, 1], [1, 1], [1, 1]])
