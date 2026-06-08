@@ -611,6 +611,14 @@ def _lower_main_result_with_tensor_env(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv,
 ) -> tuple[str, str, str]:
+    if isinstance(node, HIRVar):
+        code, value_name, value_type, _element_type = _lower_tensor_input(
+            node,
+            "result",
+            functions,
+            tensor_env,
+        )
+        return code, value_name, value_type
     if isinstance(node, (HIRMap, HIRApply)):
         if len(node.arrays) == 2:
             if not node.cell_shape and not isinstance(

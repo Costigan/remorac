@@ -73,6 +73,7 @@ from remora.typechecker import (
     TypedGrade,
     TypedIf,
     TypedIndex,
+    TypedIndexApp,
     TypedIndicesOf,
     TypedLambda,
     TypedLeftSection,
@@ -1011,6 +1012,9 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedLambda):
         return _lambda_callable(expr, env)
+
+    if isinstance(expr, TypedIndexApp):
+        return _lambda_callable(expr.function, env)
 
     if isinstance(expr, TypedReverse):
         array = _eval_expr(expr.array, env)

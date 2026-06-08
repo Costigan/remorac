@@ -32,6 +32,7 @@ from remora.typechecker import (
     TypedGrade,
     TypedIf,
     TypedIndex,
+    TypedIndexApp,
     TypedIndicesOf,
     TypedLambda,
     TypedLeftSection,
@@ -568,6 +569,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.type,
         )
 
+    if isinstance(expr, TypedIndexApp):
+        return lower_expr(expr.function)
+
     if isinstance(expr, TypedApp):
         if _typed_node_var_name(expr.func) in ALL_PRIMITIVE_OPS:
             return HIRPrimOp(
@@ -577,6 +581,8 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             )
         if isinstance(expr.func, TypedLambda):
             return _inline_lambda_call(expr.func, expr.args, expr.type)
+        if isinstance(expr.func, TypedIndexApp):
+            return _inline_lambda_call(expr.func.function, expr.args, expr.type)
         func_name = _typed_node_var_name(expr.func)
         if func_name is None:
             raise HIRLoweringError("only direct calls are supported in HIR lowering")

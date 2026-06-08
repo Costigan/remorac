@@ -21,6 +21,7 @@ from remora.ast_nodes import (
     GradeExpr,
     FilterExpr,
     IfExpr,
+    IndexAppExpr,
     IndexExpr,
     IndicesOfExpr,
     IntLit,
@@ -58,6 +59,13 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
+from remora.constraints import ConstraintError, match_shape_template
+from remora.dependent_types import (
+    free_type_index_vars,
+    instantiate_pi_type,
+    substitute_type,
+)
+from remora.index import IndexBinder, IndexSort
 from remora.operators import ALL_PRIMITIVE_OPS
 from remora.types import (
     BOOL,
@@ -66,6 +74,7 @@ from remora.types import (
     ArrayType,
     DimExpr,
     FuncType,
+    PiType,
     RemoraType,
     RemoraTypeError,
     ScalarType,
@@ -305,6 +314,15 @@ class TypedApp:
 
 
 @dataclass(frozen=True)
+class TypedIndexApp:
+    """A Pi-typed function specialized at explicit compile-time indices."""
+    expr: IndexAppExpr
+    function: TypedLambda
+    index_args: tuple[DimExpr, ...]
+    type: FuncType
+
+
+@dataclass(frozen=True)
 class TypedLet:
     """A typed let-expression binding a name to a value within a body."""
     expr: LetExpr
@@ -445,6 +463,7 @@ TypedExpr: TypeAlias = (
     | TypedLeftSection
     | TypedRightSection
     | TypedApp
+    | TypedIndexApp
     | TypedAppend
     | TypedRotate
     | TypedSubarray
@@ -635,6 +654,8 @@ class TypeChecker:
             return self._infer_grade(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
+        if isinstance(expr, IndexAppExpr):
+            return self._infer_index_app(expr, env)
         if isinstance(expr, LambdaExpr):
             raise RemoraTypeError(
                 "lambda expressions require an expected function type", expr.loc
@@ -801,6 +822,41 @@ class TypeChecker:
             for arg, param_type in zip(expr.args, typed_func.type.params)
         ]
         return TypedApp(expr, typed_func, typed_args, typed_func.type.result)
+
+    def _infer_index_app(self, expr: IndexAppExpr, env: TypeEnv) -> TypedIndexApp:
+        if not isinstance(expr.func, VarExpr) or expr.func.name not in self._functions:
+            raise RemoraTypeError(
+                "explicit index application requires a named top-level function",
+                expr.loc,
+            )
+        function = self._functions[expr.func.name]
+        declared_type = self._declared_function_type(function)
+        if not isinstance(declared_type, PiType):
+            raise RemoraTypeError(
+                f"function {function.name!r} does not have a Pi type",
+                expr.loc,
+            )
+        for arg in expr.args:
+            if not isinstance(arg, StaticDim):
+                raise RemoraTypeError(
+                    "Phase 7a explicit index arguments must be dimension literals",
+                    expr.loc,
+                )
+        try:
+            instantiated = instantiate_pi_type(declared_type, expr.args)
+        except ValueError as exc:
+            raise RemoraTypeError(str(exc), expr.loc) from exc
+        if not isinstance(instantiated, FuncType):
+            raise RemoraTypeError(
+                "explicit index application did not produce a function type",
+                expr.loc,
+            )
+        typed_function = self._typed_top_level_function(
+            function,
+            instantiated,
+            env,
+        )
+        return TypedIndexApp(expr, typed_function, expr.args, instantiated)
 
     def _try_implicit_map(
         self, expr: AppExpr, typed_args: list[TypedExpr], env: TypeEnv
@@ -1728,7 +1784,11 @@ class TypeChecker:
             )
         if isinstance(definition, FuncDef):
             self._functions[definition.name] = definition
-            return TypedDefinition(definition, None, None), env
+            return TypedDefinition(
+                definition,
+                None,
+                self._declared_function_type(definition),
+            ), env
         raise AssertionError(f"unknown definition type {type(definition).__name__}")
 
     def _infer_top_level_function_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
@@ -1765,6 +1825,30 @@ class TypeChecker:
     ) -> FuncType:
         if len(function.params) != len(param_types):
             raise RemoraTypeError("function arity mismatch", function.loc)
+        declared_param_types = self._declared_param_types(function)
+        if declared_param_types is not None:
+            bindings = self._infer_index_bindings(
+                function,
+                declared_param_types,
+                param_types,
+            )
+            specialized_params = tuple(
+                substitute_type(param_type, bindings)
+                for param_type in declared_param_types
+            )
+            declared_result = self._declared_result_type(function)
+            if declared_result is None:
+                raise RemoraTypeError(
+                    "dependent function definitions require a result type",
+                    function.loc,
+                )
+            specialized_result = substitute_type(declared_result, bindings)
+            typed_func = self._typed_top_level_function(
+                function,
+                FuncType(specialized_params, specialized_result),
+                env,
+            )
+            return typed_func.type
         typed_func = self._typed_top_level_function(
             function,
             FuncType(param_types, INT),
@@ -1772,6 +1856,127 @@ class TypeChecker:
             infer_result=True,
         )
         return typed_func.type
+
+    def _declared_function_type(self, function: FuncDef) -> RemoraType | None:
+        declared_param_types = self._declared_param_types(function)
+        if declared_param_types is None:
+            return None
+        declared_result = self._declared_result_type(function)
+        if declared_result is None:
+            raise RemoraTypeError(
+                "dependent function definitions require a result type",
+                function.loc,
+            )
+        body: RemoraType = FuncType(declared_param_types, declared_result)
+        binders = self._index_binders(function)
+        unbound = free_type_index_vars(body) - frozenset(
+            binder.name for binder in binders
+        )
+        if unbound:
+            names = ", ".join(sorted(unbound))
+            raise RemoraTypeError(
+                f"unbound index variable(s) in function annotation: {names}",
+                function.loc,
+            )
+        if binders:
+            return PiType(binders, body)
+        return body
+
+    def _declared_param_types(self, function: FuncDef) -> tuple[RemoraType, ...] | None:
+        raw = getattr(function, "param_types", None)
+        if raw is None:
+            return None
+        if len(raw) != len(function.params):
+            raise RemoraTypeError("function annotation arity mismatch", function.loc)
+        return tuple(self._require_remora_type(value, function.loc) for value in raw)
+
+    def _index_binders(self, function: FuncDef) -> tuple[IndexBinder, ...]:
+        raw = getattr(function, "index_binders", ())
+        binders: list[IndexBinder] = []
+        names: set[str] = set()
+        for binder in raw:
+            if not isinstance(binder, IndexBinder):
+                raise RemoraTypeError("invalid index binder in function definition", function.loc)
+            if binder.name in names:
+                raise RemoraTypeError(
+                    f"duplicate index binder {binder.name!r}",
+                    function.loc,
+                )
+            names.add(binder.name)
+            binders.append(binder)
+        return tuple(binders)
+
+    def _declared_result_type(self, function: FuncDef) -> RemoraType | None:
+        raw = getattr(function, "result_type", None)
+        if raw is None:
+            return None
+        return self._require_remora_type(raw, function.loc)
+
+    def _require_remora_type(self, value: object, loc) -> RemoraType:
+        if isinstance(value, (ScalarType, ArrayType, FuncType, SigmaType, PiType)):
+            return value
+        raise RemoraTypeError(f"invalid type annotation {value!r}", loc)
+
+    def _infer_index_bindings(
+        self,
+        function: FuncDef,
+        declared_param_types: tuple[RemoraType, ...],
+        actual_param_types: tuple[RemoraType, ...],
+    ) -> dict[str, DimExpr]:
+        binders = self._index_binders(function)
+        binder_names = {binder.name for binder in binders}
+        for binder in binders:
+            if binder.sort is not IndexSort.DIM:
+                raise RemoraTypeError(
+                    "Phase 7a only supports Dim binders in function annotations",
+                    function.loc,
+                )
+        bindings: dict[str, DimExpr] = {}
+        for declared, actual in zip(declared_param_types, actual_param_types):
+            try:
+                inferred = self._match_declared_type(declared, actual, function.loc)
+            except ConstraintError as exc:
+                raise RemoraTypeError(str(exc), function.loc) from exc
+            for name, value in inferred.items():
+                if name not in binder_names:
+                    raise RemoraTypeError(
+                        f"unbound dimension variable {name!r} in function annotation",
+                        function.loc,
+                    )
+                existing = bindings.get(name)
+                if existing is not None and existing != value:
+                    raise RemoraTypeError(
+                        f"dimension mismatch for {name!r}: expected {existing}, got {value}",
+                        function.loc,
+                    )
+                bindings[name] = value
+        missing = [binder.name for binder in binders if binder.name not in bindings]
+        if missing:
+            names = ", ".join(missing)
+            raise RemoraTypeError(
+                f"could not infer index argument(s): {names}",
+                function.loc,
+            )
+        return bindings
+
+    def _match_declared_type(
+        self,
+        declared: RemoraType,
+        actual: RemoraType,
+        loc,
+    ) -> dict[str, DimExpr]:
+        if isinstance(declared, ScalarType):
+            self._require(actual, declared, loc)
+            return {}
+        if isinstance(declared, ArrayType):
+            if not isinstance(actual, ArrayType):
+                raise RemoraTypeError(f"expected array type {declared}, got {actual}", loc)
+            self._require(actual.element, declared.element, loc)
+            return match_shape_template(declared.shape, actual.shape, loc=loc)
+        raise RemoraTypeError(
+            f"Phase 7a function annotations only support scalar and array parameter types, got {declared}",
+            loc,
+        )
 
     def typed_top_level_function(
         self,

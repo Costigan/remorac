@@ -12,6 +12,8 @@ Syntax mapping:
     (+ 2)                   → left section (+ 2)
     (2 +)                   → right section (2 +)
     (define (f [x]) body)   → def f x = body
+    (define/pi ([n Dim]) (f [x (Array Float n)] Float) body)
+                              → def f : Π n. Float[n] -> ...
     (define xs [1 2 3])     → def xs = [1, 2, 3]
     (lambda (x) body)       → \\x -> body
     (λ (x) body)            → \\x -> body
@@ -36,6 +38,7 @@ from typing import Any
 
 from lark import Lark, Token, Transformer
 
+from remora.index import DimVar, IndexBinder, IndexSort
 from remora.ast_nodes import (
     AppExpr,
     AppendExpr,
@@ -52,6 +55,7 @@ from remora.ast_nodes import (
     FilterExpr,
     GradeExpr,
     IfExpr,
+    IndexAppExpr,
     IndexExpr,
     IndicesOfExpr,
     IntLit,
@@ -89,6 +93,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
+from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraType, StaticDim
 
 _GRAMMAR = r"""
 program: sexpr*
@@ -104,7 +109,8 @@ program: sexpr*
 
 array_lit: "[" sexpr* "]"
 
-?list_body: define_form
+?list_body: define_pi_form
+           | define_form
            | let_form
            | if_form
            | select_form
@@ -143,6 +149,7 @@ array_lit: "[" sexpr* "]"
            | ravel_form
            | take_form
            | drop_form
+            | index_app_form
             | index_form
             | index_item_form
             | application
@@ -151,6 +158,27 @@ array_lit: "[" sexpr* "]"
 
 define_form: "define" "(" name_token "[" param_spec* "]" ")" sexpr  -> func_def_raw
            | "define" name_token sexpr  -> val_def
+
+define_pi_form: "define/pi" "(" index_binder* ")" "(" name_token "[" typed_param_spec* "]" type_expr ")" sexpr -> func_def_pi
+
+index_binder: "[" name_token index_sort "]" -> index_binder
+index_sort: "Dim" -> dim_sort
+          | "Shape" -> shape_sort
+
+typed_param_spec: name_token type_expr -> param_typed
+
+?type_expr: scalar_type
+          | "(" "Array" scalar_type dim_ref* ")" -> array_type
+
+scalar_type: "Int" -> type_int
+           | "Float" -> type_float
+           | "Bool" -> type_bool
+           | "int" -> type_int
+           | "float" -> type_float
+           | "bool" -> type_bool
+
+dim_ref: INT -> dim_lit
+       | NAME -> dim_var
 
 param_spec: name_token        -> param_simple
           | name_token INT    -> param_ranked
@@ -197,6 +225,7 @@ reshape_form: "reshape" sexpr sexpr -> reshape_expr
 ravel_form: "ravel" sexpr -> ravel_expr
 take_form: "take" sexpr sexpr -> take_expr
 drop_form: "drop" sexpr sexpr -> drop_expr
+index_app_form: "iapp" sexpr dim_ref+ -> index_app_expr
 index_form: "index" sexpr sexpr+ -> index_expr
 index_item_form: "index-item" sexpr sexpr -> index_expr
 
@@ -262,6 +291,26 @@ class LispASTBuilder(Transformer):
             param_ranks=None if all_ranks_none else param_ranks,
         )
 
+    def func_def_pi(self, items: list[Any]) -> FuncDef:
+        binders: list[IndexBinder] = []
+        pos = 0
+        while pos < len(items) and isinstance(items[pos], IndexBinder):
+            binders.append(items[pos])
+            pos += 1
+        name = str(items[pos])
+        typed_param_specs: list[tuple[str, RemoraType]] = items[pos + 1:-2]
+        result_type: RemoraType = items[-2]
+        body: Expr = items[-1]
+        return FuncDef(
+            name,
+            [param_name for param_name, _ in typed_param_specs],
+            body,
+            self._loc_from(items),
+            index_binders=tuple(binders),
+            param_types=[param_type for _, param_type in typed_param_specs],
+            result_type=result_type,
+        )
+
     def val_def(self, items: list[Any]) -> ValDef:
         return ValDef(str(items[0]), items[1], self._loc_from(items))
 
@@ -270,6 +319,39 @@ class LispASTBuilder(Transformer):
 
     def param_ranked(self, items: list[Any]) -> tuple[str, int]:
         return (str(items[0]), int(items[1]))
+
+    def param_typed(self, items: list[Any]) -> tuple[str, RemoraType]:
+        return (str(items[0]), items[1])
+
+    def index_binder(self, items: list[Any]) -> IndexBinder:
+        return IndexBinder(str(items[0]), items[1])
+
+    def dim_sort(self, items: list[Any]) -> IndexSort:
+        return IndexSort.DIM
+
+    def shape_sort(self, items: list[Any]) -> IndexSort:
+        return IndexSort.SHAPE
+
+    def type_int(self, items: list[Any]) -> RemoraType:
+        return INT
+
+    def type_float(self, items: list[Any]) -> RemoraType:
+        return FLOAT
+
+    def type_bool(self, items: list[Any]) -> RemoraType:
+        return BOOL
+
+    def array_type(self, items: list[Any]) -> RemoraType:
+        element = items[0]
+        if element not in (INT, FLOAT, BOOL):
+            raise TypeError("array element type must be scalar")
+        return ArrayType(element, tuple(items[1:]))
+
+    def dim_lit(self, items: list[Any]) -> StaticDim:
+        return StaticDim(int(items[0]))
+
+    def dim_var(self, items: list[Any]) -> DimVar:
+        return DimVar(str(items[0]))
 
     # ── let / if / lambda ────────────────────────────────────────────────
 
@@ -450,6 +532,9 @@ class LispASTBuilder(Transformer):
 
     def drop_expr(self, items: list[Any]) -> DropExpr:
         return DropExpr(items[0], items[1], self._loc_from(items))
+
+    def index_app_expr(self, items: list[Any]) -> IndexAppExpr:
+        return IndexAppExpr(items[0], tuple(items[1:]), self._loc_from(items))
 
     def index_expr(self, items: list[Any]) -> IndexExpr:
         array = items[0]
