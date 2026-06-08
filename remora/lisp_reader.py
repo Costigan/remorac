@@ -38,6 +38,7 @@ from lark import Lark, Token, Transformer
 
 from remora.ast_nodes import (
     AppExpr,
+    AppendExpr,
     ArrayLit,
     BoolLit,
     Definition,
@@ -64,6 +65,7 @@ from remora.ast_nodes import (
     ReverseExpr,
     RightSectionExpr,
     ScanExpr,
+    SelectExpr,
     ShapeExpr,
     SourceLoc,
     TakeExpr,
@@ -90,6 +92,7 @@ array_lit: "[" sexpr* "]"
 ?list_body: define_form
            | let_form
            | if_form
+           | select_form
            | lambda_form
            | map_form
            | fold_form
@@ -101,6 +104,7 @@ array_lit: "[" sexpr* "]"
            | scan_one_form
            | escan_form
            | trace_form
+           | append_form
            | iota_form
            | shape_form
            | length_form
@@ -124,6 +128,7 @@ param_spec: name_token        -> param_simple
 
 let_form: "::" name_token sexpr sexpr -> let_expr
 if_form: "if" sexpr sexpr sexpr -> if_expr
+select_form: "select" sexpr sexpr sexpr -> select_expr
 lambda_form: ("lambda" | "λ") "(" name_token* ")" sexpr -> lambda_expr
 map_form: "map" sexpr sexpr+ -> map_expr
 fold_form: "fold" sexpr sexpr sexpr -> fold_expr
@@ -135,6 +140,8 @@ scan_form: ("scan" | "iscan" | "iscan/zero" | "scan/zero") sexpr sexpr sexpr -> 
 scan_one_form: ("iscan/1" | "scan/1") sexpr sexpr sexpr -> scan_one_expr
 escan_form: ("escan" | "escan/zero") sexpr sexpr sexpr -> escan_expr
 trace_form: "trace" sexpr sexpr sexpr -> trace_expr
+           | "trace-right" sexpr sexpr sexpr -> trace_right_expr
+append_form: "append" sexpr sexpr -> append_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
@@ -224,6 +231,9 @@ class LispASTBuilder(Transformer):
     def if_expr(self, items: list[Any]) -> IfExpr:
         return IfExpr(items[0], items[1], items[2], self._loc_from(items))
 
+    def select_expr(self, items: list[Any]) -> SelectExpr:
+        return SelectExpr(items[0], items[1], items[2], self._loc_from(items))
+
     def lambda_expr(self, items: list[Any]) -> LambdaExpr:
         # items: [param_names*, body]
         # When there are no params, param list is empty
@@ -285,6 +295,15 @@ class LispASTBuilder(Transformer):
         init = items[1]
         array = items[2]
         return TraceExpr(func, init, array, self._loc_from(items))
+
+    def trace_right_expr(self, items: list[Any]) -> TraceExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return TraceExpr(func, init, array, self._loc_from(items), right=True)
+
+    def append_expr(self, items: list[Any]) -> AppendExpr:
+        return AppendExpr(items[0], items[1], self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 

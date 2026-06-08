@@ -126,6 +126,7 @@ class _Defunctionalizer:
                 self._rewrite_expr(e.init, scalar_env),
                 self._rewrite_expr(e.array, scalar_env),
                 e.exclusive,
+                e.right,
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

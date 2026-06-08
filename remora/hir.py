@@ -145,6 +145,7 @@ class HIRScan:
     init: HIRExpr
     array: HIRExpr
     exclusive: bool
+    right: bool
     result_type: RemoraType
 
 
@@ -374,6 +375,7 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             lower_expr(expr.init),
             lower_expr(expr.array),
             expr.exclusive,
+            expr.right,
             expr.type,
         )
 

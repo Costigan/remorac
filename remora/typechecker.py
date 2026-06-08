@@ -7,6 +7,7 @@ from typing import TypeAlias
 
 from remora.ast_nodes import (
     AppExpr,
+    AppendExpr,
     ArrayLit,
     BoolLit,
     Definition,
@@ -32,6 +33,7 @@ from remora.ast_nodes import (
     ReshapeExpr,
     RightSectionExpr,
     ScanExpr,
+    SelectExpr,
     ShapeExpr,
     SliceRange,
     ReverseExpr,
@@ -142,12 +144,13 @@ class TypedFoldRight:
 @dataclass(frozen=True)
 class TypedScan:
     """A typed scan (prefix-sum) operation."""
-    expr: ScanExpr
+    expr: ScanExpr | TraceExpr
     func: TypedExpr
     init: TypedExpr
     array: TypedExpr
     reduction_dim: DimExpr
     exclusive: bool
+    right: bool
     type: RemoraType
 
 
@@ -299,11 +302,20 @@ class TypedLet:
 @dataclass(frozen=True)
 class TypedIf:
     """A typed conditional expression with then and else branches."""
-    expr: IfExpr
+    expr: IfExpr | SelectExpr
     condition: TypedExpr
     then_branch: TypedExpr
     else_branch: TypedExpr
     type: RemoraType
+
+
+@dataclass(frozen=True)
+class TypedAppend:
+    """A typed append (concatenation) of two arrays along the leading dimension."""
+    expr: AppendExpr
+    left: TypedExpr
+    right: TypedExpr
+    type: ArrayType
 
 
 TypedExpr: TypeAlias = (
@@ -330,6 +342,7 @@ TypedExpr: TypeAlias = (
     | TypedLeftSection
     | TypedRightSection
     | TypedApp
+    | TypedAppend
     | TypedLet
     | TypedIf
 )
@@ -452,6 +465,29 @@ class TypeChecker:
             else_branch = self.infer(expr.else_branch, env)
             self._require(then_branch.type, else_branch.type, expr.loc)
             return TypedIf(expr, condition, then_branch, else_branch, then_branch.type)
+        if isinstance(expr, SelectExpr):
+            condition = self.infer(expr.condition, env)
+            then_branch = self.infer(expr.then_branch, env)
+            else_branch = self.infer(expr.else_branch, env)
+            if isinstance(condition.type, ArrayType):
+                if condition.type.element != BOOL:
+                    raise RemoraTypeError("select condition array must have boolean elements", expr.loc)
+            elif condition.type != BOOL:
+                self._require(condition.type, BOOL, expr.loc)
+            self._require(then_branch.type, else_branch.type, expr.loc)
+            return TypedIf(expr, condition, then_branch, else_branch, then_branch.type)  # type: ignore[arg-type]
+        if isinstance(expr, AppendExpr):
+            left = self.infer(expr.left, env)
+            right = self.infer(expr.right, env)
+            if not isinstance(left.type, ArrayType) or not isinstance(right.type, ArrayType):
+                raise RemoraTypeError("append expects two arrays", expr.loc)
+            if left.type.element != right.type.element:
+                raise RemoraTypeError(f"append expects matching element types, got {left.type.element} and {right.type.element}", expr.loc)
+            if left.type.shape[1:] != right.type.shape[1:]:
+                raise RemoraTypeError(f"append expects matching non-leading dimensions", expr.loc)
+            new_leading = StaticDim(left.type.shape[0].value + right.type.shape[0].value)
+            result_shape = (new_leading,) + left.type.shape[1:]
+            return TypedAppend(expr, left, right, ArrayType(left.type.element, result_shape))
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1153,6 +1189,7 @@ class TypeChecker:
             typed_array,
             typed_array.type.shape[0],
             expr.exclusive,
+            False,  # right
             typed_array.type,
         )
 
@@ -1174,7 +1211,8 @@ class TypeChecker:
             typed_init,
             typed_array,
             typed_array.type.shape[0],
-            False,
+            False,  # exclusive
+            expr.right,  # right
             typed_array.type,
         )
 
