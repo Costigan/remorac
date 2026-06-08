@@ -620,7 +620,7 @@ def _lower_main_result_with_tensor_env(
         return _lower_view_result(
             node, functions, tensor_env
         )
-    if isinstance(node, (HIRIota, HIRArrayLit)):
+    if isinstance(node, (HIRIota, HIRArrayLit, HIRWithShape)):
         code, value_name, value_type, _element_type = (
             _lower_tensor_input(
                 node,

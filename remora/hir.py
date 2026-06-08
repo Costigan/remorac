@@ -54,6 +54,8 @@ from remora.typechecker import (
     TypedUnbox,
     TypedWithShape,
     TypedDrop,
+    TypedFilter,
+    TypedReplicate,
 )
 from remora.types import (
     BOOL,
@@ -208,6 +210,22 @@ class HIRUnbox:
 
 
 @dataclass(frozen=True)
+class HIRFilter:
+    """Filter array elements by predicate (dynamic output size)."""
+    predicate: HIRCallable
+    array: HIRExpr
+    result_type: SigmaType
+
+
+@dataclass(frozen=True)
+class HIRReplicate:
+    """Replicate array elements by counts (dynamic output size)."""
+    counts: HIRExpr
+    array: HIRExpr
+    result_type: SigmaType
+
+
+@dataclass(frozen=True)
 class HIRAppend:
     """Concatenate two arrays along the leading dimension."""
     left: HIRExpr
@@ -359,6 +377,8 @@ HIRExpr: TypeAlias = (
     | HIRWithShape
     | HIRBox
     | HIRUnbox
+    | HIRFilter
+    | HIRReplicate
     | HIRAppend
     | HIRLet
     | HIRCall
@@ -561,6 +581,20 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.type,
         )
 
+    if isinstance(expr, TypedFilter):
+        return HIRFilter(
+            lower_callable(expr.predicate),
+            lower_expr(expr.array),
+            expr.type,
+        )
+
+    if isinstance(expr, TypedReplicate):
+        return HIRReplicate(
+            lower_expr(expr.counts),
+            lower_expr(expr.array),
+            expr.type,
+        )
+
     if isinstance(expr, TypedExprNode):
         return _lower_typed_node(expr)
 
@@ -706,6 +740,10 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
         return expr.type
     if isinstance(expr, HIRLit):
         return expr.type
+    if isinstance(expr, HIRWithShape):
+        return expr.result_type
+    if isinstance(expr, (HIRFilter, HIRReplicate)):
+        return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 
 

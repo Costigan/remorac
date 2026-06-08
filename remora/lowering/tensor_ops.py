@@ -31,6 +31,7 @@ from remora.hir import (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 from remora.types import ArrayType, ScalarType, StaticDim
 
@@ -268,6 +269,33 @@ def _lower_tensor_input(
         from remora.lowering.view_ops import _lower_view_input
 
         return _lower_view_input(node, functions, prefix, tensor_env=tensor_env)
+
+    if isinstance(node, HIRWithShape):
+        result_type = type_to_mlir(node.result_type)
+        result_elem = type_to_mlir(node.result_type.element)
+        rank = node.result_type.rank
+
+        if not isinstance(node.source, HIRLit):
+            raise RemoraLoweringError(
+                "only literal-source with-shape lowers as tensor input so far"
+            )
+        lit_val = _literal_value(node.source, result_elem)
+
+        identity = _identity_affine_map(rank)
+        iterators = _parallel_iterators(rank)
+        val_name = f"%{prefix}_val"
+        empty_name = f"%{prefix}_empty"
+        target_name = f"%{prefix}"
+        code = f"""    {val_name} = arith.constant {lit_val} : {result_elem}
+    {empty_name} = tensor.empty() : {result_type}
+    {target_name} = linalg.generic {{
+      indexing_maps = [{identity}],
+      iterator_types = {iterators}
+    }} outs({empty_name} : {result_type}) {{
+    ^bb0(%out: {result_elem}):
+      linalg.yield {val_name} : {result_elem}
+    }} -> {result_type}"""
+        return code, target_name, result_type, result_elem
 
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
