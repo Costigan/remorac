@@ -35,6 +35,24 @@ class ScalarType:
 
 
 @dataclass(frozen=True)
+class TypeVar(ScalarType):
+    """A type variable standing for an unknown scalar element type.
+
+    TypeVars are resolved during Forall instantiation before backend lowering.
+    They must not appear in backend HIR types.
+    """
+
+    def __str__(self) -> str:
+        return f"?{self.name}"
+
+
+@dataclass(frozen=True)
+class TypeBinder:
+    """Binds a type variable name in a ForallType."""
+    name: str
+
+
+@dataclass(frozen=True)
 class ArrayType:
     element: ScalarType
     shape: tuple[DimExpr, ...]
@@ -118,7 +136,26 @@ class PiType:
         return f"(Π ({binders}) {self.body})"
 
 
-RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType
+@dataclass(frozen=True)
+class ForallType:
+    """Universally quantified type over element-type variables.
+
+    ``ForallType([TypeBinder("t")], ArrayType(TypeVar("t"), ...))``
+    means "for all element types t, this function works".
+    """
+    binders: tuple[TypeBinder, ...]
+    body: RemoraType
+
+    @property
+    def rank(self) -> int:
+        return 0
+
+    def __str__(self) -> str:
+        binders = " ".join(binder.name for binder in self.binders)
+        return f"(∀ ({binders}) {self.body})"
+
+
+RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType | ForallType
 
 FLOAT = ScalarType("float")
 INT = ScalarType("int")
@@ -145,46 +182,6 @@ def eval_static_dim(expr: Expr, loc: SourceLoc | None = None) -> StaticDim:
     raise RemoraTypeError("expected a non-negative integer constant dimension", loc)
 
 
-def infer_lifting(
-    func_type: FuncType,
-    array_type: RemoraType,
-) -> tuple[tuple[DimExpr, ...], RemoraType]:
-    if len(func_type.params) != 1:
-        raise RemoraTypeError("map expects a unary function")
-
-    cell_type = func_type.params[0]
-    cell_rank = cell_type.rank
-    array_rank = array_type.rank
-
-    if array_rank < cell_rank:
-        raise RemoraTypeError(
-            f"array rank {array_rank} is too low for cell rank {cell_rank}"
-        )
-
-    if not _cell_matches_array_suffix(cell_type, array_type):
-        raise RemoraTypeError(f"function cell type {cell_type} does not match {array_type}")
-
-    frame_shape: tuple[DimExpr, ...]
-    if isinstance(array_type, ArrayType):
-        frame_shape = array_type.shape[: array_type.rank - cell_rank]
-    else:
-        frame_shape = ()
-
-    result_type = with_frame(func_type.result, frame_shape)
-    enforce_rank_limit(result_type)
-    return frame_shape, result_type
-
-
-def with_frame(value_type: RemoraType, frame: tuple[DimExpr, ...]) -> RemoraType:
-    if not frame:
-        return value_type
-    if isinstance(value_type, FuncType):
-        raise RemoraTypeError("function-valued map results are deferred")
-    if isinstance(value_type, ArrayType):
-        return value_type.with_frame(frame)
-    return ArrayType(value_type, frame)
-
-
 def enforce_rank_limit(value_type: RemoraType, loc: SourceLoc | None = None) -> None:
     if value_type.rank > MAX_DENSE_RANK:
         raise RemoraTypeError("rank limit exceeded in Dense Core", loc)
@@ -201,18 +198,3 @@ def common_numeric_type(left: RemoraType, right: RemoraType) -> ScalarType:
 
 def is_numeric(value_type: RemoraType) -> bool:
     return value_type in (INT, FLOAT)
-
-
-def _cell_matches_array_suffix(cell_type: RemoraType, array_type: RemoraType) -> bool:
-    if isinstance(cell_type, FuncType) or isinstance(array_type, FuncType):
-        return False
-    if isinstance(cell_type, ScalarType):
-        if isinstance(array_type, ScalarType):
-            return cell_type == array_type
-        return cell_type == array_type.element
-    if isinstance(array_type, ScalarType):
-        return False
-    return (
-        cell_type.element == array_type.element
-        and cell_type.shape == array_type.shape[-cell_type.rank :]
-    )

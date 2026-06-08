@@ -248,9 +248,8 @@ def infer_lifting(
 ) -> tuple[tuple[DimExpr, ...], RemoraType]:
     """Decompose and frame the result type in one step (legacy compatibility).
 
-    Returns ``(frame_shape, result_type)``, matching the call signature of
-    ``types.infer_lifting``.  New code should prefer :func:`decompose_argument`
-    and :func:`apply_frame` directly.
+    Returns ``(frame_shape, result_type)``.  New code should prefer
+    :func:`decompose_argument` and :func:`apply_frame` directly.
     """
     fc = decompose_argument(func_type, array_type, loc)
     result_type = apply_frame(func_type.result, fc.frame_shape)

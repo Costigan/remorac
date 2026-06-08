@@ -66,7 +66,10 @@ from remora.constraints import (
 )
 from remora.dependent_types import (
     free_type_index_vars,
+    free_type_vars,
+    instantiate_forall_type,
     instantiate_pi_type,
+    substitute_element_types,
     substitute_type,
 )
 from remora.frame import (
@@ -79,6 +82,7 @@ from remora.frame import (
 )
 from remora.index import (
     AnyIndexExpr,
+    DimAdd,
     DimVar,
     IndexBinder,
     IndexSort,
@@ -92,6 +96,7 @@ from remora.types import (
     INT,
     ArrayType,
     DimExpr,
+    ForallType,
     FuncType,
     PiType,
     RemoraType,
@@ -99,10 +104,10 @@ from remora.types import (
     ScalarType,
     SigmaType,
     StaticDim,
+    TypeVar,
     common_numeric_type,
     enforce_rank_limit,
     eval_static_dim,
-    infer_lifting,
     is_numeric,
 )
 
@@ -666,7 +671,18 @@ class TypeChecker:
                 raise RemoraTypeError(f"append expects matching element types, got {left.type.element} and {right.type.element}", expr.loc)
             if left.type.shape[1:] != right.type.shape[1:]:
                 raise RemoraTypeError(f"append expects matching non-leading dimensions", expr.loc)
-            new_leading = StaticDim(left.type.shape[0].value + right.type.shape[0].value)
+            left_leading = left.type.shape[0]
+            right_leading = right.type.shape[0]
+            raw_add = DimAdd(left_leading, right_leading)
+            from remora.index import normalize_index
+            normalized = normalize_index(raw_add)
+            if isinstance(normalized, DimExpr):
+                new_leading = normalized
+            else:
+                raise RemoraTypeError(
+                    "append result dimension must be a dimension expression",
+                    expr.loc,
+                )
             result_shape = (new_leading,) + left.type.shape[1:]
             return TypedAppend(expr, left, right, ArrayType(left.type.element, result_shape))
         if isinstance(expr, RotateExpr):
@@ -1822,6 +1838,18 @@ class TypeChecker:
                     declared_type.body,
                     symbolic_env,
                 )
+            if isinstance(declared_type, ForallType):
+                if not isinstance(declared_type.body, FuncType):
+                    raise RemoraTypeError(
+                        "Forall function annotation must contain a function type",
+                        definition.loc,
+                    )
+                # Check the body under symbolic parameter types
+                self._typed_top_level_function(
+                    definition,
+                    declared_type.body,
+                    env,
+                )
             return TypedDefinition(
                 definition,
                 None,
@@ -1835,6 +1863,34 @@ class TypeChecker:
             raise RemoraTypeError("function arity mismatch", expr.loc)
         typed_args = [self.infer(arg, env) for arg in expr.args]
         actual_param_types = tuple(arg.type for arg in typed_args)
+
+        # Handle ForallType: infer element-type variables and instantiate
+        declared_type = self._declared_function_type(function)
+        if isinstance(declared_type, ForallType):
+            type_bindings = self._infer_type_bindings(
+                function, declared_type, actual_param_types
+            )
+            type_args = tuple(
+                type_bindings[b.name] for b in declared_type.binders
+            )
+            instantiated_body = instantiate_forall_type(declared_type, type_args)
+            if isinstance(instantiated_body, FuncType):
+                index_args = self._inferred_index_args(function, actual_param_types)
+                typed_func = self._typed_top_level_function(
+                    function,
+                    instantiated_body,
+                    env,
+                    index_args=index_args,
+                )
+                typed_args = [
+                    self._coerce(arg, param_type, expr.loc)
+                    for arg, param_type in zip(typed_args, instantiated_body.params)
+                ]
+                return TypedApp(expr, typed_func, typed_args, instantiated_body.result)
+            raise RemoraTypeError(
+                "Forall body must be a function type", expr.loc
+            )
+
         func_type = self._infer_top_level_function_type(
             function,
             actual_param_types,
@@ -1962,7 +2018,19 @@ class TypeChecker:
                 function.loc,
             )
         if binders:
-            return PiType(binders, body)
+            body = PiType(binders, body)
+        type_binders = getattr(function, "type_binders", ())
+        if type_binders:
+            from remora.types import TypeBinder
+            forall_binders = tuple(TypeBinder(name) for name in type_binders)
+            unbound_tv = free_type_vars(body) - frozenset(type_binders)
+            if unbound_tv:
+                names = ", ".join(sorted(unbound_tv))
+                raise RemoraTypeError(
+                    f"unbound type variable(s) in function annotation: {names}",
+                    function.loc,
+                )
+            body = ForallType(forall_binders, body)
         return body
 
     def _reinterpret_shape_expr(
@@ -2108,6 +2176,29 @@ class TypeChecker:
                     function.loc,
                 )
         return tuple(result)
+
+
+    def _infer_type_bindings(
+        self,
+        function: FuncDef,
+        forall_type: ForallType,
+        actual_param_types: tuple[RemoraType, ...],
+    ) -> dict[str, ScalarType]:
+        """Infer element-type variable bindings from actual argument types."""
+        if not isinstance(forall_type.body, FuncType):
+            raise RemoraTypeError(
+                "Forall body must be a function type", function.loc
+            )
+        declared_params = forall_type.body.params
+        if len(declared_params) != len(actual_param_types):
+            raise RemoraTypeError("Forall arity mismatch", function.loc)
+
+        bindings: dict[str, ScalarType] = {}
+        type_binder_names = frozenset(function.type_binders)
+        for declared_param, actual_param in zip(declared_params, actual_param_types):
+            _infer_type_vars(declared_param, actual_param, bindings, type_binder_names)
+
+        return bindings
 
     def _match_declared_type(
         self,
@@ -2296,3 +2387,37 @@ class TypeChecker:
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()
+
+
+def _infer_type_vars(
+    declared: RemoraType,
+    actual: RemoraType,
+    bindings: dict[str, ScalarType],
+    binder_names: frozenset[str],
+) -> None:
+    """Walk declared/actual types to bind TypeVar names to concrete ScalarTypes."""
+    if isinstance(declared, TypeVar):
+        if declared.name not in binder_names:
+            return
+        existing = bindings.get(declared.name)
+        if existing is not None:
+            if existing != actual:
+                raise RemoraTypeError(
+                    f"type variable {declared.name!r} bound to "
+                    f"{existing} and {actual}"
+                )
+            return
+        if not isinstance(actual, ScalarType):
+            raise RemoraTypeError(
+                f"expected scalar type for type variable {declared.name!r}, "
+                f"got {actual}"
+            )
+        bindings[declared.name] = actual
+        return
+    if isinstance(declared, ArrayType) and isinstance(actual, ArrayType):
+        _infer_type_vars(declared.element, actual.element, bindings, binder_names)
+        return
+    if isinstance(declared, FuncType) and isinstance(actual, FuncType):
+        for dp, ap in zip(declared.params, actual.params):
+            _infer_type_vars(dp, ap, bindings, binder_names)
+        return

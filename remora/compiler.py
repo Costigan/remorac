@@ -25,7 +25,7 @@ from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
 from remora.index import ShapeExpr
-from remora.types import DimExpr, FuncType, RemoraType
+from remora.types import DimExpr, FuncType, RemoraType, RemoraTypeError
 from remora.ast_nodes import FuncDef, Program
 
 
@@ -275,6 +275,15 @@ def compile_function_source(
         env,
     )
     function_type = typed_function.type
+    # Ensure the specialized body has no free index variables
+    from remora.dependent_types import free_type_index_vars
+    free_vars = free_type_index_vars(function_type)
+    if free_vars:
+        names = ", ".join(sorted(free_vars))
+        raise RemoraTypeError(
+            f"compiled function {function_name!r} has unspecialized "
+            f"index variables: {names}"
+        )
     internal_name = typed_function.specialization_name or function_name
     hir_function = HIRFunction(
         internal_name,

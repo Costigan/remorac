@@ -9,7 +9,17 @@ from remora.index import (
     free_index_vars,
     substitute_index,
 )
-from remora.types import ArrayType, FuncType, PiType, RemoraType, SigmaType
+from remora.types import (
+    ArrayType,
+    ForallType,
+    FuncType,
+    PiType,
+    RemoraType,
+    ScalarType,
+    SigmaType,
+    TypeBinder,
+    TypeVar,
+)
 
 
 def substitute_type(value_type: RemoraType, bindings: IndexSubstitution) -> RemoraType:
@@ -45,6 +55,13 @@ def substitute_type(value_type: RemoraType, bindings: IndexSubstitution) -> Remo
     if isinstance(value_type, PiType):
         shadowed = _drop_shadowed(bindings, tuple(binder.name for binder in value_type.binders))
         return PiType(value_type.binders, substitute_type(value_type.body, shadowed))
+    if isinstance(value_type, ForallType):
+        # Forall binders shadow element-type variables (TypeVars)
+        shadowed = _drop_shadowed(bindings, tuple(binder.name for binder in value_type.binders))
+        return ForallType(value_type.binders, substitute_type(value_type.body, shadowed))
+    if isinstance(value_type, TypeVar):
+        # TypeVars are not index variables; they are left alone by index substitution
+        return value_type
     return value_type
 
 
@@ -81,6 +98,10 @@ def free_type_index_vars(value_type: RemoraType) -> frozenset[str]:
     if isinstance(value_type, PiType):
         bound = frozenset(binder.name for binder in value_type.binders)
         return free_type_index_vars(value_type.body) - bound
+    if isinstance(value_type, ForallType):
+        return free_type_index_vars(value_type.body)
+    if isinstance(value_type, TypeVar):
+        return frozenset()
     return frozenset()
 
 
@@ -98,3 +119,88 @@ def _drop_shadowed(
 def _has_index_var(dim_expr: AnyIndexExpr) -> bool:
     from remora.index import free_index_vars as _fiv
     return bool(_fiv(dim_expr))
+
+
+# ── Forall / element-type variable helpers ────────────────────────────────
+
+
+def substitute_element_types(
+    value_type: RemoraType,
+    bindings: dict[str, ScalarType],
+) -> RemoraType:
+    """Substitute ``TypeVar`` names with concrete ``ScalarType`` values."""
+    if isinstance(value_type, ArrayType):
+        return ArrayType(
+            substitute_element_types(value_type.element, bindings),  # type: ignore[return-value]
+            value_type.shape,
+            value_type.shape_expr,
+        )
+    if isinstance(value_type, FuncType):
+        return FuncType(
+            tuple(substitute_element_types(p, bindings) for p in value_type.params),
+            substitute_element_types(value_type.result, bindings),
+        )
+    if isinstance(value_type, SigmaType):
+        return SigmaType(
+            value_type.hidden_names,
+            substitute_element_types(value_type.body, bindings),
+        )
+    if isinstance(value_type, PiType):
+        return PiType(
+            value_type.binders,
+            substitute_element_types(value_type.body, bindings),
+        )
+    if isinstance(value_type, ForallType):
+        shadowed = {
+            name: ty
+            for name, ty in bindings.items()
+            if name not in {b.name for b in value_type.binders}
+        }
+        return ForallType(
+            value_type.binders,
+            substitute_element_types(value_type.body, shadowed),
+        )
+    if isinstance(value_type, TypeVar):
+        if value_type.name in bindings:
+            return bindings[value_type.name]
+        return value_type
+    return value_type
+
+
+def instantiate_forall_type(
+    value_type: ForallType,
+    args: tuple[ScalarType, ...],
+) -> RemoraType:
+    """Instantiate a Forall type with concrete element-type arguments."""
+    if len(args) != len(value_type.binders):
+        raise ValueError(
+            f"Forall expects {len(value_type.binders)} type argument(s), got {len(args)}"
+        )
+    bindings: dict[str, ScalarType] = {}
+    for binder, arg in zip(value_type.binders, args):
+        bindings[binder.name] = arg
+    return substitute_element_types(value_type.body, bindings)
+
+
+def free_type_vars(value_type: RemoraType) -> frozenset[str]:
+    """Return free element-type variable names (TypeVar names) in a type."""
+    if isinstance(value_type, ArrayType):
+        result = set(free_type_vars(value_type.element))
+        for dim in value_type.shape:
+            pass  # shapes contain DimExpr, not TypeVars
+        return frozenset(result)
+    if isinstance(value_type, FuncType):
+        result = set(free_type_vars(value_type.result))
+        for param in value_type.params:
+            result.update(free_type_vars(param))
+        return frozenset(result)
+    if isinstance(value_type, SigmaType):
+        return free_type_vars(value_type.body)
+    if isinstance(value_type, PiType):
+        return free_type_vars(value_type.body)
+    if isinstance(value_type, ForallType):
+        bound = frozenset(binder.name for binder in value_type.binders)
+        return free_type_vars(value_type.body) - bound
+    if isinstance(value_type, TypeVar):
+        return frozenset({value_type.name})
+    return frozenset()

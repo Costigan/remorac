@@ -9,8 +9,10 @@ from remora.ast_nodes import SourceLoc
 from remora.errors import RemoraError
 from remora.index import (
     AnyIndexExpr,
+    DimAdd,
     DimExpr,
     DimLit,
+    DimSub,
     DimVar,
     IndexSubstitution,
     ShapeConcat,
@@ -150,7 +152,7 @@ def match_shape_expr_pattern(
     if isinstance(pattern, ShapeLit):
         return {
             name: expr
-            for name, expr in solve_exact(
+            for name, expr in solve_with_shapes(
                 [ShapeEq(pattern, ShapeLit(actual), loc)]
             ).items()
         }
@@ -322,6 +324,18 @@ def _solve_dim_eq_any(
                 f"dimension mismatch: expected {left_value}, got {right_value}", loc
             )
         return
+    if isinstance(left, DimAdd):
+        _solve_dim_add_eq(left, right, bindings, loc)
+        return
+    if isinstance(right, DimAdd):
+        _solve_dim_add_eq(right, left, bindings, loc)
+        return
+    if isinstance(left, DimSub):
+        _solve_dim_sub_eq(left, right, bindings, loc)
+        return
+    if isinstance(right, DimSub):
+        _solve_dim_sub_eq(right, left, bindings, loc)
+        return
     raise ConstraintError(
         f"cannot solve dimension equality {left} = {right}", loc
     )
@@ -486,3 +500,117 @@ def _static_dim_value(expr: DimExpr) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+# ── Dimension arithmetic solvers ──────────────────────────────────────────
+
+
+def _solve_dim_add_eq(
+    add_expr: DimAdd,
+    other: DimExpr,
+    bindings: dict[str, AnyIndexExpr],
+    loc: SourceLoc | None,
+) -> None:
+    """Solve ``DimAdd(left, right) = other`` for a free variable."""
+    left = add_expr.left
+    right = add_expr.right
+    target = _static_dim_value(other)
+    if target is None:
+        raise ConstraintError(
+            f"cannot solve {add_expr} = {other}: right-hand side must be concrete",
+            loc,
+        )
+
+    left_value = _static_dim_value(_normalize_bound_dim_any(left, bindings))
+    right_value = _static_dim_value(_normalize_bound_dim_any(right, bindings))
+
+    if left_value is not None and right_value is not None:
+        if left_value + right_value != target:
+            raise ConstraintError(
+                f"arithmetic mismatch: {left_value} + {right_value} != {target}",
+                loc,
+            )
+        return
+
+    # Try to solve for a single free variable
+    if left_value is not None and isinstance(_normalize_bound_dim_any(right, bindings), DimVar):
+        solved = target - left_value
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {target} - {left_value} would be negative",
+                loc,
+            )
+        rv = _normalize_bound_dim_any(right, bindings)
+        _bind_dim_any(rv.name, DimLit(solved), bindings, loc)
+        return
+
+    if right_value is not None and isinstance(_normalize_bound_dim_any(left, bindings), DimVar):
+        solved = target - right_value
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {target} - {right_value} would be negative",
+                loc,
+            )
+        lv = _normalize_bound_dim_any(left, bindings)
+        _bind_dim_any(lv.name, DimLit(solved), bindings, loc)
+        return
+
+    raise ConstraintError(
+        f"cannot solve {add_expr} = {target}: need one known operand", loc
+    )
+
+
+def _solve_dim_sub_eq(
+    sub_expr: DimSub,
+    other: DimExpr,
+    bindings: dict[str, AnyIndexExpr],
+    loc: SourceLoc | None,
+) -> None:
+    """Solve ``DimSub(left, right) = other`` for a free variable."""
+    left = sub_expr.left
+    right = sub_expr.right
+    target = _static_dim_value(other)
+    if target is None:
+        raise ConstraintError(
+            f"cannot solve {sub_expr} = {other}: right-hand side must be concrete",
+            loc,
+        )
+
+    left_value = _static_dim_value(_normalize_bound_dim_any(left, bindings))
+    right_value = _static_dim_value(_normalize_bound_dim_any(right, bindings))
+
+    if left_value is not None and right_value is not None:
+        if left_value - right_value != target:
+            raise ConstraintError(
+                f"arithmetic mismatch: {left_value} - {right_value} != {target}",
+                loc,
+            )
+        if left_value - right_value < 0:
+            raise ConstraintError(
+                f"dimension subtraction {left_value} - {right_value} is negative",
+                loc,
+            )
+        return
+
+    # Solve left - concrete = target  →  left = target + concrete
+    if right_value is not None and isinstance(_normalize_bound_dim_any(left, bindings), DimVar):
+        solved = target + right_value
+        lv = _normalize_bound_dim_any(left, bindings)
+        _bind_dim_any(lv.name, DimLit(solved), bindings, loc)
+        return
+
+    # Solve concrete - right = target  →  right = concrete - target
+    if left_value is not None and isinstance(_normalize_bound_dim_any(right, bindings), DimVar):
+        solved = left_value - target
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {left_value} - {target} would be negative for {right}",
+                loc,
+            )
+        rv = _normalize_bound_dim_any(right, bindings)
+        _bind_dim_any(rv.name, DimLit(solved), bindings, loc)
+        return
+
+    raise ConstraintError(
+        f"cannot solve {sub_expr} = {target}: need one known operand", loc
+    )

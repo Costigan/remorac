@@ -938,7 +938,16 @@ def _output_memref_type(return_type: RemoraType) -> str:
         elem = type_to_mlir(return_type.body.element if isinstance(return_type.body, ArrayType) else return_type.body)
         return f"memref<?x{elem}>"
     if isinstance(return_type, ArrayType):
-        dims = "x".join(str(dim.value) for dim in return_type.shape)
+        dim_parts: list[str] = []
+        for dim in return_type.shape:
+            value = getattr(dim, "value", None)
+            if value is None:
+                raise RemoraLoweringError(
+                    f"cannot lower ABI type {return_type}: shape contains "
+                    f"non-concrete dimension {dim}"
+                )
+            dim_parts.append(str(value))
+        dims = "x".join(dim_parts)
         element = type_to_mlir(return_type.element)
         if dims:
             strides = ", ".join(

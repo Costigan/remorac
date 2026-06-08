@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
-from remora.index import DimExpr, IndexBinder
+from remora.index import DimExpr, IndexBinder  # avoid name clash with field name
 
 if TYPE_CHECKING:
     from remora.types import RemoraType
@@ -33,6 +33,7 @@ class FuncDef:
     loc: SourceLoc
     param_ranks: list[int | None] | None = None
     index_binders: tuple[IndexBinder, ...] = ()
+    type_binders: tuple[str, ...] = ()
     param_types: list[RemoraType] | None = None
     result_type: RemoraType | None = None
 

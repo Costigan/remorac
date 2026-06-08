@@ -395,3 +395,120 @@ def test_shape_preserving_called_twice():
     result = evaluate_source(source, syntax="lisp", include_prelude=False)
     import numpy as np
     np.testing.assert_array_equal(result.value, [1.0, 2.0])
+
+
+# ── Phase 7.4: Dimension arithmetic ────────────────────────────────────────
+
+def test_arithmetic_add_in_result_type():
+    """Function declares result shape as (+ a b) where a, b are Dim binders."""
+    source = (
+        "(define/pi ([a Dim] [b Dim]) "
+        "  (append-vecs [xs (Array Float a) ys (Array Float b)] "
+        "    (Array Float (+ a b))) "
+        "  (append xs ys)) "
+        "(append-vecs [1.0 2.0] [3.0 4.0 5.0])"
+    )
+    result = evaluate_source(source, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [1.0, 2.0, 3.0, 4.0, 5.0])
+
+
+def test_arithmetic_add_in_result_type_compiled():
+    """Arithmetic result type specialization works through compiled path."""
+    source = (
+        "(define/pi ([a Dim] [b Dim]) "
+        "  (append-vecs [xs (Array Float a) ys (Array Float b)] "
+        "    (Array Float (+ a b))) "
+        "  (append xs ys)) "
+        "(append-vecs [1.0 2.0] [3.0 4.0 5.0])"
+    )
+    from remora.compiler import compile_function_source
+    from remora.types import ArrayType, FLOAT, StaticDim, FuncType
+    artifact = compile_function_source(
+        source,
+        "append-vecs",
+        (ArrayType(FLOAT, (StaticDim(2),)), ArrayType(FLOAT, (StaticDim(3),))),
+        verify=False,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert artifact.specialization_name is not None
+    assert "append-vecs__" in artifact.specialization_name
+    assert "a_2" in artifact.specialization_name
+    assert "b_3" in artifact.specialization_name
+    assert artifact.function_type.result == ArrayType(FLOAT, (StaticDim(5),))
+
+
+# ── Phase 7.6: End-to-end examples ──────────────────────────────────────────
+
+def test_example_dot_product_via_dim():
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (dot [xs (Array Float n) ys (Array Float n)] Float) "
+        "  (fold + 0.0 (* xs ys))) "
+        "(dot [1.0 2.0 3.0] [4.0 5.0 6.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    assert r.value == pytest.approx(32.0)
+    rc = evaluate_source_compiled(src, syntax="lisp", include_prelude=False)
+    assert rc.value == pytest.approx(32.0)
+
+
+def test_example_shape_identity_multi_rank():
+    src = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id [1.0 2.0 3.0 4.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1.0, 2.0, 3.0, 4.0])
+
+
+def test_example_append_with_arithmetic_result():
+    src = (
+        "(define/pi ([a Dim] [b Dim]) "
+        "  (concat-first [xs (Array Float a) ys (Array Float b)]"
+        "    (Array Float (+ a b))) "
+        "  (append xs ys)) "
+        "(concat-first [1.0 2.0] [3.0 4.0 5.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1.0, 2.0, 3.0, 4.0, 5.0])
+
+
+def test_example_dependent_function_same_dim_twice():
+    """Pi function where same dim appears in both params; auto-lifted body."""
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (add-vecs [xs (Array Float n) ys (Array Float n)]"
+        "    (Array Float n)) "
+        "  (+ xs ys)) "
+        "(add-vecs [1.0 2.0] [3.0 4.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [4.0, 6.0])
+
+
+# ── Phase 7.5: Forall / element-type polymorphism ──────────────────────────
+
+def test_forall_identity_int():
+    src = "(define/forall (t) (id [x (Array t 3)] (Array t 3)) x) (id [1 2 3])"
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+
+def test_forall_identity_float():
+    src = "(define/forall (t) (id [x (Array t 2)] (Array t 2)) x) (id [1.0 2.0])"
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1.0, 2.0])
+
+
+def test_forall_identity_compiled():
+    src = "(define/forall (t) (id [x (Array t 3)] (Array t 3)) x) (id [1 2 3])"
+    r = evaluate_source_compiled(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1, 2, 3])

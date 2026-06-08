@@ -54,7 +54,16 @@ def type_to_mlir(value_type: RemoraType) -> str:
     if value_type == BOOL:
         return "i1"
     if isinstance(value_type, ArrayType):
-        dims = "x".join(str(dim.value) for dim in value_type.shape)
+        dim_parts: list[str] = []
+        for dim in value_type.shape:
+            value = getattr(dim, "value", None)
+            if value is None:
+                raise RemoraLoweringError(
+                    f"cannot lower type {value_type}: shape contains "
+                    f"non-concrete dimension {dim}"
+                )
+            dim_parts.append(str(value))
+        dims = "x".join(dim_parts)
         element = type_to_mlir(value_type.element)
         if dims:
             return f"tensor<{dims}x{element}>"
