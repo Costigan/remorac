@@ -512,3 +512,63 @@ def test_forall_identity_compiled():
     r = evaluate_source_compiled(src, syntax="lisp", include_prelude=False)
     import numpy as np
     np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+
+# ── Rest variables: append with common suffix ──────────────────────────────
+
+def test_rest_variable_append_rank1():
+    src = (
+        "(define/pi ([da Dim] [db Dim] [rest Shape]) "
+        "  (append2 [xs (Array Float da rest) ys (Array Float db rest)] "
+        "    (Array Float (+ da db) rest)) "
+        "  (append xs ys)) "
+        "(append2 [1.0 2.0] [3.0 4.0 5.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1.0, 2.0, 3.0, 4.0, 5.0])
+
+
+def test_rest_variable_append_rank2():
+    src = (
+        "(define/pi ([da Dim] [db Dim] [rest Shape]) "
+        "  (append2 [xs (Array Float da rest) ys (Array Float db rest)] "
+        "    (Array Float (+ da db) rest)) "
+        "  (append xs ys)) "
+        "(append2 [[1.0 2.0] [3.0 4.0]] [[5.0 6.0] [7.0 8.0]])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+
+
+def test_rest_variable_rejects_mismatched_trailing():
+    src = (
+        "(define/pi ([da Dim] [rest Shape]) "
+        "  (bad [xs (Array Float da rest) ys (Array Float da rest)] "
+        "    (Array Float da rest)) "
+        "  (append xs ys)) "
+        "(bad [1.0 2.0] [3.0 4.0 5.0])"
+    )
+    with pytest.raises(RemoraTypeError):
+        evaluate_source(src, syntax="lisp", include_prelude=False)
+
+
+def test_rest_variable_specialization_name():
+    from remora.compiler import compile_function_source
+    from remora.types import ArrayType, FLOAT, StaticDim
+    src = (
+        "(define/pi ([da Dim] [db Dim] [rest Shape]) "
+        "  (append2 [xs (Array Float da rest) ys (Array Float db rest)] "
+        "    (Array Float (+ da db) rest)) "
+        "  (append xs ys))"
+    )
+    art = compile_function_source(
+        src, "append2",
+        (ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+         ArrayType(FLOAT, (StaticDim(4), StaticDim(3)))),
+        verify=False, include_prelude=False, syntax="lisp",
+    )
+    assert "append2__" in art.specialization_name
+    assert "rest_shape_3" in art.specialization_name
+    assert art.function_type.result == ArrayType(FLOAT, (StaticDim(6), StaticDim(3)))

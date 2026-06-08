@@ -13,6 +13,7 @@ from remora.index import (
     ShapeLit,
     ShapeVar,
     free_index_vars,
+    index_alpha_equivalent,
     normalize_index,
     substitute_index,
 )
@@ -71,3 +72,57 @@ def test_free_index_vars_tracks_dim_and_shape_vars():
     )
 
     assert free_index_vars(expr) == frozenset({"n", "m", "rest"})
+
+
+# ── Alpha-equivalence ──────────────────────────────────────────────────────
+
+def test_alpha_equivalent_literals():
+    assert index_alpha_equivalent(DimLit(5), DimLit(5))
+    assert not index_alpha_equivalent(DimLit(5), DimLit(6))
+
+
+def test_alpha_equivalent_dim_vars():
+    assert index_alpha_equivalent(DimVar("n"), DimVar("n"))
+    assert not index_alpha_equivalent(DimVar("n"), DimVar("m"))
+
+
+def test_alpha_equivalent_renamed():
+    assert index_alpha_equivalent(DimVar("a"), DimVar("b"), {"a": "b", "b": "b"})
+
+
+def test_alpha_equivalent_arithmetic():
+    assert index_alpha_equivalent(
+        DimAdd(DimVar("a"), DimLit(3)),
+        DimAdd(DimVar("b"), DimLit(3)),
+        {"a": "b", "b": "b"},
+    )
+
+
+def test_alpha_equivalent_shape_lit():
+    assert index_alpha_equivalent(
+        ShapeLit((DimVar("a"), DimLit(4))),
+        ShapeLit((DimVar("b"), DimLit(4))),
+        {"a": "b", "b": "b"},
+    )
+    assert not index_alpha_equivalent(
+        ShapeLit((DimVar("a"), DimLit(4))),
+        ShapeLit((DimVar("a"), DimLit(5))),
+    )
+
+
+def test_alpha_equivalent_shape_var():
+    assert index_alpha_equivalent(
+        ShapeVar("s"), ShapeVar("t"),
+        {"s": "t", "t": "t"},
+    )
+    assert not index_alpha_equivalent(
+        ShapeVar("s"), ShapeVar("t"),
+    )
+
+
+def test_alpha_equivalent_shape_concat():
+    assert index_alpha_equivalent(
+        ShapeConcat(ShapeLit((DimVar("a"),)), ShapeVar("rest")),
+        ShapeConcat(ShapeLit((DimVar("b"),)), ShapeVar("tail")),
+        {"a": "b", "b": "b", "rest": "tail", "tail": "tail"},
+    )

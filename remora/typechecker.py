@@ -684,6 +684,24 @@ class TypeChecker:
                     expr.loc,
                 )
             result_shape = (new_leading,) + left.type.shape[1:]
+            # Propagate shape_expr: if both sides share a rest pattern, use it
+            result_expr = None
+            if left.type.shape_expr is not None and right.type.shape_expr is not None:
+                from remora.index import ShapeConcat, ShapeLit, normalize_index
+                # Both sides should have ShapeConcat(prefix, rest_var)
+                ln = normalize_index(left.type.shape_expr)
+                rn = normalize_index(right.type.shape_expr)
+                if isinstance(ln, ShapeConcat) and isinstance(rn, ShapeConcat):
+                    # Extract the rest (right operand of each concat)
+                    result_expr = ShapeConcat(
+                        ShapeLit((new_leading,)),
+                        ln.right,
+                    )
+            if result_expr is not None:
+                return TypedAppend(
+                    expr, left, right,
+                    ArrayType(left.type.element, result_shape, result_expr),
+                )
             return TypedAppend(expr, left, right, ArrayType(left.type.element, result_shape))
         if isinstance(expr, RotateExpr):
             typed_array = self.infer(expr.array, env)
@@ -2036,22 +2054,45 @@ class TypeChecker:
     def _reinterpret_shape_expr(
         self, value_type: RemoraType, shape_binder_names: set[str]
     ) -> RemoraType:
-        """Promote DimVar references to ShapeExpr when the binder is Shape sort."""
+        """Promote DimVar references to ShapeConcat when the binder is Shape sort.
+
+        When a shape tuple ends with one or more DimVars that map to Shape
+        binders, the suffix is lifted into a ShapeVar and concatenated with
+        the prefix of dimension expressions.
+        """
         if isinstance(value_type, ArrayType):
             if value_type.shape_expr is not None:
                 return value_type
-            if (
-                len(value_type.shape) == 1
-                and isinstance(value_type.shape[0], DimVar)
-                and value_type.shape[0].name in shape_binder_names
-            ):
+            shape = value_type.shape
+            if not shape_binder_names:
+                return value_type
+            # Walk from right to left, find the longest suffix of Shape-bound DimVars
+            split = len(shape)
+            while split > 0 and isinstance(shape[split - 1], DimVar) and shape[split - 1].name in shape_binder_names:
+                split -= 1
+            if split == len(shape):
+                # No trailing shape binder references
+                return value_type
+            if split == 0 and len(shape) == 1:
+                # Single-element shape that's a Shape binder → ShapeVar
                 from remora.index import ShapeVar
                 return value_type.with_shape_expr(
-                    ShapeVar(value_type.shape[0].name)
+                    ShapeVar(shape[0].name)
                 )
-            # Recurse into element type (not applicable for ScalarType elements,
-            # but keep for future nested types)
-            return value_type
+            if split == 0:
+                # All elements are shape binders → one ShapeVar for the whole shape
+                # Take the last binder name as the rest variable
+                from remora.index import ShapeVar, ShapeConcat, ShapeLit
+                return value_type.with_shape_expr(
+                    ShapeConcat(ShapeLit(()), ShapeVar(shape[-1].name))
+                )
+            # General case: prefix is dimension exprs, suffix is a ShapeVar
+            from remora.index import ShapeVar, ShapeConcat, ShapeLit
+            prefix_dims = shape[:split]
+            rest_name = shape[-1].name  # rightmost ShapeVar name
+            return value_type.with_shape_expr(
+                ShapeConcat(ShapeLit(prefix_dims), ShapeVar(rest_name))
+            )
         if isinstance(value_type, FuncType):
             return FuncType(
                 tuple(

@@ -268,3 +268,58 @@ def _static_dim(value: int) -> DimExpr:
     """Create a StaticDim for a concrete value, avoiding circular import."""
     from remora.types import StaticDim
     return StaticDim(value)
+
+
+# ── Alpha-equivalence ──────────────────────────────────────────────────────
+
+
+def index_alpha_equivalent(
+    a: AnyIndexExpr,
+    b: AnyIndexExpr,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Check if two index expressions are equivalent up to bound-variable renaming.
+
+    *env* maps bound variable names to canonical names.  Variables not in
+    *env* are treated as free and must match exactly.
+    """
+    if env is None:
+        env = {}
+
+    # Concrete values must match
+    if isinstance(a, DimLit) and isinstance(b, DimLit):
+        return a.value == b.value
+    if isinstance(a, (DimLit,)) != isinstance(b, (DimLit,)):
+        return False
+
+    # Variables: check env mapping
+    if isinstance(a, DimVar) and isinstance(b, DimVar):
+        ca = env.get(a.name, a.name)
+        cb = env.get(b.name, b.name)
+        return ca == cb
+
+    if isinstance(a, ShapeVar) and isinstance(b, ShapeVar):
+        ca = env.get(a.name, a.name)
+        cb = env.get(b.name, b.name)
+        return ca == cb
+
+    # Structural recursion
+    if isinstance(a, DimAdd) and isinstance(b, DimAdd):
+        return index_alpha_equivalent(a.left, b.left, env) and index_alpha_equivalent(
+            a.right, b.right, env
+        )
+    if isinstance(a, DimSub) and isinstance(b, DimSub):
+        return index_alpha_equivalent(a.left, b.left, env) and index_alpha_equivalent(
+            a.right, b.right, env
+        )
+    if isinstance(a, ShapeLit) and isinstance(b, ShapeLit):
+        return len(a.dims) == len(b.dims) and all(
+            index_alpha_equivalent(ad, bd, env) for ad, bd in zip(a.dims, b.dims)
+        )
+    if isinstance(a, ShapeConcat) and isinstance(b, ShapeConcat):
+        return index_alpha_equivalent(a.left, b.left, env) and index_alpha_equivalent(
+            a.right, b.right, env
+        )
+
+    # Different kinds
+    return type(a) is type(b) and a == b
