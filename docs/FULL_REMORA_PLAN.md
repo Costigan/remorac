@@ -494,10 +494,10 @@ Total calendar time (1 engineer):
 - [x] `subarray` — extract rectangular region by offset and shape
 - [x] `with-shape` — replicate scalar/array to match target shape
 - [x] `subarray` — extract rectangular region by offset and shape
-- [ ] `filter` — select subarrays by boolean mask (→ boxes, needs dynamic sizing)
+- [ ] `filter` — select subarrays by boolean mask (→ boxes, needs dynamic sizing; interpreter works)
 - [x] `select` — element-wise ternary (already via tensor `if`)
-- [ ] `replicate` — repeat items by count vector (→ boxes, needs dynamic sizing)
-- [ ] `sort` / `grade` — sort with stable comparison function (needs MLIR sort)
+- [x] `replicate` — repeat items by count vector (interpreter works; MLIR deferred for dynamic sizing)
+- [x] `sort` / `grade` — sort/permutation indices (interpreter works; MLIR deferred)
 - [x] `index-item` — index by scalar along leading dimension
 - [x] Tests: `(length xs)` returns correct leading dimension size
 - [x] `index-item` — index by scalar along leading dimension

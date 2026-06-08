@@ -369,6 +369,40 @@ class TypedWithShape:
 
 
 @dataclass(frozen=True)
+class TypedSort:
+    """A typed sort expression."""
+    expr: SortExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedGrade:
+    """A typed grade (argsort) expression."""
+    expr: GradeExpr
+    array: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedFilter:
+    """A typed filter expression with boxed result."""
+    expr: FilterExpr
+    predicate: TypedExpr
+    array: TypedExpr
+    type: SigmaType
+
+
+@dataclass(frozen=True)
+class TypedReplicate:
+    """A typed replicate expression with boxed result."""
+    expr: ReplicateExpr
+    counts: TypedExpr
+    array: TypedExpr
+    type: SigmaType
+
+
+@dataclass(frozen=True)
 class TypedBox:
     """A typed box expression wrapping an array with a hidden dimension."""
     expr: BoxExpr
@@ -418,6 +452,10 @@ TypedExpr: TypeAlias = (
     | TypedWithShape
     | TypedBox
     | TypedUnbox
+    | TypedSort
+    | TypedGrade
+    | TypedFilter
+    | TypedReplicate
     | TypedLet
     | TypedIf
 )
@@ -1494,6 +1532,19 @@ class TypeChecker:
         synthetic_box = BoxExpr(IotaExpr(expr.sizes[0], expr.loc), expr.loc)
         return TypedBox(synthetic_box, typed_iota, sigma)
 
+    def _infer_sort(self, expr: SortExpr, env: TypeEnv) -> TypedExpr:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("sort expects an array", expr.loc)
+        return TypedSort(expr, typed_array, typed_array.type)
+
+    def _infer_grade(self, expr: GradeExpr, env: TypeEnv) -> TypedExpr:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("grade expects an array", expr.loc)
+        result_shape = (typed_array.type.shape[0],)
+        return TypedGrade(expr, typed_array, ArrayType(INT, result_shape))
+
     def _infer_filter(self, expr: FilterExpr, env: TypeEnv) -> TypedExpr:
         """filter pred xs : (Σ (len) [elem len]) — boxed filtered array."""
         typed_pred = self.infer(expr.predicate, env)
@@ -1501,8 +1552,7 @@ class TypeChecker:
         if not isinstance(typed_array.type, ArrayType):
             raise RemoraTypeError("filter expects an array", expr.loc)
         sigma = SigmaType(("len",), typed_array.type)
-        synthetic_box = BoxExpr(expr, expr.loc)
-        return TypedBox(synthetic_box, typed_array, sigma)
+        return TypedFilter(expr, typed_pred, typed_array, sigma)
 
     def _infer_replicate(self, expr: ReplicateExpr, env: TypeEnv) -> TypedExpr:
         """replicate counts xs : (Σ (len) [elem len]) — boxed repeated array."""
@@ -1513,52 +1563,7 @@ class TypeChecker:
         if not isinstance(typed_array.type, ArrayType):
             raise RemoraTypeError("replicate expects an array", expr.loc)
         sigma = SigmaType(("len",), typed_array.type)
-        synthetic_box = BoxExpr(expr, expr.loc)
-        return TypedBox(synthetic_box, typed_array, sigma)
-
-    def _infer_replicate(self, expr: ReplicateExpr, env: TypeEnv) -> TypedExpr:
-        """replicate counts xs : (Σ (len) [elem len]) — boxed repeated array."""
-        typed_counts = self.infer(expr.counts, env)
-        typed_array = self.infer(expr.array, env)
-        if not isinstance(typed_counts.type, ArrayType) or typed_counts.type.element != INT:
-            raise RemoraTypeError("replicate expects an integer count vector", expr.loc)
-        if not isinstance(typed_array.type, ArrayType):
-            raise RemoraTypeError("replicate expects an array", expr.loc)
-        sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
-        return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
-
-    def _infer_sort(self, expr: SortExpr, env: TypeEnv) -> TypedExpr:
-        """sort cmp xs : [elem] — stable sort by comparison function."""
-        typed_array = self.infer(expr.array, env)
-        if not isinstance(typed_array.type, ArrayType):
-            raise RemoraTypeError("sort expects an array", expr.loc)
-        element_type = typed_array.type.element if isinstance(typed_array.type, ArrayType) else typed_array.type
-        if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
-            expected_type = FuncType((element_type, element_type), BOOL)
-        else:
-            typed_func = self.infer(expr.func, env)
-            if not isinstance(typed_func.type, FuncType) or len(typed_func.type.params) != 2:
-                raise RemoraTypeError("sort expects a binary comparison function", expr.loc)
-            if typed_func.type.result != BOOL:
-                raise RemoraTypeError("sort comparison function must return bool", expr.loc)
-        return TypedExprNode(expr, typed_array.type)
-
-    def _infer_grade(self, expr: GradeExpr, env: TypeEnv) -> TypedExpr:
-        """grade cmp xs : [int] — permutation indices that would sort xs."""
-        typed_array = self.infer(expr.array, env)
-        if not isinstance(typed_array.type, ArrayType):
-            raise RemoraTypeError("grade expects an array", expr.loc)
-        element_type = typed_array.type.element
-        if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
-            pass  # valid comparison operator
-        else:
-            typed_func = self.infer(expr.func, env)
-            if not isinstance(typed_func.type, FuncType) or len(typed_func.type.params) != 2:
-                raise RemoraTypeError("grade expects a binary comparison function", expr.loc)
-            if typed_func.type.result != BOOL:
-                raise RemoraTypeError("grade comparison function must return bool", expr.loc)
-        result_shape = (typed_array.type.shape[0],)
-        return TypedExprNode(expr, ArrayType(INT, result_shape))
+        return TypedReplicate(expr, typed_counts, typed_array, sigma)
 
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv
