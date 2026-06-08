@@ -23,6 +23,7 @@ from remora.typechecker import (
     TypedExpr,
     TypedExprNode,
     TypedFold,
+    TypedFoldRight,
     TypedIf,
     TypedIndex,
     TypedLambda,
@@ -35,6 +36,7 @@ from remora.typechecker import (
     TypedRavel,
     TypedReshape,
     TypedRightSection,
+    TypedScan,
     TypedShape,
     TypedSlice,
     TypedReverse,
@@ -120,6 +122,27 @@ class HIRReduce:
     func: HIRCallable
     init: HIRExpr
     array: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRFoldRight:
+    """Right-to-left fold reduction."""
+    reduction_dim: DimExpr
+    func: HIRCallable
+    init: HIRExpr
+    array: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRScan:
+    """Prefix-sum (scan) operation."""
+    reduction_dim: DimExpr
+    func: HIRCallable
+    init: HIRExpr
+    array: HIRExpr
+    exclusive: bool
     result_type: RemoraType
 
 
@@ -259,6 +282,8 @@ HIRExpr: TypeAlias = (
     | HIRApply
     | HIRFold
     | HIRReduce
+    | HIRFoldRight
+    | HIRScan
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -328,6 +353,25 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             lower_callable(expr.func),
             lower_expr(expr.init),
             lower_expr(expr.array),
+            expr.type,
+        )
+
+    if isinstance(expr, TypedFoldRight):
+        return HIRFoldRight(
+            expr.reduction_dim,
+            lower_callable(expr.func),
+            lower_expr(expr.init),
+            lower_expr(expr.array),
+            expr.type,
+        )
+
+    if isinstance(expr, TypedScan):
+        return HIRScan(
+            expr.reduction_dim,
+            lower_callable(expr.func),
+            lower_expr(expr.init),
+            lower_expr(expr.array),
+            expr.exclusive,
             expr.type,
         )
 

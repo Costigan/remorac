@@ -13,6 +13,7 @@ from remora.ast_nodes import (
     Expr,
     FloatLit,
     FoldExpr,
+    FoldRightExpr,
     FuncDef,
     IfExpr,
     IndexExpr,
@@ -26,8 +27,10 @@ from remora.ast_nodes import (
     Program,
     RankExpr,
     RavelExpr,
+    ReduceExpr,
     ReshapeExpr,
     RightSectionExpr,
+    ScanExpr,
     ShapeExpr,
     SliceRange,
     ReverseExpr,
@@ -120,6 +123,29 @@ class TypedFold:
     init: TypedExpr
     array: TypedExpr
     reduction_dim: DimExpr
+    type: RemoraType
+
+
+@dataclass(frozen=True)
+class TypedFoldRight:
+    """A typed right-to-left fold reduction."""
+    expr: FoldRightExpr
+    func: TypedExpr
+    init: TypedExpr
+    array: TypedExpr
+    reduction_dim: DimExpr
+    type: RemoraType
+
+
+@dataclass(frozen=True)
+class TypedScan:
+    """A typed scan (prefix-sum) operation."""
+    expr: ScanExpr
+    func: TypedExpr
+    init: TypedExpr
+    array: TypedExpr
+    reduction_dim: DimExpr
+    exclusive: bool
     type: RemoraType
 
 
@@ -275,6 +301,8 @@ TypedExpr: TypeAlias = (
     | TypedArray
     | TypedMap
     | TypedFold
+    | TypedFoldRight
+    | TypedScan
     | TypedShape
     | TypedRank
     | TypedTranspose
@@ -418,6 +446,12 @@ class TypeChecker:
             return self._infer_map(expr, env)
         if isinstance(expr, FoldExpr):
             return self._infer_fold(expr, env)
+        if isinstance(expr, ReduceExpr):
+            return self._infer_reduce(expr, env)
+        if isinstance(expr, FoldRightExpr):
+            return self._infer_fold_right(expr, env)
+        if isinstance(expr, ScanExpr):
+            return self._infer_scan(expr, env)
         if isinstance(expr, ReverseExpr):
             return self._infer_reverse(expr, env)
 
@@ -1032,6 +1066,70 @@ class TypeChecker:
             typed_array,
             typed_array.type.shape[0],
             typed_init.type,
+        )
+
+    def _infer_reduce(self, expr: ReduceExpr, env: TypeEnv) -> TypedFold:
+        typed_init = self.infer(expr.init, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 1:
+            raise RemoraTypeError("reduce expects a non-scalar array", expr.loc)
+
+        element_type = typed_array.type.drop_outer(1)
+        if isinstance(element_type, ArrayType):
+            self._require(typed_init.type, element_type, expr.loc)
+
+        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        typed_func = self.check_callable(expr.func, expected_func_type, env)
+        return TypedFold(
+            expr,  # type: ignore[arg-type]
+            typed_func,
+            typed_init,
+            typed_array,
+            typed_array.type.shape[0],
+            typed_init.type,
+        )
+
+    def _infer_fold_right(self, expr: FoldRightExpr, env: TypeEnv) -> TypedFoldRight:
+        typed_init = self.infer(expr.init, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 1:
+            raise RemoraTypeError("fold-right expects a non-scalar array", expr.loc)
+
+        element_type = typed_array.type.drop_outer(1)
+        if isinstance(element_type, ArrayType):
+            self._require(typed_init.type, element_type, expr.loc)
+
+        expected_func_type = FuncType((element_type, typed_init.type), typed_init.type)
+        typed_func = self.check_callable(expr.func, expected_func_type, env)
+        return TypedFoldRight(
+            expr,
+            typed_func,
+            typed_init,
+            typed_array,
+            typed_array.type.shape[0],
+            typed_init.type,
+        )
+
+    def _infer_scan(self, expr: ScanExpr, env: TypeEnv) -> TypedScan:
+        typed_init = self.infer(expr.init, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType) or typed_array.type.rank < 1:
+            raise RemoraTypeError("scan expects a non-scalar array", expr.loc)
+
+        element_type = typed_array.type.drop_outer(1)
+        if isinstance(element_type, ArrayType):
+            self._require(typed_init.type, element_type, expr.loc)
+
+        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        typed_func = self.check_callable(expr.func, expected_func_type, env)
+        return TypedScan(
+            expr,
+            typed_func,
+            typed_init,
+            typed_array,
+            typed_array.type.shape[0],
+            expr.exclusive,
+            typed_array.type,
         )
 
     def _infer_callable_type_for_map(

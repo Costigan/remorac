@@ -44,6 +44,7 @@ from remora.ast_nodes import (
     Expr,
     FloatLit,
     FoldExpr,
+    FoldRightExpr,
     FuncDef,
     IfExpr,
     IndexExpr,
@@ -57,9 +58,11 @@ from remora.ast_nodes import (
     Program,
     RankExpr,
     RavelExpr,
+    ReduceExpr,
     ReshapeExpr,
     ReverseExpr,
     RightSectionExpr,
+    ScanExpr,
     ShapeExpr,
     SourceLoc,
     TakeExpr,
@@ -88,6 +91,10 @@ array_lit: "[" sexpr* "]"
            | lambda_form
            | map_form
            | fold_form
+           | reduce_form
+           | fold_right_form
+           | scan_form
+           | escan_form
            | iota_form
            | shape_form
            | rank_form
@@ -113,6 +120,10 @@ if_form: "if" sexpr sexpr sexpr -> if_expr
 lambda_form: ("lambda" | "λ") "(" name_token* ")" sexpr -> lambda_expr
 map_form: "map" sexpr sexpr+ -> map_expr
 fold_form: "fold" sexpr sexpr sexpr -> fold_expr
+reduce_form: "reduce" sexpr sexpr sexpr -> reduce_expr
+fold_right_form: "fold-right" sexpr sexpr sexpr -> fold_right_expr
+scan_form: ("scan" | "iscan") sexpr sexpr sexpr -> scan_expr
+escan_form: "escan" sexpr sexpr sexpr -> escan_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 rank_form: "rank" sexpr -> rank_expr
@@ -220,6 +231,30 @@ class LispASTBuilder(Transformer):
         init = items[1]
         array = items[2]
         return FoldExpr(func, init, array, self._loc_from(items))
+
+    def reduce_expr(self, items: list[Any]) -> ReduceExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return ReduceExpr(func, init, array, self._loc_from(items))
+
+    def fold_right_expr(self, items: list[Any]) -> FoldRightExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return FoldRightExpr(func, init, array, self._loc_from(items))
+
+    def scan_expr(self, items: list[Any]) -> ScanExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return ScanExpr(func, init, array, self._loc_from(items), exclusive=False)
+
+    def escan_expr(self, items: list[Any]) -> ScanExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return ScanExpr(func, init, array, self._loc_from(items), exclusive=True)
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 

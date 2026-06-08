@@ -13,6 +13,7 @@ from remora.hir import (
     HIRDrop,
     HIRExpr,
     HIRFold,
+    HIRFoldRight,
     HIRFunction,
     HIRIf,
     HIRIndex,
@@ -27,6 +28,7 @@ from remora.hir import (
     HIRReduce,
     HIRReshape,
     HIRReverse,
+    HIRScan,
     HIRSlice,
     HIRTake,
     HIRTranspose,
@@ -72,6 +74,7 @@ from remora.lowering.tensor_ops import (
     _lower_scalar_fold_result,
     _lower_scalar_map_binary_module,
     _lower_scalar_map_module,
+    _lower_scan_module,
     _lower_tensor_input,
     _lower_transpose_input,
     _parallel_iterators,
@@ -185,6 +188,8 @@ class MLIRLowering:
                 HIRApply,
                 HIRFold,
                 HIRReduce,
+                HIRFoldRight,
+                HIRScan,
             ),
         ):
             raise RemoraLoweringError(
@@ -412,7 +417,9 @@ def _lower_main_module(
     | HIRMap
     | HIRApply
     | HIRFold
-    | HIRReduce,
+    | HIRReduce
+    | HIRFoldRight
+    | HIRScan,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(
@@ -448,6 +455,14 @@ def _lower_main_module(
         return _lower_array_literal_module(node)
     if isinstance(node, (HIRFold, HIRReduce)):
         return _lower_fold_module(node, functions)
+    if isinstance(node, HIRFoldRight):
+        return _lower_fold_module(node, functions)
+    if isinstance(node, HIRScan):
+        return _lower_scan_module(node, functions)
+    if not isinstance(node, (HIRMap, HIRApply)):
+        raise RemoraLoweringError(
+            f"unexpected map/apply node type {type(node).__name__}"
+        )
     if len(node.arrays) == 2:
         if not node.cell_shape and not isinstance(
             node.result_type, ArrayType
