@@ -11,6 +11,7 @@ from remora.ast_nodes import (
     FloatLit,
     IntLit,
     IotaExpr,
+    LengthExpr,
     VarExpr,
 )
 from remora.errors import RemoraError
@@ -28,6 +29,7 @@ from remora.typechecker import (
     TypedIndex,
     TypedLambda,
     TypedLeftSection,
+    TypedLength,
     TypedLet,
     TypedMap,
     TypedOperatorFunc,
@@ -383,6 +385,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedRank):
         return HIRLit(expr.array.type.rank, INT)
+
+    if isinstance(expr, TypedLength):
+        return HIRLit(expr.dim.value, INT)
 
     if isinstance(expr, TypedIndex):
         return HIRIndex(
