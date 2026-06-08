@@ -15,6 +15,7 @@ from remora.hir import (
     HIRCast,
     HIRDrop,
     HIRExpr,
+    HIRFilter,
     HIRFold,
     HIRFoldRight,
     HIRFunction,
@@ -32,6 +33,7 @@ from remora.hir import (
     HIRProgram,
     HIRRavel,
     HIRReduce,
+    HIRReplicate,
     HIRReshape,
     HIRReverse,
     HIRRotate,
@@ -169,6 +171,16 @@ class _Defunctionalizer:
             HIRAppend: lambda e: HIRAppend(
                 self._rewrite_expr(e.left, scalar_env),
                 self._rewrite_expr(e.right, scalar_env),
+                e.result_type,
+            ),
+            HIRFilter: lambda e: HIRFilter(
+                self._rewrite_callable(e.predicate, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRReplicate: lambda e: HIRReplicate(
+                self._rewrite_expr(e.counts, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

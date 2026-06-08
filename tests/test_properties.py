@@ -450,3 +450,33 @@ class TestCompiledVsInterpreter:
     def test_replicate_interpreter(self):
         r = evaluate_source("(replicate [2 1 3] [10 20 30])", include_prelude=False, syntax="lisp")
         np.testing.assert_array_equal(r.value, [10, 10, 20, 30, 30, 30])
+
+    def test_filter_all_pass(self):
+        r = evaluate_source("(filter (> 0) [1 2 3])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+    def test_filter_none_pass(self):
+        r = evaluate_source("(filter (> 0) [-1 -2 -3])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [])
+
+    def test_replicate_single(self):
+        r = evaluate_source("(replicate [3] [42])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [42, 42, 42])
+
+    # ── With-shape as sub-expression (compiled path) ──────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(map (+ 1) (with-shape 5 [3]))",
+    ])
+    def test_with_shape_subexpr(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
+    # ── With-shape edge cases (interpreter only) ──────────────────────────
+
+    def test_with_shape_fold_interp(self):
+        r = evaluate_source("(fold + 0 (with-shape 2 [4]))", include_prelude=False, syntax="lisp")
+        assert r.value == 8
+
+    def test_with_shape_nested_interp(self):
+        r = evaluate_source("(with-shape (with-shape 1 [2]) [3])", include_prelude=False, syntax="lisp")
+        np.testing.assert_array_equal(r.value, [[1, 1], [1, 1], [1, 1]])
