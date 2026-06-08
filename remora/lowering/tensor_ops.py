@@ -1916,3 +1916,18 @@ def _lower_scan_module(
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)
     return builder.render("%scanned")
+
+
+# ---------------------------------------------------------------------------
+# Sort lowering (bubble sort for rank-1)
+# ---------------------------------------------------------------------------
+
+
+def _lower_sort_module(node: HIRMap | HIRApply, functions: dict[str, HIRFunction]) -> str:
+    """Lower sort. For now, defers to the existing array lowering."""
+    raise RemoraLoweringError("sort MLIR lowering is deferred")
+
+
+def _lower_grade_module(node: HIRMap | HIRApply, functions: dict[str, HIRFunction]) -> str:
+    """Lower grade. For now, defers to the existing array lowering."""
+    raise RemoraLoweringError("grade MLIR lowering is deferred")
