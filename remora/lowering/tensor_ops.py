@@ -1681,6 +1681,34 @@ def _lower_rotate_module(
 
 
 # ---------------------------------------------------------------------------
+# Subarray lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_subarray_module(
+    node: HIRSubarray, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    input_code, input_name, input_type, _input_elem = _lower_tensor_input(
+        node.array, "input", functions
+    )
+    result_type_mlir = type_to_mlir(node.result_type)
+    input_type_mlir = type_to_mlir(_expr_result_type(node.array))
+
+    offsets = ", ".join(str(o.value) for o in node.offsets)
+    sizes = ", ".join(str(s.value) for s in node.sizes)
+    strides = ", ".join("1" for _ in node.offsets)
+
+    body = f"""{input_code}
+    %extracted = tensor.extract_slice {input_name}[{offsets}] [{sizes}] [{strides}] : {input_type_mlir} to {result_type_mlir}"""
+
+    builder = _MLIRMainModuleBuilder(result_type_mlir)
+    builder.add_block(body)
+    return builder.render("%extracted")
+
+
+# ---------------------------------------------------------------------------
 # Scan lowering
 # ---------------------------------------------------------------------------
 

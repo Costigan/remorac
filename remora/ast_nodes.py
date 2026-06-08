@@ -82,6 +82,14 @@ class RerankExpr:
 
 
 @dataclass(frozen=True)
+class SubarrayExpr:
+    array: Expr
+    offsets: list[Expr]
+    shape: list[Expr]
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class LambdaExpr:
     params: list[str]
     body: Expr
@@ -292,6 +300,7 @@ Expr: TypeAlias = (
     | AppendExpr
     | RotateExpr
     | RerankExpr
+    | SubarrayExpr
     | LambdaExpr
     | AppExpr
     | MapExpr

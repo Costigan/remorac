@@ -491,7 +491,7 @@ Total calendar time (1 engineer):
 - [x] `rotate` — circular shift with per-axis rotation vector
 - [ ] `indices-of` — coordinate array for each position
 - [ ] `with-shape` — replicate scalar/array to match target shape
-- [ ] `subarray` — extract rectangular region by offset and shape
+- [x] `subarray` — extract rectangular region by offset and shape
 - [ ] `filter` — select subarrays by boolean mask (→ boxes)
 - [x] `select` — element-wise ternary (already via tensor `if`)
 - [ ] `replicate` — repeat items by count vector (→ boxes)

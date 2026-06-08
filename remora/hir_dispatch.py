@@ -47,13 +47,11 @@ from remora.hir import (
     HIRRotate,
     HIRScan,
     HIRSlice,
+    HIRSubarray,
     HIRTake,
     HIRTranspose,
     HIRVar,
 )
-
-T = TypeVar("T")
-Handler = Callable[[HIRExpr], T]
 
 # Ordered list of all HIR expression types for dispatch.
 _ALL_HIR_TYPES: tuple[type, ...] = (
@@ -80,6 +78,7 @@ _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRRotate,
     HIRScan,
     HIRSlice,
+    HIRSubarray,
     HIRTake,
     HIRTranspose,
     HIRVar,
