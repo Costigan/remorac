@@ -122,6 +122,13 @@ class FilterExpr:
 
 
 @dataclass(frozen=True)
+class ReplicateExpr:
+    counts: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class UnboxExpr:
     box_expr: Expr
     hidden_names: list[str]
@@ -348,6 +355,7 @@ Expr: TypeAlias = (
     | UnboxExpr
     | Iota1Expr
     | FilterExpr
+    | ReplicateExpr
     | LambdaExpr
     | AppExpr
     | MapExpr

@@ -35,6 +35,7 @@ from remora.ast_nodes import (
     RavelExpr,
     ReduceExpr,
     RerankExpr,
+    ReplicateExpr,
     ReshapeExpr,
     RightSectionExpr,
     RotateExpr,
@@ -580,6 +581,8 @@ class TypeChecker:
             return self._infer_iota1(expr, env)
         if isinstance(expr, FilterExpr):
             return self._infer_filter(expr, env)
+        if isinstance(expr, ReplicateExpr):
+            return self._infer_replicate(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1457,6 +1460,17 @@ class TypeChecker:
         # The predicate must accept the array's element type
         if isinstance(typed_pred.type, FuncType):
             pass  # TODO: check predicate returns bool
+        sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
+        return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
+
+    def _infer_replicate(self, expr: ReplicateExpr, env: TypeEnv) -> TypedExpr:
+        """replicate counts xs : (Σ (len) [elem len]) — boxed repeated array."""
+        typed_counts = self.infer(expr.counts, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_counts.type, ArrayType) or typed_counts.type.element != INT:
+            raise RemoraTypeError("replicate expects an integer count vector", expr.loc)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("replicate expects an array", expr.loc)
         sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
         return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
 

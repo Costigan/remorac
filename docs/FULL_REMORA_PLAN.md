@@ -518,7 +518,7 @@ Total calendar time (1 engineer):
 - [ ] `iota2` — produces boxed matrix
 - [ ] `iota0` through `iota9` — rank-monomorphic boxed iota
 - [x] `filter` result is boxed (unknown count)
-- [ ] `replicate` result is boxed
+- [x] `replicate` result is boxed
 - [x] Typechecker: witness information cannot leak into result type
 - [x] Typechecker: unbox body's result shape must not depend on witness
 - [ ] GPU: box storage in pre-allocated device buffers
