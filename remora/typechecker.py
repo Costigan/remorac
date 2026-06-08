@@ -25,6 +25,7 @@ from remora.ast_nodes import (
     IntLit,
     Iota1Expr,
     IotaExpr,
+    IotaNExpr,
     LambdaExpr,
     LeftSectionExpr,
     LengthExpr,
@@ -581,6 +582,8 @@ class TypeChecker:
             return self._infer_unbox(expr, env)
         if isinstance(expr, Iota1Expr):
             return self._infer_iota1(expr, env)
+        if isinstance(expr, IotaNExpr):
+            return self._infer_iotan(expr, env)
         if isinstance(expr, FilterExpr):
             return self._infer_filter(expr, env)
         if isinstance(expr, ReplicateExpr):
@@ -1450,12 +1453,25 @@ class TypeChecker:
 
     def _infer_iota1(self, expr: Iota1Expr, env: TypeEnv) -> TypedExpr:
         """iota1 n : (Σ (len) [int len]) — boxed iota of runtime size."""
-        typed_size = self.infer(expr.size, env)
-        if typed_size.type != INT:
-            raise RemoraTypeError("iota1 expects an integer size", expr.loc)
-        # Produce a boxed type: (Σ (len) [int len])
-        sigma = SigmaType(("len",), ArrayType(INT, (StaticDim(0),)))
-        return TypedBox(BoxExpr(expr, expr.loc), typed_size, sigma)  # type: ignore
+        size = eval_static_dim(expr.size, expr.loc)
+        iota_type = ArrayType(INT, (size,))
+        sigma = SigmaType(("len",), iota_type)
+        # Infer the iota itself, then wrap in a box
+        typed_iota = TypedExprNode(IotaExpr(expr.size, expr.loc), iota_type)
+        synthetic_box = BoxExpr(IotaExpr(expr.size, expr.loc), expr.loc)
+        return TypedBox(synthetic_box, typed_iota, sigma)
+
+    def _infer_iotan(self, expr: IotaNExpr, env: TypeEnv) -> TypedExpr:
+        """iotaN d1 ... dN : (Σ (dims...) [int d1 ... dN]) — boxed multi-dim iota."""
+        dims = tuple(eval_static_dim(s, expr.loc) for s in expr.sizes)
+        if len(dims) != expr.rank:
+            raise RemoraTypeError(f"iota{expr.rank} expects {expr.rank} dimensions", expr.loc)
+        iota_type = ArrayType(INT, dims)
+        hidden_names = tuple(f"d{i}" for i in range(expr.rank))
+        sigma = SigmaType(hidden_names, iota_type)
+        typed_iota = TypedExprNode(IotaExpr(IntLit(dims[0].value, expr.loc), expr.loc), iota_type)
+        synthetic_box = BoxExpr(IotaExpr(expr.sizes[0], expr.loc), expr.loc)
+        return TypedBox(synthetic_box, typed_iota, sigma)
 
     def _infer_filter(self, expr: FilterExpr, env: TypeEnv) -> TypedExpr:
         """filter pred xs : (Σ (len) [elem len]) — boxed filtered array."""
@@ -1463,11 +1479,21 @@ class TypeChecker:
         typed_array = self.infer(expr.array, env)
         if not isinstance(typed_array.type, ArrayType):
             raise RemoraTypeError("filter expects an array", expr.loc)
-        # The predicate must accept the array's element type
-        if isinstance(typed_pred.type, FuncType):
-            pass  # TODO: check predicate returns bool
-        sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
-        return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
+        sigma = SigmaType(("len",), typed_array.type)
+        synthetic_box = BoxExpr(expr, expr.loc)
+        return TypedBox(synthetic_box, typed_array, sigma)
+
+    def _infer_replicate(self, expr: ReplicateExpr, env: TypeEnv) -> TypedExpr:
+        """replicate counts xs : (Σ (len) [elem len]) — boxed repeated array."""
+        typed_counts = self.infer(expr.counts, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_counts.type, ArrayType) or typed_counts.type.element != INT:
+            raise RemoraTypeError("replicate expects an integer count vector", expr.loc)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("replicate expects an array", expr.loc)
+        sigma = SigmaType(("len",), typed_array.type)
+        synthetic_box = BoxExpr(expr, expr.loc)
+        return TypedBox(synthetic_box, typed_array, sigma)
 
     def _infer_replicate(self, expr: ReplicateExpr, env: TypeEnv) -> TypedExpr:
         """replicate counts xs : (Σ (len) [elem len]) — boxed repeated array."""

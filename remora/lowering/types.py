@@ -36,6 +36,8 @@ from remora.types import (
     FuncType,
     RemoraType,
     ScalarType,
+    SigmaType,
+    StaticDim,
 )
 
 
@@ -61,6 +63,8 @@ def type_to_mlir(value_type: RemoraType) -> str:
         return f"({params}) -> {type_to_mlir(value_type.result)}"
     if isinstance(value_type, ScalarType):
         raise RemoraLoweringError(f"unknown scalar type {value_type.name}")
+    if isinstance(value_type, SigmaType):
+        return type_to_mlir(value_type.body)
     raise RemoraLoweringError(f"cannot lower type {value_type}")
 
 
