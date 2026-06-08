@@ -350,6 +350,14 @@ class TypedIndicesOf:
     type: ArrayType
 
 
+@dataclass(frozen=True)
+class TypedWithShape:
+    """A typed with-shape (broadcast replication) expression."""
+    expr: WithShapeExpr
+    source: TypedExpr
+    type: ArrayType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -378,6 +386,7 @@ TypedExpr: TypeAlias = (
     | TypedRotate
     | TypedSubarray
     | TypedIndicesOf
+    | TypedWithShape
     | TypedLet
     | TypedIf
 )
@@ -1363,13 +1372,7 @@ class TypeChecker:
             result_type = ArrayType(typed_target.type.element, shape_dims + typed_target.type.shape)
         else:
             raise RemoraTypeError("with-shape expects a scalar or array target", expr.loc)
-        return TypedExprNode(expr, result_type)
-
-        # Return as a callable-ready node; concrete type is resolved by context
-        return TypedExprNode(
-            lambda_expr,
-            FuncType(tuple(INT for _ in range(n)), INT),
-        )
+        return TypedWithShape(expr, typed_target, result_type)
 
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv

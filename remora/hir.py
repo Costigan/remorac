@@ -50,6 +50,7 @@ from remora.typechecker import (
     TypedReverse,
     TypedTake,
     TypedTranspose,
+    TypedWithShape,
     TypedDrop,
 )
 from remora.types import (
@@ -463,6 +464,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
     if isinstance(expr, TypedIndicesOf):
         return HIRIndicesOf(lower_expr(expr.array), expr.type)
 
+    if isinstance(expr, TypedWithShape):
+        return HIRWithShape(lower_expr(expr.source), expr.type)
+
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore
 
@@ -582,24 +586,9 @@ def _lower_typed_node(expr: TypedExprNode) -> HIRExpr:
             raise HIRLoweringError("lambda must have a function type")
         return HIRLambda(
             [HIRParam(name, param_type) for name, param_type in zip(ast.params, expr.type.params)],
-            # Body will need context to be lowered; defer to typechecker
             HIRLit(0, INT),
             expr.type,
         )
-    if isinstance(ast, LengthExpr):
-        # Length is already lowered to HIRLit in the typed path
-        if isinstance(expr.type, ScalarType):
-            return HIRLit(0, INT)
-        raise HIRLoweringError("length must have a scalar type")
-    if isinstance(ast, WithShapeExpr):
-        if not isinstance(expr.type, ArrayType):
-            raise HIRLoweringError("with-shape must have an array type")
-        source_val = expr.expr.target
-        if isinstance(source_val, IntLit):
-            return HIRWithShape(HIRLit(source_val.value, INT), expr.type)
-        if isinstance(source_val, FloatLit):
-            return HIRWithShape(HIRLit(source_val.value, FLOAT), expr.type)
-        raise HIRLoweringError(f"with-shape source {type(source_val).__name__} is deferred")
     raise HIRLoweringError(f"lowering for {type(ast).__name__} is deferred")
 
 
