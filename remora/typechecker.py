@@ -113,6 +113,53 @@ from remora.types import (
 )
 
 
+# ── Forall-typed primitive signatures ─────────────────────────────────────
+
+from remora.types import TypeBinder as _TypeBinder
+
+_PRIMITIVE_FORALL = {
+    "+": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
+    ),
+    "-": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
+    ),
+    "*": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
+    ),
+    "/": FuncType((FLOAT, FLOAT), FLOAT),
+    "<": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    "<=": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    ">": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    ">=": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    "==": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    "!=": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), BOOL),
+    ),
+    "&&": FuncType((BOOL, BOOL), BOOL),
+    "||": FuncType((BOOL, BOOL), BOOL),
+}
+
+
 @dataclass(frozen=True)
 class TypedProgram:
     """A fully typed program with top-level definitions and an optional body."""
@@ -1036,50 +1083,74 @@ class TypeChecker:
         right = self.infer(expr.args[1], env)
         op = expr.func.name
 
-        if op in {"+", "-", "*"}:
-            result_type = self._common_fold_operator_type(left.type, right.type, expr.loc)
+        sig = _PRIMITIVE_FORALL.get(op)
+        if sig is None:
+            raise RemoraTypeError(f"unknown primitive operator '{op}'", expr.loc)
+
+        if isinstance(sig, FuncType):
+            result_type = sig.result
+            # /: force Float; && / ||: force Bool
+            if op == "/":
+                if not is_numeric(left.type) or not is_numeric(right.type):
+                    raise RemoraTypeError("division expects numeric operands", expr.loc)
+                return TypedApp(
+                    expr,
+                    TypedExprNode(expr.func, sig),
+                    [self._coerce(left, FLOAT, expr.loc), self._coerce(right, FLOAT, expr.loc)],
+                    FLOAT,
+                )
+            # && / ||
+            self._require(left.type, BOOL, expr.loc)
+            self._require(right.type, BOOL, expr.loc)
+            return TypedApp(expr, TypedExprNode(expr.func, sig), [left, right], BOOL)
+
+        # Forall-typed: infer type variable from operands
+        if isinstance(sig, ForallType):
+            func_type = self._resolve_primitive_forall(op, sig, left.type, right.type, expr.loc)
+            param_type = func_type.params[0]  # promoted operand type
+            result_type = func_type.result
+            # Post-resolution numeric validation
+            if op in {"+", "-", "*"} and not is_numeric(param_type):
+                raise RemoraTypeError(f"operator {op} expects numeric operands", expr.loc)
             return TypedApp(
                 expr,
-                TypedExprNode(expr.func, FuncType((result_type, result_type), result_type)),
+                TypedExprNode(expr.func, func_type),
                 [
-                    self._coerce(left, result_type, expr.loc) if not isinstance(left.type, ArrayType) else left,
-                    self._coerce(right, result_type, expr.loc) if not isinstance(right.type, ArrayType) else right,
+                    self._coerce(left, param_type, expr.loc) if not isinstance(left.type, ArrayType) else left,
+                    self._coerce(right, param_type, expr.loc) if not isinstance(right.type, ArrayType) else right,
                 ],
                 result_type,
             )
-        if op == "/":
-            if not is_numeric(left.type) or not is_numeric(right.type):
-                raise RemoraTypeError("division expects numeric operands", expr.loc)
-            return TypedApp(
-                expr,
-                TypedExprNode(expr.func, FuncType((FLOAT, FLOAT), FLOAT)),
-                [
-                    self._coerce(left, FLOAT, expr.loc),
-                    self._coerce(right, FLOAT, expr.loc),
-                ],
-                FLOAT,
+
+        raise RemoraTypeError(f"unexpected signature for '{op}'", expr.loc)
+
+    def _resolve_primitive_forall(
+        self,
+        op: str,
+        sig: ForallType,
+        left_type: RemoraType,
+        right_type: RemoraType,
+        loc,
+    ) -> FuncType:
+        """Infer type variable bindings from operands and instantiate the Forall."""
+        # For arithmetic/comparison ops, promote to common numeric type first
+        if op in {"+", "-", "*", "<", "<=", ">", ">=", "==", "!="}:
+            promoted = common_numeric_type(left_type, right_type)
+            bindings = {b.name: promoted for b in sig.binders}
+            return instantiate_forall_type(  # type: ignore[return-value]
+                sig,
+                tuple(bindings[b.name] for b in sig.binders),
             )
-        if op in {"<", "<=", ">", ">=", "==", "!="}:
-            result_type = common_numeric_type(left.type, right.type)
-            return TypedApp(
-                expr,
-                TypedExprNode(expr.func, FuncType((result_type, result_type), BOOL)),
-                [
-                    self._coerce(left, result_type, expr.loc),
-                    self._coerce(right, result_type, expr.loc),
-                ],
-                BOOL,
-            )
-        if op in {"&&", "||"}:
-            self._require(left.type, BOOL, expr.loc)
-            self._require(right.type, BOOL, expr.loc)
-            return TypedApp(
-                expr,
-                TypedExprNode(expr.func, FuncType((BOOL, BOOL), BOOL)),
-                [left, right],
-                BOOL,
-            )
-        raise RemoraTypeError(f"unknown primitive operator '{op}'", expr.loc)
+        # For purely polymorphic ops, infer directly from operand types
+        bindings: dict[str, ScalarType] = {}
+        binder_names = frozenset(b.name for b in sig.binders)
+        declared_params = sig.body.params if isinstance(sig.body, FuncType) else ()
+        for dtype, atype in zip(declared_params, (left_type, right_type)):
+            _infer_type_vars(dtype, atype, bindings, binder_names)
+        return instantiate_forall_type(  # type: ignore[return-value]
+            sig,
+            tuple(bindings[b.name] for b in sig.binders),
+        )
 
     def _infer_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
         if len(expr.arrays) == 2:
@@ -1151,21 +1222,29 @@ class TypeChecker:
         env: TypeEnv,
     ) -> FuncType:
         if isinstance(expr, OperatorFuncExpr):
-            if expr.op in {"+", "-", "*"}:
-                result = common_numeric_type(left_cell, right_cell)
-                return FuncType((result, result), result)
-            if expr.op == "/":
-                self._require_numeric(left_cell, expr.loc)
-                self._require_numeric(right_cell, expr.loc)
-                return FuncType((FLOAT, FLOAT), FLOAT)
-            if expr.op in {"<", "<=", "==", "!="}:
-                result = common_numeric_type(left_cell, right_cell)
-                return FuncType((result, result), BOOL)
-            if expr.op in {"&&", "||"}:
-                self._require(left_cell, BOOL, expr.loc)
-                self._require(right_cell, BOOL, expr.loc)
-                return FuncType((BOOL, BOOL), BOOL)
-            raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
+            sig = _PRIMITIVE_FORALL.get(expr.op)
+            if sig is None:
+                raise RemoraTypeError(f"operator {expr.op} is deferred", expr.loc)
+            if isinstance(sig, FuncType):
+                if expr.op == "/":
+                    self._require_numeric(left_cell, expr.loc)
+                    self._require_numeric(right_cell, expr.loc)
+                    return sig
+                if expr.op in {"&&", "||"}:
+                    self._require(left_cell, BOOL, expr.loc)
+                    self._require(right_cell, BOOL, expr.loc)
+                    return sig
+            if isinstance(sig, ForallType):
+                func_type = self._resolve_primitive_forall(
+                    expr.op, sig, left_cell, right_cell, expr.loc
+                )
+                result = func_type.result
+                if expr.op in {"+", "-", "*"} and not is_numeric(result):
+                    raise RemoraTypeError(f"operator {expr.op} expects numeric operands", expr.loc)
+                if expr.op in {"<", "<=", "==", "!="} and not is_numeric(result):
+                    raise RemoraTypeError(f"comparison {expr.op} expects numeric operands", expr.loc)
+                return func_type
+            raise RemoraTypeError(f"unexpected signature for {expr.op}", expr.loc)
 
         if isinstance(expr, VarExpr) and expr.name in ALL_PRIMITIVE_OPS:
             return self._infer_binary_callable_type_for_primitive(
@@ -1876,17 +1955,33 @@ class TypeChecker:
                     symbolic_env,
                 )
             if isinstance(declared_type, ForallType):
-                if not isinstance(declared_type.body, FuncType):
+                # Forall may wrap PiType or FuncType
+                inner = declared_type.body
+                if isinstance(inner, PiType):
+                    if not isinstance(inner.body, FuncType):
+                        raise RemoraTypeError(
+                            "dependent function annotation must contain a function type",
+                            definition.loc,
+                        )
+                    symbolic_env = env
+                    for binder in inner.binders:
+                        symbolic_env = symbolic_env.extend_index(binder)
+                    self._typed_top_level_function(
+                        definition,
+                        inner.body,
+                        symbolic_env,
+                    )
+                elif isinstance(inner, FuncType):
+                    self._typed_top_level_function(
+                        definition,
+                        inner,
+                        env,
+                    )
+                else:
                     raise RemoraTypeError(
                         "Forall function annotation must contain a function type",
                         definition.loc,
                     )
-                # Check the body under symbolic parameter types
-                self._typed_top_level_function(
-                    definition,
-                    declared_type.body,
-                    env,
-                )
             return TypedDefinition(
                 definition,
                 None,
@@ -1911,6 +2006,46 @@ class TypeChecker:
                 type_bindings[b.name] for b in declared_type.binders
             )
             instantiated_body = instantiate_forall_type(declared_type, type_args)
+            # The Forall body may be PiType or FuncType
+            if isinstance(instantiated_body, PiType):
+                # Unwrap Pi: the instantiated_body has concrete element types
+                # but still symbolic dims. Infer index args and specialize.
+                if not isinstance(instantiated_body.body, FuncType):
+                    raise RemoraTypeError(
+                        "dependent function annotation must contain a function type",
+                        expr.loc,
+                    )
+                # Infer dim-level bindings from the actual args against
+                # the instantiated (concrete element types) declared params
+                instantiated_params = instantiated_body.body.params
+                index_bindings = self._infer_index_bindings(
+                    function,
+                    instantiated_params,
+                    actual_param_types,
+                )
+                specialized_params = tuple(
+                    substitute_type(pt, index_bindings)
+                    for pt in instantiated_params
+                )
+                declared_result = self._declared_result_type(function)
+                if declared_result is None:
+                    raise RemoraTypeError("dependent function needs result type", expr.loc)
+                # Substitute both element-type and index bindings
+                declared_result = substitute_element_types(declared_result, type_bindings)
+                specialized_result = substitute_type(declared_result, index_bindings)
+                func_type = FuncType(specialized_params, specialized_result)
+                index_args = tuple(
+                    index_bindings[binder.name]
+                    for binder in self._index_binders(function)
+                )
+                typed_func = self._typed_top_level_function(
+                    function, func_type, env, index_args=index_args,
+                )
+                typed_args = [
+                    self._coerce(arg, param_type, expr.loc)
+                    for arg, param_type in zip(typed_args, func_type.params)
+                ]
+                return TypedApp(expr, typed_func, typed_args, func_type.result)
             if isinstance(instantiated_body, FuncType):
                 index_args = self._inferred_index_args(function, actual_param_types)
                 typed_func = self._typed_top_level_function(
@@ -2245,11 +2380,14 @@ class TypeChecker:
         actual_param_types: tuple[RemoraType, ...],
     ) -> dict[str, ScalarType]:
         """Infer element-type variable bindings from actual argument types."""
-        if not isinstance(forall_type.body, FuncType):
+        inner = forall_type.body
+        if isinstance(inner, PiType):
+            inner = inner.body
+        if not isinstance(inner, FuncType):
             raise RemoraTypeError(
-                "Forall body must be a function type", function.loc
+                "Forall body must wrap a function type", function.loc
             )
-        declared_params = forall_type.body.params
+        declared_params = inner.params
         if len(declared_params) != len(actual_param_types):
             raise RemoraTypeError("Forall arity mismatch", function.loc)
 

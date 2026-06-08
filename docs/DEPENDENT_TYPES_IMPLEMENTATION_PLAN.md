@@ -690,7 +690,7 @@ Remaining Phase 7.4 work:
 - [x] `substitute_element_types` and `instantiate_forall_type`
 - [x] Core verifier accepts ForallType
 - [x] Element-polymorphic identity works (Int and Float)
-- [ ] Append with both element and shape parameters
+- [x] Append with both element and shape parameters (combined Forall+Pi)
 
 Deliverables:
 
