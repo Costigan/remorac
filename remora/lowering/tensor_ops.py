@@ -1766,6 +1766,44 @@ def _lower_indices_of_module(
 
 
 # ---------------------------------------------------------------------------
+# With-shape lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_with_shape_module(
+    node: HIRWithShape, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    rank = node.result_type.rank
+
+    identity = _identity_affine_map(rank)
+    iterators = _parallel_iterators(rank)
+
+    # For scalar→tensor: splat the value
+    source_remora = _expr_result_type(node.source)
+    if isinstance(source_remora, ScalarType):
+        lit_val = _literal_value(node.source, result_elem)
+        body = f"""    %val = arith.constant {lit_val} : {result_elem}
+    %empty = tensor.empty() : {result_type}
+    %result = linalg.generic {{
+      indexing_maps = [{identity}],
+      iterator_types = {iterators}
+    }} outs(%empty : {result_type}) {{
+    ^bb0(%out: {result_elem}):
+      linalg.yield %val : {result_elem}
+    }} -> {result_type}"""
+    else:
+        raise RemoraLoweringError("only scalar→tensor with-shape lowers to MLIR so far")
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%result")
+
+
+# ---------------------------------------------------------------------------
 # Scan lowering
 # ---------------------------------------------------------------------------
 

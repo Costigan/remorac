@@ -125,8 +125,9 @@ array_lit: "[" sexpr* "]"
            | ravel_form
            | take_form
            | drop_form
-           | index_form
-           | application
+            | index_form
+            | index_item_form
+            | application
 
 ?name_token: NAME | MINUS
 
@@ -167,6 +168,7 @@ ravel_form: "ravel" sexpr -> ravel_expr
 take_form: "take" sexpr sexpr -> take_expr
 drop_form: "drop" sexpr sexpr -> drop_expr
 index_form: "index" sexpr sexpr+ -> index_expr
+index_item_form: "index-item" sexpr sexpr -> index_expr
 
 application: sexpr sexpr* -> app
 

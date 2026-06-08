@@ -52,6 +52,7 @@ from remora.hir import (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 
 # Ordered list of all HIR expression types for dispatch.
@@ -84,6 +85,7 @@ _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 
 

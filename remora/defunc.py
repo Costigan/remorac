@@ -39,6 +39,7 @@ from remora.hir import (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 from remora.hir_dispatch import hir_dispatch
 from remora.types import ScalarType
@@ -145,6 +146,10 @@ class _Defunctionalizer:
             ),
             HIRIndicesOf: lambda e: HIRIndicesOf(
                 self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRWithShape: lambda e: HIRWithShape(
+                self._rewrite_expr(e.source, scalar_env),
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),
