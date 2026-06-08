@@ -65,7 +65,8 @@ def type_to_mlir(value_type: RemoraType) -> str:
     if isinstance(value_type, ScalarType):
         raise RemoraLoweringError(f"unknown scalar type {value_type.name}")
     if isinstance(value_type, SigmaType):
-        return type_to_mlir(value_type.body)
+        elem = type_to_mlir(value_type.body.element if isinstance(value_type.body, ArrayType) else value_type.body)
+        return f"tensor<?x{elem}>"
     raise RemoraLoweringError(f"cannot lower type {value_type}")
 
 

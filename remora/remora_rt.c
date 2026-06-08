@@ -112,15 +112,15 @@ void remora_grade_f32(
     free(pairs);
 }
 
-/* ── Filter (dynamic output size) ───────────────────────────────────────── */
+/* ── Filter (dynamic output size, returns actual count) ────────────────── */
 
-void remora_filter_i32(
+int64_t remora_filter_i32(
     int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
     int32_t* mask_alloc, int32_t* mask_align, int64_t mask_off, int64_t mask_n, int64_t mask_str,
     int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
 ) {
     (void)src_alloc; (void)src_str; (void)mask_alloc; (void)mask_n; (void)mask_str;
-    (void)dst_alloc; (void)dst_str;
+    (void)dst_alloc; (void)dst_n; (void)dst_str;
     int32_t* src_data  = (int32_t*)_mr_data(src_align, src_off);
     int32_t* mask_data = (int32_t*)_mr_data(mask_align, mask_off);
     int32_t* dst_data  = (int32_t*)_mr_data(dst_align, dst_off);
@@ -132,19 +132,16 @@ void remora_filter_i32(
             dst_data[out_n++] = src_data[i];
         }
     }
-    // Can't write back to descriptor — sizes[0] is passed by value.
-    // Instead, write the count to the first element of a reserved area?
-    // For now, just fill what we can; caller reads via the numpy array shape.
-    (void)dst_n;
+    return out_n;
 }
 
-void remora_filter_f32(
+int64_t remora_filter_f32(
     float* src_alloc, float* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
     int32_t* mask_alloc, int32_t* mask_align, int64_t mask_off, int64_t mask_n, int64_t mask_str,
     float* dst_alloc, float* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
 ) {
     (void)src_alloc; (void)src_str; (void)mask_alloc; (void)mask_n; (void)mask_str;
-    (void)dst_alloc; (void)dst_str;
+    (void)dst_alloc; (void)dst_n; (void)dst_str;
     float*   src_data  = (float*)_mr_data(src_align, src_off);
     int32_t* mask_data = (int32_t*)_mr_data(mask_align, mask_off);
     float*   dst_data  = (float*)_mr_data(dst_align, dst_off);
@@ -156,18 +153,50 @@ void remora_filter_f32(
             dst_data[out_n++] = src_data[i];
         }
     }
-    (void)dst_n;
+    return out_n;
 }
 
-/* ── Replicate (dynamic output size) ────────────────────────────────────── */
+/* ── Replicate count helper (compute output size without filling) ───────── */
 
-void remora_replicate_i32(
+int64_t remora_replicate_i32_count(
+    int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
+    int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str
+) {
+    (void)src_alloc; (void)src_align; (void)src_off; (void)src_str;
+    (void)cnt_alloc; (void)cnt_align; (void)cnt_off; (void)cnt_str;
+    int32_t* cnt_data = (int32_t*)_mr_data(cnt_align, cnt_off);
+    int64_t n = src_n;
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += cnt_data[i];
+    }
+    return total;
+}
+
+int64_t remora_replicate_f32_count(
+    float* src_alloc, float* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
+    int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str
+) {
+    (void)src_alloc; (void)src_align; (void)src_off; (void)src_str;
+    (void)cnt_alloc; (void)cnt_align; (void)cnt_off; (void)cnt_str;
+    int32_t* cnt_data = (int32_t*)_mr_data(cnt_align, cnt_off);
+    int64_t n = src_n;
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += cnt_data[i];
+    }
+    return total;
+}
+
+/* ── Replicate (dynamic output size, returns actual count) ──────────────── */
+
+int64_t remora_replicate_i32(
     int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
     int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str,
     int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
 ) {
     (void)src_alloc; (void)src_str; (void)cnt_alloc; (void)cnt_n; (void)cnt_str;
-    (void)dst_alloc; (void)dst_str;
+    (void)dst_alloc; (void)dst_n; (void)dst_str;
     int32_t* src_data  = (int32_t*)_mr_data(src_align, src_off);
     int32_t* cnt_data  = (int32_t*)_mr_data(cnt_align, cnt_off);
     int32_t* dst_data  = (int32_t*)_mr_data(dst_align, dst_off);
@@ -180,16 +209,16 @@ void remora_replicate_i32(
             dst_data[out_n++] = src_data[i];
         }
     }
-    (void)dst_n;
+    return out_n;
 }
 
-void remora_replicate_f32(
+int64_t remora_replicate_f32(
     float* src_alloc, float* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
     int32_t* cnt_alloc, int32_t* cnt_align, int64_t cnt_off, int64_t cnt_n, int64_t cnt_str,
     float* dst_alloc, float* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
 ) {
     (void)src_alloc; (void)src_str; (void)cnt_alloc; (void)cnt_n; (void)cnt_str;
-    (void)dst_alloc; (void)dst_str;
+    (void)dst_alloc; (void)dst_n; (void)dst_str;
     float*   src_data  = (float*)_mr_data(src_align, src_off);
     int32_t* cnt_data  = (int32_t*)_mr_data(cnt_align, cnt_off);
     float*   dst_data  = (float*)_mr_data(dst_align, dst_off);
@@ -202,5 +231,5 @@ void remora_replicate_f32(
             dst_data[out_n++] = src_data[i];
         }
     }
-    (void)dst_n;
+    return out_n;
 }

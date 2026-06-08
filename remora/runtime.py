@@ -93,7 +93,7 @@ from remora.typechecker import (
     TypedUnbox,
     TypedWithShape,
 )
-from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, StaticDim
+from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, SigmaType, StaticDim
 
 
 class RuntimeUnavailable(RemoraError):
@@ -898,6 +898,11 @@ def _empty_output_value(value_type: RemoraType, *, arena: Arena | None = None) -
 def _result_shape(value_type: RemoraType) -> tuple[int, ...]:
     if isinstance(value_type, ScalarType):
         return ()
+    if isinstance(value_type, SigmaType):
+        body = value_type.body
+        if isinstance(body, ArrayType):
+            return tuple(dim.value for dim in body.shape)
+        return ()
     if isinstance(value_type, ArrayType):
         return tuple(dim.value for dim in value_type.shape)
     raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
@@ -906,6 +911,11 @@ def _result_shape(value_type: RemoraType) -> tuple[int, ...]:
 def _result_dtype(value_type: RemoraType) -> np.dtype:
     if isinstance(value_type, ScalarType):
         return np.dtype(_numpy_dtype(value_type))
+    if isinstance(value_type, SigmaType):
+        body = value_type.body
+        if isinstance(body, ArrayType):
+            return np.dtype(_numpy_dtype(body.element))
+        return np.dtype(np.float32)
     if isinstance(value_type, ArrayType):
         return np.dtype(_numpy_dtype(value_type.element))
     raise RuntimeUnavailable(f"compiled CPU return type {value_type} is not supported")
