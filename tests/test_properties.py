@@ -443,6 +443,19 @@ class TestCompiledVsInterpreter:
         r = evaluate_source("(grade < [3 1 4 1])", include_prelude=False, syntax="lisp")
         np.testing.assert_array_equal(r.value, [1, 3, 0, 2])
 
+    # ── Sort / Grade (compiled path) ──────────────────────────────────────
+
+    @pytest.mark.parametrize("src", [
+        "(sort < [3 1 4 1])",
+        "(sort < [5 3 1 4 2])",
+        "(sort < (iota 5))",
+        "(grade < [3 1 4 1])",
+        "(grade < [5 3 1 4 2])",
+        "(grade < (iota 5))",
+    ])
+    def test_sort_grade_compiled(self, src):
+        _assert_lisp_compiled_matches_interp(src)
+
     def test_filter_interpreter(self):
         r = evaluate_source("(filter (> 0) [1 -2 3 -4])", include_prelude=False, syntax="lisp")
         np.testing.assert_array_equal(r.value, [1, 3])

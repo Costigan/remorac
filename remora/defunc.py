@@ -19,6 +19,7 @@ from remora.hir import (
     HIRFold,
     HIRFoldRight,
     HIRFunction,
+    HIRGrade,
     HIRIf,
     HIRIndex,
     HIRIndicesOf,
@@ -39,6 +40,7 @@ from remora.hir import (
     HIRRotate,
     HIRScan,
     HIRSlice,
+    HIRSort,
     HIRSubarray,
     HIRTake,
     HIRTranspose,
@@ -180,6 +182,14 @@ class _Defunctionalizer:
             ),
             HIRReplicate: lambda e: HIRReplicate(
                 self._rewrite_expr(e.counts, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRSort: lambda e: HIRSort(
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRGrade: lambda e: HIRGrade(
                 self._rewrite_expr(e.array, scalar_env),
                 e.result_type,
             ),
