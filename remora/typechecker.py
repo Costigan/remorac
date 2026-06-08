@@ -1547,10 +1547,17 @@ class TypeChecker:
 
     def _infer_filter(self, expr: FilterExpr, env: TypeEnv) -> TypedExpr:
         """filter pred xs : (Σ (len) [elem len]) — boxed filtered array."""
-        typed_pred = self.infer(expr.predicate, env)
+        # Handle operator sections like (filter (> 0) xs)
+        pred_expr = expr.predicate
+        if isinstance(pred_expr, AppExpr) and isinstance(pred_expr.func, VarExpr):
+            if pred_expr.func.name in ALL_PRIMITIVE_OPS and len(pred_expr.args) == 1:
+                pred_expr = LeftSectionExpr(pred_expr.func.name, pred_expr.args[0], pred_expr.loc)
         typed_array = self.infer(expr.array, env)
         if not isinstance(typed_array.type, ArrayType):
             raise RemoraTypeError("filter expects an array", expr.loc)
+        element_type = typed_array.type.element
+        expected_func = FuncType((element_type,), BOOL)
+        typed_pred = self.check_callable(pred_expr, expected_func, env)
         sigma = SigmaType(("len",), typed_array.type)
         return TypedFilter(expr, typed_pred, typed_array, sigma)
 
@@ -1655,7 +1662,7 @@ class TypeChecker:
             self._require_numeric(expected_arg_type, expr.loc)
             self._require_numeric(typed_arg.type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
-        elif expr.op in {"==", "!=", "<", "<="}:
+        elif expr.op in {"==", "!=", "<", "<=", ">", ">="}:
             if is_numeric(expected_arg_type) and is_numeric(typed_arg.type):
                 self._require(expected_type.result, BOOL, expr.loc)
             elif expected_arg_type == BOOL and typed_arg.type == BOOL:
@@ -1682,7 +1689,7 @@ class TypeChecker:
             self._require_numeric(typed_arg.type, expr.loc)
             self._require_numeric(expected_arg_type, expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
-        elif expr.op in {"==", "!=", "<", "<="}:
+        elif expr.op in {"==", "!=", "<", "<=", ">", ">="}:
             if is_numeric(expected_arg_type) and is_numeric(typed_arg.type):
                 self._require(expected_type.result, BOOL, expr.loc)
             elif expected_arg_type == BOOL and typed_arg.type == BOOL:
