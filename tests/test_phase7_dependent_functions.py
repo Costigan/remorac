@@ -66,7 +66,7 @@ def test_dependent_function_call_specializes_dimension():
 
 
 def test_dependent_function_call_rejects_mismatched_dimensions():
-    with pytest.raises(RemoraTypeError, match="dimension mismatch"):
+    with pytest.raises(RemoraTypeError, match="binding mismatch"):
         check_lisp(
             "(define/pi ([n Dim]) (dot [xs (Array Float n) ys (Array Float n)] Float) "
             "(fold + 0.0 (* xs ys))) "
@@ -326,3 +326,72 @@ def test_dot_product_compiles_at_multiple_concrete_lengths(left, right, expected
     )
 
     assert result.value == pytest.approx(expected)
+
+
+# ── Phase 7.3: Shape variables ────────────────────────────────────────────
+
+def test_shape_preserving_identity_rank1():
+    source = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id [1.0 2.0 3.0])"
+    )
+    result = evaluate_source(source, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [1.0, 2.0, 3.0])
+
+
+def test_shape_preserving_identity_rank2():
+    source = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id [[1.0 2.0] [3.0 4.0] [5.0 6.0]])"
+    )
+    result = evaluate_source(source, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+
+
+def test_shape_preserving_identity_compiled():
+    source = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id [1.0 2.0 3.0])"
+    )
+    result = evaluate_source_compiled(source, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [1.0, 2.0, 3.0])
+
+
+def test_shape_preserving_identity_specialization_named():
+    source = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id [1.0 2.0 3.0])"
+    )
+    from remora.compiler import compile_function_source
+    artifact = compile_function_source(
+        source,
+        "id",
+        (ArrayType(FLOAT, (StaticDim(3),)),),
+        verify=False,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert artifact.specialization_name is not None
+    assert "id__" in artifact.specialization_name
+    assert "s_shape" in artifact.specialization_name
+
+
+def test_shape_variable_rejects_dim_sort_at_use_site():
+    """A Shape binder cannot be used as a Dim binder argument."""
+    source = "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) (iapp id 5)"
+    with pytest.raises((RemoraTypeError, ValueError)):
+        evaluate_source(source, syntax="lisp", include_prelude=False)
+
+
+def test_shape_preserving_called_twice():
+    """Calling a shape-preserving function at different shapes works."""
+    source = (
+        "(define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x) "
+        "(id (id [1.0 2.0]))"
+    )
+    result = evaluate_source(source, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [1.0, 2.0])

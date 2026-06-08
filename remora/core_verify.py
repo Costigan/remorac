@@ -6,11 +6,23 @@ from remora.ast_nodes import FuncDef
 from remora.dependent_types import free_type_index_vars
 from remora.elaborated import CoreExpr, CoreProgram
 from remora.errors import RemoraError
+from remora.index import DimExpr, ShapeLit
 from remora.types import ArrayType, FuncType, PiType, StaticDim
 
 
 class CoreVerificationError(RemoraError):
     """Raised when typed core invariants are violated."""
+
+
+def _is_concrete_index(arg) -> bool:
+    if isinstance(arg, StaticDim):
+        return True
+    if isinstance(arg, DimExpr):
+        value = getattr(arg, "value", None)
+        return isinstance(value, int) and value >= 0
+    if isinstance(arg, ShapeLit):
+        return all(_is_concrete_index(d) for d in arg.dims)
+    return False
 
 
 def verify_core_program(program: CoreProgram) -> None:
@@ -52,7 +64,7 @@ def verify_core_program(program: CoreProgram) -> None:
                 f"duplicate core specialization {specialization.name}"
             )
         names.add(specialization.name)
-        if any(not isinstance(arg, StaticDim) for arg in specialization.index_args):
+        if any(not _is_concrete_index(arg) for arg in specialization.index_args):
             raise CoreVerificationError(
                 f"specialization {specialization.name} is not concrete"
             )
@@ -75,7 +87,7 @@ def verify_core_program(program: CoreProgram) -> None:
         )
 
     for application in program.index_applications:
-        if any(not isinstance(arg, StaticDim) for arg in application.index_args):
+        if any(not _is_concrete_index(arg) for arg in application.index_args):
             raise CoreVerificationError(
                 f"index application of {application.function_name} is not concrete"
             )

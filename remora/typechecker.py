@@ -59,7 +59,11 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
-from remora.constraints import ConstraintError, match_shape_template
+from remora.constraints import (
+    ConstraintError,
+    match_shape_expr_pattern,
+    match_shape_template,
+)
 from remora.dependent_types import (
     free_type_index_vars,
     instantiate_pi_type,
@@ -73,7 +77,14 @@ from remora.frame import (
     scalar_cell_and_frame,
     infer_lifting as frame_infer_lifting,
 )
-from remora.index import IndexBinder, IndexSort
+from remora.index import (
+    AnyIndexExpr,
+    DimVar,
+    IndexBinder,
+    IndexSort,
+    ShapeExpr as IndexShapeExpr,
+    ShapeLit,
+)
 from remora.operators import ALL_PRIMITIVE_OPS
 from remora.types import (
     BOOL,
@@ -288,7 +299,7 @@ class TypedLambda:
     body: TypedExpr
     type: FuncType
     specialization_name: str | None = None
-    index_args: tuple[DimExpr, ...] = ()
+    index_args: tuple[DimExpr | IndexShapeExpr, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -328,7 +339,7 @@ class TypedIndexApp:
     """A Pi-typed function specialized at explicit compile-time indices."""
     expr: IndexAppExpr
     function: TypedLambda
-    index_args: tuple[DimExpr, ...]
+    index_args: tuple[DimExpr | IndexShapeExpr, ...]
     type: FuncType
 
 
@@ -1892,6 +1903,15 @@ class TypeChecker:
                     "dependent function definitions require a result type",
                     function.loc,
                 )
+            binders = self._index_binders(function)
+            shape_binder_names = {
+                binder.name
+                for binder in binders
+                if binder.sort is IndexSort.SHAPE
+            }
+            declared_result = self._reinterpret_shape_expr(
+                declared_result, shape_binder_names
+            )
             specialized_result = substitute_type(declared_result, bindings)
             typed_func = self._typed_top_level_function(
                 function,
@@ -1921,8 +1941,17 @@ class TypeChecker:
                 "dependent function definitions require a result type",
                 function.loc,
             )
-        body: RemoraType = FuncType(declared_param_types, declared_result)
         binders = self._index_binders(function)
+        shape_binder_names = {
+            binder.name
+            for binder in binders
+            if binder.sort is IndexSort.SHAPE
+        }
+        # Reinterpret the result type (params already reinterpreted by _declared_param_types)
+        reinterpreted_result = self._reinterpret_shape_expr(
+            declared_result, shape_binder_names
+        )
+        body: RemoraType = FuncType(declared_param_types, reinterpreted_result)
         unbound = free_type_index_vars(body) - frozenset(
             binder.name for binder in binders
         )
@@ -1936,13 +1965,53 @@ class TypeChecker:
             return PiType(binders, body)
         return body
 
+    def _reinterpret_shape_expr(
+        self, value_type: RemoraType, shape_binder_names: set[str]
+    ) -> RemoraType:
+        """Promote DimVar references to ShapeExpr when the binder is Shape sort."""
+        if isinstance(value_type, ArrayType):
+            if value_type.shape_expr is not None:
+                return value_type
+            if (
+                len(value_type.shape) == 1
+                and isinstance(value_type.shape[0], DimVar)
+                and value_type.shape[0].name in shape_binder_names
+            ):
+                from remora.index import ShapeVar
+                return value_type.with_shape_expr(
+                    ShapeVar(value_type.shape[0].name)
+                )
+            # Recurse into element type (not applicable for ScalarType elements,
+            # but keep for future nested types)
+            return value_type
+        if isinstance(value_type, FuncType):
+            return FuncType(
+                tuple(
+                    self._reinterpret_shape_expr(pt, shape_binder_names)
+                    for pt in value_type.params
+                ),
+                self._reinterpret_shape_expr(
+                    value_type.result, shape_binder_names
+                ),
+            )
+        return value_type
+
     def _declared_param_types(self, function: FuncDef) -> tuple[RemoraType, ...] | None:
         raw = getattr(function, "param_types", None)
         if raw is None:
             return None
         if len(raw) != len(function.params):
             raise RemoraTypeError("function annotation arity mismatch", function.loc)
-        return tuple(self._require_remora_type(value, function.loc) for value in raw)
+        types = tuple(self._require_remora_type(value, function.loc) for value in raw)
+        binders = self._index_binders(function)
+        shape_binder_names = {
+            binder.name
+            for binder in binders
+            if binder.sort is IndexSort.SHAPE
+        }
+        return tuple(
+            self._reinterpret_shape_expr(pt, shape_binder_names) for pt in types
+        )
 
     def _index_binders(self, function: FuncDef) -> tuple[IndexBinder, ...]:
         raw = getattr(function, "index_binders", ())
@@ -1976,16 +2045,15 @@ class TypeChecker:
         function: FuncDef,
         declared_param_types: tuple[RemoraType, ...],
         actual_param_types: tuple[RemoraType, ...],
-    ) -> dict[str, DimExpr]:
+    ) -> dict[str, AnyIndexExpr]:
         binders = self._index_binders(function)
         binder_names = {binder.name for binder in binders}
-        for binder in binders:
-            if binder.sort is not IndexSort.DIM:
-                raise RemoraTypeError(
-                    "Phase 7a only supports Dim binders in function annotations",
-                    function.loc,
-                )
-        bindings: dict[str, DimExpr] = {}
+        shape_binder_names = {
+            binder.name
+            for binder in binders
+            if binder.sort is IndexSort.SHAPE
+        }
+        bindings: dict[str, AnyIndexExpr] = {}
         for declared, actual in zip(declared_param_types, actual_param_types):
             try:
                 inferred = self._match_declared_type(declared, actual, function.loc)
@@ -2000,7 +2068,7 @@ class TypeChecker:
                 existing = bindings.get(name)
                 if existing is not None and existing != value:
                     raise RemoraTypeError(
-                        f"dimension mismatch for {name!r}: expected {existing}, got {value}",
+                        f"binding mismatch for {name!r}: expected {existing}, got {value}",
                         function.loc,
                     )
                 bindings[name] = value
@@ -2017,7 +2085,7 @@ class TypeChecker:
         self,
         function: FuncDef,
         actual_param_types: tuple[RemoraType, ...],
-    ) -> tuple[DimExpr, ...] | None:
+    ) -> tuple[DimExpr | IndexShapeExpr, ...] | None:
         declared_param_types = self._declared_param_types(function)
         binders = self._index_binders(function)
         if declared_param_types is None or not binders:
@@ -2027,14 +2095,26 @@ class TypeChecker:
             declared_param_types,
             actual_param_types,
         )
-        return tuple(bindings[binder.name] for binder in binders)
+        result: list[DimExpr | IndexShapeExpr] = []
+        for binder in binders:
+            binding = bindings[binder.name]
+            if isinstance(binding, DimExpr):
+                result.append(binding)
+            elif isinstance(binding, IndexShapeExpr):
+                result.append(binding)
+            else:
+                raise RemoraTypeError(
+                    f"unexpected binding type for {binder.name}",
+                    function.loc,
+                )
+        return tuple(result)
 
     def _match_declared_type(
         self,
         declared: RemoraType,
         actual: RemoraType,
         loc,
-    ) -> dict[str, DimExpr]:
+    ) -> dict[str, AnyIndexExpr]:
         if isinstance(declared, ScalarType):
             self._require(actual, declared, loc)
             return {}
@@ -2042,9 +2122,18 @@ class TypeChecker:
             if not isinstance(actual, ArrayType):
                 raise RemoraTypeError(f"expected array type {declared}, got {actual}", loc)
             self._require(actual.element, declared.element, loc)
-            return match_shape_template(declared.shape, actual.shape, loc=loc)
+            if declared.shape_expr is not None:
+                return match_shape_expr_pattern(
+                    declared.shape_expr, actual.shape, loc=loc
+                )
+            return {
+                name: expr
+                for name, expr in match_shape_template(
+                    declared.shape, actual.shape, loc=loc
+                ).items()
+            }
         raise RemoraTypeError(
-            f"Phase 7a function annotations only support scalar and array parameter types, got {declared}",
+            f"Phase 7.3 function annotations only support scalar and array parameter types, got {declared}",
             loc,
         )
 
@@ -2066,7 +2155,7 @@ class TypeChecker:
         env: TypeEnv,
         *,
         infer_result: bool = False,
-        index_args: tuple[DimExpr, ...] | None = None,
+        index_args: tuple[DimExpr | IndexShapeExpr, ...] | None = None,
     ) -> TypedLambda:
         cache_key = (
             (function.name, index_args)
@@ -2115,14 +2204,20 @@ class TypeChecker:
     def _specialization_name(
         self,
         function: FuncDef,
-        index_args: tuple[DimExpr, ...],
+        index_args: tuple[DimExpr | IndexShapeExpr, ...],
     ) -> str:
         binders = self._index_binders(function)
-        suffix = "__".join(
-            f"{binder.name}_{arg}"
-            for binder, arg in zip(binders, index_args)
-        )
-        return f"{function.name}__{suffix}"
+        parts: list[str] = []
+        for binder, arg in zip(binders, index_args):
+            if isinstance(arg, ShapeLit):
+                dim_repr = "_".join(
+                    str(d.value) if hasattr(d, 'value') else str(d)
+                    for d in arg.dims
+                )
+                parts.append(f"{binder.name}_shape_{dim_repr}")
+            else:
+                parts.append(f"{binder.name}_{arg}")
+        return f"{function.name}__{'__'.join(parts)}"
 
     def _infer_let_lambda(self, expr: LetExpr, env: TypeEnv) -> TypedExpr:
         if not isinstance(expr.value, LambdaExpr):
