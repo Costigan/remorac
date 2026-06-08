@@ -109,6 +109,19 @@ class BoxExpr:
 
 
 @dataclass(frozen=True)
+class Iota1Expr:
+    size: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class FilterExpr:
+    predicate: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class UnboxExpr:
     box_expr: Expr
     hidden_names: list[str]
@@ -333,6 +346,8 @@ Expr: TypeAlias = (
     | WithShapeExpr
     | BoxExpr
     | UnboxExpr
+    | Iota1Expr
+    | FilterExpr
     | LambdaExpr
     | AppExpr
     | MapExpr

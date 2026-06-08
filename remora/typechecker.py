@@ -17,10 +17,12 @@ from remora.ast_nodes import (
     FoldExpr,
     FoldRightExpr,
     FuncDef,
+    FilterExpr,
     IfExpr,
     IndexExpr,
     IndicesOfExpr,
     IntLit,
+    Iota1Expr,
     IotaExpr,
     LambdaExpr,
     LeftSectionExpr,
@@ -574,6 +576,10 @@ class TypeChecker:
             return self._infer_box(expr, env)
         if isinstance(expr, UnboxExpr):
             return self._infer_unbox(expr, env)
+        if isinstance(expr, Iota1Expr):
+            return self._infer_iota1(expr, env)
+        if isinstance(expr, FilterExpr):
+            return self._infer_filter(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1432,6 +1438,27 @@ class TypeChecker:
         if isinstance(typed_body.type, SigmaType):
             raise RemoraTypeError("hidden dimension escapes in unbox body", expr.loc)
         return TypedUnbox(expr, typed_box, expr.hidden_names, expr.value_name, typed_body, typed_body.type)
+
+    def _infer_iota1(self, expr: Iota1Expr, env: TypeEnv) -> TypedExpr:
+        """iota1 n : (Σ (len) [int len]) — boxed iota of runtime size."""
+        typed_size = self.infer(expr.size, env)
+        if typed_size.type != INT:
+            raise RemoraTypeError("iota1 expects an integer size", expr.loc)
+        # Produce a boxed type: (Σ (len) [int len])
+        sigma = SigmaType(("len",), ArrayType(INT, (StaticDim(0),)))
+        return TypedBox(BoxExpr(expr, expr.loc), typed_size, sigma)  # type: ignore
+
+    def _infer_filter(self, expr: FilterExpr, env: TypeEnv) -> TypedExpr:
+        """filter pred xs : (Σ (len) [elem len]) — boxed filtered array."""
+        typed_pred = self.infer(expr.predicate, env)
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("filter expects an array", expr.loc)
+        # The predicate must accept the array's element type
+        if isinstance(typed_pred.type, FuncType):
+            pass  # TODO: check predicate returns bool
+        sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
+        return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
 
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv
