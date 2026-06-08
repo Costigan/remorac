@@ -15,6 +15,21 @@ from remora.types import ArrayType, FuncType, PiType, RemoraType, SigmaType
 def substitute_type(value_type: RemoraType, bindings: IndexSubstitution) -> RemoraType:
     """Substitute index variables inside a Remora type."""
     if isinstance(value_type, ArrayType):
+        if value_type.shape_expr is not None:
+            # Substitute into the shape expression and extract concrete dims
+            from remora.index import ShapeLit, normalize_index
+            new_expr = normalize_index(substitute_index(value_type.shape_expr, bindings))
+            if isinstance(new_expr, ShapeLit):
+                new_dims = new_expr.dims
+                # If the new dims are all concrete (no free variables), drop shape_expr
+                if not any(_has_index_var(d) for d in new_dims):
+                    return ArrayType(value_type.element, new_dims)
+                return ArrayType(value_type.element, new_dims, new_expr)
+            # Shape var could not be fully resolved; keep existing dims
+            new_dims = tuple(
+                substitute_index(dim, bindings) for dim in value_type.shape
+            )
+            return ArrayType(value_type.element, new_dims, new_expr)
         return ArrayType(
             value_type.element,
             tuple(substitute_index(dim, bindings) for dim in value_type.shape),
@@ -78,3 +93,8 @@ def _drop_shadowed(
         for name, expr in bindings.items()
         if name not in names
     }
+
+
+def _has_index_var(dim_expr: AnyIndexExpr) -> bool:
+    from remora.index import free_index_vars as _fiv
+    return bool(_fiv(dim_expr))

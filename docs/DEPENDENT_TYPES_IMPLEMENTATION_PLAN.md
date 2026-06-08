@@ -505,6 +505,62 @@ Acceptance criteria:
 
 Estimate: 5-8 weeks.
 
+Implementation status: **Phase 7.3 core infrastructure complete on June 8, 2026.**
+
+- `ShapeVar` and `ShapeConcat` already existed in `remora/index.py` with full
+  normalization (flatten nested concats, merge adjacent ShapeLits).
+
+- `ArrayType` (`remora/types.py`) gains `shape_expr: ShapeExpr | None` field:
+  - When set, `shape_expr` represents the abstract shape (may contain ShapeVars).
+  - Backward-compatible: default `None` preserves existing behavior.
+  - `with_frame` propagates `shape_expr` as `ShapeConcat(frame_lit, shape_expr)`.
+  - After substitution resolves all shape variables, `shape_expr` is dropped.
+
+- `substitute_type` (`remora/dependent_types.py`) handles `shape_expr`:
+  - Substitutes into the shape expression; extracts concrete dims from ShapeLit.
+  - When result is fully concrete (no free index vars), drops `shape_expr`.
+
+- Shape binder support in the Lisp reader already existed (parses `Shape` sort
+  in `define/pi`); the typechecker was the blocker.
+  - Removed the Phase 7a `Dim`-only restriction in `_infer_index_bindings`.
+  - `_reinterpret_shape_expr` promotes `ArrayType(Float, (DimVar("s"),))` to
+    carry `shape_expr = ShapeVar("s")` when `s` is a Shape binder.
+  - `_declared_param_types` applies reinterpretation at read time.
+  - `_infer_top_level_function_type` applies reinterpretation to result types.
+
+- Extended constraint solver (`remora/constraints.py`):
+  - `solve_with_shapes` returns `dict[str, AnyIndexExpr]` (DimExpr + ShapeExpr).
+  - `match_shape_expr_pattern(pattern, actual)`: ShapeVar → bind to full shape;
+    ShapeLit → exact dim matching; ShapeConcat → finite split enumeration.
+  - `_solve_shape_concat`: enumerates all splits of concrete shape to match
+    a `ShapeConcat(left, right)` pattern, supporting prefix/rest variables.
+  - `_solve_shape_eq_any`, `_solve_dim_eq_any`, `_bind_shape` handle mixed
+    Dim/Shape bindings.
+
+- Specialization infrastructure updated for mixed Dim/Shape index args:
+  - `TypedLambda.index_args`, `TypedIndexApp.index_args`, `CoreSpecialization.index_args`
+    changed from `tuple[DimExpr, ...]` to `tuple[DimExpr | ShapeExpr, ...]`.
+  - `_specialization_name` produces names like `id__s_shape_3` for Shape bindings.
+  - `_is_concrete_index` in `core_verify.py` accepts `ShapeLit` with concrete dims.
+
+- Shape-preserving identity works end-to-end:
+  ```lisp
+  (define/pi ([s Shape]) (id [x (Array Float s)] (Array Float s)) x)
+  (id [1.0 2.0 3.0])        ;; rank 1
+  (id [[1.0 2.0] [3.0 4.0]]) ;; rank 2
+  ```
+  Tested through interpreter and compiled CPU path.
+
+- 6 new Phase 7.3 tests in `tests/test_phase7_dependent_functions.py`.
+- Full regression suite: **777 passed, 1 skipped.**
+
+Remaining Phase 7.3 work:
+- Rest-variable syntax for append (e.g., `@rest` suffix matching).
+- ShapeConcat patterns in function annotations (currently only whole-shape
+  variables are supported; concat patterns remain unimplemented in the
+  type-checker binding inference).
+- Free-monoid normalizer improvements (alpha-equivalence for ShapeExpr).
+
 ### 7.4 Dimension Arithmetic (6-10 weeks)
 
 Deliverables:

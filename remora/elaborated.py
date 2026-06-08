@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from remora.ast_nodes import Definition, IndexAppExpr
-from remora.index import DimExpr
+from remora.index import DimExpr, ShapeExpr
 from remora.typechecker import TypedDefinition, TypedExpr
 from remora.types import FuncType, RemoraType
 
@@ -65,7 +65,7 @@ class CoreSpecialization:
 
     name: str
     function_name: str
-    index_args: tuple[DimExpr, ...]
+    index_args: tuple[DimExpr | ShapeExpr, ...]
     params: tuple[tuple[str, RemoraType], ...]
     body: CoreExpr
     type: FuncType
@@ -78,7 +78,7 @@ class CoreIndexApplication:
     source: IndexAppExpr
     function_name: str
     specialization_name: str
-    index_args: tuple[DimExpr, ...]
+    index_args: tuple[DimExpr | ShapeExpr, ...]
     type: FuncType
 
 

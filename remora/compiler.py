@@ -24,6 +24,7 @@ from remora.pipeline import run_validation_pipeline, verify_module_text
 from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
+from remora.index import ShapeExpr
 from remora.types import DimExpr, FuncType, RemoraType
 from remora.ast_nodes import FuncDef, Program
 
@@ -63,7 +64,7 @@ class FunctionCompilerArtifact:
     mlir_module: object
     mlir_text: str
     specialization_name: str | None = None
-    index_args: tuple[DimExpr, ...] = ()
+    index_args: tuple[DimExpr | ShapeExpr, ...] = ()
 
     @property
     def return_type(self) -> RemoraType:

@@ -7,7 +7,7 @@ from typing import TypeAlias
 
 from remora.ast_nodes import Expr, IntLit, SourceLoc
 from remora.errors import RemoraError
-from remora.index import DimExpr, IndexBinder
+from remora.index import DimExpr, IndexBinder, ShapeExpr
 from remora.limits import MAX_DENSE_RANK
 
 
@@ -38,13 +38,22 @@ class ScalarType:
 class ArrayType:
     element: ScalarType
     shape: tuple[DimExpr, ...]
+    shape_expr: ShapeExpr | None = None
 
     @property
     def rank(self) -> int:
         return len(self.shape)
 
+    def with_shape_expr(self, expr: ShapeExpr) -> ArrayType:
+        return ArrayType(self.element, self.shape, expr)
+
     def with_frame(self, frame: tuple[DimExpr, ...]) -> ArrayType:
-        return ArrayType(self.element, frame + self.shape)
+        new_shape = frame + self.shape
+        new_expr = None
+        if self.shape_expr is not None:
+            from remora.index import ShapeConcat, ShapeLit
+            new_expr = ShapeConcat(ShapeLit(frame), self.shape_expr)
+        return ArrayType(self.element, new_shape, new_expr)
 
     def drop_outer(self, n: int) -> RemoraType:
         if n < 0 or n > self.rank:
@@ -54,8 +63,14 @@ class ArrayType:
             return self.element
         return ArrayType(self.element, remaining_shape)
 
+    def concrete_shape(self) -> tuple[DimExpr, ...]:
+        return self.shape
+
     def __str__(self) -> str:
-        dims = ",".join(str(dim) for dim in self.shape)
+        if self.shape_expr is not None:
+            dims = str(self.shape_expr)
+        else:
+            dims = ",".join(str(dim) for dim in self.shape)
         return f"{self.element}[{dims}]"
 
 
