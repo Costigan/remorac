@@ -142,6 +142,10 @@ class _MLIRMainModuleBuilder:
         self.result_type = result_type
         self.functions = functions or {}
         self.blocks: list[str] = []
+        self.externs: list[str] = []
+
+    def add_extern(self, decl: str) -> None:
+        self.externs.append(decl)
 
     def add_block(self, block: str) -> None:
         if block.strip():
@@ -150,8 +154,11 @@ class _MLIRMainModuleBuilder:
     def render(self, result_value: str) -> str:
         function_text = _lower_functions(self.functions)
         function_prefix = f"\n{function_text}\n" if function_text else ""
+        extern_text = "\n".join(self.externs)
+        extern_prefix = f"{extern_text}\n" if extern_text else ""
         body = "\n".join(self.blocks)
         return f"""module {{
+{extern_prefix}\
 {function_prefix}\
   func.func @main() -> {self.result_type} {{
 {body}
