@@ -148,6 +148,7 @@ class GPUPtxContext:
     def __init__(self, ptx_text: str):
         self._rt = CUDARuntime()
         self._mod = self._rt.load_ptx(ptx_text)
+        self._pool: list[int] = []
 
     def get_kernel(self, name: str):
         return self._mod.get_function(name)
@@ -155,7 +156,23 @@ class GPUPtxContext:
     def get_runtime(self) -> CUDARuntime:
         return self._rt
 
+    def alloc_buffer(self, nbytes: int) -> int:
+        """Get a reusable GPU buffer of at least *nbytes*, zeroing it."""
+        if self._pool:
+            ptr = self._pool.pop()
+        else:
+            ptr = self._rt.alloc(nbytes)
+        self._rt.memset_d32(ptr, 0, nbytes // 4)
+        return ptr
+
+    def free_buffer(self, ptr: int) -> None:
+        """Return a buffer to the pool for reuse."""
+        self._pool.append(ptr)
+
     def close(self) -> None:
+        for ptr in self._pool:
+            self._rt.free(ptr)
+        self._pool.clear()
         self._mod.close()
         self._rt.close()
 
@@ -210,25 +227,32 @@ def execute_program_from_ptx(
 
     if context is not None:
         rt = context.get_runtime()
+        mod = context._mod
+        use_pool = True
     else:
         rt = CUDARuntime()
+        use_pool = False
     try:
-        if context is not None:
-            mod = context._mod
-        else:
+        if not use_pool:
             mod = rt.load_ptx(artifact.ptx_text)
-        buf_size = max(4096, output_nbytes * 4, 1024 * 1024)  # up to 256K i32 elements
+        buf_size = max(4096, output_nbytes * 4, 1024 * 1024)
         output_storage = np.zeros(buf_size, dtype=np.uint8)
-        buf_ptr = rt.alloc(buf_size)
-        rt.memset_d32(buf_ptr, 0, buf_size // 4)
+        if use_pool:
+            buf_ptr = context.alloc_buffer(buf_size)
+        else:
+            buf_ptr = rt.alloc(buf_size)
+            rt.memset_d32(buf_ptr, 0, buf_size // 4)
         extra_bufs: list[int] = []
 
         for kernel_meta in artifact.kernels:
             kernel = mod.get_function(kernel_meta.name)
             num_params = kernel_meta.num_inputs + kernel_meta.num_outputs
             if num_params > 1:
-                extra_ptr = rt.alloc(buf_size)
-                rt.memset_d32(extra_ptr, 0, buf_size // 4)
+                if use_pool:
+                    extra_ptr = context.alloc_buffer(buf_size)
+                else:
+                    extra_ptr = rt.alloc(buf_size)
+                    rt.memset_d32(extra_ptr, 0, buf_size // 4)
                 extra_bufs.append(extra_ptr)
                 params = [buf_ptr, extra_ptr]
             else:
@@ -237,36 +261,42 @@ def execute_program_from_ptx(
             if output_shape:
                 element_count = max(1, int(np.prod(output_shape, dtype=np.int64)))
             else:
-                element_count = max(1, buf_size // np.dtype(output_dtype).itemsize)
+                # Scalar output: use grid=1 for reduction, or small grid for safety
+                element_count = 1
             grid_size = int((element_count + block_size - 1) // block_size)
             kernel.launch((grid_size, 1, 1), (block_size, 1, 1), params)
             rt.synchronize()
             # Swap buffers: output of this kernel becomes input of next
             if extra_bufs:
-                rt.free(buf_ptr)
+                if use_pool:
+                    context.free_buffer(buf_ptr)
+                else:
+                    rt.free(buf_ptr)
                 buf_ptr = extra_bufs.pop()
 
         rt.copy_device_to_host(buf_ptr, output_storage)
-        # The final result may be at an offset in the buffer. For reductions,
-        # IREE places results after input data. Search for the non-zero tail.
         result_offset = 0
         if output_shape == () and len(artifact.kernels) > 1:
             # For scalar results from multi-kernel programs, find the last
-            # non-zero word in the buffer, which is typically the result
+            # non-zero word in the buffer using numpy vector search.
             itemsize = np.dtype(output_dtype).itemsize
             flat = output_storage.view(output_dtype)
-            for i in range(len(flat) - 1, -1, -1):
-                if flat[i] != 0:
-                    result_offset = i * itemsize
-                    break
+            nonzero = np.nonzero(flat)[0]
+            if len(nonzero) > 0:
+                result_offset = int(nonzero[-1]) * itemsize
         output_bytes = output_storage[result_offset:result_offset + output_nbytes]
         if output_shape:
             output[:] = output_bytes.view(output_dtype).reshape(output_shape)
         else:
             output[...] = output_bytes.view(output_dtype)[0]
-        rt.free(buf_ptr)
-        for ptr in extra_bufs:
-            rt.free(ptr)
+        if use_pool:
+            context.free_buffer(buf_ptr)
+            for ptr in extra_bufs:
+                context.free_buffer(ptr)
+        else:
+            rt.free(buf_ptr)
+            for ptr in extra_bufs:
+                rt.free(ptr)
         if context is None:
             mod.close()
     finally:

@@ -282,18 +282,14 @@ def _lower_tensor_input(
         result_elem = type_to_mlir(node.result_type.element)
         rank = node.result_type.rank
 
-        if not isinstance(node.source, HIRLit):
-            raise RemoraLoweringError(
-                "only literal-source with-shape lowers as tensor input so far"
-            )
-        lit_val = _literal_value(node.source, result_elem)
-
-        identity = _identity_affine_map(rank)
-        iterators = _parallel_iterators(rank)
-        val_name = f"%{prefix}_val"
-        empty_name = f"%{prefix}_empty"
-        target_name = f"%{prefix}"
-        code = f"""    {val_name} = arith.constant {lit_val} : {result_elem}
+        if isinstance(node.source, HIRLit):
+            lit_val = _literal_value(node.source, result_elem)
+            identity = _identity_affine_map(rank)
+            iterators = _parallel_iterators(rank)
+            val_name = f"%{prefix}_val"
+            empty_name = f"%{prefix}_empty"
+            target_name = f"%{prefix}"
+            code = f"""    {val_name} = arith.constant {lit_val} : {result_elem}
     {empty_name} = tensor.empty() : {result_type}
     {target_name} = linalg.generic {{
       indexing_maps = [{identity}],
@@ -302,7 +298,37 @@ def _lower_tensor_input(
     ^bb0(%out: {result_elem}):
       linalg.yield {val_name} : {result_elem}
     }} -> {result_type}"""
-        return code, target_name, result_type, result_elem
+            return code, target_name, result_type, result_elem
+
+        # Non-literal source: recursively lower, then broadcast
+        source_remora = _expr_result_type(node.source)
+        if isinstance(source_remora, ArrayType):
+            src_code, src_name, src_type, src_elem = _lower_tensor_input(
+                node.source, f"{prefix}_src", functions, tensor_env
+            )
+            source_rank = source_remora.rank
+            # Broadcast: source maps to last source_rank dims of target
+            all_dims = ", ".join(f"d{a}" for a in range(rank))
+            src_dims = ", ".join(f"d{a}" for a in range(rank - source_rank, rank))
+            src_map = f"affine_map<({all_dims}) -> ({src_dims})>"
+            tgt_map = _identity_affine_map(rank)
+            iterators = _parallel_iterators(rank)
+            empty_name = f"%{prefix}_empty"
+            target_name = f"%{prefix}"
+            code = f"""{src_code}
+    {empty_name} = tensor.empty() : {result_type}
+    {target_name} = linalg.generic {{
+      indexing_maps = [{src_map}, {tgt_map}],
+      iterator_types = {iterators}
+    }} ins({src_name} : {src_type}) outs({empty_name} : {result_type}) {{
+    ^bb0(%in: {src_elem}, %out: {result_elem}):
+      linalg.yield %in : {result_elem}
+    }} -> {result_type}"""
+            return code, target_name, result_type, result_elem
+
+        raise RemoraLoweringError(
+            "only scalar-literal or array-source with-shape lowers as tensor input so far"
+        )
 
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
@@ -1845,6 +1871,10 @@ def _lower_with_shape_module(
     # For scalar→tensor: splat the value
     source_remora = _expr_result_type(node.source)
     if isinstance(source_remora, ScalarType):
+        if not isinstance(node.source, HIRLit):
+            raise RemoraLoweringError(
+                "only scalar-literal with-shape lowers as top-level module"
+            )
         lit_val = _literal_value(node.source, result_elem)
         body = f"""    %val = arith.constant {lit_val} : {result_elem}
     %empty = tensor.empty() : {result_type}
@@ -1855,12 +1885,34 @@ def _lower_with_shape_module(
     ^bb0(%out: {result_elem}):
       linalg.yield %val : {result_elem}
     }} -> {result_type}"""
-    else:
-        raise RemoraLoweringError("only scalar→tensor with-shape lowers to MLIR so far")
+        builder = _MLIRMainModuleBuilder(result_type)
+        builder.add_block(body)
+        return builder.render("%result")
 
-    builder = _MLIRMainModuleBuilder(result_type)
-    builder.add_block(body)
-    return builder.render("%result")
+    # Array→tensor: broadcast source tensor to target shape
+    if isinstance(source_remora, ArrayType):
+        source_rank = source_remora.rank
+        src_code, src_name, src_type, src_elem = _lower_tensor_input(
+            node.source, "src", functions, tensor_env=None
+        )
+        all_dims = ", ".join(f"d{a}" for a in range(rank))
+        src_dims = ", ".join(f"d{a}" for a in range(rank - source_rank, rank))
+        src_map = f"affine_map<({all_dims}) -> ({src_dims})>"
+        tgt_map = _identity_affine_map(rank)
+        body = f"""{src_code}
+    %empty = tensor.empty() : {result_type}
+    %result = linalg.generic {{
+      indexing_maps = [{src_map}, {tgt_map}],
+      iterator_types = {iterators}
+    }} ins({src_name} : {src_type}) outs(%empty : {result_type}) {{
+    ^bb0(%in: {src_elem}, %out: {result_elem}):
+      linalg.yield %in : {result_elem}
+    }} -> {result_type}"""
+        builder = _MLIRMainModuleBuilder(result_type)
+        builder.add_block(body)
+        return builder.render("%result")
+
+    raise RemoraLoweringError("only scalar→tensor with-shape lowers to MLIR so far")
 
 
 # ---------------------------------------------------------------------------
