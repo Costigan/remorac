@@ -1640,6 +1640,51 @@ def _flatten_array_literal(node: HIRArrayLit) -> list[HIRLit]:
 # ---------------------------------------------------------------------------
 
 
+def _lower_rotate_module(
+    node: HIRRotate, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("rotate lowering requires an array result")
+    if node.result_type.rank != 1:
+        raise RemoraLoweringError("only rank-1 rotate lowers to MLIR so far")
+
+    input_code, input_name, input_type, input_element_type = _lower_tensor_input(
+        node.array, "input", functions
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
+    shift = node.shift.value
+    N = node.result_type.shape[0].value
+
+    body = f"""{input_code}
+    %rot_zero = arith.constant 0 : index
+    %rot_N = arith.constant {N} : index
+    %rot_shift = arith.constant {shift} : index
+    %empty = tensor.empty() : {result_type}
+    %rotated = linalg.generic {{
+      indexing_maps = [affine_map<(d0) -> (d0)>],
+      iterator_types = [\"parallel\"]
+    }} outs(%empty : {result_type}) {{
+    ^bb0(%out: {result_element_type}):
+      %idx = linalg.index 0 : index
+      %shifted = arith.addi %idx, %rot_shift : index
+      %wrapped = arith.remsi %shifted, %rot_N : index
+      %elem = tensor.extract {input_name}[%wrapped] : {input_type}
+      linalg.yield %elem : {result_element_type}
+    }} -> {result_type}"""
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%rotated")
+
+
+# ---------------------------------------------------------------------------
+# Scan lowering
+# ---------------------------------------------------------------------------
+
+
 def _lower_scan_module(
     node: HIRScan, functions: dict[str, HIRFunction]
 ) -> str:

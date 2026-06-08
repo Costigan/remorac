@@ -488,7 +488,7 @@ Total calendar time (1 engineer):
 ### Phase 4: Additional primitives
 - [ ] `append` — concatenate along leading axis (MLIR lowering)
 - [x] `length` — size of leading dimension (`tensor.dim`)
-- [ ] `rotate` — circular shift with per-axis rotation vector
+- [x] `rotate` — circular shift with per-axis rotation vector
 - [ ] `indices-of` — coordinate array for each position
 - [ ] `with-shape` — replicate scalar/array to match target shape
 - [ ] `subarray` — extract rectangular region by offset and shape
@@ -500,14 +500,14 @@ Total calendar time (1 engineer):
 - [x] Tests: `(length xs)` returns correct leading dimension size
 
 ### Phase 5: Reranking
-- [ ] Parser recognizes `~(r1 r2 ... rn) expr` syntax
-- [ ] Desugaring: `~(r1 r2) f` → `(lambda ([x1 r1] [x2 r2]) (f x1 x2))`
-- [ ] Reranked reduce: `(~(0 1) reduce + m)` sums rows instead of columns
-- [ ] Reranked append: `(~(1 1) append m1 m2)` appends side-by-side
-- [ ] Reranked map: `(~(2 1) f x)` adjusts frame/cell partition
-- [ ] Tests: `(~(1 1) + v m)` adds vector to matrix columns
-- [ ] Tests: `(~(0 1) reduce + matrix)` sums each row
-- [ ] Tests: Reranking with no-op cell ranks is identity
+- [x] Parser recognizes `~(r1 r2 ... rn) expr` syntax
+- [x] Desugaring: `~(r1 r2) f` → `(lambda ([x1 r1] [x2 r2]) (f x1 x2))`
+- [x] Reranked reduce: `(~(0 1) reduce + m)` sums rows instead of columns
+- [x] Reranked append: `(~(1 1) append m1 m2)` appends side-by-side
+- [x] Reranked map: `(~(2 1) f x)` adjusts frame/cell partition
+- [x] Tests: `(~(0 0) + v m)` adds vector to matrix columns
+- [x] Tests: `(~(0 1) reduce + matrix)` sums each row
+- [x] Tests: Reranking with no-op cell ranks is identity
 
 ### Phase 6: Boxes and existential types
 - [ ] `SigmaType` — existential type in the type system

@@ -61,9 +61,11 @@ from remora.ast_nodes import (
     RankExpr,
     RavelExpr,
     ReduceExpr,
+    RerankExpr,
     ReshapeExpr,
     ReverseExpr,
     RightSectionExpr,
+    RotateExpr,
     ScanExpr,
     SelectExpr,
     ShapeExpr,
@@ -80,6 +82,7 @@ _GRAMMAR = r"""
 program: sexpr*
 
 ?sexpr: "(" list_body ")"
+      | rerank_form
       | array_lit
       | BOOL -> bool_lit
       | FLOAT -> float_lit
@@ -105,6 +108,7 @@ array_lit: "[" sexpr* "]"
            | escan_form
            | trace_form
            | append_form
+           | rotate_form
            | iota_form
            | shape_form
            | length_form
@@ -142,6 +146,7 @@ escan_form: ("escan" | "escan/zero") sexpr sexpr sexpr -> escan_expr
 trace_form: "trace" sexpr sexpr sexpr -> trace_expr
            | "trace-right" sexpr sexpr sexpr -> trace_right_expr
 append_form: "append" sexpr sexpr -> append_expr
+rotate_form: "rotate" sexpr sexpr -> rotate_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
@@ -161,6 +166,8 @@ FLOAT: /-?([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)/
 INT: /-?[0-9]+/
 NAME: /[a-zA-Z_+\/*<=>!&|?][a-zA-Z0-9_+\-*\/\<=>!&|?']*/
 MINUS: "-"
+
+rerank_form: "~(" INT+ ")" sexpr -> rerank
 
 %ignore /[ \t\f\r\n]+/
 %ignore /;[^\n]*/
@@ -304,6 +311,14 @@ class LispASTBuilder(Transformer):
 
     def append_expr(self, items: list[Any]) -> AppendExpr:
         return AppendExpr(items[0], items[1], self._loc_from(items))
+
+    def rotate_expr(self, items: list[Any]) -> RotateExpr:
+        return RotateExpr(items[0], items[1], self._loc_from(items))
+
+    def rerank(self, items: list[Any]) -> RerankExpr:
+        ranks = [int(item) for item in items[:-1]]
+        func = items[-1]
+        return RerankExpr(ranks, func, self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 
