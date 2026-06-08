@@ -7,6 +7,7 @@ from remora.index import (
     IndexSort,
     IndexSubstitution,
     free_index_vars,
+    index_alpha_equivalent,
     substitute_index,
 )
 from remora.types import (
@@ -119,6 +120,92 @@ def _drop_shadowed(
 def _has_index_var(dim_expr: AnyIndexExpr) -> bool:
     from remora.index import free_index_vars as _fiv
     return bool(_fiv(dim_expr))
+
+
+# ── Alpha-equivalence for Remora types ─────────────────────────────────────
+
+
+def type_alpha_equivalent(
+    a: RemoraType,
+    b: RemoraType,
+    index_env: dict[str, str] | None = None,
+    type_env: dict[str, str] | None = None,
+) -> bool:
+    """Check if two Remora types are equivalent up to bound-variable renaming.
+
+    ``index_env`` maps bound index variables to canonical names.
+    ``type_env`` maps bound type variables to canonical names.
+    """
+    if index_env is None:
+        index_env = {}
+    if type_env is None:
+        type_env = {}
+
+    if isinstance(a, ArrayType) and isinstance(b, ArrayType):
+        if not type_alpha_equivalent(a.element, b.element, index_env, type_env):
+            return False
+        if a.shape_expr is not None and b.shape_expr is not None:
+            if not index_alpha_equivalent(a.shape_expr, b.shape_expr, index_env):
+                return False
+        elif a.shape_expr is not None or b.shape_expr is not None:
+            return False
+        if len(a.shape) != len(b.shape):
+            return False
+        return all(
+            index_alpha_equivalent(ad, bd, index_env)
+            for ad, bd in zip(a.shape, b.shape)
+        )
+
+    if isinstance(a, FuncType) and isinstance(b, FuncType):
+        if len(a.params) != len(b.params):
+            return False
+        return all(
+            type_alpha_equivalent(ap, bp, index_env, type_env)
+            for ap, bp in zip(a.params, b.params)
+        ) and type_alpha_equivalent(a.result, b.result, index_env, type_env)
+
+    if isinstance(a, PiType) and isinstance(b, PiType):
+        if len(a.binders) != len(b.binders):
+            return False
+        if any(
+            ab.sort != bb.sort
+            for ab, bb in zip(a.binders, b.binders)
+        ):
+            return False
+        # Extend index environment with binder mappings
+        extended_env = dict(index_env)
+        for ab, bb in zip(a.binders, b.binders):
+            extended_env[ab.name] = bb.name
+            extended_env[bb.name] = bb.name
+        return type_alpha_equivalent(a.body, b.body, extended_env, type_env)
+
+    if isinstance(a, ForallType) and isinstance(b, ForallType):
+        if len(a.binders) != len(b.binders):
+            return False
+        extended = dict(type_env)
+        for ab, bb in zip(a.binders, b.binders):
+            extended[ab.name] = bb.name
+            extended[bb.name] = bb.name
+        return type_alpha_equivalent(a.body, b.body, index_env, extended)
+
+    if isinstance(a, SigmaType) and isinstance(b, SigmaType):
+        if len(a.hidden_names) != len(b.hidden_names):
+            return False
+        extended = dict(index_env)
+        for an, bn in zip(a.hidden_names, b.hidden_names):
+            extended[an] = bn
+            extended[bn] = bn
+        return type_alpha_equivalent(a.body, b.body, extended, type_env)
+
+    if isinstance(a, TypeVar) and isinstance(b, TypeVar):
+        ca = type_env.get(a.name, a.name)
+        cb = type_env.get(b.name, b.name)
+        return ca == cb
+
+    if isinstance(a, ScalarType) and isinstance(b, ScalarType):
+        return a.name == b.name
+
+    return False
 
 
 # ── Forall / element-type variable helpers ────────────────────────────────

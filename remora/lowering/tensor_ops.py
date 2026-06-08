@@ -1989,8 +1989,20 @@ def _lower_scan_module(
 
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("scan lowering requires an array result")
-    if node.result_type.rank != 1:
-        raise RemoraLoweringError("only rank-1 scan lowers to MLIR so far")
+    if node.result_type.rank < 1 or node.result_type.rank > 2:
+        raise RemoraLoweringError(
+            "scan lowering supports rank 1 and 2 so far"
+        )
+
+    if node.result_type.rank == 1:
+        return _lower_scan_rank1(node, functions)
+    return _lower_scan_rank2(node, functions)
+
+
+def _lower_scan_rank1(
+    node: HIRScan, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
 
     result_type = type_to_mlir(node.result_type)
     result_element_type = type_to_mlir(node.result_type.element)
@@ -2049,6 +2061,51 @@ def _lower_scan_module(
       %stored = tensor.insert %next_carry into %acc_tensor[%i] : {result_type}
       \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
     }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%scanned")
+
+
+def _lower_scan_rank2(
+    node: HIRScan, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    N = node.reduction_dim.value
+    M = node.result_type.shape[1].value
+    result_type = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
+    trailing_type = f"tensor<{M}x{result_element_type}>"
+
+    init_code, init_name, _init_type, _ielem = _lower_tensor_input(
+        node.init, "scan_init", functions
+    )
+    input_code, input_name, input_type, _ielem2 = _lower_tensor_input(
+        node.array, "input", functions
+    )
+    op_name = _arith_op(node.func.op, result_element_type)
+
+    body = f"""{init_code}
+{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %cM = arith.constant {M} : index
+    %empty = tensor.empty() : {result_type}
+    %scanned, %_carry = "scf.for"(%c0, %cN, %c1, %empty, {init_name}) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {trailing_type}):
+      %new_carry = "scf.for"(%c0, %cM, %c1, %carry) ({{
+      ^bb1(%j: index, %c: {trailing_type}):
+        %in_elem = tensor.extract {input_name}[%i, %j] : {input_type}
+        %c_elem = tensor.extract %c[%j] : {trailing_type}
+        %added = {op_name} %c_elem, %in_elem : {result_element_type}
+        %c_next = tensor.insert %added into %c[%j] : {trailing_type}
+        "scf.yield"(%c_next) : ({trailing_type}) -> ()
+      }}) : (index, index, index, {trailing_type}) -> {trailing_type}
+      %acc_next = tensor.insert_slice %new_carry into %acc_tensor[%i, 0] [1, {M}] [1, 1] : {trailing_type} into {result_type}
+      "scf.yield"(%acc_next, %new_carry) : ({result_type}, {trailing_type}) -> ()
+    }}) : (index, index, index, {result_type}, {trailing_type}) -> ({result_type}, {trailing_type})"""
 
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)

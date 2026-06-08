@@ -396,6 +396,7 @@ class TestCompiledVsInterpreter:
         "(scan + 0 [2 10 5])",
         "(iscan/zero + 0 [2 10 5])",
         "(escan/zero + 0 [2 10 5])",
+        "(iscan + [0 0 0] [[1 2 3] [4 5 6] [7 8 9]])",
     ])
     def test_scan_family(self, src):
         _assert_lisp_compiled_matches_interp(src)

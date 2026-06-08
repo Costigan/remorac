@@ -920,3 +920,44 @@ Rough breakdown:
 6. Implement exact-dimension constraint solving and specialization.
 
 The first implementation PR should not touch MLIR lowering except to prove that erased programs still reach the same backend path.
+
+
+## 17. Phase 7 Implementation Status (June 8, 2026)
+
+### Milestones
+
+| # | Milestone | Status |
+|---|---:|
+| 7.0 | Foundation | ✅ Complete |
+| 7.1 | Exact-dimension Pi | ✅ Complete |
+| 7.2 | Frame/cell elaboration | ✅ Complete |
+| 7.3 | Shape variables/concat | ✅ Complete |
+| 7.4 | Dimension arithmetic | ✅ Complete |
+| 7.5 | Forall (optional) | ✅ Complete |
+| 7.6 | Stabilization | ✅ Complete |
+
+**Final: 808 tests passed, 1 skipped.**
+
+### New Modules
+
+| Module | Purpose |
+|--------|---------|
+| `remora/index.py` | Index sorts, expressions, normalization, alpha-equiv |
+| `remora/constraints.py` | Exact/linear solvers, split search, shape matching |
+| `remora/dependent_types.py` | Pi/Forall instantiation, substitution, free vars |
+| `remora/elaborated.py` | Typed core: CoreProgram, FrameCellDecision, etc. |
+| `remora/elaborate.py` | AST → typed core elaboration |
+| `remora/erase.py` | Dependent erasure → backend HIR |
+| `remora/core_verify.py` | Typed-core verifier |
+| `remora/frame.py` | Centralized frame/cell decomposition |
+
+### AD Prerequisites (NEW_AD_PLAN.md §2)
+
+| # | Criterion | Status |
+|---|-----------|:---:|
+| 1 | Pi/index applications elaborated explicitly | ✅ |
+| 2 | Typed core IR between typechecking and HIR | ✅ |
+| 3 | Frame/cell decomposition explicit and consistent | ✅ |
+| 4 | Specialization and type erasure separate | ✅ |
+| 5 | Typed core verifier re-checks after transforms | ✅ |
+| 6 | Rank-2 scan/rotate/append independent of rank-1 shortcuts | ✅ rotate/app/scan done |

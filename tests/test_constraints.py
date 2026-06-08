@@ -8,6 +8,7 @@ from remora.constraints import (
     match_shape_expr_pattern,
     match_shape_template,
     solve_exact,
+    solve_linear,
     solve_with_shapes,
 )
 from remora.index import DimAdd, DimLit, DimSub, DimVar, ShapeLit, ShapeVar
@@ -144,3 +145,61 @@ def _dim_value(binding) -> int:
     if hasattr(binding, "value"):
         return binding.value
     return binding.value
+
+
+# ── Full linear solver (multi-equation, multi-unknown) ─────────────────────
+
+def test_linear_solver_multi_equation():
+    bindings = solve_linear([
+        DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(10)),
+        DimEq(DimVar("b"), DimLit(3)),
+    ])
+    assert _dim_value(bindings["a"]) == 7
+    assert _dim_value(bindings["b"]) == 3
+
+
+def test_linear_solver_interdependent_adds():
+    bindings = solve_linear([
+        DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(10)),
+        DimEq(DimAdd(DimVar("b"), DimLit(2)), DimLit(5)),
+    ])
+    assert _dim_value(bindings["a"]) == 7
+    assert _dim_value(bindings["b"]) == 3
+
+
+def test_linear_solver_sub_and_add():
+    """a + b = 10, b = 3 → a = 7 (one equation anchors the system)"""
+    bindings = solve_linear([
+        DimEq(DimSub(DimVar("a"), DimLit(3)), DimLit(4)),  # a - 3 = 4 → a = 7
+        DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(10)),  # 7 + b = 10 → b = 3
+    ])
+    assert _dim_value(bindings["a"]) == 7
+    assert _dim_value(bindings["b"]) == 3
+
+
+def test_linear_solver_three_equations():
+    bindings = solve_linear([
+        DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(12)),
+        DimEq(DimSub(DimVar("a"), DimVar("c")), DimLit(5)),
+        DimEq(DimVar("c"), DimLit(3)),
+    ])
+    assert _dim_value(bindings["a"]) == 8
+    assert _dim_value(bindings["b"]) == 4
+    assert _dim_value(bindings["c"]) == 3
+
+
+def test_linear_solver_detects_inconsistency():
+    with pytest.raises(ConstraintError):
+        solve_linear([
+            DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(10)),
+            DimEq(DimVar("a"), DimLit(3)),
+            DimEq(DimVar("b"), DimLit(8)),  # 3 + 8 != 10
+        ])
+
+
+def test_linear_solver_rejects_underconstrained():
+    with pytest.raises(ConstraintError):
+        solve_linear([
+            DimEq(DimAdd(DimVar("a"), DimVar("b")), DimLit(10)),
+            # missing: neither a nor b is known
+        ])

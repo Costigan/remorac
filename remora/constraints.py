@@ -103,6 +103,60 @@ def solve_with_shapes(constraints: list[Constraint]) -> dict[str, AnyIndexExpr]:
     return bindings
 
 
+def solve_linear(constraints: list[Constraint]) -> dict[str, AnyIndexExpr]:
+    """Iterative fixed-point solver for linear dimension constraints.
+
+    Re-processes constraints until no new bindings are produced.  This
+    handles interdependent equations like::
+
+        a + b = 10
+        b = 3
+        → a = 7 (found on second pass)
+
+    where a single-pass solver would fail on the first equation.
+    """
+    bindings: dict[str, AnyIndexExpr] = {}
+    # Collect shapes separately since they may need re-solving after dims change
+    shape_constraints = [c for c in constraints if isinstance(c, ShapeEq)]
+
+    prev_size = -1
+    while len(bindings) > prev_size:
+        prev_size = len(bindings)
+        for constraint in constraints:
+            try:
+                if isinstance(constraint, DimEq):
+                    _solve_dim_eq_any_iter(
+                        constraint.left, constraint.right,
+                        bindings, constraint.loc,
+                    )
+                elif isinstance(constraint, ShapeEq):
+                    _solve_shape_eq_any(
+                        constraint.left, constraint.right,
+                        bindings, constraint.loc,
+                    )
+            except ConstraintError:
+                # Re-raise on the next iteration if still no progress
+                if len(bindings) == prev_size:
+                    raise
+
+    # One final pass to catch any remaining issues
+    for shape_c in shape_constraints:
+        _solve_shape_eq_any(
+            shape_c.left, shape_c.right,
+            bindings, shape_c.loc,
+        )
+
+    # Verify no unsolved dim constraints remain
+    for constraint in constraints:
+        if isinstance(constraint, DimEq):
+            _solve_dim_eq_any(
+                constraint.left, constraint.right,
+                dict(bindings), constraint.loc,
+            )
+
+    return bindings
+
+
 def match_shape_template_with_shapes(
     expected: tuple[DimExpr, ...],
     actual: tuple[DimExpr, ...],
@@ -335,6 +389,48 @@ def _solve_dim_eq_any(
         return
     if isinstance(right, DimSub):
         _solve_dim_sub_eq(right, left, bindings, loc)
+        return
+    raise ConstraintError(
+        f"cannot solve dimension equality {left} = {right}", loc
+    )
+
+
+def _solve_dim_eq_any_iter(
+    left: DimExpr,
+    right: DimExpr,
+    bindings: dict[str, AnyIndexExpr],
+    loc: SourceLoc | None,
+) -> None:
+    """Like ``_solve_dim_eq_any`` but skips unsolvable arithmetic gracefully."""
+    left = _normalize_bound_dim_any(left, bindings)
+    right = _normalize_bound_dim_any(right, bindings)
+    if left == right:
+        return
+    if isinstance(left, DimVar):
+        _bind_dim_any(left.name, right, bindings, loc)
+        return
+    if isinstance(right, DimVar):
+        _bind_dim_any(right.name, left, bindings, loc)
+        return
+    left_value = _static_dim_value(left)
+    right_value = _static_dim_value(right)
+    if left_value is not None and right_value is not None:
+        if left_value != right_value:
+            raise ConstraintError(
+                f"dimension mismatch: expected {left_value}, got {right_value}", loc
+            )
+        return
+    if isinstance(left, DimAdd):
+        _solve_dim_add_eq_iter(left, right, bindings, loc)
+        return
+    if isinstance(right, DimAdd):
+        _solve_dim_add_eq_iter(right, left, bindings, loc)
+        return
+    if isinstance(left, DimSub):
+        _solve_dim_sub_eq_iter(left, right, bindings, loc)
+        return
+    if isinstance(right, DimSub):
+        _solve_dim_sub_eq_iter(right, left, bindings, loc)
         return
     raise ConstraintError(
         f"cannot solve dimension equality {left} = {right}", loc
@@ -614,3 +710,98 @@ def _solve_dim_sub_eq(
     raise ConstraintError(
         f"cannot solve {sub_expr} = {target}: need one known operand", loc
     )
+
+
+# ── Iterative arithmetic solvers (skip when both operands unknown) ─────────
+
+
+def _solve_dim_add_eq_iter(
+    add_expr: DimAdd,
+    other: DimExpr,
+    bindings: dict[str, AnyIndexExpr],
+    loc: SourceLoc | None,
+) -> None:
+    """Like ``_solve_dim_add_eq`` but returns silently when unsolvable."""
+    left = add_expr.left
+    right = add_expr.right
+    target = _static_dim_value(other)
+    if target is None:
+        return  # can't solve yet
+
+    left_val = _static_dim_value(_normalize_bound_dim_any(left, bindings))
+    right_val = _static_dim_value(_normalize_bound_dim_any(right, bindings))
+
+    if left_val is not None and right_val is not None:
+        if left_val + right_val != target:
+            raise ConstraintError(
+                f"arithmetic mismatch: {left_val} + {right_val} != {target}", loc
+            )
+        return
+
+    if left_val is not None and isinstance(_normalize_bound_dim_any(right, bindings), DimVar):
+        solved = target - left_val
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {target} - {left_val} would be negative", loc
+            )
+        rv = _normalize_bound_dim_any(right, bindings)
+        _bind_dim_any(rv.name, DimLit(solved), bindings, loc)
+        return
+
+    if right_val is not None and isinstance(_normalize_bound_dim_any(left, bindings), DimVar):
+        solved = target - right_val
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {target} - {right_val} would be negative", loc
+            )
+        lv = _normalize_bound_dim_any(left, bindings)
+        _bind_dim_any(lv.name, DimLit(solved), bindings, loc)
+        return
+
+    # Both operands unknown → skip, iteration will retry
+
+
+def _solve_dim_sub_eq_iter(
+    sub_expr: DimSub,
+    other: DimExpr,
+    bindings: dict[str, AnyIndexExpr],
+    loc: SourceLoc | None,
+) -> None:
+    """Like ``_solve_dim_sub_eq`` but returns silently when unsolvable."""
+    left = sub_expr.left
+    right = sub_expr.right
+    target = _static_dim_value(other)
+    if target is None:
+        return
+
+    left_val = _static_dim_value(_normalize_bound_dim_any(left, bindings))
+    right_val = _static_dim_value(_normalize_bound_dim_any(right, bindings))
+
+    if left_val is not None and right_val is not None:
+        if left_val - right_val != target:
+            raise ConstraintError(
+                f"arithmetic mismatch: {left_val} - {right_val} != {target}", loc
+            )
+        if left_val - right_val < 0:
+            raise ConstraintError(
+                f"dimension subtraction {left_val} - {right_val} is negative", loc
+            )
+        return
+
+    if right_val is not None and isinstance(_normalize_bound_dim_any(left, bindings), DimVar):
+        solved = target + right_val
+        lv = _normalize_bound_dim_any(left, bindings)
+        _bind_dim_any(lv.name, DimLit(solved), bindings, loc)
+        return
+
+    if left_val is not None and isinstance(_normalize_bound_dim_any(right, bindings), DimVar):
+        solved = left_val - target
+        if solved < 0:
+            raise ConstraintError(
+                f"dimension subtraction {left_val} - {target} would be negative for {right}", loc
+            )
+        rv = _normalize_bound_dim_any(right, bindings)
+        _bind_dim_any(rv.name, DimLit(solved), bindings, loc)
+        return
+
+    # Both operands unknown → skip, iteration will retry
