@@ -142,22 +142,48 @@ class RemoraExecutor:
         )
 
 
+class GPUPtxContext:
+    """Pre-loaded CUDA runtime and PTX module for reuse across launches."""
+
+    def __init__(self, ptx_text: str):
+        self._rt = CUDARuntime()
+        self._mod = self._rt.load_ptx(ptx_text)
+
+    def get_kernel(self, name: str):
+        return self._mod.get_function(name)
+
+    def get_runtime(self) -> CUDARuntime:
+        return self._rt
+
+    def close(self) -> None:
+        self._mod.close()
+        self._rt.close()
+
+
 def execute_program_on_gpu(
     source: str,
     *,
     include_prelude: bool = True,
 ) -> np.ndarray:
-    """Compile a Remora body program to GPU PTX and execute it.
-
-    Uses the IREE HAL compilation path (``iree-compile``) to generate
-    CUDA PTX, then launches kernels directly via the CUDA driver.
-    For multi-kernel programs, launches all kernels in order with
-    intermediate buffers. Returns the output as a numpy array.
-    """
+    """Compile a Remora body program to GPU PTX and execute it."""
     from remora.compiler import compile_source_to_ptx
-    from remora.runtime import CUDARuntime
 
     artifact = compile_source_to_ptx(source, include_prelude=include_prelude)
+    return execute_program_from_ptx(artifact)
+
+
+def execute_program_from_ptx(
+    artifact: Any,
+    *,
+    context: GPUPtxContext | None = None,
+) -> np.ndarray:
+    """Execute a pre-compiled PTX artifact on GPU.
+
+    Launches all kernels in order with intermediate buffers.
+    If *context* is provided, reuses the pre-loaded CUDA runtime
+    and PTX module to avoid recompilation overhead.
+    Returns the output as a numpy array.
+    """
     if not artifact.kernels:
         raise RemoraExecutorError(
             "No GPU kernels generated. Try a program with tensor operations."
@@ -182,9 +208,15 @@ def execute_program_on_gpu(
 
     output = np.empty(output_shape, dtype=output_dtype)
 
-    rt = CUDARuntime()
+    if context is not None:
+        rt = context.get_runtime()
+    else:
+        rt = CUDARuntime()
     try:
-        mod = rt.load_ptx(artifact.ptx_text)
+        if context is not None:
+            mod = context._mod
+        else:
+            mod = rt.load_ptx(artifact.ptx_text)
         buf_size = max(4096, output_nbytes * 4, 1024 * 1024)  # up to 256K i32 elements
         output_storage = np.zeros(buf_size, dtype=np.uint8)
         buf_ptr = rt.alloc(buf_size)
@@ -235,9 +267,11 @@ def execute_program_on_gpu(
         rt.free(buf_ptr)
         for ptr in extra_bufs:
             rt.free(ptr)
-        mod.close()
+        if context is None:
+            mod.close()
     finally:
-        rt.close()
+        if context is None:
+            rt.close()
 
     return output
 

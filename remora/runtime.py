@@ -470,7 +470,25 @@ def evaluate_source_compiled(
     cpu_threads: int | None = None,
     cpu_vectorize: bool = False,
     syntax: str = "ml",
+    strict: bool = True,
 ) -> EvaluationResult:
+    if not strict:
+        try:
+            return evaluate_source_compiled(
+                source,
+                include_prelude=include_prelude,
+                cpu_threads=cpu_threads,
+                cpu_vectorize=cpu_vectorize,
+                syntax=syntax,
+                strict=True,
+            )
+        except Exception as e:
+            if type(e).__name__ == "RemoraLoweringError":
+                return evaluate_source(
+                    source, include_prelude=include_prelude, syntax=syntax
+                )
+            raise
+
     artifact = CPUExecutor.compile_source(
         source,
         include_prelude=include_prelude,

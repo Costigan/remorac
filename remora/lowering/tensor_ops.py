@@ -1060,7 +1060,7 @@ def _lower_fold_input(
     *,
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str, str]:
-    if isinstance(node, (HIRIota, HIRArrayLit)):
+    if isinstance(node, (HIRIota, HIRArrayLit, HIRWithShape)):
         return _lower_tensor_input(
             node, _join_prefix(prefix, "input"), functions, tensor_env
         )
