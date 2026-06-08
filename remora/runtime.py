@@ -16,7 +16,7 @@ import numpy as np
 
 from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_function_source, compile_source
-from remora.ast_nodes import BoolLit, FloatLit, FuncDef, IfExpr, IntLit, IotaExpr, VarExpr
+from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, IfExpr, IntLit, IotaExpr, ReplicateExpr, SortExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS
@@ -39,8 +39,10 @@ from remora.typechecker import (
     TypedDefinition,
     TypedExpr,
     TypedExprNode,
+    TypedFilter,
     TypedFold,
     TypedFoldRight,
+    TypedGrade,
     TypedIf,
     TypedIndex,
     TypedIndicesOf,
@@ -52,11 +54,13 @@ from remora.typechecker import (
     TypedOperatorFunc,
     TypedProgram,
     TypedRank,
+    TypedReplicate,
     TypedRightSection,
     TypedRotate,
     TypedReverse,
     TypedScan,
     TypedShape,
+    TypedSort,
     TypedSubarray,
     TypedUnbox,
     TypedWithShape,
@@ -975,6 +979,87 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
     if isinstance(expr, TypedScan):
         array = _eval_expr(expr.array, env)
         acc = _eval_expr(expr.init, env)
+        fn = _eval_callable(expr.func, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("scan expects an array value")
+        result = np.empty_like(array)
+        for i in range(len(array)):
+            if expr.exclusive:
+                result[i] = acc
+                acc = fn(acc, array[i])
+            else:
+                acc = fn(acc, array[i])
+                result[i] = acc
+        if expr.right:
+            result = result[::-1]
+        return _coerce_runtime_value(result, expr.type)
+
+    if isinstance(expr, TypedFoldRight):
+        array = _eval_expr(expr.array, env)
+        acc = _eval_expr(expr.init, env)
+        fn = _eval_callable(expr.func, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("fold-right expects an array value")
+        for item in reversed(array):
+            acc = fn(item, acc)
+        return _coerce_runtime_value(acc, expr.type)
+
+    if isinstance(expr, TypedRotate):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("rotate expects an array value")
+        return np.roll(array, -expr.shift.value, axis=0)
+
+    if isinstance(expr, TypedSubarray):
+        array = _eval_expr(expr.array, env)
+        slices = tuple(slice(o.value, o.value + s.value) for o, s in zip(expr.offsets, expr.sizes))
+        return _coerce_runtime_value(array[slices], expr.type)
+
+    if isinstance(expr, TypedIndicesOf):
+        array = _eval_expr(expr.array, env)
+        return np.indices(array.shape, dtype=np.int32)
+
+    if isinstance(expr, TypedWithShape):
+        source = _eval_expr(expr.source, env)
+        shape = tuple(d.value for d in expr.type.shape)
+        return np.full(shape, source, dtype=_numpy_dtype(expr.type.element))
+
+    if isinstance(expr, TypedBox):
+        return _eval_expr(expr.value, env)
+
+    if isinstance(expr, TypedUnbox):
+        inner_env = dict(env)
+        inner_env[expr.value_name] = _eval_expr(expr.box_value, env)
+        return _eval_expr(expr.body, inner_env)
+
+    if isinstance(expr, TypedAppend):
+        return np.concatenate([_eval_expr(expr.left, env), _eval_expr(expr.right, env)], axis=0)
+
+    if isinstance(expr, TypedLength):
+        return int(expr.dim.value)
+
+    if isinstance(expr, TypedSort):
+        array = _eval_expr(expr.array, env)
+        return _coerce_runtime_value(np.sort(array, kind='stable'), expr.type)
+
+    if isinstance(expr, TypedGrade):
+        array = _eval_expr(expr.array, env)
+        return np.argsort(array, kind='stable').astype(np.int32)
+
+    if isinstance(expr, TypedFilter):
+        array = _eval_expr(expr.array, env)
+        pred = _eval_callable(expr.predicate, env)
+        mask = np.array([bool(pred(x)) for x in array])
+        return array[mask]
+
+    if isinstance(expr, TypedReplicate):
+        counts = _eval_expr(expr.counts, env)
+        array = _eval_expr(expr.array, env)
+        return np.repeat(array, counts.astype(int))
+
+    if isinstance(expr, TypedScan):
+        array = _eval_expr(expr.array, env)
+        acc = _eval_expr(expr.init, env)
         callable_value = _eval_callable(expr.func, env)
         if not isinstance(array, np.ndarray):
             raise EvaluationError("scan expects an array value")
@@ -1070,6 +1155,29 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
         if not isinstance(size, StaticDim):
             raise EvaluationError("iota requires a static dimension")
         return np.arange(size.value, dtype=np.int32)
+    if isinstance(ast, SortExpr):
+        array = _eval_expr(TypedExprNode(ast.array, expr.type), env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("sort expects an array value")
+        return _coerce_runtime_value(np.sort(array, kind='stable'), expr.type)
+    if isinstance(ast, GradeExpr):
+        array = _eval_expr(TypedExprNode(ast.array, expr.type), env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("grade expects an array value")
+        return np.argsort(array, kind='stable').astype(np.int32)
+    if isinstance(ast, FilterExpr):
+        array = _eval_expr(TypedExprNode(ast.array, expr.type), env)
+        pred = _eval_callable(TypedExprNode(ast.predicate, expr.type), env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("filter expects an array value")
+        mask = np.array([bool(pred(x)) for x in array])
+        return array[mask]
+    if isinstance(ast, ReplicateExpr):
+        counts = _eval_expr(TypedExprNode(ast.counts, expr.type), env)
+        array = _eval_expr(TypedExprNode(ast.array, expr.type), env)
+        if not isinstance(counts, np.ndarray) or not isinstance(array, np.ndarray):
+            raise EvaluationError("replicate expects array values")
+        return np.repeat(array, counts.astype(int))
     raise EvaluationError(f"CPU evaluation for {type(ast).__name__} is deferred")
 
 
