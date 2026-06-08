@@ -24,7 +24,7 @@ from remora.pipeline import run_validation_pipeline, verify_module_text
 from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
-from remora.types import FuncType, RemoraType
+from remora.types import DimExpr, FuncType, RemoraType
 from remora.ast_nodes import FuncDef, Program
 
 
@@ -62,6 +62,8 @@ class FunctionCompilerArtifact:
     hir_function: HIRFunction
     mlir_module: object
     mlir_text: str
+    specialization_name: str | None = None
+    index_args: tuple[DimExpr, ...] = ()
 
     @property
     def return_type(self) -> RemoraType:
@@ -266,10 +268,15 @@ def compile_function_source(
     if function_def is None:
         raise ValueError(f"function {function_name!r} is not defined")
 
-    function_type = checker.infer_top_level_function_type(function_def, param_types, env)
-    typed_function = checker.typed_top_level_function(function_def, function_type, env)
+    typed_function = checker.specialize_top_level_function(
+        function_def,
+        param_types,
+        env,
+    )
+    function_type = typed_function.type
+    internal_name = typed_function.specialization_name or function_name
     hir_function = HIRFunction(
-        function_name,
+        internal_name,
         [HIRParam(name, param_type) for name, param_type in typed_function.params],
         lower_expr(typed_function.body),
         function_type.result,
@@ -294,4 +301,6 @@ def compile_function_source(
         hir_function=hir_function,
         mlir_module=mlir_module,
         mlir_text=mlir_text,
+        specialization_name=typed_function.specialization_name,
+        index_args=typed_function.index_args,
     )

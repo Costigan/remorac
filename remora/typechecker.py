@@ -65,6 +65,14 @@ from remora.dependent_types import (
     instantiate_pi_type,
     substitute_type,
 )
+from remora.frame import (
+    apply_frame,
+    cell_matches_array_suffix,
+    cell_type_candidates,
+    principal_frame,
+    scalar_cell_and_frame,
+    infer_lifting as frame_infer_lifting,
+)
 from remora.index import IndexBinder, IndexSort
 from remora.operators import ALL_PRIMITIVE_OPS
 from remora.types import (
@@ -279,6 +287,8 @@ class TypedLambda:
     params: list[tuple[str, RemoraType]]
     body: TypedExpr
     type: FuncType
+    specialization_name: str | None = None
+    index_args: tuple[DimExpr, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -481,15 +491,39 @@ TypedExpr: TypeAlias = (
 
 
 class TypeEnv:
-    """Immutable type environment mapping variable names to their types."""
+    """Immutable environment with separate value and compile-time index namespaces."""
 
-    def __init__(self, bindings: dict[str, RemoraType] | None = None):
+    def __init__(
+        self,
+        bindings: dict[str, RemoraType] | None = None,
+        index_bindings: dict[str, IndexSort] | None = None,
+    ):
         """Create a type environment with optional initial variable bindings."""
         self._bindings = dict(bindings or {})
+        self._index_bindings = dict(index_bindings or {})
 
     def extend(self, name: str, value_type: RemoraType) -> TypeEnv:
         """Return a new environment with the given name-type binding added."""
-        return TypeEnv({**self._bindings, name: value_type})
+        return TypeEnv(
+            {**self._bindings, name: value_type},
+            self._index_bindings,
+        )
+
+    def extend_index(self, binder: IndexBinder) -> TypeEnv:
+        """Return an environment extended with one compile-time index binder."""
+        if binder.name in self._index_bindings:
+            raise RemoraTypeError(f"duplicate index binder {binder.name!r}")
+        return TypeEnv(
+            self._bindings,
+            {**self._index_bindings, binder.name: binder.sort},
+        )
+
+    def lookup_index(self, name: str) -> IndexSort:
+        """Return the sort of a compile-time index variable."""
+        try:
+            return self._index_bindings[name]
+        except KeyError as exc:
+            raise RemoraTypeError(f"unbound index variable '{name}'") from exc
 
     def lookup(self, name: str) -> RemoraType:
         """Return the type bound to a variable name, or raise an error."""
@@ -506,6 +540,9 @@ class TypeChecker:
         """Create a new type checker with empty function registries."""
         self._functions: dict[str, FuncDef] = {}
         self._active_functions: set[str] = set()
+        self._specializations: dict[
+            tuple[str, tuple[DimExpr, ...]], TypedLambda
+        ] = {}
 
     def check_program(self, program: Program) -> TypedProgram:
         """Type-check an entire program and return a typed program."""
@@ -517,6 +554,7 @@ class TypeChecker:
             if isinstance(definition, FuncDef)
         }
         self._active_functions = set()
+        self._specializations = {}
 
         for definition in program.definitions:
             typed_definition, env = self._check_definition(definition, env)
@@ -855,6 +893,7 @@ class TypeChecker:
             function,
             instantiated,
             env,
+            index_args=expr.args,
         )
         return TypedIndexApp(expr, typed_function, expr.args, instantiated)
 
@@ -883,7 +922,7 @@ class TypeChecker:
                     expr.func, cell_type, env
                 )
                 typed_func = self.check_callable(expr.func, func_type, env)
-                frame_shape, result_type = infer_lifting(func_type, typed_array.type)
+                frame_shape, result_type = frame_infer_lifting(func_type, typed_array.type)
                 cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
                 # If frame_shape is empty and cell_shape matches the full array,
                 # this is a direct application – no implicit map needed.
@@ -914,8 +953,8 @@ class TypeChecker:
 
         # Principal-frame broadcasting: determine the principal (longest) frame.
         # Shorter frames get their cells replicated to match the principal shape.
-        principal_frame = self._principal_frame(left_frame, right_frame, expr.loc)
-        if principal_frame is None:
+        princ_frame = self._principal_frame(left_frame, right_frame, expr.loc)
+        if princ_frame is None:
             return None
 
         try:
@@ -924,14 +963,14 @@ class TypeChecker:
             )
             typed_func = self.check_callable(expr.func, func_type, env)
             result_type = func_type.result
-            if principal_frame:
+            if princ_frame:
                 if isinstance(result_type, FuncType):
                     return None
                 if isinstance(result_type, ArrayType):
                     return None
-                result_type = ArrayType(result_type, principal_frame)
+                result_type = apply_frame(result_type, princ_frame)
             return TypedMap(
-                expr, typed_func, typed_args, principal_frame, (), result_type,
+                expr, typed_func, typed_args, princ_frame, (), result_type,
             )
         except RemoraTypeError:
             return None
@@ -942,25 +981,7 @@ class TypeChecker:
         right_frame: tuple[DimExpr, ...],
         loc,
     ) -> tuple[DimExpr, ...] | None:
-        """Determine the principal frame from two argument frames.
-
-        The principal frame is the longest frame. The shorter frame must be
-        a prefix (or empty) to allow cell replication. Returns None if frames
-        are incompatible.
-        """
-        if left_frame == right_frame:
-            return left_frame
-        if not left_frame:
-            return right_frame
-        if not right_frame:
-            return left_frame
-        # Check if one frame is a prefix of the other
-        min_len = min(len(left_frame), len(right_frame))
-        if left_frame[:min_len] != right_frame[:min_len]:
-            return None  # incompatible shapes
-        if len(left_frame) > len(right_frame):
-            return left_frame
-        return right_frame
+        return principal_frame([left_frame, right_frame], loc)
 
     def _infer_primitive_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
         if len(expr.args) != 2:
@@ -1029,7 +1050,7 @@ class TypeChecker:
                     expr.func, cell_type, env
                 )
                 typed_func = self.check_callable(expr.func, expected_func_type, env)
-                frame_shape, result_type = infer_lifting(expected_func_type, typed_array.type)
+                frame_shape, result_type = frame_infer_lifting(expected_func_type, typed_array.type)
                 cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
                 return TypedMap(
                     expr,
@@ -1068,17 +1089,13 @@ class TypeChecker:
                 raise RemoraTypeError("function-valued map results are deferred", expr.loc)
             if isinstance(result_type, ArrayType):
                 raise RemoraTypeError("binary map over array-valued cells is deferred", expr.loc)
-            result_type = ArrayType(result_type, frame_shape)
+            result_type = apply_frame(result_type, frame_shape)
         return TypedMap(expr, typed_func, [left, right], frame_shape, (), result_type)
 
     def _scalar_cell_and_frame(
         self, value_type: RemoraType, loc
     ) -> tuple[ScalarType, tuple[DimExpr, ...]]:
-        if isinstance(value_type, ScalarType):
-            return value_type, ()
-        if isinstance(value_type, ArrayType):
-            return value_type.element, value_type.shape
-        raise RemoraTypeError("map over function values is deferred", loc)
+        return scalar_cell_and_frame(value_type, loc)
 
     def _infer_binary_map_callable_type(
         self,
@@ -1761,12 +1778,7 @@ class TypeChecker:
         return TypedRightSection(expr, typed_arg, expected_type)
 
     def _cell_type_candidates(self, value_type: RemoraType) -> list[RemoraType]:
-        if isinstance(value_type, ScalarType):
-            return [value_type]
-        candidates: list[RemoraType] = [value_type.element]
-        for rank in range(1, value_type.rank + 1):
-            candidates.append(ArrayType(value_type.element, value_type.shape[-rank:]))
-        return candidates
+        return cell_type_candidates(value_type)
 
     def check_definition(
         self, definition: Definition, env: TypeEnv
@@ -1784,10 +1796,25 @@ class TypeChecker:
             )
         if isinstance(definition, FuncDef):
             self._functions[definition.name] = definition
+            declared_type = self._declared_function_type(definition)
+            if isinstance(declared_type, PiType):
+                if not isinstance(declared_type.body, FuncType):
+                    raise RemoraTypeError(
+                        "dependent function annotation must contain a function type",
+                        definition.loc,
+                    )
+                symbolic_env = env
+                for binder in declared_type.binders:
+                    symbolic_env = symbolic_env.extend_index(binder)
+                self._typed_top_level_function(
+                    definition,
+                    declared_type.body,
+                    symbolic_env,
+                )
             return TypedDefinition(
                 definition,
                 None,
-                self._declared_function_type(definition),
+                declared_type,
             ), env
         raise AssertionError(f"unknown definition type {type(definition).__name__}")
 
@@ -1796,12 +1823,19 @@ class TypeChecker:
         if len(expr.args) != len(function.params):
             raise RemoraTypeError("function arity mismatch", expr.loc)
         typed_args = [self.infer(arg, env) for arg in expr.args]
+        actual_param_types = tuple(arg.type for arg in typed_args)
         func_type = self._infer_top_level_function_type(
             function,
-            tuple(arg.type for arg in typed_args),
+            actual_param_types,
             env,
         )
-        typed_func = self._typed_top_level_function(function, func_type, env)
+        index_args = self._inferred_index_args(function, actual_param_types)
+        typed_func = self._typed_top_level_function(
+            function,
+            func_type,
+            env,
+            index_args=index_args,
+        )
         typed_args = [
             self._coerce(arg, param_type, expr.loc)
             for arg, param_type in zip(typed_args, func_type.params)
@@ -1816,6 +1850,22 @@ class TypeChecker:
     ) -> FuncType:
         """Infer the result type of a top-level function given concrete parameter types."""
         return self._infer_top_level_function_type(function, param_types, env)
+
+    def specialize_top_level_function(
+        self,
+        function: FuncDef,
+        param_types: tuple[RemoraType, ...],
+        env: TypeEnv,
+    ) -> TypedLambda:
+        """Build or reuse a concrete top-level function specialization."""
+        func_type = self._infer_top_level_function_type(function, param_types, env)
+        index_args = self._inferred_index_args(function, param_types)
+        return self._typed_top_level_function(
+            function,
+            func_type,
+            env,
+            index_args=index_args,
+        )
 
     def _infer_top_level_function_type(
         self,
@@ -1847,6 +1897,10 @@ class TypeChecker:
                 function,
                 FuncType(specialized_params, specialized_result),
                 env,
+                index_args=tuple(
+                    bindings[binder.name]
+                    for binder in self._index_binders(function)
+                ),
             )
             return typed_func.type
         typed_func = self._typed_top_level_function(
@@ -1959,6 +2013,22 @@ class TypeChecker:
             )
         return bindings
 
+    def _inferred_index_args(
+        self,
+        function: FuncDef,
+        actual_param_types: tuple[RemoraType, ...],
+    ) -> tuple[DimExpr, ...] | None:
+        declared_param_types = self._declared_param_types(function)
+        binders = self._index_binders(function)
+        if declared_param_types is None or not binders:
+            return None
+        bindings = self._infer_index_bindings(
+            function,
+            declared_param_types,
+            actual_param_types,
+        )
+        return tuple(bindings[binder.name] for binder in binders)
+
     def _match_declared_type(
         self,
         declared: RemoraType,
@@ -1996,7 +2066,21 @@ class TypeChecker:
         env: TypeEnv,
         *,
         infer_result: bool = False,
+        index_args: tuple[DimExpr, ...] | None = None,
     ) -> TypedLambda:
+        cache_key = (
+            (function.name, index_args)
+            if index_args is not None
+            else None
+        )
+        if cache_key is not None and cache_key in self._specializations:
+            cached = self._specializations[cache_key]
+            if cached.type != func_type:
+                raise RemoraTypeError(
+                    f"inconsistent specialization type for {cached.specialization_name}",
+                    function.loc,
+                )
+            return cached
         if function.name in self._active_functions:
             raise RemoraTypeError("recursive function definitions are deferred", function.loc)
         self._active_functions.add(function.name)
@@ -2012,14 +2096,33 @@ class TypeChecker:
                 typed_result = self._coerce(typed_body, func_type.result, function.loc)
                 result_type = func_type.result
             inferred_type = FuncType(func_type.params, result_type)
-            return TypedLambda(
+            typed_lambda = TypedLambda(
                 function,
                 list(zip(function.params, func_type.params)),
                 typed_result,
                 inferred_type,
+                self._specialization_name(function, index_args)
+                if index_args is not None
+                else None,
+                index_args or (),
             )
+            if cache_key is not None:
+                self._specializations[cache_key] = typed_lambda
+            return typed_lambda
         finally:
             self._active_functions.remove(function.name)
+
+    def _specialization_name(
+        self,
+        function: FuncDef,
+        index_args: tuple[DimExpr, ...],
+    ) -> str:
+        binders = self._index_binders(function)
+        suffix = "__".join(
+            f"{binder.name}_{arg}"
+            for binder, arg in zip(binders, index_args)
+        )
+        return f"{function.name}__{suffix}"
 
     def _infer_let_lambda(self, expr: LetExpr, env: TypeEnv) -> TypedExpr:
         if not isinstance(expr.value, LambdaExpr):

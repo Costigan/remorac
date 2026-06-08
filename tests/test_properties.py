@@ -289,6 +289,10 @@ class TestPhase4Operators:
         r = _evaluate_lisp("(rotate [1 2 3 4 5] 2)")
         np.testing.assert_array_equal(r.value, [3, 4, 5, 1, 2])
 
+    def test_rotate_rank2_correctness(self):
+        r = _evaluate_lisp("(rotate [[1 2] [3 4] [5 6]] 1)")
+        np.testing.assert_array_equal(r.value, [[3, 4], [5, 6], [1, 2]])
+
     def test_rotate_identity(self):
         r = _evaluate_lisp("(rotate [1 2 3 4 5] 0)")
         np.testing.assert_array_equal(r.value, [1, 2, 3, 4, 5])
@@ -300,6 +304,10 @@ class TestPhase4Operators:
     def test_append_correctness(self):
         r = _evaluate_lisp("(append [1 2] [3 4 5])")
         np.testing.assert_array_equal(r.value, [1, 2, 3, 4, 5])
+
+    def test_append_rank2_correctness(self):
+        r = _evaluate_lisp("(append [[1 2] [3 4]] [[5 6] [7 8]])")
+        np.testing.assert_array_equal(r.value, [[1, 2], [3, 4], [5, 6], [7, 8]])
 
     def test_select_correctness(self):
         assert _evaluate_lisp("(select #t 10 20)").value == 10
@@ -409,8 +417,10 @@ class TestCompiledVsInterpreter:
         "(length [[1 2] [3 4] [5 6]])",
         "(rotate [1 2 3 4 5] 2)",
         "(rotate [1 2 3 4 5] 0)",
+        "(rotate [[1 2] [3 4] [5 6]] 1)",
         "(subarray [[1 2 3] [4 5 6] [7 8 9]] [1 0] [2 2])",
         "(append [1 2] [3 4 5])",
+        "(append [[1 2] [3 4]] [[5 6] [7 8]])",
         "(indices-of [10 20 30])",
         "(indices-of [[1 2] [3 4]])",
         "(with-shape 5 [3 2])",
