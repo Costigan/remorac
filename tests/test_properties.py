@@ -15,6 +15,21 @@ def _assert_cpu_matches_interp(source: str):
     np.testing.assert_equal(compiled.value, interp.value)
 
 
+def _evaluate_lisp(source: str):
+    """Evaluate a Lisp-syntax source on compiled CPU."""
+    return evaluate_source_compiled(source, include_prelude=False, syntax="lisp")
+
+
+def _assert_implicit_matches_explicit(lisp_implicit: str, lisp_explicit: str):
+    """Assert that Lisp implicit (auto-lifted) and explicit (map) produce same result."""
+    r_imp = _evaluate_lisp(lisp_implicit)
+    r_exp = _evaluate_lisp(lisp_explicit)
+    if r_imp.type != r_exp.type:
+        pytest.fail(f"type mismatch: {r_imp.type} vs {r_exp.type}")
+    np.testing.assert_equal(r_imp.value, r_exp.value, 
+        err_msg=f"implicit: {r_imp.value}, explicit: {r_exp.value}")
+
+
 class TestCpuVsInterp:
     def test_scalar_arithmetic(self):
         _assert_cpu_matches_interp("1 + 2 * 3 - 4")
@@ -115,3 +130,99 @@ class TestRandomizedCpuVsInterp:
             "let xs = [[1, 2, 3], [4, 5, 6], [7, 8, 9]] in "
             "map (\\row -> fold (+) 0 row) xs"
         )
+
+
+class TestRankPolymorphism:
+    """Property tests for rank-polymorphic auto-lifting."""
+
+    def test_scalar_auto_lift_binary(self):
+        _assert_implicit_matches_explicit(
+            "(+ [1 2 3] [4 5 6])",
+            "(map + [1 2 3] [4 5 6])",
+        )
+
+    def test_scalar_auto_lift_unary(self):
+        _assert_implicit_matches_explicit(
+            "(* 2 [1 2 3 4 5])",
+            "(map (* 2) [1 2 3 4 5])",
+        )
+
+    def test_scalar_auto_lift_commutative(self):
+        _assert_implicit_matches_explicit(
+            "(- [10 20 30] 5)",
+            "(map (lambda (x) (- x 5)) [10 20 30])",
+        )
+
+    @pytest.mark.parametrize("size", [1, 3, 7, 15])
+    def test_implicit_add_vs_explicit_map(self, size):
+        arr = " ".join(str(i) for i in range(size))
+        _assert_implicit_matches_explicit(
+            f"(+ [{arr}] [{arr}])",
+            f"(map + [{arr}] [{arr}])",
+        )
+
+    @pytest.mark.parametrize("size", [1, 3, 5, 10])
+    def test_implicit_multiply_vs_explicit_map(self, size):
+        arr = " ".join(str(i * 2) for i in range(size))
+        _assert_implicit_matches_explicit(
+            f"(* 3 [{arr}])",
+            f"(map (* 3) [{arr}])",
+        )
+
+    def test_broadcast_vector_to_matrix(self):
+        # Broadcast produces correct values: [10+1,10+2,10+3], [20+4,20+5,20+6]
+        r = _evaluate_lisp("(+ [10 20] [[1 2 3] [4 5 6]])")
+        expected = [[11, 12, 13], [24, 25, 26]]
+        np.testing.assert_equal(r.value, expected)
+
+    def test_broadcast_scalar_to_matrix(self):
+        r = _evaluate_lisp("(* 2 [[1 2] [3 4]])")
+        expected = [[2, 4], [6, 8]]
+        np.testing.assert_equal(r.value, expected)
+
+    def test_vector_cell_fold_auto_lift(self):
+        r = _evaluate_lisp(
+            "(define (sum-vec [v 1]) (fold + 0 v)) (sum-vec [[1 2] [3 4]])"
+        )
+        expected = [3, 7]  # [1+2, 3+4]
+        np.testing.assert_equal(r.value, expected)
+
+    def test_direct_vs_auto_lift_same_result(self):
+        """Direct application (matching ranks) equals auto-lifted application."""
+        src_def = "(define (sum-vec [v 1]) (fold + 0 v)) "
+        r_direct = _evaluate_lisp(src_def + "(sum-vec [1 2 3 4])")
+        # Direct: 1+2+3+4 = 10
+        assert r_direct.value == 10
+        # Lifted over 2x2 matrix: [[1,2],[3,4]] -> [1+2, 3+4] = [3, 7]
+        r_lifted = _evaluate_lisp(src_def + "(sum-vec [[1 2] [3 4]])")
+        np.testing.assert_equal(r_lifted.value, [3, 7])
+
+    def test_lambda_auto_lift(self):
+        _assert_implicit_matches_explicit(
+            "((lambda (x) (* x 2)) [1 2 3])",
+            "(map (lambda (x) (* x 2)) [1 2 3])",
+        )
+
+    def test_subtract_auto_lift(self):
+        _assert_implicit_matches_explicit(
+            "(- [5 3 1] [1 1 1])",
+            "(map - [5 3 1] [1 1 1])",
+        )
+
+
+class TestRankPolymorphismErrors:
+    """Type error tests for rank polymorphism."""
+
+    def test_incompatible_frames_error(self):
+        from remora.typechecker import TypeChecker
+        from remora.lisp_reader import parse_lisp
+        from remora.types import RemoraTypeError
+
+        # [1 2] (rank 1) + [[1] [2] [3]] (rank 2, shape mismatch)
+        # frame shapes: (2,) and (3, 1) - first dims differ
+        # Actually [1 2] has shape (2), [[1][2][3]] has shape (3,1)
+        # First dims 2 vs 3 are incompatible
+        with pytest.raises(RemoraTypeError):
+            tc = TypeChecker()
+            prog = parse_lisp("(+ [1 2] [[1] [2] [3]])")
+            tc.check_program(prog)

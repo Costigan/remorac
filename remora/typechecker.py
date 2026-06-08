@@ -497,12 +497,17 @@ class TypeChecker:
         return TypedArray(expr, typed_elements, array_type)
 
     def _infer_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
-        # Implicit rank-polymorphic map: for primitive ops and lambdas applied
-        # to arrays, attempt to lift the application to a map.
-        # Named functions use explicit type matching (existing behavior).
+        # Implicit rank-polymorphic map: for primitive ops, lambdas, and
+        # named functions with cell-rank annotations, attempt to lift
+        # array applications to a map.
         is_primitive = isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS
         is_lambda = isinstance(expr.func, LambdaExpr)
-        if is_primitive or is_lambda:
+        is_ranked_func = (
+            isinstance(expr.func, VarExpr)
+            and expr.func.name in self._functions
+            and getattr(self._functions[expr.func.name], "param_ranks", None) is not None
+        )
+        if is_primitive or is_lambda or is_ranked_func:
             typed_args = [self.infer(arg, env) for arg in expr.args]
             if any(isinstance(a.type, ArrayType) for a in typed_args):
                 result = self._try_implicit_map(expr, typed_args, env)
@@ -553,6 +558,10 @@ class TypeChecker:
                 typed_func = self.check_callable(expr.func, func_type, env)
                 frame_shape, result_type = infer_lifting(func_type, typed_array.type)
                 cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
+                # If frame_shape is empty and cell_shape matches the full array,
+                # this is a direct application – no implicit map needed.
+                if not frame_shape and cell_shape == typed_array.type.shape:
+                    return None
                 return TypedMap(
                     expr,
                     typed_func,
@@ -576,11 +585,10 @@ class TypeChecker:
         left_cell, left_frame = self._scalar_cell_and_frame(left.type, expr.loc)
         right_cell, right_frame = self._scalar_cell_and_frame(right.type, expr.loc)
 
-        # Both args must be arrays with matching shapes for now
-        # (broadcasting/scalar-array replication deferred)
-        if not isinstance(left.type, ArrayType) or not isinstance(right.type, ArrayType):
-            return None
-        if left_frame != right_frame:
+        # Principal-frame broadcasting: determine the principal (longest) frame.
+        # Shorter frames get their cells replicated to match the principal shape.
+        principal_frame = self._principal_frame(left_frame, right_frame, expr.loc)
+        if principal_frame is None:
             return None
 
         try:
@@ -589,17 +597,43 @@ class TypeChecker:
             )
             typed_func = self.check_callable(expr.func, func_type, env)
             result_type = func_type.result
-            if left_frame:
+            if principal_frame:
                 if isinstance(result_type, FuncType):
                     return None
                 if isinstance(result_type, ArrayType):
                     return None
-                result_type = ArrayType(result_type, left_frame)
+                result_type = ArrayType(result_type, principal_frame)
             return TypedMap(
-                expr, typed_func, typed_args, left_frame, (), result_type,
+                expr, typed_func, typed_args, principal_frame, (), result_type,
             )
         except RemoraTypeError:
             return None
+
+    def _principal_frame(
+        self,
+        left_frame: tuple[DimExpr, ...],
+        right_frame: tuple[DimExpr, ...],
+        loc,
+    ) -> tuple[DimExpr, ...] | None:
+        """Determine the principal frame from two argument frames.
+
+        The principal frame is the longest frame. The shorter frame must be
+        a prefix (or empty) to allow cell replication. Returns None if frames
+        are incompatible.
+        """
+        if left_frame == right_frame:
+            return left_frame
+        if not left_frame:
+            return right_frame
+        if not right_frame:
+            return left_frame
+        # Check if one frame is a prefix of the other
+        min_len = min(len(left_frame), len(right_frame))
+        if left_frame[:min_len] != right_frame[:min_len]:
+            return None  # incompatible shapes
+        if len(left_frame) > len(right_frame):
+            return left_frame
+        return right_frame
 
     def _infer_primitive_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
         if len(expr.args) != 2:

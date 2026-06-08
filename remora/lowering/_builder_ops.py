@@ -13,6 +13,7 @@ from importlib import import_module
 from typing import Any
 
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -30,6 +31,7 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,
@@ -214,9 +216,9 @@ def _build_expr(
         return _build_iota(expr, block, ir_mod, ctx)
     if isinstance(expr, HIRArrayLit):
         return _build_array_lit(expr, block, ir_mod)
-    if isinstance(expr, HIRMap):
+    if isinstance(expr, (HIRMap, HIRApply)):
         return _build_map(expr, block, functions, ctx, ir_mod, tensor_env)
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         return _build_fold(expr, block, functions, ctx, ir_mod, tensor_env)
     if isinstance(
         expr,
@@ -462,7 +464,7 @@ def _build_array_lit(expr: HIRArrayLit, block: Any, ir_mod: Any) -> Any:
 
 
 def _build_map(
-    expr: HIRMap,
+    expr: HIRMap | HIRApply,
     block: Any,
     functions: dict[str, HIRFunction],
     ctx: Any,
@@ -479,7 +481,7 @@ def _build_map(
 
 
 def _build_unary_map(
-    expr: HIRMap,
+    expr: HIRMap | HIRApply,
     block: Any,
     functions: dict[str, HIRFunction],
     ctx: Any,
@@ -556,7 +558,7 @@ def _build_unary_map(
 
 
 def _build_binary_map(
-    expr: HIRMap,
+    expr: HIRMap | HIRApply,
     block: Any,
     functions: dict[str, HIRFunction],
     ctx: Any,
@@ -737,7 +739,7 @@ def _build_binary_map_callable_body(
 
 
 def _build_fold(
-    expr: HIRFold,
+    expr: HIRFold | HIRReduce,
     block: Any,
     functions: dict[str, HIRFunction],
     ctx: Any,
@@ -750,7 +752,7 @@ def _build_fold(
 
 
 def _build_scalar_fold(
-    expr: HIRFold,
+    expr: HIRFold | HIRReduce,
     block: Any,
     functions: dict[str, HIRFunction],
     ctx: Any,

@@ -7,6 +7,7 @@ from typing import Any
 
 from remora.errors import RemoraError
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCast,
     HIRCall,
@@ -20,6 +21,7 @@ from remora.hir import (
     HIRMap,
     HIRPrimOp,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRTake,
@@ -79,9 +81,9 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
         return expr.result_type
     if isinstance(expr, HIRArrayLit):
         return expr.result_type
-    if isinstance(expr, HIRMap):
+    if isinstance(expr, (HIRMap, HIRApply)):
         return expr.result_type
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         return expr.result_type
     if isinstance(expr, HIRLet):
         return expr.result_type

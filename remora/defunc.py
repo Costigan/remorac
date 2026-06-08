@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from remora.errors import RemoraError
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCallable,
@@ -26,6 +27,7 @@ from remora.hir import (
     HIRPrimOp,
     HIRProgram,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,
@@ -89,7 +91,20 @@ class _Defunctionalizer:
                 [self._rewrite_expr(a, scalar_env) for a in e.arrays],
                 e.result_type,
             ),
+            HIRApply: lambda e: HIRApply(
+                e.frame_shape, e.cell_shape,
+                self._rewrite_callable(e.func, scalar_env),
+                [self._rewrite_expr(a, scalar_env) for a in e.arrays],
+                e.result_type,
+            ),
             HIRFold: lambda e: HIRFold(
+                e.reduction_dim,
+                self._rewrite_callable(e.func, scalar_env),
+                self._rewrite_expr(e.init, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRReduce: lambda e: HIRReduce(
                 e.reduction_dim,
                 self._rewrite_callable(e.func, scalar_env),
                 self._rewrite_expr(e.init, scalar_env),
@@ -210,7 +225,14 @@ def _free_vars(expr: HIRExpr) -> set[str]:
         HIRMap: lambda e: _free_vars_callable(e.func) | set().union(
             *(_free_vars(a) for a in e.arrays)
         ),
+        HIRApply: lambda e: _free_vars_callable(e.func) | set().union(
+            *(_free_vars(a) for a in e.arrays)
+        ),
         HIRFold: lambda e: (
+            _free_vars_callable(e.func)
+            | _free_vars(e.init) | _free_vars(e.array)
+        ),
+        HIRReduce: lambda e: (
             _free_vars_callable(e.func)
             | _free_vars(e.init) | _free_vars(e.array)
         ),
