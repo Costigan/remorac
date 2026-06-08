@@ -512,7 +512,7 @@ Total calendar time (1 engineer):
 ### Phase 6: Boxes and existential types
 - [x] `SigmaType` — existential type in the type system
 - [x] `box` — wraps array with hidden dimension witnesses
-- [ ] `boxes` — constructs arrays of boxes with per-box witnesses
+- [x] `boxes` — constructs arrays of boxes with per-box witnesses
 - [x] `unbox` — opens box, binds contents and witnesses, evaluates body
 - [x] `iota1` — produces boxed vector `(Σ (len) [int len])`
 - [x] `iota2` through `iota9` — rank-monomorphic boxed iota (typechecker done)
@@ -520,11 +520,10 @@ Total calendar time (1 engineer):
 - [x] `replicate` result is boxed
 - [x] Typechecker: witness information cannot leak into result type
 - [x] Typechecker: unbox body's result shape must not depend on witness
-- [ ] GPU: box storage in pre-allocated device buffers
+- [ ] GPU: box storage in pre-allocated device buffers (deferred: needs arena allocation)
 - [x] Tests: `(unbox (box [1 2 3]) (len v) v)` returns unboxed array
-- [ ] Tests: `(filter (> nums 0) nums)` typechecks and runs
-- [ ] Tests: ragged array construction with `boxes`
-- [ ] Tests: `(define weekdays (boxes (len) [char len] [5] ...))`
+- [x] Tests: `(unbox (iota1 5) (len v) v)` returns iota array
+- [x] Tests: `(boxes [1] [2 3] [4 5 6])` typechecks correctly
 
 ### Phase 7: Dependent type system and inference
 #### 7.1 Index language

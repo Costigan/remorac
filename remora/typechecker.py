@@ -10,6 +10,7 @@ from remora.ast_nodes import (
     AppendExpr,
     ArrayLit,
     BoolLit,
+    BoxesExpr,
     BoxExpr,
     Definition,
     Expr,
@@ -580,6 +581,8 @@ class TypeChecker:
             return self._infer_box(expr, env)
         if isinstance(expr, UnboxExpr):
             return self._infer_unbox(expr, env)
+        if isinstance(expr, BoxesExpr):
+            return self._infer_boxes(expr, env)
         if isinstance(expr, Iota1Expr):
             return self._infer_iota1(expr, env)
         if isinstance(expr, IotaNExpr):
@@ -1450,6 +1453,24 @@ class TypeChecker:
         if isinstance(typed_body.type, SigmaType):
             raise RemoraTypeError("hidden dimension escapes in unbox body", expr.loc)
         return TypedUnbox(expr, typed_box, expr.hidden_names, expr.value_name, typed_body, typed_body.type)
+
+    def _infer_boxes(self, expr: BoxesExpr, env: TypeEnv) -> TypedExpr:
+        """boxes e1 e2 ... : [(Σ (len) elem_type)] — array of individually-boxed elements."""
+        if not expr.elements:
+            raise RemoraTypeError("boxes requires at least one element", expr.loc)
+        typed_elements = [self.infer(e, env) for e in expr.elements]
+        first_type = typed_elements[0].type
+        if not isinstance(first_type, ArrayType):
+            raise RemoraTypeError("boxes elements must be arrays", expr.loc)
+        # Each element is boxed: (Σ (len) element_type)
+        element_sigma = SigmaType(("len",), first_type)
+        for te in typed_elements[1:]:
+            if not isinstance(te.type, ArrayType):
+                raise RemoraTypeError("boxes elements must be arrays", expr.loc)
+            if te.type.element != first_type.element:
+                raise RemoraTypeError("boxes elements must have the same element type", expr.loc)
+        result_type = ArrayType(element_sigma, (StaticDim(len(typed_elements)),))
+        return TypedExprNode(expr, result_type)
 
     def _infer_iota1(self, expr: Iota1Expr, env: TypeEnv) -> TypedExpr:
         """iota1 n : (Σ (len) [int len]) — boxed iota of runtime size."""
