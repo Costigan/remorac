@@ -1054,3 +1054,85 @@ def _reduction_fold_expr(operation: str) -> str:
         raise GPUScaffoldError(f"descriptor ABI GPU reduction does not support fold operator {operation}")
     mlir_op = llvm_op(operation, "f32")
     return f"{mlir_op} %acc, %item  : f32"
+
+
+# ---------------------------------------------------------------------------
+# GPU append kernel
+# ---------------------------------------------------------------------------
+
+
+def build_descriptor_abi_f32_append_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for f32 array append (concatenation)."""
+    if len(function.params) != 2:
+        raise GPUScaffoldError("GPU append supports two-parameter functions only")
+    left_type = function.params[0].type
+    right_type = function.params[1].type
+    if not isinstance(left_type, ArrayType) or not isinstance(right_type, ArrayType):
+        raise GPUScaffoldError("GPU append requires array inputs")
+    if left_type.element != FLOAT or right_type.element != FLOAT:
+        raise GPUScaffoldError("GPU append currently supports f32 input only")
+    if left_type.rank != 1 or right_type.rank != 1:
+        raise GPUScaffoldError("GPU append currently supports rank-1 input only")
+
+    left_N = int(left_type.shape[0].value)
+    right_N = int(right_type.shape[0].value)
+    total_N = left_N + right_N
+    name = kernel_name or f"remora_{function.name}_f32_append"
+    _validate_scaffold_names(module_name, name)
+
+    rank = 1
+    desc_lines = _descriptor_load_lines("left", "%input0_desc", rank)
+    desc_lines.extend(_descriptor_load_lines("right", "%input1_desc", rank))
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input0_desc: !llvm.ptr, %input1_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tid = llvm.sext %tid32 : i32 to i64
+      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %bid = llvm.sext %bid32 : i32 to i64
+      %bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %bdim = llvm.sext %bdim32 : i32 to i64
+      %block_offset = llvm.mul %bid, %bdim : i64
+      %idx = llvm.add %block_offset, %tid : i64
+      %cN = llvm.mlir.constant({total_N} : index) : i64
+      %inside = llvm.icmp "ult" %idx, %cN : i64
+      llvm.cond_br %inside, ^body, ^done
+
+    ^body:
+      %cLeft = llvm.mlir.constant({left_N} : index) : i64
+      %is_left = llvm.icmp "ult" %idx, %cLeft : i64
+      llvm.cond_br %is_left, ^left_elem, ^right_elem
+
+    ^left_elem:
+      %left_linear = llvm.add %left_offset, %idx : i64
+      %left_ptr = llvm.getelementptr %left_aligned[%left_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %elem = llvm.load %left_ptr : !llvm.ptr -> f32
+      llvm.br ^store
+
+    ^right_elem:
+      %right_idx = llvm.sub %idx, %cLeft : i64
+      %right_linear = llvm.add %right_offset, %right_idx : i64
+      %right_ptr = llvm.getelementptr %right_aligned[%right_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %elem = llvm.load %right_ptr : !llvm.ptr -> f32
+      llvm.br ^store
+
+    ^store:
+      %out_linear = llvm.add %out_offset, %idx : i64
+      %out_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %elem, %out_ptr : f32, !llvm.ptr
+      llvm.br ^done
+
+    ^done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)

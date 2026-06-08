@@ -1,0 +1,3 @@
+-- GPU rotate: circular shift by 2 on rank-1 i32 array
+-- Expected: [2, 3, 4, 5, 6, 7, 8, 9, 0, 1]
+rotate (iota 10) 2

@@ -34,6 +34,7 @@ from remora.pipeline import (
 from remora.gpu_lowering import (
     GPUScaffoldError,
     build_descriptor_abi_bool_map_gpu_module,
+    build_descriptor_abi_f32_append_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_f32_scan_gpu_module,
@@ -231,7 +232,20 @@ def generate_mlir_descriptor_abi_ptx(
                             output_dtype="float32",
                         )
                     except GPUScaffoldError as scan_error:
-                        raise CodegenUnavailable(str(bool_map_error)) from scan_error
+                        try:
+                            gpu_module = build_descriptor_abi_f32_append_gpu_module(function, kernel_name=name)
+                            meta = KernelMeta(
+                                name=name,
+                                grid_dims=1,
+                                block_size=0,
+                                num_inputs=2,
+                                num_outputs=1,
+                                input_elem_types=["f32", "f32"],
+                                output_elem_types=["f32"],
+                                output_dtype="float32",
+                            )
+                        except GPUScaffoldError as append_error:
+                            raise CodegenUnavailable(str(bool_map_error)) from append_error
 
     device_module = extract_gpu_module_body_as_module(gpu_module.text)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
