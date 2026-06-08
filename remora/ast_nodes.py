@@ -53,6 +53,21 @@ class IfExpr:
 
 
 @dataclass(frozen=True)
+class SelectExpr:
+    condition: Expr
+    then_branch: Expr
+    else_branch: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class AppendExpr:
+    left: Expr
+    right: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class LambdaExpr:
     params: list[str]
     body: Expr
@@ -259,6 +274,8 @@ class SliceRange:
 Expr: TypeAlias = (
     LetExpr
     | IfExpr
+    | SelectExpr
+    | AppendExpr
     | LambdaExpr
     | AppExpr
     | MapExpr

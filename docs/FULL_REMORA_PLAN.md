@@ -479,7 +479,7 @@ Total calendar time (1 engineer):
 - [x] `scan/1` — alias for `iscan/1`
 - [x] `fold-right` — right-to-left serial fold
 - [x] `trace` — serial prefix-sum (like `iscan` but serial)
-- [ ] `trace-right` — right-to-left trace
+- [x] `trace-right` — right-to-left trace
 - [x] Tests: each operator on rank-1, rank-2, rank-3 inputs
 - [x] Tests: zero variants handle empty leading dimension
 - [x] Tests: `iscan` + on `[2 10 5]` → `[2 12 17]`
@@ -493,7 +493,7 @@ Total calendar time (1 engineer):
 - [ ] `with-shape` — replicate scalar/array to match target shape
 - [ ] `subarray` — extract rectangular region by offset and shape
 - [ ] `filter` — select subarrays by boolean mask (→ boxes)
-- [ ] `select` — element-wise ternary (already via tensor `if`)
+- [x] `select` — element-wise ternary (already via tensor `if`)
 - [ ] `replicate` — repeat items by count vector (→ boxes)
 - [ ] `sort` / `grade` — sort with stable comparison function
 - [ ] `index-item` — index by scalar along leading dimension

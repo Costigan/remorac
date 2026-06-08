@@ -1661,7 +1661,24 @@ def _lower_scan_module(
     op_name = _arith_op(node.func.op, result_element_type)
     N = node.reduction_dim.value
 
-    if node.exclusive:
+    if node.right:
+        body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %cNminus1 = arith.constant {N - 1} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %rev_idx = arith.subi %cNminus1, %i : index
+      %elem = tensor.extract {input_name}[%rev_idx] : {input_type}
+      %next_carry = {op_name} %carry, %elem : {result_element_type}
+      %stored = tensor.insert %next_carry into %acc_tensor[%rev_idx] : {result_type}
+      \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+    elif node.exclusive:
         body = f"""{input_code}
     %init = arith.constant {init_value_str} : {result_element_type}
     %c0 = arith.constant 0 : index
