@@ -66,6 +66,7 @@ from remora.ast_nodes import (
     ShapeExpr,
     SourceLoc,
     TakeExpr,
+    TraceExpr,
     TransposeExpr,
     DropExpr,
     ValDef,
@@ -92,9 +93,13 @@ array_lit: "[" sexpr* "]"
            | map_form
            | fold_form
            | reduce_form
+           | reduce_zero_form
+           | reduce_one_form
            | fold_right_form
            | scan_form
+           | scan_one_form
            | escan_form
+           | trace_form
            | iota_form
            | shape_form
            | rank_form
@@ -121,9 +126,13 @@ lambda_form: ("lambda" | "λ") "(" name_token* ")" sexpr -> lambda_expr
 map_form: "map" sexpr sexpr+ -> map_expr
 fold_form: "fold" sexpr sexpr sexpr -> fold_expr
 reduce_form: "reduce" sexpr sexpr sexpr -> reduce_expr
+reduce_zero_form: "reduce/zero" sexpr sexpr sexpr -> reduce_expr
+reduce_one_form: "reduce/1" sexpr sexpr sexpr -> reduce_one_expr
 fold_right_form: "fold-right" sexpr sexpr sexpr -> fold_right_expr
-scan_form: ("scan" | "iscan") sexpr sexpr sexpr -> scan_expr
-escan_form: "escan" sexpr sexpr sexpr -> escan_expr
+scan_form: ("scan" | "iscan" | "iscan/zero" | "scan/zero") sexpr sexpr sexpr -> scan_expr
+scan_one_form: ("iscan/1" | "scan/1") sexpr sexpr sexpr -> scan_one_expr
+escan_form: ("escan" | "escan/zero") sexpr sexpr sexpr -> escan_expr
+trace_form: "trace" sexpr sexpr sexpr -> trace_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 rank_form: "rank" sexpr -> rank_expr
@@ -238,6 +247,12 @@ class LispASTBuilder(Transformer):
         array = items[2]
         return ReduceExpr(func, init, array, self._loc_from(items))
 
+    def reduce_one_expr(self, items: list[Any]) -> ReduceExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return ReduceExpr(func, init, array, self._loc_from(items), require_nonempty=True)
+
     def fold_right_expr(self, items: list[Any]) -> FoldRightExpr:
         func = self._as_callable(items[0])
         init = items[1]
@@ -250,11 +265,23 @@ class LispASTBuilder(Transformer):
         array = items[2]
         return ScanExpr(func, init, array, self._loc_from(items), exclusive=False)
 
+    def scan_one_expr(self, items: list[Any]) -> ScanExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return ScanExpr(func, init, array, self._loc_from(items), exclusive=False, require_nonempty=True)
+
     def escan_expr(self, items: list[Any]) -> ScanExpr:
         func = self._as_callable(items[0])
         init = items[1]
         array = items[2]
         return ScanExpr(func, init, array, self._loc_from(items), exclusive=True)
+
+    def trace_expr(self, items: list[Any]) -> TraceExpr:
+        func = self._as_callable(items[0])
+        init = items[1]
+        array = items[2]
+        return TraceExpr(func, init, array, self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 
