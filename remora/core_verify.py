@@ -7,7 +7,7 @@ from remora.dependent_types import free_type_index_vars
 from remora.elaborated import CoreExpr, CoreProgram
 from remora.errors import RemoraError
 from remora.index import DimExpr, ShapeLit
-from remora.types import ArrayType, FuncType, PiType, StaticDim
+from remora.types import ArrayType, ForallType, FuncType, PiType, StaticDim
 
 
 class CoreVerificationError(RemoraError):
@@ -40,7 +40,7 @@ def verify_core_program(program: CoreProgram) -> None:
         if definition.value is None:
             if isinstance(definition.source, FuncDef) and (
                 definition.type is None
-                or isinstance(definition.type, (FuncType, PiType))
+                or isinstance(definition.type, (FuncType, PiType, ForallType))
             ):
                 continue
             if definition.type is not None:

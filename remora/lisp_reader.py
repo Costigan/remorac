@@ -38,7 +38,7 @@ from typing import Any
 
 from lark import Lark, Token, Transformer
 
-from remora.index import DimVar, IndexBinder, IndexSort
+from remora.index import DimAdd, DimSub, DimVar, IndexBinder, IndexSort
 from remora.ast_nodes import (
     AppExpr,
     AppendExpr,
@@ -93,7 +93,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraType, StaticDim
+from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraType, StaticDim, TypeBinder, TypeVar
 
 _GRAMMAR = r"""
 program: sexpr*
@@ -110,6 +110,7 @@ program: sexpr*
 array_lit: "[" sexpr* "]"
 
 ?list_body: define_pi_form
+           | define_forall_form
            | define_form
            | let_form
            | if_form
@@ -161,6 +162,10 @@ define_form: "define" "(" name_token "[" param_spec* "]" ")" sexpr  -> func_def_
 
 define_pi_form: "define/pi" "(" index_binder* ")" "(" name_token "[" typed_param_spec* "]" type_expr ")" sexpr -> func_def_pi
 
+define_forall_form: "define/forall" "(" type_binder* ")" "(" name_token "[" typed_param_spec* "]" type_expr ")" sexpr -> func_def_forall
+
+type_binder: name_token -> type_binder
+
 index_binder: "[" name_token index_sort "]" -> index_binder
 index_sort: "Dim" -> dim_sort
           | "Shape" -> shape_sort
@@ -171,14 +176,17 @@ typed_param_spec: name_token type_expr -> param_typed
           | "(" "Array" scalar_type dim_ref* ")" -> array_type
 
 scalar_type: "Int" -> type_int
-           | "Float" -> type_float
-           | "Bool" -> type_bool
-           | "int" -> type_int
-           | "float" -> type_float
-           | "bool" -> type_bool
+            | "Float" -> type_float
+            | "Bool" -> type_bool
+            | "int" -> type_int
+            | "float" -> type_float
+            | "bool" -> type_bool
+            | NAME -> type_var
 
 dim_ref: INT -> dim_lit
        | NAME -> dim_var
+       | "(" "+" dim_ref dim_ref ")" -> dim_add
+       | "(" "-" dim_ref dim_ref ")" -> dim_sub
 
 param_spec: name_token        -> param_simple
           | name_token INT    -> param_ranked
@@ -311,6 +319,26 @@ class LispASTBuilder(Transformer):
             result_type=result_type,
         )
 
+    def func_def_forall(self, items: list[Any]) -> FuncDef:
+        type_binders: list[TypeBinder] = []
+        pos = 0
+        while pos < len(items) and isinstance(items[pos], TypeBinder):
+            type_binders.append(items[pos])
+            pos += 1
+        name = str(items[pos])
+        typed_param_specs: list[tuple[str, RemoraType]] = items[pos + 1:-2]
+        result_type: RemoraType = items[-2]
+        body: Expr = items[-1]
+        return FuncDef(
+            name,
+            [param_name for param_name, _ in typed_param_specs],
+            body,
+            self._loc_from(items),
+            type_binders=tuple(b.name for b in type_binders),
+            param_types=[param_type for _, param_type in typed_param_specs],
+            result_type=result_type,
+        )
+
     def val_def(self, items: list[Any]) -> ValDef:
         return ValDef(str(items[0]), items[1], self._loc_from(items))
 
@@ -325,6 +353,9 @@ class LispASTBuilder(Transformer):
 
     def index_binder(self, items: list[Any]) -> IndexBinder:
         return IndexBinder(str(items[0]), items[1])
+
+    def type_binder(self, items: list[Any]) -> TypeBinder:
+        return TypeBinder(str(items[0]))
 
     def dim_sort(self, items: list[Any]) -> IndexSort:
         return IndexSort.DIM
@@ -341,10 +372,13 @@ class LispASTBuilder(Transformer):
     def type_bool(self, items: list[Any]) -> RemoraType:
         return BOOL
 
+    def type_var(self, items: list[Any]) -> RemoraType:
+        return TypeVar(str(items[0]))
+
     def array_type(self, items: list[Any]) -> RemoraType:
         element = items[0]
-        if element not in (INT, FLOAT, BOOL):
-            raise TypeError("array element type must be scalar")
+        if element not in (INT, FLOAT, BOOL) and not isinstance(element, TypeVar):
+            raise TypeError("array element type must be scalar or type variable")
         return ArrayType(element, tuple(items[1:]))
 
     def dim_lit(self, items: list[Any]) -> StaticDim:
@@ -352,6 +386,12 @@ class LispASTBuilder(Transformer):
 
     def dim_var(self, items: list[Any]) -> DimVar:
         return DimVar(str(items[0]))
+
+    def dim_add(self, items: list[Any]) -> DimAdd:
+        return DimAdd(items[0], items[1])
+
+    def dim_sub(self, items: list[Any]) -> DimSub:
+        return DimSub(items[0], items[1])
 
     # ── let / if / lambda ────────────────────────────────────────────────
 

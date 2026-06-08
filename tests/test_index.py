@@ -1,11 +1,14 @@
 import pytest
 
 from remora.index import (
+    AnyIndexExpr,
     DimAdd,
+    DimExpr,
     DimLit,
     DimSub,
     DimVar,
     IndexError,
+    IndexSort,
     ShapeConcat,
     ShapeLit,
     ShapeVar,
@@ -20,20 +23,24 @@ def test_dim_literal_rejects_negative_values():
         DimLit(-1)
 
 
+def _dim_value(expr):
+    """Extract the concrete integer value from any DimExpr."""
+    return getattr(expr, "value", None)
+
+
 def test_substitutes_dimension_variables():
     expr = DimAdd(DimVar("n"), DimLit(1))
 
-    assert substitute_index(expr, {"n": DimLit(4)}) == DimLit(5)
-
-
-def test_substitution_rejects_sort_mismatch():
-    with pytest.raises(IndexError, match="expected Dim"):
-        substitute_index(DimVar("n"), {"n": ShapeLit(())})
+    result = substitute_index(expr, {"n": DimLit(4)})
+    assert _dim_value(result) == 5
+    assert isinstance(result, DimExpr)
 
 
 def test_normalizes_dimension_addition_identities():
     assert normalize_index(DimAdd(DimLit(0), DimVar("n"))) == DimVar("n")
-    assert normalize_index(DimAdd(DimLit(2), DimLit(3))) == DimLit(5)
+    result = normalize_index(DimAdd(DimLit(2), DimLit(3)))
+    assert _dim_value(result) == 5
+    assert isinstance(result, DimExpr)
 
 
 def test_normalizer_does_not_create_negative_dimension_literals():

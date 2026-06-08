@@ -1,8 +1,16 @@
 import pytest
 
 from remora.ast_nodes import SourceLoc
-from remora.constraints import ConstraintError, DimEq, ShapeEq, match_shape_template, solve_exact
-from remora.index import DimAdd, DimLit, DimVar, ShapeLit, ShapeVar
+from remora.constraints import (
+    ConstraintError,
+    DimEq,
+    ShapeEq,
+    match_shape_expr_pattern,
+    match_shape_template,
+    solve_exact,
+    solve_with_shapes,
+)
+from remora.index import DimAdd, DimLit, DimSub, DimVar, ShapeLit, ShapeVar
 from remora.types import StaticDim
 
 
@@ -54,3 +62,85 @@ def test_constraint_errors_include_source_location():
 
     with pytest.raises(ConstraintError, match=r"bad\.lisp:2:5"):
         solve_exact([DimEq(StaticDim(3), StaticDim(4), loc)])
+
+
+# ── Phase 7.4: Arithmetic constraint solver ───────────────────────────────
+
+def test_arithmetic_solver_add_var_left():
+    bindings = solve_with_shapes(
+        [DimEq(DimAdd(DimVar("a"), DimLit(3)), DimLit(8))]
+    )
+    assert "a" in bindings
+    assert _dim_value(bindings["a"]) == 5
+
+
+def test_arithmetic_solver_add_var_right():
+    bindings = solve_with_shapes(
+        [DimEq(DimAdd(DimLit(3), DimVar("b")), DimLit(10))]
+    )
+    assert "b" in bindings
+    assert _dim_value(bindings["b"]) == 7
+
+
+def test_arithmetic_solver_add_both_known():
+    bindings = solve_with_shapes(
+        [DimEq(DimAdd(DimLit(2), DimLit(3)), DimLit(5))]
+    )
+    assert bindings == {}
+
+
+def test_arithmetic_solver_add_mismatch():
+    # DimLit(2) + DimLit(3) = 5 normalizes to 5=6 → dimension mismatch
+    with pytest.raises(ConstraintError, match="dimension mismatch"):
+        solve_with_shapes([DimEq(DimAdd(DimLit(2), DimLit(3)), DimLit(6))])
+
+
+def test_arithmetic_solver_add_negative_rejected():
+    with pytest.raises(ConstraintError, match="negative"):
+        solve_with_shapes([DimEq(DimAdd(DimVar("a"), DimLit(8)), DimLit(5))])
+
+
+def test_arithmetic_solver_sub_var_left():
+    bindings = solve_with_shapes(
+        [DimEq(DimSub(DimVar("a"), DimLit(3)), DimLit(5))]
+    )
+    assert "a" in bindings
+    assert _dim_value(bindings["a"]) == 8
+
+
+def test_arithmetic_solver_sub_var_right():
+    bindings = solve_with_shapes(
+        [DimEq(DimSub(DimLit(10), DimVar("b")), DimLit(3))]
+    )
+    assert "b" in bindings
+    assert _dim_value(bindings["b"]) == 7
+
+
+def test_arithmetic_solver_sub_negative_rejected():
+    # 3 - b = 5  →  b = -2  (rejected as negative)
+    with pytest.raises(ConstraintError, match="negative"):
+        solve_with_shapes([DimEq(DimSub(DimLit(3), DimVar("b")), DimLit(5))])
+
+
+def test_arithmetic_solver_add_in_shape_template():
+    # a + b = 7 with both unknown → needs one known operand
+    with pytest.raises(ConstraintError, match="need one known operand"):
+        match_shape_expr_pattern(
+            ShapeLit((DimAdd(DimVar("a"), DimVar("b")),)),
+            (DimLit(7),),
+        )
+
+
+def test_arithmetic_solver_add_with_known_in_shape():
+    bindings = match_shape_expr_pattern(
+        ShapeLit((DimAdd(DimVar("a"), DimLit(2)),)),
+        (DimLit(7),),
+    )
+    assert "a" in bindings
+    assert _dim_value(bindings["a"]) == 5
+
+
+def _dim_value(binding) -> int:
+    if hasattr(binding, "value"):
+        return binding.value
+    return binding.value

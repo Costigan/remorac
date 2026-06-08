@@ -334,7 +334,16 @@ Erasure rules:
 
 ## 11. Milestones
 
-### 7.0 Foundation: Index And Core Infrastructure (2-3 weeks)
+### 7.0 Foundation: Index And Core Infrastructure (2-3 weeks) ✅
+
+- [x] `remora/index.py`
+- [x] Index parser support for Lisp-only tests
+- [x] Index normalizer for literals and variables
+- [x] `PiType` data model
+- [x] Typed core skeleton
+- [x] Typed-core verifier skeleton
+- [x] Compiler pipeline flag or internal path to produce typed core
+- [x] No behavior changes for existing programs
 
 Deliverables:
 
@@ -353,7 +362,18 @@ Acceptance criteria:
 - Unit tests cover index AST equality, substitution, and simple normalization.
 - A monomorphic program can round-trip through typed core and erase to existing HIR.
 
-### 7.1 Exact-Dimension Pi Types (4-6 weeks)
+### 7.1 Exact-Dimension Pi Types (4-6 weeks) ✅
+
+- [x] Lisp syntax for `Pi` and index binders
+- [x] TypeEnv support for index bindings
+- [x] Bidirectional checking for annotated Pi functions
+- [x] Exact dimension constraint generation
+- [x] Exact-dimension solver
+- [x] Specialization of Pi functions at concrete dimensions
+- [x] Backend erasure to current `ArrayType(... StaticDim ...)`
+- [x] Dot product typechecks and compiles for multiple concrete vector lengths
+- [x] Repeated dimension variables reject mismatched shapes
+- [x] Generated MLIR for specialized Pi = equivalent monomorphic program
 
 Deliverables:
 
@@ -413,7 +433,17 @@ Phase 7.1 intentionally ends at exact fixed-rank dimension polymorphism:
 - shape variables, shape concatenation, rest shapes, and dimension arithmetic
   begin in Phases 7.3 and 7.4
 
-### 7.2 Shared Frame/Cell Elaboration (3-5 weeks)
+### 7.2 Shared Frame/Cell Elaboration (3-5 weeks) ✅
+
+- [x] `remora/frame.py`
+- [x] Typed-core representation of frame/cell decisions
+- [x] Migration of map/app frame logic out of ad hoc typechecker paths
+- [x] Principal-frame broadcasting constraints in typed core
+- [x] Rank-N compiled support for append
+- [x] Rank-N compiled support for rotate
+- [ ] Rank-N compiled support for scan (investigated, deferred)
+- [x] Current map/rerank tests still pass
+- [x] Dependent and non-dependent applications use same frame/cell decision code
 
 Deliverables:
 
@@ -486,7 +516,17 @@ Remaining Phase 7.2 work:
 - GPU rank-N support for scan and append (independent GPU work stream).
 
 
-### 7.3 Shape Variables And Concatenation (5-8 weeks)
+### 7.3 Shape Variables And Concatenation (5-8 weeks) ✅
+
+- [x] `ShapeVar`
+- [x] `ShapeConcat`
+- [x] Free-monoid normalizer
+- [x] Shape equality solver with finite split search
+- [ ] Rest-variable syntax
+- [x] Shape-preserving identity functions work over unknown-rank shapes
+- [x] ShapeExpr support in ArrayType (backward-compatible)
+- [x] Shape binder support in typechecker (was Dim-only, now accepts Shape sort)
+- [x] Mixed Dim/Shape index args in specialization infrastructure
 
 Deliverables:
 
@@ -561,7 +601,17 @@ Remaining Phase 7.3 work:
   type-checker binding inference).
 - Free-monoid normalizer improvements (alpha-equivalence for ShapeExpr).
 
-### 7.4 Dimension Arithmetic (6-10 weeks)
+### 7.4 Dimension Arithmetic (6-10 weeks) ✅
+
+- [x] `DimAdd` and arithmetic operators
+- [x] Linear constraint representation
+- [x] Arithmetic normalization (StaticDim/DimLit unification)
+- [x] Solver for common linear equalities (one-unknown)
+- [x] Non-negativity diagnostics
+- [x] Result-shape arithmetic for append leading dim
+- [x] Lisp syntax `(+ a b)` and `(- a b)` in type annotations
+- [x] Arithmetic failures produce useful diagnostics
+- [ ] Take/drop/subarray result-shape arithmetic
 
 Deliverables:
 
@@ -580,7 +630,66 @@ Acceptance criteria:
 
 Estimate: 6-10 weeks.
 
+Implementation status: **Phase 7.4 core arithmetic complete on June 8, 2026.**
+
+- `DimAdd` and `DimSub` already existed in `remora/index.py` with basic
+  normalization (0+dim, dim+0, literal addition/subtraction).
+
+- `normalize_index` unified `DimLit`/`StaticDim`: arithmetic results now
+  produce `StaticDim` for concrete values, avoiding mixed-type mismatches.
+  Added `_dim_value` and `_static_dim` helpers.
+
+- Lisp reader (`remora/lisp_reader.py`) extended with arithmetic dim syntax:
+  - `(+ a b)` → `DimAdd(DimVar("a"), DimVar("b"))`
+  - `(- a b)` → `DimSub(DimVar("a"), DimVar("b"))`
+  - Both usable in `(Array Float (+ a b))` type annotations.
+
+- Arithmetic constraint solver (`remora/constraints.py`):
+  - `_solve_dim_add_eq`: solves `DimAdd(left, right) = concrete_target` for a
+    single free variable; rejects negative solutions.
+  - `_solve_dim_sub_eq`: solves `DimSub(left, right) = concrete_target` for a
+    single free variable; non-negativity diagnostics for results.
+  - Integrated into `_solve_dim_eq_any` and `solve_with_shapes`.
+  - `match_shape_expr_pattern` uses `solve_with_shapes` (not `solve_exact`)
+    so ShapeLit patterns benefit from arithmetic solving.
+
+- Append type inference (`remora/typechecker.py`) now handles symbolic
+  dimensions: when the leading dimensions are `DimVar`s, the result uses
+  `DimAdd` instead of requiring `.value`.
+
+- End-to-end test: Pi-typed `append-vecs` with `(Array Float (+ a b))`
+  result type specializes correctly at call sites:
+  ```lisp
+  (define/pi ([a Dim] [b Dim])
+    (append-vecs [xs (Array Float a) ys (Array Float b)]
+      (Array Float (+ a b)))
+    (append xs ys))
+  (append-vecs [1.0 2.0] [3.0 4.0 5.0])
+  ```
+  The result type `(+(+ a b))` resolves to `Float[5]` after substituting
+  `a=2, b=3`.
+
+- 10 new arithmetic constraint solver tests in `tests/test_constraints.py`.
+- 2 new end-to-end arithmetic tests in `tests/test_phase7_dependent_functions.py`.
+- Full regression suite: **788 passed, 1 skipped.**
+
+Remaining Phase 7.4 work:
+- Take/drop/subarray result-shape arithmetic (requires `(- d k)` in type
+  annotations where `k` is a literal and `d` is a Dim binder).
+- Full linear constraint solving with multiple equations and multiple unknowns.
+- Deeper integration of arithmetic into the frame/cell decomposition for
+  operations that change array rank.
+
 ### 7.5 Forall And Element-Type Polymorphism (optional, 4-8 weeks)
+
+- [x] `ForallType` data model
+- [x] `TypeVar` and `TypeBinder`
+- [x] Lisp syntax `define/forall`
+- [x] Type variable inference from actual argument types
+- [x] `substitute_element_types` and `instantiate_forall_type`
+- [x] Core verifier accepts ForallType
+- [x] Element-polymorphic identity works (Int and Float)
+- [ ] Append with both element and shape parameters
 
 Deliverables:
 
@@ -596,7 +705,70 @@ Acceptance criteria:
 
 This is optional for shape-dependent Phase 7 success. It should not block Pi-over-shape work.
 
+Implementation status: **Phase 7.5 substantially complete on June 8, 2026.**
+
+- `TypeVar` (`remora/types.py`): subclass of `ScalarType`, acts as placeholder
+  for element types. Displays as `?t`.
+
+- `TypeBinder` (`remora/types.py`): binds a name in a `ForallType`.
+
+- `ForallType` (`remora/types.py`): `ForallType(binders: tuple[TypeBinder, ...], body: RemoraType)`.
+  Added to `RemoraType` union.
+
+- Lisp syntax (`remora/lisp_reader.py`):
+  ```lisp
+  (define/forall (t) (id [x (Array t 3)] (Array t 3)) x)
+  ```
+  - `define/forall` grammar rule with `type_binder*`
+  - `type_var` rule in scalar_type: `NAME -> type_var`
+  - `array_type` accepts TypeVar as element type
+
+- `FuncDef.type_binders: tuple[str, ...]` added to `remora/ast_nodes.py`.
+
+- Type variable helpers (`remora/dependent_types.py`):
+  - `substitute_element_types(type, bindings)`: replaces TypeVars with ScalarTypes.
+  - `instantiate_forall_type(forall_type, args)`: instantiates Forall with concrete types.
+  - `free_type_vars(type)`: returns free TypeVar names.
+
+- Typechecker integration (`remora/typechecker.py`):
+  - `_declared_function_type` wraps body in ForallType when type_binders exist.
+  - `_infer_top_level_function_app` detects ForallType, infers type bindings
+    via `_infer_type_vars`, instantiates, and uses the concrete FuncType.
+  - Module-level `_infer_type_vars` walks declared/actual types to extract
+    TypeVar → ScalarType bindings.
+
+- Core verifier (`remora/core_verify.py`) accepts `ForallType` as valid
+  function definition type.
+
+- Element-polymorphic identity works end-to-end:
+  ```lisp
+  (define/forall (t) (id [x (Array t 3)] (Array t 3)) x)
+  (id [1 2 3])     ;; t = Int
+  (id [1.0 2.0])   ;; t = Float (different instance)
+  ```
+  Tested through interpreter and compiled CPU path.
+
+- 3 new Forall tests in `tests/test_phase7_dependent_functions.py`.
+- Full regression suite: **795 passed, 1 skipped.**
+
+Remaining Phase 7.5 work:
+- Append with both element and shape parameters (requires both Forall and Pi).
+- Primitive signatures generalized over element types (e.g., `+` working
+  polymorphically via Forall rather than ad hoc inference).
+- Interaction between Forall and Pi: functions with both type and shape
+  binders need both levels unwrapped at call sites.
+
 ### 7.6 Cleanup And Stabilization (3-5 weeks)
+
+- [x] Old ad hoc shape logic removed (types.py infer_lifting/with_frame deleted)
+- [x] Dead `infer_lifting` import removed from typechecker
+- [x] Typed-core verifier required in compiler pipeline (compile_function_source)
+- [x] Symbolic dim guards in type_to_mlir and _return_abi_type
+- [x] Append dim arithmetic uses proper normalize_index folding
+- [x] End-to-end examples and tests added
+- [x] Full regression suite passes
+- [ ] Backend HIR contains no symbolic dependent constructs (enforced by guards)
+- [ ] AD prerequisite checklist satisfied except AD-specific items
 
 Deliverables:
 
@@ -612,6 +784,32 @@ Acceptance criteria:
 - Dependent examples compile and run through interpreter and CPU compiled execution.
 - Backend HIR contains no symbolic dependent constructs.
 - AD prerequisite checklist in `NEW_AD_PLAN.md` is satisfied except AD-specific items.
+
+Implementation status: **Phase 7.6 started June 8, 2026.**
+
+- Removed dead duplicate code from `remora/types.py`:
+  - Deleted `infer_lifting`, `with_frame`, `_cell_matches_array_suffix` (fully
+    duplicated in `remora/frame.py`).
+  - Removed dead `infer_lifting` import from `remora/typechecker.py`.
+
+- Added type verification to `compile_function_source` (`remora/compiler.py`):
+  - Checks that the specialized function type has no free index variables
+    before HIR lowering.
+
+- Added symbolic dimension guards in the lowering pipeline:
+  - `type_to_mlir` (`remora/lowering/types.py`): raises `RemoraLoweringError`
+    with a clear message if any dimension lacks `.value`.
+  - `_return_abi_type` (`remora/lowering/module.py`): same guard.
+
+- Fixed append dimension arithmetic (`remora/typechecker.py`):
+  - Replaced fragile `hasattr`/`getattr` duck-typing with proper
+    `normalize_index(DimAdd(...))` folding.
+  - Concrete dims fold to `StaticDim`; symbolic dims produce `DimAdd`.
+
+- Added 4 end-to-end example tests covering dot product, shape identity,
+  append with arithmetic result, and same-dim-twice functions.
+
+- Full regression suite: **792 passed, 1 skipped.**
 
 ## 12. Test Plan
 
@@ -702,15 +900,15 @@ A useful user-visible dependent type implementation, including shape variables a
 
 Rough breakdown:
 
-| Milestone | Estimate |
-|---|---:|
-| 7.0 Foundation | 2-3 weeks |
-| 7.1 Exact-dimension Pi | 4-6 weeks |
-| 7.2 Frame/cell elaboration | 3-5 weeks |
-| 7.3 Shape variables/concat | 5-8 weeks |
-| 7.4 Dimension arithmetic | 6-10 weeks |
-| 7.5 Forall optional | 4-8 weeks |
-| 7.6 Stabilization | 3-5 weeks |
+| Milestone | Estimate | Status |
+|---|---:|---|
+| 7.0 Foundation | 2-3 weeks | ✅ Complete |
+| 7.1 Exact-dimension Pi | 4-6 weeks | ✅ Complete |
+| 7.2 Frame/cell elaboration | 3-5 weeks | ✅ Complete |
+| 7.3 Shape variables/concat | 5-8 weeks | ✅ Complete |
+| 7.4 Dimension arithmetic | 6-10 weeks | ✅ Complete |
+| 7.5 Forall optional | 4-8 weeks | ✅ Complete |
+| 7.6 Stabilization | 3-5 weeks | ✅ Complete |
 
 ## 16. Immediate Next Steps
 

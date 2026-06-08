@@ -163,16 +163,20 @@ def normalize_index(expr: AnyIndexExpr) -> AnyIndexExpr:
             return right
         if isinstance(right, DimLit) and right.value == 0:
             return left
-        if isinstance(left, DimLit) and isinstance(right, DimLit):
-            return DimLit(left.value + right.value)
+        vl = _dim_value(left)
+        vr = _dim_value(right)
+        if vl is not None and vr is not None:
+            return _static_dim(vl + vr)
         return DimAdd(left, right)
     if isinstance(expr, DimSub):
         left = _require_dim(normalize_index(expr.left))
         right = _require_dim(normalize_index(expr.right))
         if isinstance(right, DimLit) and right.value == 0:
             return left
-        if isinstance(left, DimLit) and isinstance(right, DimLit) and left.value >= right.value:
-            return DimLit(left.value - right.value)
+        vl = _dim_value(left)
+        vr = _dim_value(right)
+        if vl is not None and vr is not None and vl >= vr:
+            return _static_dim(vl - vr)
         return DimSub(left, right)
     if isinstance(expr, ShapeLit):
         return ShapeLit(tuple(_require_dim(normalize_index(dim)) for dim in expr.dims))
@@ -247,3 +251,20 @@ def _require_shape(expr: AnyIndexExpr) -> ShapeExpr:
     if not isinstance(expr, ShapeExpr):
         raise IndexError(f"expected shape expression, got {expr.sort}")
     return expr
+
+
+def _dim_value(expr: DimExpr) -> int | None:
+    """Extract a concrete integer from a DimExpr, or None."""
+    if isinstance(expr, DimLit):
+        return expr.value
+    # Also check StaticDim (from types.py) which has .value
+    value = getattr(expr, "value", None)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _static_dim(value: int) -> DimExpr:
+    """Create a StaticDim for a concrete value, avoiding circular import."""
+    from remora.types import StaticDim
+    return StaticDim(value)
