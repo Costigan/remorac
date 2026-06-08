@@ -2157,6 +2157,7 @@ def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> 
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c{n} = arith.constant {n} : index
+    %c{n}p2 = arith.constant {n+2} : index
     %mask_empty = tensor.empty() : tensor<{n}xi32>
     %mask = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
@@ -2170,24 +2171,32 @@ def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> 
     }} -> tensor<{n}xi32>
     %buf_src = memref.alloc() : memref<{n}x{input_elem}>
     %buf_mask = memref.alloc() : memref<{n}xi32>
-    %buf_dst = memref.alloc() : memref<{n}x{result_elem}>
+    %buf_dst = memref.alloc() : memref<{n+2}x{result_elem}>
     scf.for %i = %c0 to %c{n} step %c1 {{
       %v = tensor.extract {input_name}[%i] : {input_type}
       memref.store %v, %buf_src[%i] : memref<{n}x{input_elem}>
       %m = tensor.extract %mask[%i] : tensor<{n}xi32>
       memref.store %m, %buf_mask[%i] : memref<{n}xi32>
     }}
-    %count = func.call @{rt}(%buf_src, %buf_mask, %buf_dst) : (memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n}x{result_elem}>) -> i64
+    %count = func.call @{rt}(%buf_src, %buf_mask, %buf_dst) : (memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n+2}x{result_elem}>) -> i64
     %count_idx = arith.index_cast %count : i64 to index
-    %view = memref.subview %buf_dst[0] [%count_idx] [1] : memref<{n}x{result_elem}> to memref<?x{result_elem}, strided<[1]>>
-    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}, strided<[1]>>
+    scf.for %k = %c0 to %count_idx step %c1 {{
+      %offset = arith.subi %count_idx, %k : index
+      %src_minus_1 = arith.subi %offset, %c1 : index
+      %val = memref.load %buf_dst[%src_minus_1] : memref<{n+2}x{result_elem}>
+      memref.store %val, %buf_dst[%offset] : memref<{n+2}x{result_elem}>
+    }}
+    %count_i32 = arith.trunci %count : i64 to i32
+    memref.store %count_i32, %buf_dst[%c0] : memref<{n+2}x{result_elem}>
+    %count_p1 = arith.addi %count_idx, %c1 : index
+    %view = memref.subview %buf_dst[0] [%count_p1] [1] : memref<{n+2}x{result_elem}> to memref<?x{result_elem}, strided<[1]>>
     memref.dealloc %buf_src : memref<{n}x{input_elem}>
     memref.dealloc %buf_mask : memref<{n}xi32>
-    memref.dealloc %buf_dst : memref<{n}x{result_elem}>"""
+    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}, strided<[1]>>"""
     result_type_str = f"tensor<?x{result_elem}>"
     builder = _MLIRMainModuleBuilder(result_type_str)
     builder.add_extern(
-        f"  func.func private @{rt}(memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n}x{result_elem}>) -> i64"
+        f"  func.func private @{rt}(memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n+2}x{result_elem}>) -> i64"
     )
     builder.add_block(filter_body)
     return builder.render("%result")

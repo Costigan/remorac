@@ -226,6 +226,8 @@ class MLIRLowering:
                 HIRUnbox,
                 HIRSort,
                 HIRGrade,
+                HIRFilter,
+                HIRReplicate,
             ),
         ):
             raise RemoraLoweringError(

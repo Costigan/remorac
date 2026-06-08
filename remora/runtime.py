@@ -649,6 +649,12 @@ class CPUExecutor:
         self.execute_main_into(output)
         if isinstance(return_type, ScalarType):
             return output.item()
+        if isinstance(return_type, SigmaType):
+            # Filter/replicate: count at position 0, data at positions 1..count
+            count = int(output.flat[0]) if output.size > 0 else 0
+            if output.ndim == 0:
+                return output[1:]
+            return output.ravel()[1:1 + count]
         return output
 
     def execute_main_into(self, output: np.ndarray) -> None:
@@ -901,7 +907,9 @@ def _result_shape(value_type: RemoraType) -> tuple[int, ...]:
     if isinstance(value_type, SigmaType):
         body = value_type.body
         if isinstance(body, ArrayType):
-            return tuple(dim.value for dim in body.shape)
+            # Allocate worst-case: input size + 2 (for count + shift safety)
+            n = tuple(dim.value for dim in body.shape)
+            return (n[0] + 2,) if n else ()
         return ()
     if isinstance(value_type, ArrayType):
         return tuple(dim.value for dim in value_type.shape)
