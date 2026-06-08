@@ -2179,8 +2179,8 @@ def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> 
     }}
     %count = func.call @{rt}(%buf_src, %buf_mask, %buf_dst) : (memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n}x{result_elem}>) -> i64
     %count_idx = arith.index_cast %count : i64 to index
-    %view = memref.subview %buf_dst[0] [%count_idx] [%c1] : memref<{n}x{result_elem}> to memref<?x{result_elem}>
-    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}>
+    %view = memref.subview %buf_dst[0] [%count_idx] [1] : memref<{n}x{result_elem}> to memref<?x{result_elem}, strided<[1]>>
+    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}, strided<[1]>>
     memref.dealloc %buf_src : memref<{n}x{input_elem}>
     memref.dealloc %buf_mask : memref<{n}xi32>
     memref.dealloc %buf_dst : memref<{n}x{result_elem}>"""

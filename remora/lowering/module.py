@@ -894,8 +894,13 @@ def _output_descriptor_export_function(
         )
     elif isinstance(return_type, (ArrayType, SigmaType)):
         if isinstance(return_type, SigmaType):
+            body_t = return_type.body
+            elem = type_to_mlir(body_t.element if isinstance(body_t, ArrayType) else body_t)
             lines.append(
-                f'    "memref.copy"(%result, %out) : ({result_type}, {memref_type}) -> ()'
+                f"    %result_mem = bufferization.to_memref %result : memref<?x{elem}>"
+            )
+            lines.append(
+                f'    "memref.copy"(%result_mem, %out) : (memref<?x{elem}>, {memref_type}) -> ()'
             )
         else:
             lines.extend(
