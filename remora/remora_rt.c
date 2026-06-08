@@ -290,3 +290,99 @@ void remora_sort_1d_i32(int32_t* a, int32_t* b, int64_t o, int64_t n, int64_t s)
 void remora_sort_1d_f32(float* a, float* b, int64_t o, int64_t n, int64_t s)   { remora_sort_f32(a, b, o, n, s); }
 void remora_grade_1d_i32(int32_t* sa, int32_t* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_i32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
 void remora_grade_1d_f32(float* sa, float* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_f32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
+
+/* ── Scan (prefix sum) per-row helpers ──────────────────────────────────── */
+
+void remora_scan_i32_1d(
+    int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t n, int64_t src_str,
+    int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dn, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)dst_alloc; (void)dst_str; (void)dn;
+    int32_t* src = (int32_t*)_mr_data(src_align, src_off);
+    int32_t* dst = (int32_t*)_mr_data(dst_align, dst_off);
+    int32_t acc = 0;
+    for (int64_t i = 0; i < n; i++) {
+        acc += src[i];
+        dst[i] = acc;
+    }
+}
+
+void remora_scan_f32_1d(
+    float* src_alloc, float* src_align, int64_t src_off, int64_t n, int64_t src_str,
+    float* dst_alloc, float* dst_align, int64_t dst_off, int64_t dn, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)dst_alloc; (void)dst_str; (void)dn;
+    float* src = (float*)_mr_data(src_align, src_off);
+    float* dst = (float*)_mr_data(dst_align, dst_off);
+    float acc = 0.0f;
+    for (int64_t i = 0; i < n; i++) {
+        acc += src[i];
+        dst[i] = acc;
+    }
+}
+
+/* ── Rotate per-row helpers ─────────────────────────────────────────────── */
+
+void remora_rotate_i32_1d(
+    int32_t* src_alloc, int32_t* src_align, int64_t src_off, int64_t n, int64_t src_str,
+    int32_t* amt_alloc, int32_t* amt_align, int64_t amt_off, int64_t amt_n, int64_t amt_str,
+    int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dn, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)amt_alloc; (void)amt_n; (void)amt_str;
+    (void)dst_alloc; (void)dst_str; (void)dn;
+    int32_t* src = (int32_t*)_mr_data(src_align, src_off);
+    int32_t* dst = (int32_t*)_mr_data(dst_align, dst_off);
+    int32_t k = *(int32_t*)_mr_data(amt_align, amt_off);
+    int32_t k_mod = ((k % (int32_t)n) + (int32_t)n) % (int32_t)n;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t src_idx = (i + k_mod) % n;
+        dst[i] = src[src_idx];
+    }
+}
+
+void remora_rotate_f32_1d(
+    float* src_alloc, float* src_align, int64_t src_off, int64_t n, int64_t src_str,
+    int32_t* amt_alloc, int32_t* amt_align, int64_t amt_off, int64_t amt_n, int64_t amt_str,
+    float* dst_alloc, float* dst_align, int64_t dst_off, int64_t dn, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)amt_alloc; (void)amt_n; (void)amt_str;
+    (void)dst_alloc; (void)dst_str; (void)dn;
+    float* src = (float*)_mr_data(src_align, src_off);
+    float* dst = (float*)_mr_data(dst_align, dst_off);
+    int32_t k = *(int32_t*)_mr_data(amt_align, amt_off);
+    int32_t k_mod = ((k % (int32_t)n) + (int32_t)n) % (int32_t)n;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t src_idx = (i + k_mod) % n;
+        dst[i] = src[src_idx];
+    }
+}
+
+/* ── Append per-row helpers ─────────────────────────────────────────────── */
+
+void remora_append_i32_1d(
+    int32_t* a_alloc, int32_t* a_align, int64_t a_off, int64_t a_n, int64_t a_str,
+    int32_t* b_alloc, int32_t* b_align, int64_t b_off, int64_t b_n, int64_t b_str,
+    int32_t* d_alloc, int32_t* d_align, int64_t d_off, int64_t d_n, int64_t d_str
+) {
+    (void)a_alloc; (void)a_str; (void)b_alloc; (void)b_str;
+    (void)d_alloc; (void)d_str; (void)d_n;
+    int32_t* a = (int32_t*)_mr_data(a_align, a_off);
+    int32_t* b = (int32_t*)_mr_data(b_align, b_off);
+    int32_t* d = (int32_t*)_mr_data(d_align, d_off);
+    for (int64_t i = 0; i < a_n; i++) d[i] = a[i];
+    for (int64_t i = 0; i < b_n; i++) d[a_n + i] = b[i];
+}
+
+void remora_append_f32_1d(
+    float* a_alloc, float* a_align, int64_t a_off, int64_t a_n, int64_t a_str,
+    float* b_alloc, float* b_align, int64_t b_off, int64_t b_n, int64_t b_str,
+    float* d_alloc, float* d_align, int64_t d_off, int64_t d_n, int64_t d_str
+) {
+    (void)a_alloc; (void)a_str; (void)b_alloc; (void)b_str;
+    (void)d_alloc; (void)d_str; (void)d_n;
+    float* a = (float*)_mr_data(a_align, a_off);
+    float* b = (float*)_mr_data(b_align, b_off);
+    float* d = (float*)_mr_data(d_align, d_off);
+    for (int64_t i = 0; i < a_n; i++) d[i] = a[i];
+    for (int64_t i = 0; i < b_n; i++) d[a_n + i] = b[i];
+}
