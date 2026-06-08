@@ -65,6 +65,7 @@ from remora.ast_nodes import (
     RankExpr,
     RavelExpr,
     ReduceExpr,
+    ReplicateExpr,
     RerankExpr,
     ReshapeExpr,
     ReverseExpr,
@@ -124,6 +125,7 @@ array_lit: "[" sexpr* "]"
            | iota_form
            | iota1_form
            | filter_form
+           | replicate_form
            | shape_form
            | length_form
            | rank_form
@@ -170,6 +172,7 @@ unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
 iota_form: "iota" sexpr -> iota_expr
 iota1_form: "iota1" sexpr -> iota1_expr
 filter_form: "filter" sexpr sexpr -> filter_expr
+replicate_form: "replicate" sexpr sexpr -> replicate_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
 rank_form: "rank" sexpr -> rank_expr
@@ -376,6 +379,9 @@ class LispASTBuilder(Transformer):
 
     def filter_expr(self, items: list[Any]) -> FilterExpr:
         return FilterExpr(items[0], items[1], self._loc_from(items))
+
+    def replicate_expr(self, items: list[Any]) -> ReplicateExpr:
+        return ReplicateExpr(items[0], items[1], self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 

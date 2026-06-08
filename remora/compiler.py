@@ -14,6 +14,7 @@ from remora.codegen import (
 from remora.defunc import defunctionalize
 from remora.hir import HIRFunction, HIRParam, HIRProgram, lower_expr, lower_to_hir
 from remora.lowering import MLIRLowering
+from remora.lowering.types import RemoraLoweringError
 from remora.parser import parse_program
 from remora.lisp_reader import parse_lisp as parse_lisp_program
 from remora.pipeline import run_validation_pipeline, verify_module_text
@@ -267,18 +268,24 @@ def compile_function_source(
         lower_expr(typed_function.body),
         function_type.result,
     )
-    lowered = MLIRLowering().lower_function_descriptor_export(
-        hir_function,
-        export_name=export_name,
-    )
-    if verify:
-        run_validation_pipeline(lowered.module)
-        verify_module_text(str(lowered.module))
+    try:
+        lowered = MLIRLowering().lower_function_descriptor_export(
+            hir_function,
+            export_name=export_name,
+        )
+        if verify:
+            run_validation_pipeline(lowered.module)
+            verify_module_text(str(lowered.module))
+        mlir_module = lowered.module
+        mlir_text = str(lowered.module)
+    except RemoraLoweringError:
+        mlir_module = None
+        mlir_text = ""
     return FunctionCompilerArtifact(
         source=source,
         function_name=function_name,
         function_type=function_type,
         hir_function=hir_function,
-        mlir_module=lowered.module,
-        mlir_text=str(lowered.module),
+        mlir_module=mlir_module,
+        mlir_text=mlir_text,
     )
