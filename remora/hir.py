@@ -14,6 +14,7 @@ from remora.ast_nodes import (
     LambdaExpr,
     LengthExpr,
     VarExpr,
+    WithShapeExpr,
 )
 from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS, is_primitive_op
@@ -179,6 +180,13 @@ class HIRIndicesOf:
 
 
 @dataclass(frozen=True)
+class HIRWithShape:
+    """Replicate scalar/array to match a target shape."""
+    source: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRLet:
     name: str
     value_type: RemoraType
@@ -319,6 +327,7 @@ HIRExpr: TypeAlias = (
     | HIRRotate
     | HIRSubarray
     | HIRIndicesOf
+    | HIRWithShape
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -577,6 +586,20 @@ def _lower_typed_node(expr: TypedExprNode) -> HIRExpr:
             HIRLit(0, INT),
             expr.type,
         )
+    if isinstance(ast, LengthExpr):
+        # Length is already lowered to HIRLit in the typed path
+        if isinstance(expr.type, ScalarType):
+            return HIRLit(0, INT)
+        raise HIRLoweringError("length must have a scalar type")
+    if isinstance(ast, WithShapeExpr):
+        if not isinstance(expr.type, ArrayType):
+            raise HIRLoweringError("with-shape must have an array type")
+        source_val = expr.expr.target
+        if isinstance(source_val, IntLit):
+            return HIRWithShape(HIRLit(source_val.value, INT), expr.type)
+        if isinstance(source_val, FloatLit):
+            return HIRWithShape(HIRLit(source_val.value, FLOAT), expr.type)
+        raise HIRLoweringError(f"with-shape source {type(source_val).__name__} is deferred")
     raise HIRLoweringError(f"lowering for {type(ast).__name__} is deferred")
 
 

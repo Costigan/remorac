@@ -36,6 +36,7 @@ from remora.hir import (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 from remora.types import ArrayType, FuncType, RemoraType, ScalarType
 
@@ -83,6 +84,7 @@ from remora.lowering.tensor_ops import (
     _lower_subarray_module,
     _lower_tensor_input,
     _lower_transpose_input,
+    _lower_with_shape_module,
     _parallel_iterators,
 )
 from remora.lowering.types import (
@@ -192,6 +194,7 @@ class MLIRLowering:
                 HIRDrop,
                 HIRIota,
                 HIRIndicesOf,
+                HIRWithShape,
                 HIRArrayLit,
                 HIRMap,
                 HIRApply,
@@ -431,7 +434,8 @@ def _lower_main_module(
     | HIRScan
     | HIRRotate
     | HIRSubarray
-    | HIRIndicesOf,
+    | HIRIndicesOf
+    | HIRWithShape,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(
@@ -467,6 +471,8 @@ def _lower_main_module(
         return _lower_subarray_module(node, functions)
     if isinstance(node, HIRIndicesOf):
         return _lower_indices_of_module(node, functions)
+    if isinstance(node, HIRWithShape):
+        return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):
