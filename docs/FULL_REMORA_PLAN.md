@@ -495,7 +495,7 @@ Total calendar time (1 engineer):
 - [ ] `filter` — select subarrays by boolean mask (→ boxes)
 - [x] `select` — element-wise ternary (already via tensor `if`)
 - [ ] `replicate` — repeat items by count vector (→ boxes)
-- [ ] `sort` / `grade` — sort with stable comparison function
+- [x] `sort` / `grade` — AST/parser/typechecker done, MLIR lowering deferred
 - [ ] `index-item` — index by scalar along leading dimension
 - [x] Tests: `(length xs)` returns correct leading dimension size
 

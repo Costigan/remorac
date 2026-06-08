@@ -17,6 +17,7 @@ from remora.ast_nodes import (
     FoldExpr,
     FoldRightExpr,
     FuncDef,
+    GradeExpr,
     FilterExpr,
     IfExpr,
     IndexExpr,
@@ -43,6 +44,7 @@ from remora.ast_nodes import (
     SelectExpr,
     ShapeExpr,
     SliceRange,
+    SortExpr,
     SubarrayExpr,
     ReverseExpr,
     TakeExpr,
@@ -583,6 +585,10 @@ class TypeChecker:
             return self._infer_filter(expr, env)
         if isinstance(expr, ReplicateExpr):
             return self._infer_replicate(expr, env)
+        if isinstance(expr, SortExpr):
+            return self._infer_sort(expr, env)
+        if isinstance(expr, GradeExpr):
+            return self._infer_grade(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1473,6 +1479,39 @@ class TypeChecker:
             raise RemoraTypeError("replicate expects an array", expr.loc)
         sigma = SigmaType(("len",), ArrayType(typed_array.type.element, (StaticDim(0),)))
         return TypedBox(BoxExpr(expr, expr.loc), typed_array, sigma)  # type: ignore
+
+    def _infer_sort(self, expr: SortExpr, env: TypeEnv) -> TypedExpr:
+        """sort cmp xs : [elem] — stable sort by comparison function."""
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("sort expects an array", expr.loc)
+        element_type = typed_array.type.element if isinstance(typed_array.type, ArrayType) else typed_array.type
+        if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
+            expected_type = FuncType((element_type, element_type), BOOL)
+        else:
+            typed_func = self.infer(expr.func, env)
+            if not isinstance(typed_func.type, FuncType) or len(typed_func.type.params) != 2:
+                raise RemoraTypeError("sort expects a binary comparison function", expr.loc)
+            if typed_func.type.result != BOOL:
+                raise RemoraTypeError("sort comparison function must return bool", expr.loc)
+        return TypedExprNode(expr, typed_array.type)
+
+    def _infer_grade(self, expr: GradeExpr, env: TypeEnv) -> TypedExpr:
+        """grade cmp xs : [int] — permutation indices that would sort xs."""
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("grade expects an array", expr.loc)
+        element_type = typed_array.type.element
+        if isinstance(expr.func, VarExpr) and expr.func.name in ALL_PRIMITIVE_OPS:
+            pass  # valid comparison operator
+        else:
+            typed_func = self.infer(expr.func, env)
+            if not isinstance(typed_func.type, FuncType) or len(typed_func.type.params) != 2:
+                raise RemoraTypeError("grade expects a binary comparison function", expr.loc)
+            if typed_func.type.result != BOOL:
+                raise RemoraTypeError("grade comparison function must return bool", expr.loc)
+        result_shape = (typed_array.type.shape[0],)
+        return TypedExprNode(expr, ArrayType(INT, result_shape))
 
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv
