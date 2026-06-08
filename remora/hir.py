@@ -29,6 +29,7 @@ from remora.typechecker import (
     TypedExprNode,
     TypedFold,
     TypedFoldRight,
+    TypedGrade,
     TypedIf,
     TypedIndex,
     TypedIndicesOf,
@@ -47,6 +48,7 @@ from remora.typechecker import (
     TypedScan,
     TypedShape,
     TypedSlice,
+    TypedSort,
     TypedSubarray,
     TypedReverse,
     TypedTake,
@@ -226,6 +228,20 @@ class HIRReplicate:
 
 
 @dataclass(frozen=True)
+class HIRSort:
+    """Sort array elements in ascending order."""
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRGrade:
+    """Return permutation indices that would sort the array."""
+    array: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRAppend:
     """Concatenate two arrays along the leading dimension."""
     left: HIRExpr
@@ -379,6 +395,8 @@ HIRExpr: TypeAlias = (
     | HIRUnbox
     | HIRFilter
     | HIRReplicate
+    | HIRSort
+    | HIRGrade
     | HIRAppend
     | HIRLet
     | HIRCall
@@ -595,6 +613,12 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.type,
         )
 
+    if isinstance(expr, TypedSort):
+        return HIRSort(lower_expr(expr.array), expr.type)
+
+    if isinstance(expr, TypedGrade):
+        return HIRGrade(lower_expr(expr.array), expr.type)
+
     if isinstance(expr, TypedExprNode):
         return _lower_typed_node(expr)
 
@@ -743,6 +767,8 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRWithShape):
         return expr.result_type
     if isinstance(expr, (HIRFilter, HIRReplicate)):
+        return expr.result_type
+    if isinstance(expr, (HIRSort, HIRGrade)):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 

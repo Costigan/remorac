@@ -14,13 +14,15 @@ from remora.hir import (
     HIRCast,
     HIRDrop,
     HIRExpr,
+    HIRFilter,
     HIRFold,
     HIRFoldRight,
     HIRFunction,
+    HIRGrade,
     HIRIf,
     HIRIndex,
-    HIRIota,
     HIRIndicesOf,
+    HIRIota,
     HIRLet,
     HIRLit,
     HIRMap,
@@ -29,11 +31,13 @@ from remora.hir import (
     HIRProgram,
     HIRRavel,
     HIRReduce,
+    HIRReplicate,
     HIRReshape,
     HIRReverse,
     HIRRotate,
     HIRScan,
     HIRSlice,
+    HIRSort,
     HIRSubarray,
     HIRTake,
     HIRTranspose,
@@ -70,6 +74,7 @@ from remora.lowering.tensor_ops import (
     _lower_fold_input,
     _lower_fold_module,
     _lower_fold_result,
+    _lower_grade_module,
     _lower_indices_of_module,
     _lower_iota_module,
     _lower_iota_scalar_map_module,
@@ -85,6 +90,7 @@ from remora.lowering.tensor_ops import (
     _lower_scalar_map_binary_module,
     _lower_scalar_map_module,
     _lower_scan_module,
+    _lower_sort_module,
     _lower_subarray_module,
     _lower_tensor_input,
     _lower_transpose_input,
@@ -209,12 +215,14 @@ class MLIRLowering:
                 HIRFoldRight,
                 HIRScan,
                 HIRUnbox,
+                HIRSort,
+                HIRGrade,
             ),
         ):
             raise RemoraLoweringError(
                 "only scalar expressions, scalar lets/calls, full-rank indexing, "
                 "view operations, iota, array literals, scalar maps, scalar folds, "
-                "box/unbox, and reverse lower to MLIR so far"
+                "box/unbox, sort, grade, and reverse lower to MLIR so far"
             )
 
         # Prefer builder API path; fall back to text-based if unsupported node types
@@ -454,6 +462,10 @@ def _lower_main_module(
     | HIRWithShape
     | HIRBox
     | HIRUnbox
+    | HIRFilter
+    | HIRReplicate
+    | HIRSort
+    | HIRGrade
     | HIRAppend,
     functions: dict[str, HIRFunction],
 ) -> str:
@@ -497,6 +509,10 @@ def _lower_main_module(
         return _lower_subarray_module(node, functions)
     if isinstance(node, HIRIndicesOf):
         return _lower_indices_of_module(node, functions)
+    if isinstance(node, HIRSort):
+        return _lower_sort_module(node, functions)
+    if isinstance(node, HIRGrade):
+        return _lower_grade_module(node, functions)
     if isinstance(node, HIRWithShape):
         return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRIota):
