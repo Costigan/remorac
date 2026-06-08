@@ -215,6 +215,27 @@ def build_descriptor_abi_f32_reduction_gpu_module(
     )
 
 
+def build_descriptor_abi_f32_scan_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for f32 scan (prefix-sum).
+
+    GPU scan implementation requires shared-memory parallel prefix-sum
+    (Blelloch or Kogge-Stone).  This is deferred: the current CPU scan
+    lowering uses ``scf.for`` which IREE cannot compile to GPU.
+
+    Future work: reimplement scan in the CPU lowering using
+    ``linalg.generic`` with a reduction iterator carrying scan state.
+    """
+    raise GPUScaffoldError(
+        "GPU scan is deferred: requires shared-memory parallel prefix-sum "
+        "kernel or linalg.generic-based lowering"
+    )
+
+
 def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
     """Raise GPUScaffoldError if module or kernel name is not a valid identifier."""
     if not module_name.isidentifier() or not kernel_name.isidentifier():
