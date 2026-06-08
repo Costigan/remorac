@@ -215,6 +215,20 @@ def build_descriptor_abi_f32_reduction_gpu_module(
     )
 
 
+def _scan_kernel(function: HIRFunction) -> HIRFunction:
+    """Analyze the HIR function and return it if it's a valid scan kernel."""
+    if not function.params:
+        raise GPUScaffoldError("GPU scan requires a single-parameter function")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("GPU scan requires an array input parameter")
+    if param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU scan currently supports f32 input only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU scan currently supports rank-1 input only")
+    return function
+
+
 def build_descriptor_abi_f32_scan_gpu_module(
     function: HIRFunction,
     *,
@@ -223,17 +237,65 @@ def build_descriptor_abi_f32_scan_gpu_module(
 ) -> GPUModuleScaffold:
     """Build a descriptor-ABI GPU module for f32 scan (prefix-sum).
 
-    GPU scan implementation requires shared-memory parallel prefix-sum
-    (Blelloch or Kogge-Stone).  This is deferred: the current CPU scan
-    lowering uses ``scf.for`` which IREE cannot compile to GPU.
-
-    Future work: reimplement scan in the CPU lowering using
-    ``linalg.generic`` with a reduction iterator carrying scan state.
+    Uses a single-thread serial scan within a GPU kernel — correct for any
+    size but potentially slow. A production implementation would use shared-
+    memory Blelloch or Kogge-Stone scan.
     """
-    raise GPUScaffoldError(
-        "GPU scan is deferred: requires shared-memory parallel prefix-sum "
-        "kernel or linalg.generic-based lowering"
-    )
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU scan supports single-parameter functions only")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU scan supports rank-1 f32 input only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU scan supports rank-1 input only")
+
+    shape = _validate_shape(tuple(int(d.value) for d in param_type.shape))
+    N = shape[0]
+    name = kernel_name or f"remora_{function.name}_f32_scan"
+    _validate_scaffold_names(module_name, name)
+
+    rank = 1
+    desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tid = llvm.sext %tid32 : i32 to i64
+      %c0_i64 = llvm.mlir.constant(0 : index) : i64
+      %is_main = llvm.icmp "eq" %tid, %c0_i64 : i64
+      llvm.cond_br %is_main, ^scan, ^done
+
+    ^scan:
+      %cN = llvm.mlir.constant({N} : index) : i64
+      %init = llvm.mlir.constant(0.000000e+00 : f32) : f32
+      %c1 = llvm.mlir.constant(1 : index) : i64
+      %c0 = llvm.mlir.constant(0 : index) : i64
+      llvm.br ^loop(%c0, %init : i64, f32)
+
+    ^loop(%i: i64, %acc: f32):
+      %loop_done = llvm.icmp "uge" %i, %cN : i64
+      llvm.cond_br %loop_done, ^done, ^body
+
+    ^body:
+      %in_linear = llvm.add %in_offset, %i  : i64
+      %in_ptr = llvm.getelementptr %in_aligned[%in_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %elem = llvm.load %in_ptr : !llvm.ptr -> f32
+      %next_acc = llvm.fadd %acc, %elem  : f32
+      %out_linear = llvm.add %out_offset, %i  : i64
+      %out_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %next_acc, %out_ptr : f32, !llvm.ptr
+      %next_i = llvm.add %i, %c1 : i64
+      llvm.br ^loop(%next_i, %next_acc : i64, f32)
+
+    ^done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
 
 
 def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
