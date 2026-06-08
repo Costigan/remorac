@@ -566,7 +566,7 @@ Total calendar time (1 engineer):
 - [x] GPU rotate — via IREE linalg.generic compilation
 - [x] GPU subarray — via IREE tensor.extract_slice compilation
 - [x] GPU indices-of — via IREE linalg.generic compilation
-- [ ] GPU scan operators (needs shared-memory or non-scf.for lowering)
+- [x] GPU scan operators (single-thread serial kernel, parallel kernel deferred)
 - [ ] GPU box support (pre-allocated device buffers)
 - [ ] GPU append / rotate via descriptor arithmetic
 - [ ] GPU subarray via strided descriptor slicing
