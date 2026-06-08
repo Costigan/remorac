@@ -49,6 +49,7 @@ from remora.ast_nodes import (
     FoldRightExpr,
     FuncDef,
     FilterExpr,
+    GradeExpr,
     IfExpr,
     IndexExpr,
     IndicesOfExpr,
@@ -74,6 +75,7 @@ from remora.ast_nodes import (
     ScanExpr,
     SelectExpr,
     ShapeExpr,
+    SortExpr,
     SourceLoc,
     SubarrayExpr,
     TakeExpr,
@@ -126,6 +128,8 @@ array_lit: "[" sexpr* "]"
            | iota1_form
            | filter_form
            | replicate_form
+           | sort_form
+           | grade_form
            | shape_form
            | length_form
            | rank_form
@@ -173,6 +177,8 @@ iota_form: "iota" sexpr -> iota_expr
 iota1_form: "iota1" sexpr -> iota1_expr
 filter_form: "filter" sexpr sexpr -> filter_expr
 replicate_form: "replicate" sexpr sexpr -> replicate_expr
+sort_form: "sort" sexpr sexpr -> sort_expr
+grade_form: "grade" sexpr sexpr -> grade_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
 rank_form: "rank" sexpr -> rank_expr
@@ -382,6 +388,12 @@ class LispASTBuilder(Transformer):
 
     def replicate_expr(self, items: list[Any]) -> ReplicateExpr:
         return ReplicateExpr(items[0], items[1], self._loc_from(items))
+
+    def sort_expr(self, items: list[Any]) -> SortExpr:
+        return SortExpr(items[0], items[1], self._loc_from(items))
+
+    def grade_expr(self, items: list[Any]) -> GradeExpr:
+        return GradeExpr(items[0], items[1], self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 

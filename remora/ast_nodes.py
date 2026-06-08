@@ -129,6 +129,20 @@ class ReplicateExpr:
 
 
 @dataclass(frozen=True)
+class SortExpr:
+    func: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class GradeExpr:
+    func: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class UnboxExpr:
     box_expr: Expr
     hidden_names: list[str]
@@ -356,6 +370,8 @@ Expr: TypeAlias = (
     | Iota1Expr
     | FilterExpr
     | ReplicateExpr
+    | SortExpr
+    | GradeExpr
     | LambdaExpr
     | AppExpr
     | MapExpr
