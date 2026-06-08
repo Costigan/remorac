@@ -568,8 +568,9 @@ Total calendar time (1 engineer):
 - [x] GPU indices-of — via IREE linalg.generic compilation
 - [x] GPU scan operators (single-thread serial kernel, parallel kernel deferred)
 - [ ] GPU box support (pre-allocated device buffers)
-- [ ] GPU append / rotate via descriptor arithmetic
-- [ ] GPU subarray via strided descriptor slicing
+- [x] GPU append / rotate — via IREE linalg compilation + descriptor-ABI kernel
+- [x] GPU subarray — via IREE tensor.extract_slice compilation
+- [x] GPU indices-of — via IREE linalg.generic compilation
 - [ ] GPU filter / replicate (dynamic output, pre-allocated max-size)
 - [ ] GPU sort (device-side sorting)
 - [ ] GPU MIMD dispatch (arrays of functions → indirect calls)
