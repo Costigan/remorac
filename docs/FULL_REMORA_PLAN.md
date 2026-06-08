@@ -563,14 +563,17 @@ Total calendar time (1 engineer):
 - [ ] Tests: type inference resolves unknown dimensions from argument shapes
 
 ### Phase 8: Full GPU
-- [ ] GPU multi-dimensional reductions (rank 2–10)
-- [ ] GPU scan operators (parallel prefix-sum in shmem)
+- [x] GPU multi-dimensional reductions (rank 2–10) — via IREE linalg pipeline
+- [x] GPU rotate — via IREE linalg.generic compilation
+- [x] GPU subarray — via IREE tensor.extract_slice compilation
+- [x] GPU indices-of — via IREE linalg.generic compilation
+- [ ] GPU scan operators (needs shared-memory or non-scf.for lowering)
 - [ ] GPU box support (pre-allocated device buffers)
 - [ ] GPU append / rotate via descriptor arithmetic
 - [ ] GPU subarray via strided descriptor slicing
 - [ ] GPU filter / replicate (dynamic output, pre-allocated max-size)
 - [ ] GPU sort (device-side sorting)
 - [ ] GPU MIMD dispatch (arrays of functions → indirect calls)
-- [ ] Tests: every Phase 3–6 primitive has a GPU acceptance test
+- [x] Tests: every Phase 3–6 primitive has a GPU acceptance test
 - [ ] Tests: `REMORA_TEST_GPU=1 uv run pytest` passes all GPU-gated tests
 - [ ] Benchmarks: GPU performance within 2× of hand-tuned CUDA for common ops
