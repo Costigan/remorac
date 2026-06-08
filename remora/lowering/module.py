@@ -18,6 +18,7 @@ from remora.hir import (
     HIRIf,
     HIRIndex,
     HIRIota,
+    HIRIndicesOf,
     HIRLet,
     HIRLit,
     HIRMap,
@@ -64,6 +65,7 @@ from remora.lowering.tensor_ops import (
     _lower_fold_input,
     _lower_fold_module,
     _lower_fold_result,
+    _lower_indices_of_module,
     _lower_iota_module,
     _lower_iota_scalar_map_module,
     _lower_iota_scalar_map_result,
@@ -189,6 +191,7 @@ class MLIRLowering:
                 HIRTake,
                 HIRDrop,
                 HIRIota,
+                HIRIndicesOf,
                 HIRArrayLit,
                 HIRMap,
                 HIRApply,
@@ -427,7 +430,8 @@ def _lower_main_module(
     | HIRFoldRight
     | HIRScan
     | HIRRotate
-    | HIRSubarray,
+    | HIRSubarray
+    | HIRIndicesOf,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(
@@ -461,6 +465,8 @@ def _lower_main_module(
         return _lower_rotate_module(node, functions)
     if isinstance(node, HIRSubarray):
         return _lower_subarray_module(node, functions)
+    if isinstance(node, HIRIndicesOf):
+        return _lower_indices_of_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):

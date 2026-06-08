@@ -489,7 +489,7 @@ Total calendar time (1 engineer):
 - [ ] `append` — concatenate along leading axis (MLIR lowering)
 - [x] `length` — size of leading dimension (`tensor.dim`)
 - [x] `rotate` — circular shift with per-axis rotation vector
-- [ ] `indices-of` — coordinate array for each position
+- [x] `indices-of` — coordinate array for each position
 - [ ] `with-shape` — replicate scalar/array to match target shape
 - [x] `subarray` — extract rectangular region by offset and shape
 - [ ] `filter` — select subarrays by boolean mask (→ boxes)

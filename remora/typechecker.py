@@ -18,6 +18,7 @@ from remora.ast_nodes import (
     FuncDef,
     IfExpr,
     IndexExpr,
+    IndicesOfExpr,
     IntLit,
     IotaExpr,
     LambdaExpr,
@@ -46,6 +47,7 @@ from remora.ast_nodes import (
     DropExpr,
     ValDef,
     VarExpr,
+    WithShapeExpr,
 )
 from remora.operators import ALL_PRIMITIVE_OPS
 from remora.types import (
@@ -340,6 +342,14 @@ class TypedSubarray:
     type: ArrayType
 
 
+@dataclass(frozen=True)
+class TypedIndicesOf:
+    """A typed indices-of expression."""
+    expr: IndicesOfExpr
+    array: TypedExpr
+    type: ArrayType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -367,6 +377,7 @@ TypedExpr: TypeAlias = (
     | TypedAppend
     | TypedRotate
     | TypedSubarray
+    | TypedIndicesOf
     | TypedLet
     | TypedIf
 )
@@ -522,6 +533,10 @@ class TypeChecker:
             return self._infer_rerank(expr, env)
         if isinstance(expr, SubarrayExpr):
             return self._infer_subarray(expr, env)
+        if isinstance(expr, IndicesOfExpr):
+            return self._infer_indices_of(expr, env)
+        if isinstance(expr, WithShapeExpr):
+            return self._infer_with_shape(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1324,6 +1339,31 @@ class TypeChecker:
         sizes = tuple(eval_static_dim(s, expr.loc) for s in expr.shape)
         result_type = ArrayType(typed_array.type.element, sizes)
         return TypedSubarray(expr, typed_array, offsets, sizes, result_type)
+
+    def _infer_indices_of(self, expr: IndicesOfExpr, env: TypeEnv) -> TypedExpr:
+        typed_array = self.infer(expr.array, env)
+        if not isinstance(typed_array.type, ArrayType):
+            raise RemoraTypeError("indices-of expects an array", expr.loc)
+        rank = StaticDim(typed_array.type.rank)
+        result_shape = (rank,) + typed_array.type.shape
+        return TypedIndicesOf(expr, typed_array, ArrayType(INT, result_shape))
+
+    def _infer_with_shape(self, expr: WithShapeExpr, env: TypeEnv) -> TypedExpr:
+        typed_target = self.infer(expr.target, env)
+        typed_shape = self.infer(expr.shape, env)
+        if not isinstance(typed_shape.type, ArrayType) or typed_shape.type.element != INT:
+            raise RemoraTypeError("with-shape expects an integer shape vector", expr.loc)
+        shape_dims = tuple(
+            StaticDim(int(e.value)) if isinstance(e, IntLit) else StaticDim(0)
+            for e in (expr.shape.elements if isinstance(expr.shape, ArrayLit) else [expr.shape])
+        )
+        if isinstance(typed_target.type, ScalarType):
+            result_type = ArrayType(typed_target.type, shape_dims)
+        elif isinstance(typed_target.type, ArrayType):
+            result_type = ArrayType(typed_target.type.element, shape_dims + typed_target.type.shape)
+        else:
+            raise RemoraTypeError("with-shape expects a scalar or array target", expr.loc)
+        return TypedExprNode(expr, result_type)
 
         # Return as a callable-ready node; concrete type is resolved by context
         return TypedExprNode(

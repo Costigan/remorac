@@ -49,6 +49,7 @@ from remora.ast_nodes import (
     FuncDef,
     IfExpr,
     IndexExpr,
+    IndicesOfExpr,
     IntLit,
     IotaExpr,
     LambdaExpr,
@@ -77,6 +78,7 @@ from remora.ast_nodes import (
     DropExpr,
     ValDef,
     VarExpr,
+    WithShapeExpr,
 )
 
 _GRAMMAR = r"""
@@ -111,6 +113,8 @@ array_lit: "[" sexpr* "]"
            | append_form
            | rotate_form
            | subarray_form
+           | indices_of_form
+           | with_shape_form
            | iota_form
            | shape_form
            | length_form
@@ -150,6 +154,8 @@ trace_form: "trace" sexpr sexpr sexpr -> trace_expr
 append_form: "append" sexpr sexpr -> append_expr
 rotate_form: "rotate" sexpr sexpr -> rotate_expr
 subarray_form: "subarray" sexpr sexpr sexpr -> subarray_expr
+indices_of_form: "indices-of" sexpr -> indices_of_expr
+with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
@@ -332,6 +338,12 @@ class LispASTBuilder(Transformer):
             list(items[2].elements) if isinstance(items[2], ArrayLit) else [items[2]]
         )
         return SubarrayExpr(array, offsets, shape, self._loc_from(items))
+
+    def indices_of_expr(self, items: list[Any]) -> IndicesOfExpr:
+        return IndicesOfExpr(items[0], self._loc_from(items))
+
+    def with_shape_expr(self, items: list[Any]) -> WithShapeExpr:
+        return WithShapeExpr(items[0], items[1], self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 
