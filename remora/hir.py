@@ -208,6 +208,14 @@ class HIRUnbox:
 
 
 @dataclass(frozen=True)
+class HIRAppend:
+    """Concatenate two arrays along the leading dimension."""
+    left: HIRExpr
+    right: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRLet:
     name: str
     value_type: RemoraType
@@ -351,6 +359,7 @@ HIRExpr: TypeAlias = (
     | HIRWithShape
     | HIRBox
     | HIRUnbox
+    | HIRAppend
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -498,6 +507,13 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             expr.hidden_names,
             expr.value_name,
             lower_expr(expr.body),
+            expr.type,
+        )
+
+    if isinstance(expr, TypedAppend):
+        return HIRAppend(
+            lower_expr(expr.left),
+            lower_expr(expr.right),
             expr.type,
         )
 

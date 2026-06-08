@@ -7,6 +7,7 @@ from dataclasses import replace
 from remora.errors import RemoraError
 from remora.hir import (
     HIRApply,
+    HIRAppend,
     HIRArrayLit,
     HIRBox,
     HIRCall,
@@ -163,6 +164,11 @@ class _Defunctionalizer:
                 e.hidden_names,
                 e.value_name,
                 self._rewrite_expr(e.body, scalar_env),
+                e.result_type,
+            ),
+            HIRAppend: lambda e: HIRAppend(
+                self._rewrite_expr(e.left, scalar_env),
+                self._rewrite_expr(e.right, scalar_env),
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

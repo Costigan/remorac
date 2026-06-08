@@ -1804,6 +1804,42 @@ def _lower_with_shape_module(
 
 
 # ---------------------------------------------------------------------------
+# Append lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_append_module(
+    node: HIRAppend, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    left_code, left_name, left_type, _left_elem = _lower_tensor_input(
+        node.left, "left", functions
+    )
+    right_code, right_name, right_type, _right_elem = _lower_tensor_input(
+        node.right, "right", functions
+    )
+    result_type_mlir = type_to_mlir(node.result_type)
+    result_rank = node.result_type.rank
+
+    if result_rank != 1:
+        raise RemoraLoweringError("only rank-1 append lowers to MLIR so far")
+
+    left_dim = _expr_result_type(node.left).shape[0].value if isinstance(_expr_result_type(node.left), ArrayType) else 0
+    right_dim = _expr_result_type(node.right).shape[0].value if isinstance(_expr_result_type(node.right), ArrayType) else 0
+
+    body = f"""{left_code}
+{right_code}
+    %empty = tensor.empty() : {result_type_mlir}
+    %tmp = tensor.insert_slice {left_name} into %empty[0] [{left_dim}] [1] : {left_type} into {result_type_mlir}
+    %result = tensor.insert_slice {right_name} into %tmp[{left_dim}] [{right_dim}] [1] : {right_type} into {result_type_mlir}"""
+
+    builder = _MLIRMainModuleBuilder(result_type_mlir)
+    builder.add_block(body)
+    return builder.render("%result")
+
+
+# ---------------------------------------------------------------------------
 # Scan lowering
 # ---------------------------------------------------------------------------
 

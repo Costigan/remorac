@@ -23,6 +23,7 @@ from typing import Any, TypeVar
 
 from remora.hir import (
     HIRApply,
+    HIRAppend,
     HIRArrayLit,
     HIRBox,
     HIRCall,
@@ -60,6 +61,7 @@ from remora.hir import (
 # Ordered list of all HIR expression types for dispatch.
 _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRApply,
+    HIRAppend,
     HIRArrayLit,
     HIRBox,
     HIRCall,

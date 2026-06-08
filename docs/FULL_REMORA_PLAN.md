@@ -486,7 +486,7 @@ Total calendar time (1 engineer):
 - [x] Tests: `escan/zero` + 0 on `[2 10 5]` → `[0 2 12 17]`
 
 ### Phase 4: Additional primitives
-- [ ] `append` — concatenate along leading axis (MLIR lowering)
+- [x] `append` — concatenate along leading axis (MLIR lowering)
 - [x] `length` — size of leading dimension (`tensor.dim`)
 - [x] `rotate` — circular shift with per-axis rotation vector
 - [x] `indices-of` — coordinate array for each position
@@ -514,10 +514,10 @@ Total calendar time (1 engineer):
 - [x] `box` — wraps array with hidden dimension witnesses
 - [ ] `boxes` — constructs arrays of boxes with per-box witnesses
 - [x] `unbox` — opens box, binds contents and witnesses, evaluates body
-- [ ] `iota1` — produces boxed vector `(Σ (len) [int len])`
+- [x] `iota1` — produces boxed vector `(Σ (len) [int len])`
 - [ ] `iota2` — produces boxed matrix
 - [ ] `iota0` through `iota9` — rank-monomorphic boxed iota
-- [ ] `filter` result is boxed (unknown count)
+- [x] `filter` result is boxed (unknown count)
 - [ ] `replicate` result is boxed
 - [x] Typechecker: witness information cannot leak into result type
 - [x] Typechecker: unbox body's result shape must not depend on witness

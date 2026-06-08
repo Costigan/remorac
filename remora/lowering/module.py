@@ -7,6 +7,7 @@ from typing import Any
 
 from remora.hir import (
     HIRApply,
+    HIRAppend,
     HIRArrayLit,
     HIRBox,
     HIRCall,
@@ -59,6 +60,7 @@ from remora.lowering.scalar import (
 from remora.lowering.tensor_ops import (
     _flatten_array_literal,
     _identity_affine_map,
+    _lower_append_module,
     _lower_array_fold_module,
     _lower_array_fold_result,
     _lower_array_literal_module,
@@ -198,6 +200,7 @@ class MLIRLowering:
                 HIRIndicesOf,
                 HIRWithShape,
                 HIRArrayLit,
+                HIRAppend,
                 HIRBox,
                 HIRMap,
                 HIRApply,
@@ -450,7 +453,8 @@ def _lower_main_module(
     | HIRIndicesOf
     | HIRWithShape
     | HIRBox
-    | HIRUnbox,
+    | HIRUnbox
+    | HIRAppend,
     functions: dict[str, HIRFunction],
 ) -> str:
     # Box/Unbox are type-erased at runtime
@@ -458,6 +462,8 @@ def _lower_main_module(
         return _lower_main_module(node.value, functions)
     if isinstance(node, HIRUnbox):
         return _lower_main_module(node.body, functions)
+    if isinstance(node, HIRAppend):
+        return _lower_append_module(node, functions)
     if isinstance(node, HIRLet) and isinstance(
         node.value_type, ArrayType
     ):

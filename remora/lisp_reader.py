@@ -48,10 +48,12 @@ from remora.ast_nodes import (
     FoldExpr,
     FoldRightExpr,
     FuncDef,
+    FilterExpr,
     IfExpr,
     IndexExpr,
     IndicesOfExpr,
     IntLit,
+    Iota1Expr,
     IotaExpr,
     LambdaExpr,
     LeftSectionExpr,
@@ -120,6 +122,8 @@ array_lit: "[" sexpr* "]"
            | box_form
            | unbox_form
            | iota_form
+           | iota1_form
+           | filter_form
            | shape_form
            | length_form
            | rank_form
@@ -164,6 +168,8 @@ with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
 box_form: "box" sexpr -> box_expr
 unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
 iota_form: "iota" sexpr -> iota_expr
+iota1_form: "iota1" sexpr -> iota1_expr
+filter_form: "filter" sexpr sexpr -> filter_expr
 shape_form: "shape" sexpr -> shape_expr
 length_form: "length" sexpr -> length_expr
 rank_form: "rank" sexpr -> rank_expr
@@ -357,8 +363,6 @@ class LispASTBuilder(Transformer):
         return BoxExpr(items[0], self._loc_from(items))
 
     def unbox_expr(self, items: list[Any]) -> UnboxExpr:
-        # items: [box_expr, hidden_names..., value_name, body]
-        # All hidden names except the last value_name
         all_names = [str(item) for item in items[1:-1]]
         if len(all_names) < 1:
             raise ValueError("unbox requires at least one hidden name and a value name")
@@ -366,6 +370,12 @@ class LispASTBuilder(Transformer):
         value_name = all_names[-1]
         body = items[-1]
         return UnboxExpr(items[0], hidden_names, value_name, body, self._loc_from(items))
+
+    def iota1_expr(self, items: list[Any]) -> Iota1Expr:
+        return Iota1Expr(items[0], self._loc_from(items))
+
+    def filter_expr(self, items: list[Any]) -> FilterExpr:
+        return FilterExpr(items[0], items[1], self._loc_from(items))
 
     # ── iota / shape / rank / views ──────────────────────────────────────
 
