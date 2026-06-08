@@ -1189,8 +1189,8 @@ def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
             _apply_op(expr.expr.op, left, right), expr.type.result
         )
     if isinstance(expr, TypedLeftSection):
-        left = _eval_expr(expr.arg, env)
-        return lambda right: _coerce_runtime_value(
+        right = _eval_expr(expr.arg, env)
+        return lambda left: _coerce_runtime_value(
             _apply_op(expr.expr.op, left, right), expr.type.result
         )
     if isinstance(expr, TypedRightSection):
@@ -1288,6 +1288,10 @@ def _apply_op(op: str, left: Value, right: Value) -> Value:
         return left < right
     if op == "<=":
         return left <= right
+    if op == ">":
+        return left > right
+    if op == ">=":
+        return left >= right
     if op == "==":
         return left == right
     if op == "!=":

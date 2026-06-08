@@ -494,7 +494,7 @@ Total calendar time (1 engineer):
 - [x] `subarray` — extract rectangular region by offset and shape
 - [x] `with-shape` — replicate scalar/array to match target shape
 - [x] `subarray` — extract rectangular region by offset and shape
-- [ ] `filter` — select subarrays by boolean mask (→ boxes, needs dynamic sizing; interpreter works)
+- [x] `filter` — select subarrays by boolean mask (interpreter works; MLIR deferred for dynamic sizing)
 - [x] `select` — element-wise ternary (already via tensor `if`)
 - [x] `replicate` — repeat items by count vector (interpreter works; MLIR deferred for dynamic sizing)
 - [x] `sort` / `grade` — sort/permutation indices (interpreter works; MLIR deferred)

@@ -15,7 +15,7 @@ from typing import ClassVar
 # ---------------------------------------------------------------------------
 
 ARITHMETIC_OPS = frozenset({"+", "-", "*", "/"})
-COMPARISON_OPS = frozenset({"<", "<=", "==", "!="})
+COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "==", "!="})
 BOOLEAN_OPS = frozenset({"&&", "||"})
 ALL_PRIMITIVE_OPS = ARITHMETIC_OPS | COMPARISON_OPS | BOOLEAN_OPS
 
