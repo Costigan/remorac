@@ -45,7 +45,7 @@ from remora.hir import (
     HIRVar,
     HIRWithShape,
 )
-from remora.types import ArrayType, FuncType, RemoraType, ScalarType
+from remora.types import ArrayType, FuncType, RemoraType, ScalarType, SigmaType
 
 from remora.lowering.indexing import (
     _lower_index_module,
@@ -91,6 +91,8 @@ from remora.lowering.tensor_ops import (
     _lower_scalar_map_module,
     _lower_scan_module,
     _lower_sort_module,
+    _lower_filter_module,
+    _lower_replicate_module,
     _lower_subarray_module,
     _lower_tensor_input,
     _lower_transpose_input,
@@ -520,6 +522,10 @@ def _lower_main_module(
         return _lower_sort_module(node, functions)
     if isinstance(node, HIRGrade):
         return _lower_grade_module(node, functions)
+    if isinstance(node, HIRFilter):
+        return _lower_filter_module(node, functions)
+    if isinstance(node, HIRReplicate):
+        return _lower_replicate_module(node, functions)
     if isinstance(node, HIRWithShape):
         return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRIota):
@@ -886,12 +892,17 @@ def _output_descriptor_export_function(
         lines.append(
             f"    memref.store %result, %out[] : {memref_type}"
         )
-    elif isinstance(return_type, ArrayType):
-        lines.extend(
-            _output_descriptor_store_lines(
-                return_type, result_type, memref_type
+    elif isinstance(return_type, (ArrayType, SigmaType)):
+        if isinstance(return_type, SigmaType):
+            lines.append(
+                f'    "memref.copy"(%result, %out) : ({result_type}, {memref_type}) -> ()'
             )
-        )
+        else:
+            lines.extend(
+                _output_descriptor_store_lines(
+                    return_type, result_type, memref_type
+                )
+            )
     else:
         raise RemoraLoweringError(
             f"cannot export output descriptor for type {return_type}"
@@ -908,6 +919,9 @@ def _output_descriptor_export_function(
 def _output_memref_type(return_type: RemoraType) -> str:
     if isinstance(return_type, ScalarType):
         return f"memref<{type_to_mlir(return_type)}>"
+    if isinstance(return_type, SigmaType):
+        elem = type_to_mlir(return_type.body.element if isinstance(return_type.body, ArrayType) else return_type.body)
+        return f"memref<?x{elem}>"
     if isinstance(return_type, ArrayType):
         dims = "x".join(str(dim.value) for dim in return_type.shape)
         element = type_to_mlir(return_type.element)

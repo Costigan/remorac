@@ -40,7 +40,7 @@ from remora.hir import (
     HIRWithShape,
     HIRIndicesOf,
 )
-from remora.types import ArrayType, ScalarType, StaticDim
+from remora.types import ArrayType, ScalarType, SigmaType, StaticDim
 
 from remora.lowering.scalar import (
     _Operand,
@@ -2110,3 +2110,138 @@ def _lower_grade_module(node: HIRGrade, functions: dict[str, HIRFunction]) -> st
     )
     builder.add_block(grade_body)
     return builder.render("%sorted_indices")
+
+
+# ---------------------------------------------------------------------------
+# Filter / Replicate lowering (C runtime with dynamic sizing)
+# ---------------------------------------------------------------------------
+
+
+def _cmp_op_to_mlir(op: str, elem_type: str) -> str:
+    """Map Remora comparison operator to MLIR arith.cmpi/cmpf predicate."""
+    int_preds = {">": "sgt", "<": "slt", ">=": "sge", "<=": "sle", "==": "eq", "!=": "ne"}
+    flt_preds = {">": "ogt", "<": "olt", ">=": "oge", "<=": "ole", "==": "oeq", "!=": "one"}
+    preds = int_preds if elem_type == "i32" else flt_preds
+    op_base = op[:-1] if op.endswith("b") else op
+    return preds.get(op_base, "sgt")
+
+
+def _lower_filter_module(node: HIRFilter, functions: dict[str, HIRFunction]) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    if not isinstance(node.result_type, SigmaType):
+        raise RemoraLoweringError("filter result must be SigmaType")
+    body_type = node.result_type.body
+    if not isinstance(body_type, ArrayType) or body_type.rank != 1:
+        raise RemoraLoweringError("filter only supports rank-1 arrays")
+
+    input_code, input_name, input_type, input_elem = _lower_tensor_input(
+        node.array, "flt_in", functions, tensor_env=None
+    )
+    n = body_type.shape[0].value
+    result_elem = type_to_mlir(body_type.element)
+
+    # Generate mask via linalg.generic
+    pred = node.predicate
+    if not isinstance(pred, HIRPrimCallable):
+        raise RemoraLoweringError("filter predicate must be a primitive operator")
+    if pred.right_arg is None or not isinstance(pred.right_arg, HIRLit):
+        raise RemoraLoweringError("filter predicate must be a left section with literal")
+    rhs_val = _literal_value(pred.right_arg, result_elem)
+    cmp_op = _cmp_op_to_mlir(pred.op, input_elem)
+    cmp_kind = "arith.cmpi" if input_elem == "i32" else "arith.cmpf"
+
+    rt = "remora_filter_i32" if input_elem == "i32" else "remora_filter_f32"
+
+    filter_body = f"""{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c{n} = arith.constant {n} : index
+    %mask_empty = tensor.empty() : tensor<{n}xi32>
+    %mask = linalg.generic {{
+      indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
+      iterator_types = ["parallel"]
+    }} ins({input_name} : {input_type}) outs(%mask_empty : tensor<{n}xi32>) {{
+    ^bb0(%in: {input_elem}, %out: i32):
+      %rhs = arith.constant {rhs_val} : {input_elem}
+      %cond = {cmp_kind} {cmp_op}, %in, %rhs : {input_elem}
+      %intv = arith.extui %cond : i1 to i32
+      linalg.yield %intv : i32
+    }} -> tensor<{n}xi32>
+    %buf_src = memref.alloc() : memref<{n}x{input_elem}>
+    %buf_mask = memref.alloc() : memref<{n}xi32>
+    %buf_dst = memref.alloc() : memref<{n}x{result_elem}>
+    scf.for %i = %c0 to %c{n} step %c1 {{
+      %v = tensor.extract {input_name}[%i] : {input_type}
+      memref.store %v, %buf_src[%i] : memref<{n}x{input_elem}>
+      %m = tensor.extract %mask[%i] : tensor<{n}xi32>
+      memref.store %m, %buf_mask[%i] : memref<{n}xi32>
+    }}
+    %count = func.call @{rt}(%buf_src, %buf_mask, %buf_dst) : (memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n}x{result_elem}>) -> i64
+    %count_idx = arith.index_cast %count : i64 to index
+    %view = memref.subview %buf_dst[0] [%count_idx] [%c1] : memref<{n}x{result_elem}> to memref<?x{result_elem}>
+    %result = bufferization.to_tensor %view restrict writable : memref<?x{result_elem}>
+    memref.dealloc %buf_src : memref<{n}x{input_elem}>
+    memref.dealloc %buf_mask : memref<{n}xi32>
+    memref.dealloc %buf_dst : memref<{n}x{result_elem}>"""
+    result_type_str = f"tensor<?x{result_elem}>"
+    builder = _MLIRMainModuleBuilder(result_type_str)
+    builder.add_extern(
+        f"  func.func private @{rt}(memref<{n}x{input_elem}>, memref<{n}xi32>, memref<{n}x{result_elem}>) -> i64"
+    )
+    builder.add_block(filter_body)
+    return builder.render("%result")
+
+
+def _lower_replicate_module(node: HIRReplicate, functions: dict[str, HIRFunction]) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    if not isinstance(node.result_type, SigmaType):
+        raise RemoraLoweringError("replicate result must be SigmaType")
+    body_type = node.result_type.body
+    if not isinstance(body_type, ArrayType) or body_type.rank != 1:
+        raise RemoraLoweringError("replicate only supports rank-1 arrays")
+
+    # Lower array and counts
+    arr_code, arr_name, arr_type, arr_elem = _lower_tensor_input(
+        node.array, "rep_arr", functions, tensor_env=None
+    )
+    cnt_code, cnt_name, cnt_type, _cnt_elem = _lower_tensor_input(
+        node.counts, "rep_cnt", functions, tensor_env=None
+    )
+    n = body_type.shape[0].value
+    result_elem = type_to_mlir(body_type.element)
+
+    rt = "remora_replicate_i32" if arr_elem == "i32" else "remora_replicate_f32"
+
+    replicate_body = f"""{arr_code}
+{cnt_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c{n} = arith.constant {n} : index
+    %buf_src = memref.alloc() : memref<{n}x{arr_elem}>
+    %buf_cnt = memref.alloc() : memref<{n}xi32>
+    scf.for %i = %c0 to %c{n} step %c1 {{
+      %v = tensor.extract {arr_name}[%i] : {arr_type}
+      memref.store %v, %buf_src[%i] : memref<{n}x{arr_elem}>
+      %c = tensor.extract {cnt_name}[%i] : {cnt_type}
+      memref.store %c, %buf_cnt[%i] : memref<{n}xi32>
+    }}
+    %total_count_i64 = func.call @{rt}_count(%buf_src, %buf_cnt) : (memref<{n}x{arr_elem}>, memref<{n}xi32>) -> i64
+    %total_count = arith.index_cast %total_count_i64 : i64 to index
+    %buf_dst = memref.alloc(%total_count) : memref<?x{result_elem}>
+    func.call @{rt}(%buf_src, %buf_cnt, %buf_dst) : (memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<?x{result_elem}>) -> ()
+    %result = bufferization.to_tensor %buf_dst restrict writable : memref<?x{result_elem}>
+    memref.dealloc %buf_src : memref<{n}x{arr_elem}>
+    memref.dealloc %buf_cnt : memref<{n}xi32>
+    memref.dealloc %buf_dst : memref<?x{result_elem}>"""
+    result_type_str = f"tensor<?x{result_elem}>"
+    builder = _MLIRMainModuleBuilder(result_type_str)
+    builder.add_extern(
+        f"  func.func private @{rt}_count(memref<{n}x{arr_elem}>, memref<{n}xi32>) -> i64"
+    )
+    builder.add_extern(
+        f"  func.func private @{rt}(memref<{n}x{arr_elem}>, memref<{n}xi32>, memref<?x{result_elem}>)"
+    )
+    builder.add_block(replicate_body)
+    return builder.render("%result")
