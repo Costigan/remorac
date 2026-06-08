@@ -8,6 +8,7 @@ from remora.errors import RemoraError
 from remora.hir import (
     HIRApply,
     HIRArrayLit,
+    HIRBox,
     HIRCall,
     HIRCallable,
     HIRCast,
@@ -38,6 +39,7 @@ from remora.hir import (
     HIRSubarray,
     HIRTake,
     HIRTranspose,
+    HIRUnbox,
     HIRVar,
     HIRWithShape,
 )
@@ -150,6 +152,17 @@ class _Defunctionalizer:
             ),
             HIRWithShape: lambda e: HIRWithShape(
                 self._rewrite_expr(e.source, scalar_env),
+                e.result_type,
+            ),
+            HIRBox: lambda e: HIRBox(
+                self._rewrite_expr(e.value, scalar_env),
+                e.result_type,
+            ),
+            HIRUnbox: lambda e: HIRUnbox(
+                self._rewrite_expr(e.box_value, scalar_env),
+                e.hidden_names,
+                e.value_name,
+                self._rewrite_expr(e.body, scalar_env),
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

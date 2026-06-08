@@ -22,6 +22,7 @@ from remora.typechecker import (
     TypedApp,
     TypedAppend,
     TypedArray,
+    TypedBox,
     TypedCast,
     TypedDefinition,
     TypedExpr,
@@ -50,6 +51,7 @@ from remora.typechecker import (
     TypedReverse,
     TypedTake,
     TypedTranspose,
+    TypedUnbox,
     TypedWithShape,
     TypedDrop,
 )
@@ -62,6 +64,7 @@ from remora.types import (
     FuncType,
     RemoraType,
     ScalarType,
+    SigmaType,
     StaticDim,
     eval_static_dim,
 )
@@ -185,6 +188,23 @@ class HIRWithShape:
     """Replicate scalar/array to match a target shape."""
     source: HIRExpr
     result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRBox:
+    """Box an array (type erasure: no runtime effect)."""
+    value: HIRExpr
+    result_type: SigmaType
+
+
+@dataclass(frozen=True)
+class HIRUnbox:
+    """Unbox a boxed array (type erasure: no runtime effect, like let)."""
+    box_value: HIRExpr
+    hidden_names: list[str]
+    value_name: str
+    body: HIRExpr
+    result_type: RemoraType
 
 
 @dataclass(frozen=True)
@@ -329,6 +349,8 @@ HIRExpr: TypeAlias = (
     | HIRSubarray
     | HIRIndicesOf
     | HIRWithShape
+    | HIRBox
+    | HIRUnbox
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -466,6 +488,18 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedWithShape):
         return HIRWithShape(lower_expr(expr.source), expr.type)
+
+    if isinstance(expr, TypedBox):
+        return HIRBox(lower_expr(expr.value), expr.type)
+
+    if isinstance(expr, TypedUnbox):
+        return HIRUnbox(
+            lower_expr(expr.box_value),
+            expr.hidden_names,
+            expr.value_name,
+            lower_expr(expr.body),
+            expr.type,
+        )
 
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore

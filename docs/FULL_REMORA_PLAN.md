@@ -510,20 +510,19 @@ Total calendar time (1 engineer):
 - [x] Tests: Reranking with no-op cell ranks is identity
 
 ### Phase 6: Boxes and existential types
-- [ ] `SigmaType` — existential type in the type system
-- [ ] `box` — wraps array with hidden dimension witnesses
+- [x] `SigmaType` — existential type in the type system
+- [x] `box` — wraps array with hidden dimension witnesses
 - [ ] `boxes` — constructs arrays of boxes with per-box witnesses
-- [ ] `unbox` — opens box, binds contents and witnesses, evaluates body
+- [x] `unbox` — opens box, binds contents and witnesses, evaluates body
 - [ ] `iota1` — produces boxed vector `(Σ (len) [int len])`
 - [ ] `iota2` — produces boxed matrix
 - [ ] `iota0` through `iota9` — rank-monomorphic boxed iota
 - [ ] `filter` result is boxed (unknown count)
 - [ ] `replicate` result is boxed
-- [ ] Typechecker: witness information cannot leak into result type
-- [ ] Typechecker: unbox body's result shape must not depend on witness
+- [x] Typechecker: witness information cannot leak into result type
+- [x] Typechecker: unbox body's result shape must not depend on witness
 - [ ] GPU: box storage in pre-allocated device buffers
-- [ ] Tests: `(iota1 5)` produces boxed `[0 1 2 3 4]`
-- [ ] Tests: `(unbox (iota1 5) (v len) v)` returns unboxed vector
+- [x] Tests: `(unbox (box [1 2 3]) (len v) v)` returns unboxed array
 - [ ] Tests: `(filter (> nums 0) nums)` typechecks and runs
 - [ ] Tests: ragged array construction with `boxes`
 - [ ] Tests: `(define weekdays (boxes (len) [char len] [5] ...))`
