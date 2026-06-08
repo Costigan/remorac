@@ -18,6 +18,7 @@ from remora.hir import (
     HIRFunction,
     HIRIf,
     HIRIndex,
+    HIRIndicesOf,
     HIRIota,
     HIRLambda,
     HIRLet,
@@ -140,6 +141,10 @@ class _Defunctionalizer:
                 self._rewrite_expr(e.array, scalar_env),
                 e.offsets,
                 e.sizes,
+                e.result_type,
+            ),
+            HIRIndicesOf: lambda e: HIRIndicesOf(
+                self._rewrite_expr(e.array, scalar_env),
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),

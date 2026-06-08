@@ -29,6 +29,7 @@ from remora.typechecker import (
     TypedFoldRight,
     TypedIf,
     TypedIndex,
+    TypedIndicesOf,
     TypedLambda,
     TypedLeftSection,
     TypedLength,
@@ -167,6 +168,13 @@ class HIRSubarray:
     array: HIRExpr
     offsets: tuple[StaticDim, ...]
     sizes: tuple[StaticDim, ...]
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRIndicesOf:
+    """Coordinate tensor from array shape."""
+    array: HIRExpr
     result_type: ArrayType
 
 
@@ -310,6 +318,7 @@ HIRExpr: TypeAlias = (
     | HIRScan
     | HIRRotate
     | HIRSubarray
+    | HIRIndicesOf
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -441,6 +450,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedSubarray):
         return HIRSubarray(lower_expr(expr.array), expr.offsets, expr.sizes, expr.type)
+
+    if isinstance(expr, TypedIndicesOf):
+        return HIRIndicesOf(lower_expr(expr.array), expr.type)
 
     if isinstance(expr, TypedTake):
         return HIRTake(expr.count.expr.value, lower_expr(expr.array), expr.type) # type: ignore

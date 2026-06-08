@@ -90,6 +90,19 @@ class SubarrayExpr:
 
 
 @dataclass(frozen=True)
+class IndicesOfExpr:
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class WithShapeExpr:
+    target: Expr
+    shape: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class LambdaExpr:
     params: list[str]
     body: Expr
@@ -301,6 +314,8 @@ Expr: TypeAlias = (
     | RotateExpr
     | RerankExpr
     | SubarrayExpr
+    | IndicesOfExpr
+    | WithShapeExpr
     | LambdaExpr
     | AppExpr
     | MapExpr

@@ -1709,6 +1709,63 @@ def _lower_subarray_module(
 
 
 # ---------------------------------------------------------------------------
+# Indices-of lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_indices_of_module(
+    node: HIRIndicesOf, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    rank = node.result_type.rank
+    input_rank = node.result_type.rank - 1 if rank > 1 else 0
+
+    identity = _identity_affine_map(rank)
+    iterators = _parallel_iterators(rank)
+
+    # Generate the conditional chain: for each coordinate dim k, yield linalg.index (k+1)
+    yield_val = f"%idx{input_rank}" if input_rank >= 1 else "%c0_i32"
+    if rank == 2:  # rank-1 input → rank-2 result [1, N]
+        body = f"""    %c0_i32 = arith.constant 0 : i32
+    %empty = tensor.empty() : {result_type}
+    %indices = linalg.generic {{
+      indexing_maps = [{identity}],
+      iterator_types = {iterators}
+    }} outs(%empty : {result_type}) {{
+    ^bb0(%out: {result_elem}):
+      %d1 = linalg.index 1 : index
+      %cast1 = arith.index_cast %d1 : index to {result_elem}
+      linalg.yield %cast1 : {result_elem}
+    }} -> {result_type}"""
+    elif rank == 3:  # rank-2 input → rank-3 result [2, R, C]
+        body = f"""    %empty = tensor.empty() : {result_type}
+    %indices = linalg.generic {{
+      indexing_maps = [{identity}],
+      iterator_types = {iterators}
+    }} outs(%empty : {result_type}) {{
+    ^bb0(%out: {result_elem}):
+      %d0 = linalg.index 0 : index
+      %d1 = linalg.index 1 : index
+      %d2 = linalg.index 2 : index
+      %c0_idx = arith.constant 0 : index
+      %is_row = arith.cmpi eq, %d0, %c0_idx : index
+      %row_val = arith.index_cast %d1 : index to {result_elem}
+      %col_val = arith.index_cast %d2 : index to {result_elem}
+      %val = arith.select %is_row, %row_val, %col_val : {result_elem}
+      linalg.yield %val : {result_elem}
+    }} -> {result_type}"""
+    else:
+        raise RemoraLoweringError(f"unsupported rank {rank} for indices-of lowering")
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%indices")
+
+
+# ---------------------------------------------------------------------------
 # Scan lowering
 # ---------------------------------------------------------------------------
 
