@@ -52,6 +52,7 @@ from remora.ast_nodes import (
     IotaExpr,
     LambdaExpr,
     LeftSectionExpr,
+    LengthExpr,
     LetExpr,
     MapExpr,
     OperatorFuncExpr,
@@ -102,6 +103,7 @@ array_lit: "[" sexpr* "]"
            | trace_form
            | iota_form
            | shape_form
+           | length_form
            | rank_form
            | transpose_form
            | reverse_form
@@ -135,6 +137,7 @@ escan_form: ("escan" | "escan/zero") sexpr sexpr sexpr -> escan_expr
 trace_form: "trace" sexpr sexpr sexpr -> trace_expr
 iota_form: "iota" sexpr -> iota_expr
 shape_form: "shape" sexpr -> shape_expr
+length_form: "length" sexpr -> length_expr
 rank_form: "rank" sexpr -> rank_expr
 transpose_form: "transpose" sexpr -> transpose_expr
 reverse_form: "reverse" sexpr -> reverse_expr
@@ -290,6 +293,9 @@ class LispASTBuilder(Transformer):
 
     def shape_expr(self, items: list[Any]) -> ShapeExpr:
         return ShapeExpr(items[0], self._loc_from(items))
+
+    def length_expr(self, items: list[Any]) -> LengthExpr:
+        return LengthExpr(items[0], self._loc_from(items))
 
     def rank_expr(self, items: list[Any]) -> RankExpr:
         return RankExpr(items[0], self._loc_from(items))

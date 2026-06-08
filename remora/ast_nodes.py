@@ -135,6 +135,12 @@ class ShapeExpr:
 
 
 @dataclass(frozen=True)
+class LengthExpr:
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class RankExpr:
     array: Expr
     loc: SourceLoc
@@ -263,6 +269,7 @@ Expr: TypeAlias = (
     | TraceExpr
     | IotaExpr
     | ShapeExpr
+    | LengthExpr
     | RankExpr
     | TransposeExpr
     | ReshapeExpr

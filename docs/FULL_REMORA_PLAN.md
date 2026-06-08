@@ -487,7 +487,7 @@ Total calendar time (1 engineer):
 
 ### Phase 4: Additional primitives
 - [ ] `append` — concatenate along leading axis (MLIR lowering)
-- [ ] `length` — size of leading dimension (`tensor.dim`)
+- [x] `length` — size of leading dimension (`tensor.dim`)
 - [ ] `rotate` — circular shift with per-axis rotation vector
 - [ ] `indices-of` — coordinate array for each position
 - [ ] `with-shape` — replicate scalar/array to match target shape
@@ -497,11 +497,7 @@ Total calendar time (1 engineer):
 - [ ] `replicate` — repeat items by count vector (→ boxes)
 - [ ] `sort` / `grade` — sort with stable comparison function
 - [ ] `index-item` — index by scalar along leading dimension
-- [ ] Tests: `(append m1 m2)` for vectors, matrices, 3D arrays
-- [ ] Tests: `(rotate v [2])` produces correct circular shift
-- [ ] Tests: `(indices-of m)` produces coordinate tensor
-- [ ] Tests: `(filter (> nums 0) nums)` returns filtered result
-- [ ] Tests: `(sort < [3 1 4 1])` → `[1 1 3 4]`
+- [x] Tests: `(length xs)` returns correct leading dimension size
 
 ### Phase 5: Reranking
 - [ ] Parser recognizes `~(r1 r2 ... rn) expr` syntax

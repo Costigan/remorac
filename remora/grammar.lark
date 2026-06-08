@@ -74,8 +74,9 @@ lambda_expr: LAMBDA NAME+ ARROW expr
            | "trace" callable atom atom -> trace_expr
            | "trace-right" callable atom atom -> trace_right_expr
            | "iota" atom               -> iota_expr
-          | "shape" atom              -> shape_expr
-          | "rank" atom               -> rank_expr
+           | "shape" atom              -> shape_expr
+           | "length" atom             -> length_expr
+           | "rank" atom               -> rank_expr
           | "transpose" atom          -> transpose_expr
           | "reshape" primary atom    -> reshape_expr
           | "ravel" atom              -> ravel_expr

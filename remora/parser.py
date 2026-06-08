@@ -44,6 +44,7 @@ from remora.ast_nodes import (
     DropExpr,
     ValDef,
     VarExpr,
+    LengthExpr,
 )
 
 
@@ -158,6 +159,9 @@ class ASTBuilder(Transformer):
 
     def shape_expr(self, items: list[Any]) -> ShapeExpr:
         return ShapeExpr(items[0], self._loc_from(items))
+
+    def length_expr(self, items: list[Any]) -> LengthExpr:
+        return LengthExpr(items[0], self._loc_from(items))
 
     def rank_expr(self, items: list[Any]) -> RankExpr:
         return RankExpr(items[0], self._loc_from(items))

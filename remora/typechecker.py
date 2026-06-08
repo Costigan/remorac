@@ -21,6 +21,7 @@ from remora.ast_nodes import (
     IotaExpr,
     LambdaExpr,
     LeftSectionExpr,
+    LengthExpr,
     LetExpr,
     MapExpr,
     OperatorFuncExpr,
@@ -167,6 +168,15 @@ class TypedRank:
 
 
 @dataclass(frozen=True)
+class TypedLength:
+    """A typed length operator returning the size of the leading dimension."""
+    expr: LengthExpr
+    array: TypedExpr
+    dim: DimExpr
+    type: ScalarType
+
+
+@dataclass(frozen=True)
 class TypedTranspose:
     """A typed transpose swapping the first two axes of an array."""
     expr: TransposeExpr
@@ -306,6 +316,7 @@ TypedExpr: TypeAlias = (
     | TypedScan
     | TypedShape
     | TypedRank
+    | TypedLength
     | TypedTranspose
     | TypedReshape
     | TypedRavel
@@ -401,6 +412,14 @@ class TypeChecker:
             typed_array = self.infer(expr.array, env)
             self._require_shape_operand(typed_array.type, "rank", expr.loc)
             return TypedRank(expr, typed_array, INT)
+        if isinstance(expr, LengthExpr):
+            typed_array = self.infer(expr.array, env)
+            self._require_shape_operand(typed_array.type, "length", expr.loc)
+            if isinstance(typed_array.type, ArrayType):
+                dim = typed_array.type.shape[0]
+            else:
+                raise RemoraTypeError("length expects an array operand", expr.loc)
+            return TypedLength(expr, typed_array, dim, INT)
         if isinstance(expr, TransposeExpr):
             return self._infer_transpose(expr, env)
         if isinstance(expr, ReshapeExpr):
