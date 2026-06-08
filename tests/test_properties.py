@@ -467,15 +467,13 @@ class TestCompiledVsInterpreter:
 
     @pytest.mark.parametrize("src", [
         "(map (+ 1) (with-shape 5 [3]))",
+        "(fold + 0 (with-shape 2 [4]))",
+        "(fold * 1 (with-shape 3 [3]))",
     ])
     def test_with_shape_subexpr(self, src):
         _assert_lisp_compiled_matches_interp(src)
 
     # ── With-shape edge cases (interpreter only) ──────────────────────────
-
-    def test_with_shape_fold_interp(self):
-        r = evaluate_source("(fold + 0 (with-shape 2 [4]))", include_prelude=False, syntax="lisp")
-        assert r.value == 8
 
     def test_with_shape_nested_interp(self):
         r = evaluate_source("(with-shape (with-shape 1 [2]) [3])", include_prelude=False, syntax="lisp")
