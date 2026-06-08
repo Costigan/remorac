@@ -61,6 +61,7 @@ from remora.ast_nodes import (
 )
 from remora.constraints import (
     ConstraintError,
+    _static_dim_value,
     match_shape_expr_pattern,
     match_shape_template,
 )
@@ -1276,18 +1277,23 @@ class TypeChecker:
         typed_count = self.infer(expr.count, env)
         typed_array = self._require_array(expr.array, "take", env)
         self._require(typed_count.type, INT, expr.loc)
-        
+
         if typed_array.type.rank < 1:
              raise RemoraTypeError("take expects a non-scalar array", expr.loc)
-             
+
         if not (isinstance(typed_count, TypedExprNode) and isinstance(typed_count.expr, IntLit)):
              raise RemoraTypeError("take count must be a literal integer", expr.loc)
-             
+
         count = typed_count.expr.value
-        extent = typed_array.type.shape[0].value
-        if count < 0 or count > extent:
-             raise RemoraTypeError(f"take count {count} is out of bounds for axis 0 with extent {extent}", expr.loc)
-             
+        leading_dim = typed_array.type.shape[0]
+        # Bounds check only when leading dim is concrete
+        extent_value = _static_dim_value(leading_dim)
+        if extent_value is not None and (count < 0 or count > extent_value):
+             raise RemoraTypeError(
+                 f"take count {count} is out of bounds for axis 0 with extent {extent_value}",
+                 expr.loc,
+             )
+
         new_shape = (StaticDim(count),) + typed_array.type.shape[1:]
         return TypedTake(expr, typed_count, typed_array, ArrayType(typed_array.type.element, new_shape))
 
@@ -1295,19 +1301,32 @@ class TypeChecker:
         typed_count = self.infer(expr.count, env)
         typed_array = self._require_array(expr.array, "drop", env)
         self._require(typed_count.type, INT, expr.loc)
-        
+
         if typed_array.type.rank < 1:
              raise RemoraTypeError("drop expects a non-scalar array", expr.loc)
 
         if not (isinstance(typed_count, TypedExprNode) and isinstance(typed_count.expr, IntLit)):
              raise RemoraTypeError("drop count must be a literal integer", expr.loc)
-             
+
         count = typed_count.expr.value
-        extent = typed_array.type.shape[0].value
-        if count < 0 or count > extent:
-             raise RemoraTypeError(f"drop count {count} is out of bounds for axis 0 with extent {extent}", expr.loc)
-             
-        new_shape = (StaticDim(extent - count),) + typed_array.type.shape[1:]
+        leading_dim = typed_array.type.shape[0]
+        # Bounds check only when leading dim is concrete
+        extent_value = _static_dim_value(leading_dim)
+        if extent_value is not None and (count < 0 or count > extent_value):
+             raise RemoraTypeError(
+                 f"drop count {count} is out of bounds for axis 0 with extent {extent_value}",
+                 expr.loc,
+             )
+
+        # Compute result leading dim: arithmetic if symbolic, concrete if known
+        from remora.index import DimSub, normalize_index
+        raw_sub = DimSub(leading_dim, StaticDim(count))
+        normalized = normalize_index(raw_sub)
+        if isinstance(normalized, DimExpr):
+            new_leading = normalized
+        else:
+            raise RemoraTypeError("drop result dimension must be a dim", expr.loc)
+        new_shape = (new_leading,) + typed_array.type.shape[1:]
         return TypedDrop(expr, typed_count, typed_array, ArrayType(typed_array.type.element, new_shape))
 
     def _require_array(self, expr: Expr, context: str, env: TypeEnv) -> TypedExpr:

@@ -572,3 +572,53 @@ def test_rest_variable_specialization_name():
     assert "append2__" in art.specialization_name
     assert "rest_shape_3" in art.specialization_name
     assert art.function_type.result == ArrayType(FLOAT, (StaticDim(6), StaticDim(3)))
+
+
+# ── Take / drop result-shape arithmetic ────────────────────────────────────
+
+def test_take_result_shape_is_literal():
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (take2 [xs (Array Float n)] (Array Float 2)) "
+        "  (take 2 xs)) "
+        "(take2 [1.0 2.0 3.0 4.0 5.0])"
+    )
+    from remora.lisp_reader import parse_lisp
+    from remora.typechecker import TypeChecker
+    tc = TypeChecker()
+    typed = tc.check_program(parse_lisp(src))
+    assert typed.type is not None
+    from remora.types import ArrayType, FLOAT, StaticDim
+    assert typed.type == ArrayType(FLOAT, (StaticDim(2),))
+
+
+def test_drop_result_shape_uses_dimsub():
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (drop2 [xs (Array Float n)] (Array Float (- n 2))) "
+        "  (drop 2 xs)) "
+        "(drop2 [1.0 2.0 3.0 4.0 5.0])"
+    )
+    from remora.lisp_reader import parse_lisp
+    from remora.typechecker import TypeChecker
+    tc = TypeChecker()
+    typed = tc.check_program(parse_lisp(src))
+    assert typed.type is not None
+    from remora.types import ArrayType, FLOAT, StaticDim
+    assert typed.type == ArrayType(FLOAT, (StaticDim(3),))
+
+
+def test_drop_arithmetic_specialization():
+    from remora.compiler import compile_function_source
+    from remora.types import ArrayType, FLOAT, StaticDim
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (drop2 [xs (Array Float n)] (Array Float (- n 2))) "
+        "  (drop 2 xs))"
+    )
+    art = compile_function_source(
+        src, "drop2",
+        (ArrayType(FLOAT, (StaticDim(5),)),),
+        verify=False, include_prelude=False, syntax="lisp",
+    )
+    assert art.function_type.result == ArrayType(FLOAT, (StaticDim(3),))
