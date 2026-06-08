@@ -167,6 +167,7 @@ define_forall_form: "define/forall" "(" type_binder* ")" "(" name_token "[" type
 type_binder: name_token -> type_binder
 
 index_binder: "[" name_token index_sort "]" -> index_binder
+            | "[" name_token "]" -> type_binder_item
 index_sort: "Dim" -> dim_sort
           | "Shape" -> shape_sort
 
@@ -300,10 +301,14 @@ class LispASTBuilder(Transformer):
         )
 
     def func_def_pi(self, items: list[Any]) -> FuncDef:
-        binders: list[IndexBinder] = []
+        index_binders: list[IndexBinder] = []
+        type_binders: list[TypeBinder] = []
         pos = 0
-        while pos < len(items) and isinstance(items[pos], IndexBinder):
-            binders.append(items[pos])
+        while pos < len(items) and isinstance(items[pos], (IndexBinder, TypeBinder)):
+            if isinstance(items[pos], IndexBinder):
+                index_binders.append(items[pos])
+            elif isinstance(items[pos], TypeBinder):
+                type_binders.append(items[pos])
             pos += 1
         name = str(items[pos])
         typed_param_specs: list[tuple[str, RemoraType]] = items[pos + 1:-2]
@@ -314,7 +319,8 @@ class LispASTBuilder(Transformer):
             [param_name for param_name, _ in typed_param_specs],
             body,
             self._loc_from(items),
-            index_binders=tuple(binders),
+            index_binders=tuple(index_binders),
+            type_binders=tuple(b.name for b in type_binders),
             param_types=[param_type for _, param_type in typed_param_specs],
             result_type=result_type,
         )
@@ -355,6 +361,9 @@ class LispASTBuilder(Transformer):
         return IndexBinder(str(items[0]), items[1])
 
     def type_binder(self, items: list[Any]) -> TypeBinder:
+        return TypeBinder(str(items[0]))
+
+    def type_binder_item(self, items: list[Any]) -> TypeBinder:
         return TypeBinder(str(items[0]))
 
     def dim_sort(self, items: list[Any]) -> IndexSort:

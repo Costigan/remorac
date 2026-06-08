@@ -622,3 +622,41 @@ def test_drop_arithmetic_specialization():
         verify=False, include_prelude=False, syntax="lisp",
     )
     assert art.function_type.result == ArrayType(FLOAT, (StaticDim(3),))
+
+
+# ── Combined Forall + Pi ──────────────────────────────────────────────────
+
+def test_combined_forall_pi_identity():
+    src = (
+        "(define/pi ([n Dim] [t]) "
+        "  (id [x (Array t n)] (Array t n)) "
+        "  x) "
+        "(id [1 2 3])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+
+def test_combined_forall_pi_compiled():
+    src = (
+        "(define/pi ([n Dim] [t]) "
+        "  (id [x (Array t n)] (Array t n)) "
+        "  x) "
+        "(id [1 2 3])"
+    )
+    r = evaluate_source_compiled(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1, 2, 3])
+
+
+def test_combined_forall_pi_different_element_type():
+    src = (
+        "(define/pi ([n Dim] [t]) "
+        "  (id [x (Array t n)] (Array t n)) "
+        "  x) "
+        "(id [1.0 2.0])"
+    )
+    r = evaluate_source(src, syntax="lisp", include_prelude=False)
+    import numpy as np
+    np.testing.assert_array_equal(r.value, [1.0, 2.0])
