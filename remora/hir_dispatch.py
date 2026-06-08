@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -39,6 +40,7 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,
@@ -52,6 +54,7 @@ Handler = Callable[[HIRExpr], T]
 
 # Ordered list of all HIR expression types for dispatch.
 _ALL_HIR_TYPES: tuple[type, ...] = (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -67,6 +70,7 @@ _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRPrimOp,
     HIRPrimCallable,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,

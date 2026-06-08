@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -22,6 +23,7 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,
@@ -62,8 +64,31 @@ def _identity_affine_map(rank: int) -> str:
     return f"affine_map<({dims}) -> ({results})>"
 
 
+def _constant_affine_map(rank: int) -> str:
+    """Affine map projecting from *rank* dimensions to a scalar (no results)."""
+    dims = ", ".join(f"d{axis}" for axis in range(rank))
+    return f"affine_map<({dims}) -> ()>"
+
+
 def _parallel_iterators(rank: int) -> str:
     return "[" + ", ".join('"parallel"' for _axis in range(rank)) + "]"
+
+
+def _tensor_rank_from_mlir_type(mlir_type: str) -> int:
+    """Extract the rank from a MLIR tensor type string like 'tensor<2x3xi32>'."""
+    if not mlir_type.startswith("tensor<"):
+        return 0  # scalar type like 'i32', 'f32', etc.
+    inner = mlir_type[len("tensor<") : -1]  # remove 'tensor<' and trailing '>'
+    # Find the element type by looking for the last 'x' followed by non-digit
+    # Simple: count dimensions by splitting on 'x' and checking if parts are digits
+    parts = inner.split("x")
+    dim_count = 0
+    for p in parts:
+        if p and p[0].isdigit():
+            dim_count += 1
+        else:
+            break
+    return dim_count
 
 
 def _fold_iterators(rank: int) -> str:
@@ -101,9 +126,9 @@ def _reverse_first_axis_affine_map(array_type: ArrayType) -> str:
 
 
 def _map_cell_iterators(frame_rank: int, cell_rank: int) -> str:
-    if frame_rank < 1 or cell_rank < 1:
+    if cell_rank < 1:
         raise RemoraLoweringError(
-            "cell maps require frame and cell dimensions"
+            "cell maps require at least one cell dimension"
         )
     iterators = [
         *('"parallel"' for _axis in range(frame_rank)),
@@ -221,7 +246,7 @@ def _lower_tensor_input(
         )
         return "\n".join(lines), f"%{prefix}", result_type, element_type
 
-    if isinstance(node, HIRMap):
+    if isinstance(node, (HIRMap, HIRApply)):
         return _lower_fold_input(
             node, functions, prefix, tensor_env=tensor_env
         )
@@ -269,7 +294,7 @@ def _lower_transpose_input(
 
 
 def _lower_scalar_map_module(
-    node: HIRMap, functions: dict[str, HIRFunction]
+    node: HIRMap | HIRApply, functions: dict[str, HIRFunction]
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
@@ -295,7 +320,7 @@ def _lower_scalar_map_module(
 
 
 def _lower_scalar_map_binary_module(
-    node: HIRMap, functions: dict[str, HIRFunction]
+    node: HIRMap | HIRApply, functions: dict[str, HIRFunction]
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
@@ -333,7 +358,7 @@ def _lower_scalar_map_binary_module(
 
 
 def _lower_iota_scalar_map_module(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -350,7 +375,7 @@ def _lower_iota_scalar_map_module(
 
 
 def _lower_iota_scalar_map_result(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -394,7 +419,7 @@ def _lower_iota_scalar_map_result(
 
 
 def _lower_binary_map_module(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -409,7 +434,7 @@ def _lower_binary_map_module(
 
 
 def _lower_binary_map_result(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -422,25 +447,56 @@ def _lower_binary_map_result(
             "ranked binary map lowering requires an array result"
         )
 
-    left_code, left_name, left_type, left_element_type = _lower_tensor_input(
-        node.arrays[0],
-        "left",
-        functions,
-        tensor_env,
-    )
-    right_code, right_name, right_type, right_element_type = (
-        _lower_tensor_input(
-            node.arrays[1],
-            "right",
-            functions,
-            tensor_env,
-        )
-    )
     result_type = type_to_mlir(node.result_type)
     result_element_type = type_to_mlir(node.result_type.element)
-    rank = node.result_type.rank
-    identity = _identity_affine_map(rank)
-    iterators = _parallel_iterators(rank)
+
+    def _lower_input(arg: HIRExpr, prefix: str):
+        """Lower a single map input, promoting scalars to tensors."""
+        if isinstance(arg, HIRLit) and _is_scalar_type(arg.type):
+            scalar_code = (
+                f"    %{prefix}_scalar = arith.constant "
+                f"{_literal_value(arg, result_element_type)} : {result_element_type}"
+            )
+            rank = node.result_type.rank
+            splat_identity = _identity_affine_map(rank)
+            splat_iterators = _parallel_iterators(rank)
+            splat_code = f"""    %{prefix}_empty = tensor.empty() : {result_type}
+    %{prefix} = linalg.generic {{
+      indexing_maps = [{splat_identity}],
+      iterator_types = {splat_iterators}
+    }} outs(%{prefix}_empty : {result_type}) {{
+    ^bb0(%{prefix}_out: {result_element_type}):
+      linalg.yield %{prefix}_scalar : {result_element_type}
+    }} -> {result_type}"""
+            return f"{scalar_code}\n{splat_code}", f"%{prefix}", result_type, result_element_type
+        return _lower_tensor_input(arg, prefix, functions, tensor_env)
+
+    left_code, left_name, left_type, left_element_type = _lower_input(
+        node.arrays[0], "left"
+    )
+    right_code, right_name, right_type, right_element_type = _lower_input(
+        node.arrays[1], "right"
+    )
+
+    result_rank = node.result_type.rank
+    left_rank = _tensor_rank_from_mlir_type(left_type)
+    right_rank = _tensor_rank_from_mlir_type(right_type)
+
+    # Broadcasting indexing maps: each input projects from the principal
+    # (result) rank down to its own rank, keeping the first k dimensions.
+    def _broadcast_map(input_rank: int) -> str:
+        if input_rank == result_rank:
+            return _identity_affine_map(result_rank)
+        if input_rank == 0:
+            return _constant_affine_map(result_rank)
+        dims = ", ".join(f"d{i}" for i in range(result_rank))
+        kept = ", ".join(f"d{i}" for i in range(input_rank))
+        return f"affine_map<({dims}) -> ({kept})>"
+
+    left_map = _broadcast_map(left_rank)
+    right_map = _broadcast_map(right_rank)
+    identity = _identity_affine_map(result_rank)
+    iterators = _parallel_iterators(result_rank)
     op_lines = _lower_map_binary_callable_body(
         node.func,
         functions,
@@ -455,7 +511,7 @@ def _lower_binary_map_result(
 {right_code}
     %map_empty = tensor.empty() : {result_type}
     %mapped = linalg.generic {{
-      indexing_maps = [{identity}, {identity}, {identity}],
+      indexing_maps = [{left_map}, {right_map}, {identity}],
       iterator_types = {iterators}
     }} ins({left_name}, {right_name} : {left_type}, {right_type}) outs(%map_empty : {result_type}) {{
     ^bb0(%left_in: {left_element_type}, %right_in: {right_element_type}, %out: {result_element_type}):
@@ -471,7 +527,7 @@ def _lower_binary_map_result(
 
 
 def _lower_map_cell_module(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -486,7 +542,7 @@ def _lower_map_cell_module(
 
 
 def _lower_map_cell_result(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -515,7 +571,7 @@ def _lower_map_cell_result(
 
     param_name = function.params[0].name
 
-    if isinstance(function.body, HIRFold):
+    if isinstance(function.body, (HIRFold, HIRReduce)):
         return _lower_map_cell_fold_result(
             node, function, param_name, functions, tensor_env
         )
@@ -526,7 +582,7 @@ def _lower_map_cell_result(
 
 
 def _lower_map_cell_fold_result(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     function: HIRFunction,
     param_name: str,
     functions: dict[str, HIRFunction],
@@ -537,12 +593,11 @@ def _lower_map_cell_fold_result(
         raise RemoraLoweringError(
             "only literal cell-fold initial values lower to MLIR so far"
         )
-    if (
-        not isinstance(body_fold.array, HIRVar)
-        or body_fold.array.name != param_name
-    ):
+    # The cell-map parameter must be reduced somewhere. For nested folds like
+    # (fold + 0 (fold + init m)), allow the inner fold to reduce the parameter.
+    if not _reduces_param(body_fold.array, param_name):
         raise RemoraLoweringError(
-            "cell-map fold must reduce the cell-map parameter"
+            "cell-map fold must reduce the cell-map parameter (directly or via nested fold)"
         )
     input_remora_type = _expr_result_type(node.array)
     if not isinstance(input_remora_type, ArrayType):
@@ -597,6 +652,15 @@ def _lower_map_cell_fold_result(
     return body.rstrip(), "%mapped", result_type
 
 
+def _reduces_param(expr: HIRExpr, param_name: str) -> bool:
+    """Check if *expr* directly or indirectly reduces *param_name*."""
+    if isinstance(expr, HIRVar) and expr.name == param_name:
+        return True
+    if isinstance(expr, (HIRFold, HIRReduce)):
+        return _reduces_param(expr.array, param_name)
+    return False
+
+
 def _collect_cell_indices(expr: HIRExpr, param_name: str) -> set[int]:
     """Collect all literal index values used on *param_name* in *expr*."""
     indices: set[int] = set()
@@ -621,14 +685,14 @@ def _collect_cell_indices(expr: HIRExpr, param_name: str) -> set[int]:
         child = getattr(expr, field_name, None)
         if isinstance(child, HIRExpr):
             indices |= _collect_cell_indices(child, param_name)
-    if isinstance(expr, (HIRPrimOp, HIRMap)):
+    if isinstance(expr, (HIRPrimOp, HIRMap, HIRApply)):
         for child_expr in getattr(expr, "args", []):
             if isinstance(child_expr, HIRExpr):
                 indices |= _collect_cell_indices(child_expr, param_name)
         for child_expr in getattr(expr, "arrays", []):
             if isinstance(child_expr, HIRExpr):
                 indices |= _collect_cell_indices(child_expr, param_name)
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         if isinstance(expr.init, HIRExpr):
             indices |= _collect_cell_indices(expr.init, param_name)
         if isinstance(expr.array, HIRExpr):
@@ -652,7 +716,7 @@ def _collect_cell_indices(expr: HIRExpr, param_name: str) -> set[int]:
 
 
 def _lower_map_cell_index_result(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     function: HIRFunction,
     param_name: str,
     functions: dict[str, HIRFunction],
@@ -755,7 +819,7 @@ def _rewrite_cell_indices(
             var_name = f"{param_name}_{pos}"
             if var_name in env:
                 return HIRVar(var_name, expr.result_type)
-    if isinstance(expr, HIRPrimOp):
+    if isinstance(expr, (HIRPrimOp, HIRMap, HIRApply)):
         return HIRPrimOp(
             expr.op,
             [
@@ -795,7 +859,7 @@ def _rewrite_cell_indices(
 
 
 def _lower_fold_module(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -810,7 +874,7 @@ def _lower_fold_module(
 
 
 def _lower_fold_result(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -820,7 +884,7 @@ def _lower_fold_result(
 
 
 def _lower_scalar_fold_module(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -835,7 +899,7 @@ def _lower_scalar_fold_module(
 
 
 def _lower_scalar_fold_result(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -878,7 +942,7 @@ def _lower_scalar_fold_result(
 
 
 def _lower_array_fold_module(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -893,7 +957,7 @@ def _lower_array_fold_module(
 
 
 def _lower_array_fold_result(
-    node: HIRFold,
+    node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> tuple[str, str, str]:
@@ -992,7 +1056,7 @@ def _lower_fold_input(
             node, _join_prefix(prefix, "input"), functions, tensor_env
         )
 
-    if isinstance(node, HIRMap):
+    if isinstance(node, (HIRMap, HIRApply)):
         if node.cell_shape:
             raise RemoraLoweringError(
                 "only scalar-cell map inputs lower to fold MLIR so far"
@@ -1051,7 +1115,7 @@ def _lower_fold_input(
 
 
 def _lower_binary_map_fold_input(
-    node: HIRMap,
+    node: HIRMap | HIRApply,
     functions: dict[str, HIRFunction],
     prefix: str,
     tensor_env: TensorEnv | None = None,
@@ -1462,7 +1526,7 @@ def _lower_fold_callable_body(
                 f"      linalg.yield %fold_result : {result_type}",
             ]
             return "\n".join(lines)
-        if isinstance(function.body, HIRMap) and not function.body.cell_shape:
+        if isinstance(function.body, (HIRMap, HIRApply)) and not function.body.cell_shape:
             if (
                 isinstance(function.body.func, HIRPrimCallable)
                 and function.body.func.left_arg is None

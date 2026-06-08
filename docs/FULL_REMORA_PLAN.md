@@ -447,23 +447,23 @@ Total calendar time (1 engineer):
 - [x] `FuncType` extended with cell-rank annotations per parameter
 - [x] Typechecker infers cell ranks from function definition body
 - [x] Typechecker computes frame/cell split at application sites
-- [ ] Typechecker determines principal frame from argument shapes
-- [ ] Typechecker validates frame agreement (prefix-ordering check)
-- [ ] Typechecker handles cell replication for shorter frames
-- [ ] `HIRApply` replaces `HIRMap` for general application
-- [ ] `HIRApply` carries frame shape and cell shape
-- [ ] `HIRReduce` replaces `HIRFold` for leading-dimension reduction
-- [ ] Lowering pass: frame/cell decomposition → nested loops
-- [ ] Lowering pass: cell replication → broadcast loads
+- [x] Typechecker determines principal frame from argument shapes
+- [x] Typechecker validates frame agreement (prefix-ordering check)
+- [x] Typechecker handles cell replication for shorter frames
+- [x] `HIRApply` replaces `HIRMap` for general application
+- [x] `HIRApply` carries frame shape and cell shape
+- [x] `HIRReduce` replaces `HIRFold` for leading-dimension reduction
+- [x] Lowering pass: frame/cell decomposition → nested loops
+- [x] Lowering pass: cell replication → broadcast loads
 - [x] Scalar ops auto-lift: `(+ xs ys)` works without `map`
-- [ ] Vector-cell ops auto-lift: `(vmag matrix)` works
-- [ ] Matrix-cell ops auto-lift: `(m*m a b)` matrix multiply
-- [ ] Functions of functions in function position (MIMD)
+- [x] Vector-cell ops auto-lift: `(vmag matrix)` works
+- [ ] Matrix-cell ops auto-lift: `(m*m a b)` matrix multiply (deferred: typechecking done, lowering needs nested-fold support)
+- [ ] Functions of functions in function position (MIMD) (deferred: Phase 6+)
 - [x] Tests: `(+ xs ys)` produces same result as `map (+) xs ys`
-- [ ] Tests: `(vmag matrix)` produces correct per-row magnitudes
-- [ ] Tests: principal-frame replication mirrors tutorial examples
-- [ ] Tests: type errors for failed frame agreement are clear
-- [ ] Property tests: rank-polymorphic programs match explicit-map equivalents
+- [x] Tests: `(vmag matrix)` produces correct per-row magnitudes
+- [x] Tests: principal-frame replication mirrors tutorial examples
+- [x] Tests: type errors for failed frame agreement are clear
+- [x] Property tests: rank-polymorphic programs match explicit-map equivalents
 
 ### Phase 3: Full reduce/scan/fold/trace family
 - [ ] `reduce` — associative parallel reduction over leading dimension

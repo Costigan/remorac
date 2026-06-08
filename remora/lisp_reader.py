@@ -70,7 +70,7 @@ from remora.ast_nodes import (
 )
 
 _GRAMMAR = r"""
-program: _NL? sexpr* _NL?
+program: sexpr*
 
 ?sexpr: "(" list_body ")"
       | array_lit
@@ -131,9 +131,8 @@ FLOAT: /-?([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)/
 INT: /-?[0-9]+/
 NAME: /[a-zA-Z_+\/*<=>!&|?][a-zA-Z0-9_+\-*\/\<=>!&|?']*/
 MINUS: "-"
-_NL: /(\r?\n)+/
 
-%ignore /[ \t\f\r]+/
+%ignore /[ \t\f\r\n]+/
 %ignore /;[^\n]*/
 """
 

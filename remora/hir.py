@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from remora.ast_nodes import (
+    AppExpr,
     BoolLit,
     FloatLit,
     IntLit,
@@ -90,7 +91,31 @@ class HIRMap:
 
 
 @dataclass(frozen=True)
+class HIRApply:
+    """General rank-polymorphic application (supersedes HIRMap for implicit maps)."""
+    frame_shape: tuple[DimExpr, ...]
+    cell_shape: tuple[DimExpr, ...]
+    func: HIRCallable
+    arrays: list[HIRExpr]
+    result_type: RemoraType
+
+    @property
+    def array(self) -> HIRExpr:
+        return self.arrays[0]
+
+
+@dataclass(frozen=True)
 class HIRFold:
+    reduction_dim: DimExpr
+    func: HIRCallable
+    init: HIRExpr
+    array: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRReduce:
+    """Parallel reduction over a leading dimension (supersedes HIRFold)."""
     reduction_dim: DimExpr
     func: HIRCallable
     init: HIRExpr
@@ -231,7 +256,9 @@ class HIRLit:
 
 HIRExpr: TypeAlias = (
     HIRMap
+    | HIRApply
     | HIRFold
+    | HIRReduce
     | HIRLet
     | HIRCall
     | HIRLambda
@@ -285,7 +312,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
         return HIRArrayLit([lower_expr(element) for element in expr.elements], expr.type)
 
     if isinstance(expr, TypedMap):
-        return HIRMap(
+        # Use HIRApply for implicit (AppExpr-based) maps, HIRMap for explicit ones
+        node_cls = HIRApply if isinstance(expr.expr, AppExpr) else HIRMap
+        return node_cls(
             expr.frame_shape,
             expr.cell_shape,
             lower_callable(expr.func),
@@ -476,9 +505,9 @@ def _inline_lambda_call(
 
 
 def body_result_type(expr: HIRExpr) -> RemoraType:
-    if isinstance(expr, HIRMap):
+    if isinstance(expr, (HIRMap, HIRApply)):
         return expr.result_type
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         return expr.result_type
     if isinstance(expr, HIRLet):
         return expr.result_type

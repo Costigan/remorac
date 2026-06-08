@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from remora.hir import (
+    HIRApply,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -23,6 +24,7 @@ from remora.hir import (
     HIRPrimOp,
     HIRProgram,
     HIRRavel,
+    HIRReduce,
     HIRReshape,
     HIRReverse,
     HIRSlice,
@@ -180,7 +182,9 @@ class MLIRLowering:
                 HIRIota,
                 HIRArrayLit,
                 HIRMap,
+                HIRApply,
                 HIRFold,
+                HIRReduce,
             ),
         ):
             raise RemoraLoweringError(
@@ -276,25 +280,25 @@ def _inline_lets(
         )
     if isinstance(expr, HIRVar):
         return env.get(expr.name, expr)
-    if isinstance(expr, HIRMap):
+    if isinstance(expr, (HIRMap, HIRApply)):
         arrays = [
             _inline_lets(array, env) for array in expr.arrays
         ]
         if any(array is None for array in arrays):
             raise RemoraLoweringError("map array cannot be empty")
-        return HIRMap(
+        return type(expr)(
             expr.frame_shape,
             expr.cell_shape,
             _inline_callable(expr.func, env),
             arrays,
             expr.result_type,
         )  # type: ignore[arg-type]
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         init = _inline_lets(expr.init, env)
         array = _inline_lets(expr.array, env)
         if init is None or array is None:
             raise RemoraLoweringError("fold operands cannot be empty")
-        return HIRFold(
+        return type(expr)(
             expr.reduction_dim,
             _inline_callable(expr.func, env),
             init,
@@ -406,7 +410,9 @@ def _lower_main_module(
     | HIRIota
     | HIRArrayLit
     | HIRMap
-    | HIRFold,
+    | HIRApply
+    | HIRFold
+    | HIRReduce,
     functions: dict[str, HIRFunction],
 ) -> str:
     if isinstance(node, HIRLet) and isinstance(
@@ -440,7 +446,7 @@ def _lower_main_module(
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):
         return _lower_array_literal_module(node)
-    if isinstance(node, HIRFold):
+    if isinstance(node, (HIRFold, HIRReduce)):
         return _lower_fold_module(node, functions)
     if len(node.arrays) == 2:
         if not node.cell_shape and not isinstance(
@@ -509,7 +515,7 @@ def _lower_main_result_with_tensor_env(
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv,
 ) -> tuple[str, str, str]:
-    if isinstance(node, HIRMap):
+    if isinstance(node, (HIRMap, HIRApply)):
         if len(node.arrays) == 2:
             if not node.cell_shape and not isinstance(
                 node.result_type, ArrayType
@@ -531,7 +537,7 @@ def _lower_main_result_with_tensor_env(
         return _lower_iota_scalar_map_result(
             node, functions, tensor_env
         )
-    if isinstance(node, HIRFold):
+    if isinstance(node, (HIRFold, HIRReduce)):
         return _lower_fold_result(node, functions, tensor_env)
     if isinstance(
         node,
@@ -722,7 +728,7 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
         result_value = result_name
     elif isinstance(function.return_type, ScalarType):
         body_expr = _inline_lets(function.body)
-        if isinstance(body_expr, HIRMap):
+        if isinstance(body_expr, (HIRMap, HIRApply)):
             code, result_name, lowered_result_type, _element_type = (
                 _lower_tensor_input(
                     body_expr,
@@ -733,7 +739,7 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
             )
             body = code
             result_value = result_name
-        elif isinstance(body_expr, HIRFold):
+        elif isinstance(body_expr, (HIRFold, HIRReduce)):
             return (
                 _lower_descriptor_scalar_result_body(
                     body_expr,
@@ -959,7 +965,7 @@ def _lower_descriptor_scalar_result_body(
     tensor_env: TensorEnv,
 ) -> tuple[str, str]:
     expr = _inline_lets(expr)
-    if isinstance(expr, HIRFold):
+    if isinstance(expr, (HIRFold, HIRReduce)):
         input_code, input_name, input_type, input_element_type = (
             _lower_fold_input(
                 expr.array,
