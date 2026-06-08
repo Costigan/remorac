@@ -10,6 +10,7 @@ from remora.ast_nodes import (
     FoldExpr,
     FuncDef,
     IfExpr,
+    IndexAppExpr,
     IndexExpr,
     IntLit,
     IotaExpr,
@@ -32,6 +33,7 @@ from remora.ast_nodes import (
     VarExpr,
 )
 from remora.lisp_reader import parse_lisp
+from remora.types import StaticDim
 
 
 # ── Literals ────────────────────────────────────────────────────────────────
@@ -344,6 +346,26 @@ def test_function_definition_with_rank_annotation():
 def test_function_definition_multi_ranked():
     p = parse_lisp("(define (f [x 0 y 1]) (+ x y))")
     assert p.definitions[0].params == ["x", "y"]
+
+
+def test_dependent_function_definition():
+    p = parse_lisp("(define/pi ([n Dim]) (dot [xs (Array Float n) ys (Array Float n)] Float) (fold + 0.0 (* xs ys)))")
+    definition = p.definitions[0]
+    assert isinstance(definition, FuncDef)
+    assert definition.name == "dot"
+    assert definition.params == ["xs", "ys"]
+    assert len(definition.index_binders) == 1
+    assert definition.index_binders[0].name == "n"
+    assert definition.param_types is not None
+    assert len(definition.param_types) == 2
+
+
+def test_explicit_index_application():
+    program = parse_lisp("((iapp dot 3) [1.0 2.0 3.0] [4.0 5.0 6.0])")
+
+    assert isinstance(program.body, AppExpr)
+    assert isinstance(program.body.func, IndexAppExpr)
+    assert program.body.func.args == (StaticDim(3),)
 
 
 def test_value_definition():

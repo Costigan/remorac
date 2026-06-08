@@ -7,11 +7,12 @@ from typing import TypeAlias
 
 from remora.ast_nodes import Expr, IntLit, SourceLoc
 from remora.errors import RemoraError
+from remora.index import DimExpr, IndexBinder
 from remora.limits import MAX_DENSE_RANK
 
 
 @dataclass(frozen=True)
-class StaticDim:
+class StaticDim(DimExpr):
     value: int
 
     def __post_init__(self) -> None:
@@ -20,10 +21,6 @@ class StaticDim:
 
     def __str__(self) -> str:
         return str(self.value)
-
-
-DimExpr: TypeAlias = StaticDim
-
 
 @dataclass(frozen=True)
 class ScalarType:
@@ -91,7 +88,22 @@ class SigmaType:
         return f"(Σ ({names}) {self.body})"
 
 
-RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType
+@dataclass(frozen=True)
+class PiType:
+    """Dependent product over compile-time dimension/shape indices."""
+    binders: tuple[IndexBinder, ...]
+    body: RemoraType
+
+    @property
+    def rank(self) -> int:
+        return 0
+
+    def __str__(self) -> str:
+        binders = " ".join(f"({binder.name} {binder.sort})" for binder in self.binders)
+        return f"(Π ({binders}) {self.body})"
+
+
+RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType
 
 FLOAT = ScalarType("float")
 INT = ScalarType("int")

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
+
+from remora.index import DimExpr, IndexBinder
+
+if TYPE_CHECKING:
+    from remora.types import RemoraType
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,9 @@ class FuncDef:
     body: Expr
     loc: SourceLoc
     param_ranks: list[int | None] | None = None
+    index_binders: tuple[IndexBinder, ...] = ()
+    param_types: list[RemoraType] | None = None
+    result_type: RemoraType | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +184,13 @@ class LambdaExpr:
 class AppExpr:
     func: Expr
     args: list[Expr]
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class IndexAppExpr:
+    func: Expr
+    args: tuple[DimExpr, ...]
     loc: SourceLoc
 
 
@@ -389,6 +404,7 @@ Expr: TypeAlias = (
     | GradeExpr
     | LambdaExpr
     | AppExpr
+    | IndexAppExpr
     | MapExpr
     | FoldExpr
     | ReduceExpr

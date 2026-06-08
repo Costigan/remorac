@@ -12,6 +12,9 @@ from remora.codegen import (
     generate_rank1_f32_unary_mlir_descriptor_abi_ptx,
 )
 from remora.defunc import defunctionalize
+from remora.elaborated import CoreProgram
+from remora.elaborate import elaborate_program
+from remora.erase import erase_to_hir
 from remora.hir import HIRFunction, HIRParam, HIRProgram, lower_expr, lower_to_hir
 from remora.lowering import MLIRLowering
 from remora.lowering.types import RemoraLoweringError
@@ -41,6 +44,7 @@ from remora.gpu_lowering import (
 class CompilerArtifact:
     source: str
     typed: TypedProgram
+    core: CoreProgram
     hir: HIRProgram
     mlir_module: object
     mlir_text: str
@@ -91,7 +95,8 @@ def compile_source(
     program_source = with_prelude(source) if _maybe_include_prelude else source
     ast = _parse_source(program_source, syntax)
     typed = TypeChecker().check_program(ast)
-    hir = defunctionalize(lower_to_hir(typed))
+    core = elaborate_program(typed)
+    hir = defunctionalize(erase_to_hir(core))
     mlir_module = MLIRLowering().lower_program(
         hir,
         export_output_descriptor=export_output_descriptor,
@@ -102,6 +107,7 @@ def compile_source(
     return CompilerArtifact(
         source=source,
         typed=typed,
+        core=core,
         hir=hir,
         mlir_module=mlir_module,
         mlir_text=str(mlir_module),
