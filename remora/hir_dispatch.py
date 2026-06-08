@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 from remora.hir import (
     HIRApply,
     HIRArrayLit,
+    HIRBox,
     HIRCall,
     HIRCast,
     HIRDrop,
@@ -51,6 +52,7 @@ from remora.hir import (
     HIRSubarray,
     HIRTake,
     HIRTranspose,
+    HIRUnbox,
     HIRVar,
     HIRWithShape,
 )
@@ -59,6 +61,7 @@ from remora.hir import (
 _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRApply,
     HIRArrayLit,
+    HIRBox,
     HIRCall,
     HIRCast,
     HIRDrop,
@@ -84,6 +87,7 @@ _ALL_HIR_TYPES: tuple[type, ...] = (
     HIRSubarray,
     HIRTake,
     HIRTranspose,
+    HIRUnbox,
     HIRVar,
     HIRWithShape,
 )

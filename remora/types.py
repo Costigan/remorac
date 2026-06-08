@@ -76,7 +76,22 @@ class FuncType:
         return f"({params}) -> {self.result}"
 
 
-RemoraType: TypeAlias = ScalarType | ArrayType | FuncType
+@dataclass(frozen=True)
+class SigmaType:
+    """Existential type: (Σ (name) body_type) — there exists some dimension."""
+    hidden_names: tuple[str, ...]
+    body: RemoraType
+
+    @property
+    def rank(self) -> int:
+        return 0
+
+    def __str__(self) -> str:
+        names = " ".join(self.hidden_names)
+        return f"(Σ ({names}) {self.body})"
+
+
+RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType
 
 FLOAT = ScalarType("float")
 INT = ScalarType("int")

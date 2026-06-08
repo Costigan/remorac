@@ -10,6 +10,7 @@ from remora.ast_nodes import (
     AppendExpr,
     ArrayLit,
     BoolLit,
+    BoxExpr,
     Definition,
     Expr,
     FloatLit,
@@ -45,6 +46,7 @@ from remora.ast_nodes import (
     TraceExpr,
     TransposeExpr,
     DropExpr,
+    UnboxExpr,
     ValDef,
     VarExpr,
     WithShapeExpr,
@@ -60,6 +62,7 @@ from remora.types import (
     RemoraType,
     RemoraTypeError,
     ScalarType,
+    SigmaType,
     StaticDim,
     common_numeric_type,
     enforce_rank_limit,
@@ -358,6 +361,25 @@ class TypedWithShape:
     type: ArrayType
 
 
+@dataclass(frozen=True)
+class TypedBox:
+    """A typed box expression wrapping an array with a hidden dimension."""
+    expr: BoxExpr
+    value: TypedExpr
+    type: SigmaType
+
+
+@dataclass(frozen=True)
+class TypedUnbox:
+    """A typed unbox expression opening an existential type."""
+    expr: UnboxExpr
+    box_value: TypedExpr
+    hidden_names: list[str]
+    value_name: str
+    body: TypedExpr
+    type: RemoraType
+
+
 TypedExpr: TypeAlias = (
     TypedExprNode
     | TypedCast
@@ -387,6 +409,8 @@ TypedExpr: TypeAlias = (
     | TypedSubarray
     | TypedIndicesOf
     | TypedWithShape
+    | TypedBox
+    | TypedUnbox
     | TypedLet
     | TypedIf
 )
@@ -546,6 +570,10 @@ class TypeChecker:
             return self._infer_indices_of(expr, env)
         if isinstance(expr, WithShapeExpr):
             return self._infer_with_shape(expr, env)
+        if isinstance(expr, BoxExpr):
+            return self._infer_box(expr, env)
+        if isinstance(expr, UnboxExpr):
+            return self._infer_unbox(expr, env)
         if isinstance(expr, AppExpr):
             return self._infer_app(expr, env)
         if isinstance(expr, LambdaExpr):
@@ -1373,6 +1401,37 @@ class TypeChecker:
         else:
             raise RemoraTypeError("with-shape expects a scalar or array target", expr.loc)
         return TypedWithShape(expr, typed_target, result_type)
+
+    def _infer_box(self, expr: BoxExpr, env: TypeEnv) -> TypedExpr:
+        typed_value = self.infer(expr.value, env)
+        if not isinstance(typed_value.type, ArrayType):
+            raise RemoraTypeError("box expects an array", expr.loc)
+        # Create hidden name from the leading dimension
+        hidden_name = "len"
+        sigma = SigmaType((hidden_name,), typed_value.type)
+        return TypedBox(expr, typed_value, sigma)
+
+    def _infer_unbox(self, expr: UnboxExpr, env: TypeEnv) -> TypedExpr:
+        typed_box = self.infer(expr.box_expr, env)
+        if not isinstance(typed_box.type, SigmaType):
+            raise RemoraTypeError("unbox expects a boxed value (Sigma type)", expr.loc)
+        sigma = typed_box.type
+        if len(expr.hidden_names) != len(sigma.hidden_names):
+            raise RemoraTypeError(
+                f"unbox expects {len(sigma.hidden_names)} hidden name(s), got {len(expr.hidden_names)}",
+                expr.loc,
+            )
+        # For the value binding, use the sigma body type
+        # In a full implementation, we'd substitute the hidden dimensions
+        inner_env = env
+        for name in expr.hidden_names:
+            inner_env = inner_env.extend(name, INT)
+        inner_env = inner_env.extend(expr.value_name, sigma.body)
+        typed_body = self.infer(expr.body, inner_env)
+        # The hidden dimension must not leak into the body type
+        if isinstance(typed_body.type, SigmaType):
+            raise RemoraTypeError("hidden dimension escapes in unbox body", expr.loc)
+        return TypedUnbox(expr, typed_box, expr.hidden_names, expr.value_name, typed_body, typed_body.type)
 
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv

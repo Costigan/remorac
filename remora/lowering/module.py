@@ -8,6 +8,7 @@ from typing import Any
 from remora.hir import (
     HIRApply,
     HIRArrayLit,
+    HIRBox,
     HIRCall,
     HIRCast,
     HIRDrop,
@@ -35,6 +36,7 @@ from remora.hir import (
     HIRSubarray,
     HIRTake,
     HIRTranspose,
+    HIRUnbox,
     HIRVar,
     HIRWithShape,
 )
@@ -196,18 +198,20 @@ class MLIRLowering:
                 HIRIndicesOf,
                 HIRWithShape,
                 HIRArrayLit,
+                HIRBox,
                 HIRMap,
                 HIRApply,
                 HIRFold,
                 HIRReduce,
                 HIRFoldRight,
                 HIRScan,
+                HIRUnbox,
             ),
         ):
             raise RemoraLoweringError(
                 "only scalar expressions, scalar lets/calls, full-rank indexing, "
                 "view operations, iota, array literals, scalar maps, scalar folds, "
-                "and reverse lower to MLIR so far"
+                "box/unbox, and reverse lower to MLIR so far"
             )
 
         # Prefer builder API path; fall back to text-based if unsupported node types
@@ -297,6 +301,15 @@ def _inline_lets(
         )
     if isinstance(expr, HIRVar):
         return env.get(expr.name, expr)
+    if isinstance(expr, HIRBox):
+        return _inline_lets(expr.value, env)
+    if isinstance(expr, HIRUnbox):
+        box_value = _inline_lets(expr.box_value, env)
+        if box_value is None:
+            raise RemoraLoweringError("unbox value cannot be empty")
+        return _inline_lets(
+            expr.body, {**env, expr.value_name: box_value}
+        )
     if isinstance(expr, (HIRMap, HIRApply)):
         arrays = [
             _inline_lets(array, env) for array in expr.arrays
@@ -435,9 +448,16 @@ def _lower_main_module(
     | HIRRotate
     | HIRSubarray
     | HIRIndicesOf
-    | HIRWithShape,
+    | HIRWithShape
+    | HIRBox
+    | HIRUnbox,
     functions: dict[str, HIRFunction],
 ) -> str:
+    # Box/Unbox are type-erased at runtime
+    if isinstance(node, HIRBox):
+        return _lower_main_module(node.value, functions)
+    if isinstance(node, HIRUnbox):
+        return _lower_main_module(node.body, functions)
     if isinstance(node, HIRLet) and isinstance(
         node.value_type, ArrayType
     ):

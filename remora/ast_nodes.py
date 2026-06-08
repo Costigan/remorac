@@ -103,6 +103,21 @@ class WithShapeExpr:
 
 
 @dataclass(frozen=True)
+class BoxExpr:
+    value: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class UnboxExpr:
+    box_expr: Expr
+    hidden_names: list[str]
+    value_name: str
+    body: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class LambdaExpr:
     params: list[str]
     body: Expr
@@ -316,6 +331,8 @@ Expr: TypeAlias = (
     | SubarrayExpr
     | IndicesOfExpr
     | WithShapeExpr
+    | BoxExpr
+    | UnboxExpr
     | LambdaExpr
     | AppExpr
     | MapExpr
