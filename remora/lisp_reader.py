@@ -41,6 +41,7 @@ from remora.ast_nodes import (
     AppendExpr,
     ArrayLit,
     BoolLit,
+    BoxesExpr,
     BoxExpr,
     Definition,
     Expr,
@@ -125,6 +126,7 @@ array_lit: "[" sexpr* "]"
            | with_shape_form
            | box_form
            | unbox_form
+           | boxes_form
            | iota_form
            | iota1_form
            | iota_n_form
@@ -175,6 +177,7 @@ indices_of_form: "indices-of" sexpr -> indices_of_expr
 with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
 box_form: "box" sexpr -> box_expr
 unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
+boxes_form: "boxes" sexpr+ -> boxes_expr
 iota_form: "iota" sexpr -> iota_expr
 iota1_form: "iota1" sexpr -> iota1_expr
 iota_n_form: "iota2" sexpr sexpr -> iota2_expr
@@ -376,6 +379,9 @@ class LispASTBuilder(Transformer):
 
     def box_expr(self, items: list[Any]) -> BoxExpr:
         return BoxExpr(items[0], self._loc_from(items))
+
+    def boxes_expr(self, items: list[Any]) -> BoxesExpr:
+        return BoxesExpr(list(items), self._loc_from(items))
 
     def unbox_expr(self, items: list[Any]) -> UnboxExpr:
         all_names = [str(item) for item in items[1:-1]]
