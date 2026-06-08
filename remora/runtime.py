@@ -32,24 +32,34 @@ from remora.prelude import with_prelude
 from remora.typechecker import (
     TypeChecker,
     TypedApp,
+    TypedAppend,
     TypedArray,
+    TypedBox,
     TypedCast,
     TypedDefinition,
     TypedExpr,
     TypedExprNode,
     TypedFold,
+    TypedFoldRight,
     TypedIf,
     TypedIndex,
+    TypedIndicesOf,
     TypedLambda,
     TypedLeftSection,
+    TypedLength,
     TypedLet,
     TypedMap,
     TypedOperatorFunc,
     TypedProgram,
     TypedRank,
     TypedRightSection,
+    TypedRotate,
     TypedReverse,
+    TypedScan,
     TypedShape,
+    TypedSubarray,
+    TypedUnbox,
+    TypedWithShape,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, StaticDim
 
@@ -961,6 +971,78 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, (TypedOperatorFunc, TypedLeftSection, TypedRightSection)):
         return _eval_callable(expr, env)
+
+    if isinstance(expr, TypedScan):
+        array = _eval_expr(expr.array, env)
+        acc = _eval_expr(expr.init, env)
+        callable_value = _eval_callable(expr.func, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("scan expects an array value")
+        result = np.empty_like(array)
+        for i in range(len(array)):
+            if expr.exclusive:
+                result[i] = acc
+                acc = callable_value(acc, array[i])
+            else:
+                acc = callable_value(acc, array[i])
+                result[i] = acc
+        if expr.right:
+            result = result[::-1]
+        return _coerce_runtime_value(result, expr.type)
+
+    if isinstance(expr, TypedFoldRight):
+        array = _eval_expr(expr.array, env)
+        acc = _eval_expr(expr.init, env)
+        callable_value = _eval_callable(expr.func, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("fold-right expects an array value")
+        for item in reversed(array):
+            acc = callable_value(item, acc)
+        return _coerce_runtime_value(acc, expr.type)
+
+    if isinstance(expr, TypedRotate):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("rotate expects an array value")
+        shift = expr.shift.value
+        return np.roll(array, -shift, axis=0)
+
+    if isinstance(expr, TypedSubarray):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("subarray expects an array value")
+        slices = tuple(slice(o.value, o.value + s.value) for o, s in zip(expr.offsets, expr.sizes))
+        return _coerce_runtime_value(array[slices], expr.type)
+
+    if isinstance(expr, TypedIndicesOf):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("indices-of expects an array value")
+        indices = np.indices(array.shape, dtype=np.int32)
+        return indices
+
+    if isinstance(expr, TypedWithShape):
+        source = _eval_expr(expr.source, env)
+        shape = tuple(d.value for d in expr.type.shape)
+        return np.full(shape, source, dtype=_numpy_dtype(expr.type.element))
+
+    if isinstance(expr, TypedBox):
+        return _eval_expr(expr.value, env)
+
+    if isinstance(expr, TypedUnbox):
+        inner_env = dict(env)
+        inner_env[expr.value_name] = _eval_expr(expr.box_value, env)
+        return _eval_expr(expr.body, inner_env)
+
+    if isinstance(expr, TypedAppend):
+        left = _eval_expr(expr.left, env)
+        right = _eval_expr(expr.right, env)
+        if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
+            raise EvaluationError("append expects array values")
+        return np.concatenate([left, right], axis=0)
+
+    if isinstance(expr, TypedLength):
+        return int(expr.dim.value)
 
     if isinstance(expr, TypedExprNode):
         return _eval_expr_node(expr, env)

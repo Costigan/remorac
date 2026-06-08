@@ -492,10 +492,14 @@ Total calendar time (1 engineer):
 - [x] `indices-of` — coordinate array for each position
 - [x] `with-shape` — replicate scalar/array to match target shape
 - [x] `subarray` — extract rectangular region by offset and shape
-- [ ] `filter` — select subarrays by boolean mask (→ boxes)
+- [x] `with-shape` — replicate scalar/array to match target shape
+- [x] `subarray` — extract rectangular region by offset and shape
+- [ ] `filter` — select subarrays by boolean mask (→ boxes, needs dynamic sizing)
 - [x] `select` — element-wise ternary (already via tensor `if`)
-- [ ] `replicate` — repeat items by count vector (→ boxes)
-- [x] `sort` / `grade` — AST/parser/typechecker done, MLIR lowering deferred
+- [ ] `replicate` — repeat items by count vector (→ boxes, needs dynamic sizing)
+- [ ] `sort` / `grade` — sort with stable comparison function (needs MLIR sort)
+- [x] `index-item` — index by scalar along leading dimension
+- [x] Tests: `(length xs)` returns correct leading dimension size
 - [x] `index-item` — index by scalar along leading dimension
 - [x] Tests: `(length xs)` returns correct leading dimension size
 
