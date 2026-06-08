@@ -26,6 +26,7 @@ from remora.hir import (
     HIRReduce,
     HIRReshape,
     HIRReverse,
+    HIRScan,
     HIRSlice,
     HIRTake,
     HIRTranspose,
@@ -859,7 +860,7 @@ def _rewrite_cell_indices(
 
 
 def _lower_fold_module(
-    node: HIRFold | HIRReduce,
+    node: HIRFold | HIRReduce | HIRFoldRight,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
 ) -> str:
@@ -1632,3 +1633,65 @@ def _flatten_array_literal(node: HIRArrayLit) -> list[HIRLit]:
                 "only scalar literal elements lower in tensor literals so far"
             )
     return flat
+
+
+# ---------------------------------------------------------------------------
+# Scan lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_scan_module(
+    node: HIRScan, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("scan lowering requires an array result")
+    if node.result_type.rank != 1:
+        raise RemoraLoweringError("only rank-1 scan lowers to MLIR so far")
+    if not isinstance(node.func, HIRPrimCallable):
+        raise RemoraLoweringError("only primitive scan callables lower to MLIR so far")
+
+    input_code, input_name, input_type, input_element_type = _lower_tensor_input(
+        node.array, "input", functions
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
+    init_value_str = _literal_value(node.init, result_element_type)
+    op_name = _arith_op(node.func.op, result_element_type)
+    N = node.reduction_dim.value
+
+    if node.exclusive:
+        body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %stored = tensor.insert %carry into %acc_tensor[%i] : {result_type}
+      %elem = tensor.extract {input_name}[%i] : {input_type}
+      %next_carry = {op_name} %carry, %elem : {result_element_type}
+      \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+    else:
+        body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %elem = tensor.extract {input_name}[%i] : {input_type}
+      %next_carry = {op_name} %carry, %elem : {result_element_type}
+      %stored = tensor.insert %next_carry into %acc_tensor[%i] : {result_type}
+      \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%scanned")

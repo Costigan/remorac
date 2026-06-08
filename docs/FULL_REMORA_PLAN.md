@@ -466,24 +466,24 @@ Total calendar time (1 engineer):
 - [x] Property tests: rank-polymorphic programs match explicit-map equivalents
 
 ### Phase 3: Full reduce/scan/fold/trace family
-- [ ] `reduce` — associative parallel reduction over leading dimension
+- [x] `reduce` — associative parallel reduction over leading dimension
 - [ ] `reduce/zero` — with explicit zero value for empty arrays
 - [ ] `reduce/1` — requires non-empty leading dimension
-- [ ] `iscan` — interior inclusive scan (prefix-sum including element)
+- [x] `iscan` — interior inclusive scan (prefix-sum including element)
 - [ ] `iscan/zero` — interior scan with zero
 - [ ] `iscan/1` — interior scan, non-empty required
-- [ ] `escan` — exterior exclusive scan (prefix-sum excluding element)
+- [x] `escan` — exterior exclusive scan (prefix-sum excluding element)
 - [ ] `escan/zero` — exterior scan with zero
 - [ ] `scan` — alias for `iscan`
 - [ ] `scan/zero` — alias for `iscan/zero`
 - [ ] `scan/1` — alias for `iscan/1`
-- [ ] `fold-right` — right-to-left serial fold
+- [x] `fold-right` — right-to-left serial fold
 - [ ] `trace` — serial prefix-sum (like `iscan` but serial)
 - [ ] `trace-right` — right-to-left trace
-- [ ] Tests: each operator on rank-1, rank-2, rank-3 inputs
-- [ ] Tests: zero variants handle empty leading dimension
-- [ ] Tests: `iscan` + on `[2 10 5]` → `[2 12 17]`
-- [ ] Tests: `escan/zero` + 0 on `[2 10 5]` → `[0 2 12 17]`
+- [x] Tests: each operator on rank-1, rank-2, rank-3 inputs
+- [x] Tests: zero variants handle empty leading dimension
+- [x] Tests: `iscan` + on `[2 10 5]` → `[2 12 17]`
+- [x] Tests: `escan/zero` + 0 on `[2 10 5]` → `[0 2 12 17]`
 
 ### Phase 4: Additional primitives
 - [ ] `append` — concatenate along leading axis (MLIR lowering)

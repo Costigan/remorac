@@ -87,6 +87,31 @@ class FoldExpr:
 
 
 @dataclass(frozen=True)
+class ReduceExpr:
+    func: Expr
+    init: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class FoldRightExpr:
+    func: Expr
+    init: Expr
+    array: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class ScanExpr:
+    func: Expr
+    init: Expr
+    array: Expr
+    loc: SourceLoc
+    exclusive: bool = False
+
+
+@dataclass(frozen=True)
 class IotaExpr:
     size: Expr
     loc: SourceLoc
@@ -221,6 +246,9 @@ Expr: TypeAlias = (
     | AppExpr
     | MapExpr
     | FoldExpr
+    | ReduceExpr
+    | FoldRightExpr
+    | ScanExpr
     | IotaExpr
     | ShapeExpr
     | RankExpr

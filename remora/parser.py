@@ -16,6 +16,7 @@ from remora.ast_nodes import (
     Expr,
     FloatLit,
     FoldExpr,
+    FoldRightExpr,
     FuncDef,
     IfExpr,
     IndexExpr,
@@ -29,8 +30,10 @@ from remora.ast_nodes import (
     Program,
     RankExpr,
     RavelExpr,
+    ReduceExpr,
     ReshapeExpr,
     RightSectionExpr,
+    ScanExpr,
     ShapeExpr,
     SliceRange,
     SourceLoc,
@@ -121,6 +124,18 @@ class ASTBuilder(Transformer):
 
     def fold_expr(self, items: list[Any]) -> FoldExpr:
         return FoldExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def reduce_expr(self, items: list[Any]) -> ReduceExpr:
+        return ReduceExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def fold_right_expr(self, items: list[Any]) -> FoldRightExpr:
+        return FoldRightExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def scan_expr(self, items: list[Any]) -> ScanExpr:
+        return ScanExpr(items[0], items[1], items[2], self._loc_from(items), exclusive=False)
+
+    def escan_expr(self, items: list[Any]) -> ScanExpr:
+        return ScanExpr(items[0], items[1], items[2], self._loc_from(items), exclusive=True)
 
     def iota_expr(self, items: list[Any]) -> IotaExpr:
         return IotaExpr(items[0], self._loc_from(items))

@@ -14,6 +14,7 @@ from remora.hir import (
     HIRDrop,
     HIRExpr,
     HIRFold,
+    HIRFoldRight,
     HIRFunction,
     HIRIf,
     HIRIndex,
@@ -30,6 +31,7 @@ from remora.hir import (
     HIRReduce,
     HIRReshape,
     HIRReverse,
+    HIRScan,
     HIRSlice,
     HIRTake,
     HIRTranspose,
@@ -109,6 +111,21 @@ class _Defunctionalizer:
                 self._rewrite_callable(e.func, scalar_env),
                 self._rewrite_expr(e.init, scalar_env),
                 self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRFoldRight: lambda e: HIRFoldRight(
+                e.reduction_dim,
+                self._rewrite_callable(e.func, scalar_env),
+                self._rewrite_expr(e.init, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.result_type,
+            ),
+            HIRScan: lambda e: HIRScan(
+                e.reduction_dim,
+                self._rewrite_callable(e.func, scalar_env),
+                self._rewrite_expr(e.init, scalar_env),
+                self._rewrite_expr(e.array, scalar_env),
+                e.exclusive,
                 e.result_type,
             ),
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),
@@ -233,6 +250,14 @@ def _free_vars(expr: HIRExpr) -> set[str]:
             | _free_vars(e.init) | _free_vars(e.array)
         ),
         HIRReduce: lambda e: (
+            _free_vars_callable(e.func)
+            | _free_vars(e.init) | _free_vars(e.array)
+        ),
+        HIRFoldRight: lambda e: (
+            _free_vars_callable(e.func)
+            | _free_vars(e.init) | _free_vars(e.array)
+        ),
+        HIRScan: lambda e: (
             _free_vars_callable(e.func)
             | _free_vars(e.init) | _free_vars(e.array)
         ),

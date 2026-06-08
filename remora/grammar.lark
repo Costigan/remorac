@@ -59,9 +59,14 @@ lambda_expr: LAMBDA NAME+ ARROW expr
         | NAME                          -> var
 
 ?view_expr: "map" callable atom atom  -> map_expr
-          | "map" callable atom       -> map_expr
-          | "fold" callable atom atom -> fold_expr
-          | "iota" atom               -> iota_expr
+           | "map" callable atom       -> map_expr
+           | "fold" callable atom atom -> fold_expr
+           | "reduce" callable atom atom -> reduce_expr
+           | "fold-right" callable atom atom -> fold_right_expr
+           | "scan" callable atom atom -> scan_expr
+           | "iscan" callable atom atom -> scan_expr
+           | "escan" callable atom atom -> escan_expr
+           | "iota" atom               -> iota_expr
           | "shape" atom              -> shape_expr
           | "rank" atom               -> rank_expr
           | "transpose" atom          -> transpose_expr
