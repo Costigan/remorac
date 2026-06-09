@@ -527,3 +527,45 @@ def test_transpose_vjp_swaps_cotangent_axes_back():
     expected = 2.0 * np.arange(1.0, 7.0).reshape(2, 3)
     np.testing.assert_array_equal(interpreted.value, expected)
     np.testing.assert_array_equal(compiled.value, expected)
+
+
+def test_reverse_vjp_reverses_cotangent_back():
+    source = (
+        "(define/pi () (loss [x (Array Float 5)] Float) "
+        "(fold + 0.0 (* (reverse x) (reverse x))))"
+    )
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0 5.0])"
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    np.testing.assert_array_equal(compiled.value, [2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+@pytest.mark.parametrize(
+    "view,expected",
+    [
+        ("(take 3 x)", [2.0, 4.0, 6.0, 0.0, 0.0]),
+        ("(drop 2 x)", [0.0, 0.0, 6.0, 8.0, 10.0]),
+    ],
+)
+def test_take_and_drop_vjps_zero_pad_cotangent(view, expected):
+    source = (
+        "(define/pi () (loss [x (Array Float 5)] Float) "
+        f"(fold + 0.0 (* {view} {view})))"
+    )
+    generated = compile_gradient_function_source(
+        source,
+        "loss",
+        (ArrayType(FLOAT, (StaticDim(5),)),),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(append" in generated.gradient_source.source
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0 5.0])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)

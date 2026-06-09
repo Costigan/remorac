@@ -278,9 +278,10 @@ Implementation status: **AD4 substantially complete on June 8, 2026.**
 - Conditional handling: `_trace_if` evaluates predicate, traces only the active branch.
   Predicate is treated as inactive (non-differentiable).
 - Structured view VJPs: `ravel` and `reshape` restore the original operand shape;
-  transpose swaps the first two cotangent axes back. These rules flow through
-  tape evaluation, generated source, ordinary compiler rewriting, and compiled
-  CPU execution for concrete shapes.
+  transpose swaps the first two cotangent axes back; reverse reverses the
+  cotangent; and take/drop pad the cotangent with zeros on the omitted side.
+  These rules flow through tape evaluation, generated source, ordinary compiler
+  rewriting, and compiled CPU execution for concrete shapes.
 - 839 passed, 1 skipped.
 
 ### AD5: GPU and Performance Work (4-8 weeks)
@@ -349,6 +350,9 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 - Generated gradients containing `ravel`, `reshape`, and transpose now compile
   on CPU. They are intentionally outside the fused GPU expression subset until
   GPU indexing supports shape-remapping views.
+- Concrete `reverse`, `take`, and `drop` VJPs now execute through the tape and
+  generated-source paths. Take/drop emit append-based zero padding, and append
+  lowering now composes as a tensor input so those gradients compile on CPU.
 
 Remaining AD5 work:
 
@@ -375,9 +379,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs and fused GPU arithmetic | 881 |
+| AD5 | In progress: structured CPU VJPs and fused GPU arithmetic | 884 |
 
-Full suite after this milestone: **881 passed, 1 skipped**.
+Full suite after this milestone: **884 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
@@ -421,7 +425,8 @@ The AD milestone is complete when:
 
 1. `grad` has a precise dependent type and rejects non-scalar outputs or non-float active inputs.
 2. Generated reverse programs pass the typed-core verifier before erasure.
-3. Scalar arithmetic, elementwise lifting, sum reduction, reshape, ravel, and transpose have tested VJPs.
+3. Scalar arithmetic, elementwise lifting, sum reduction, reshape, ravel,
+   transpose, reverse, take, and drop have tested VJPs.
 4. A Pi-typed mean-squared-error or linear-regression loss compiles at multiple shapes.
 5. Gradients agree with finite differences and across supported execution backends.
 6. Unsupported primitives fail at compile time with actionable diagnostics.
