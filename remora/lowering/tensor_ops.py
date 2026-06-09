@@ -273,9 +273,25 @@ def _lower_tensor_input(
             lit_val = _literal_value(node.update, target_elem)
             update_name = f"%{_join_prefix(prefix, 'update')}"
             update_code = f"    {update_name} = arith.constant {lit_val} : {target_elem}"
+        elif isinstance(node.update, HIRIndex) and len(node.update.indices) == 1:
+            idx_item = node.update.indices[0]
+            if isinstance(idx_item, HIRLit):
+                idx_val = int(idx_item.value)
+                idx_code, idx_name, idx_type, idx_elem = _lower_tensor_input(
+                    node.update.array, _join_prefix(prefix, "idx_arr"), functions, tensor_env
+                )
+                update_name = f"%{_join_prefix(prefix, 'update')}"
+                update_code = f"""{idx_code}
+    {update_name}_pos = arith.constant {idx_val} : index
+    {update_name} = tensor.extract {idx_name}[{update_name}_pos] : {idx_type}"""
+            else:
+                raise RemoraLoweringError(
+                    "scatter-add cannot lower non-literal index in fold input"
+                )
         else:
-            update_code = _lower_scalar_module(node.update, functions)
-            update_name = "%result"
+            raise RemoraLoweringError(
+                f"scatter-add cannot lower update of type {type(node.update).__name__}"
+            )
         result_type = type_to_mlir(node.result_type)
         result_name = f"%{prefix}"
         code = f"""{target_code}
