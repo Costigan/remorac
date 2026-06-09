@@ -372,8 +372,9 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   cotangent back to the indexed position in a zero array. Source VJP uses
   append-based zero padding: wraps the scalar adj into a 1-element array
   via `adj * take(1, operand)`, then pads with take/drop-based zero
-  segments. Validated through CPU tape execution and interpreter execution.
-  Compiled CPU path is not yet exercised for index gradients.
+  segments.   Validated through CPU tape execution and interpreter execution.
+  Compiled CPU path is blocked by a lowerings limitation (non-literal
+  captured values in map operator sections cannot be lowered to MLIR).
   Not in the supported GPU subset.
 
 Remaining AD5 work:
