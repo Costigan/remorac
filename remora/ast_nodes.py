@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
-from remora.index import DimExpr, IndexBinder  # avoid name clash with field name
+from remora.index import DimExpr, IndexBinder
+from remora.index import ShapeExpr as IndexShapeExpr  # avoid name clash with field name
 
 if TYPE_CHECKING:
     from remora.types import RemoraType
@@ -191,7 +192,7 @@ class AppExpr:
 @dataclass(frozen=True)
 class IndexAppExpr:
     func: Expr
-    args: tuple[DimExpr, ...]
+    args: tuple[DimExpr | IndexShapeExpr, ...]
     loc: SourceLoc
 
 

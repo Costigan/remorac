@@ -650,6 +650,43 @@ def test_combined_forall_pi_compiled():
     np.testing.assert_array_equal(r.value, [1, 2, 3])
 
 
+# ── Explicit shape application via iapp ────────────────────────────────────
+
+def test_iapp_with_shape_literal():
+    src = (
+        "(define/pi ([s Shape]) "
+        "  (id [x (Array Float s)] (Array Float s)) "
+        "  x) "
+        "(iapp id (shape 3))"
+    )
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+    tc = TypeChecker()
+    typed = tc.check_program(parse_lisp(src))
+    from remora.typechecker import TypedIndexApp
+    assert isinstance(typed.body, TypedIndexApp)
+    from remora.types import FuncType, ArrayType, FLOAT
+    assert isinstance(typed.body.type, FuncType)
+    assert typed.body.type.result == ArrayType(FLOAT, (StaticDim(3),))
+
+
+def test_iapp_with_shape_literal_specialization():
+    from remora.compiler import compile_function_source
+    from remora.types import ArrayType, FLOAT, StaticDim
+    src = (
+        "(define/pi ([s Shape]) "
+        "  (id [x (Array Float s)] (Array Float s)) "
+        "  x)"
+    )
+    art = compile_function_source(
+        src, "id",
+        (ArrayType(FLOAT, (StaticDim(3),)),),
+        verify=False, include_prelude=False, syntax="lisp",
+    )
+    assert art.specialization_name is not None
+    assert art.function_type.result == ArrayType(FLOAT, (StaticDim(3),))
+
+
 def test_combined_forall_pi_different_element_type():
     src = (
         "(define/pi ([n Dim] [t]) "

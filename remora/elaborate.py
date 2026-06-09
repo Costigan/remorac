@@ -16,11 +16,13 @@ from remora.elaborated import (
 from remora.typechecker import (
     TypedDefinition,
     TypedExpr,
+    TypedExprNode,
     TypedIndexApp,
     TypedLambda,
     TypedMap,
     TypedProgram,
 )
+from remora.types import FuncType
 
 
 def elaborate_program(program: TypedProgram) -> CoreProgram:
@@ -74,12 +76,19 @@ def _elaborate_expr(
     )
     frame: FrameCellDecision | None = None
     if isinstance(value, TypedMap):
+        # Derive the cell type from the function's first parameter
+        cell_type = None
+        if isinstance(value.func, TypedExprNode) and isinstance(value.func.type, FuncType):
+            cell_type = value.func.type.params[0]
+        elif isinstance(value.func, TypedLambda) and isinstance(value.func.type, FuncType):
+            cell_type = value.func.type.params[0]
         frame = FrameCellDecision(
             value.frame_shape,
             value.cell_shape,
-            cell_type=None,
+            cell_type=cell_type,
             is_implicit=isinstance(value.expr, AppExpr),
             is_binary=len(value.arrays) == 2,
+            principal_frame=value.frame_shape if len(value.arrays) == 2 else None,
         )
     core = CoreExpr(type(value).__name__, value.type, children, value, frame)
 

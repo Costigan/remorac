@@ -512,7 +512,6 @@ Implementation status: **Phase 7.2 substantially complete on June 8, 2026.**
 - Full regression suite: **771 passed, 1 skipped.**
 
 Remaining Phase 7.2 work:
-- Rank-N compiled scan support (requires cell-typed carry lowering).
 - GPU rank-N support for scan and append (independent GPU work stream).
 
 
@@ -593,11 +592,8 @@ Implementation status: **Phase 7.3 core infrastructure complete on June 8, 2026.
 - Full regression suite: **777 passed, 1 skipped.**
 
 Remaining Phase 7.3 work:
-- Rest-variable syntax for append (e.g., `@rest` suffix matching).
-- ShapeConcat patterns in function annotations (currently only whole-shape
-  variables are supported; concat patterns remain unimplemented in the
-  type-checker binding inference).
-- Free-monoid normalizer improvements (alpha-equivalence for ShapeExpr).
+- Free-monoid normalizer improvements (alpha-equivalence now exists in `index_alpha_equivalent`).
+- ShapeConcat patterns in function annotations are supported via `_reinterpret_shape_expr` for prefix + ShapeVar rest.
 
 ### 7.4 Dimension Arithmetic (6-10 weeks) ✅
 
@@ -786,7 +782,7 @@ Acceptance criteria:
 - Backend HIR contains no symbolic dependent constructs.
 - AD prerequisite checklist in `NEW_AD_PLAN.md` is satisfied except AD-specific items.
 
-Implementation status: **Phase 7.6 started June 8, 2026.**
+Implementation status: **Phase 7.6 complete on June 8, 2026.**
 
 - Removed dead duplicate code from `remora/types.py`:
   - Deleted `infer_lifting`, `with_frame`, `_cell_matches_array_suffix` (fully

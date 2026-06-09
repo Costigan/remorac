@@ -40,12 +40,18 @@ class FrameCellDecision:
 
 @dataclass(frozen=True)
 class CoreExpr:
-    """A structural typed-core expression with its elaborated children."""
+    """A structural typed-core expression with its elaborated children.
+
+    The ``typed`` field carries the original type-checked node for source
+    verification and erasure.  It may be ``None`` for nodes that were
+    created or transformed by downstream passes (e.g. AD).  When absent,
+    structural verification and type-only lowering are still possible.
+    """
 
     kind: str
     type: RemoraType
     children: tuple[CoreExpr, ...]
-    typed: TypedExpr
+    typed: TypedExpr | None = None
     frame: FrameCellDecision | None = None
 
 

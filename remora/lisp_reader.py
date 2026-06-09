@@ -38,7 +38,7 @@ from typing import Any
 
 from lark import Lark, Token, Transformer
 
-from remora.index import DimAdd, DimSub, DimVar, IndexBinder, IndexSort
+from remora.index import DimAdd, DimSub, DimVar, IndexBinder, IndexSort, ShapeLit
 from remora.ast_nodes import (
     AppExpr,
     AppendExpr,
@@ -234,7 +234,10 @@ reshape_form: "reshape" sexpr sexpr -> reshape_expr
 ravel_form: "ravel" sexpr -> ravel_expr
 take_form: "take" sexpr sexpr -> take_expr
 drop_form: "drop" sexpr sexpr -> drop_expr
-index_app_form: "iapp" sexpr dim_ref+ -> index_app_expr
+index_app_form: "iapp" sexpr index_arg+ -> index_app_expr
+
+index_arg: dim_ref -> dim_arg
+         | "(" "shape" dim_ref* ")" -> shape_lit_arg
 index_form: "index" sexpr sexpr+ -> index_expr
 index_item_form: "index-item" sexpr sexpr -> index_expr
 
@@ -401,6 +404,12 @@ class LispASTBuilder(Transformer):
 
     def dim_sub(self, items: list[Any]) -> DimSub:
         return DimSub(items[0], items[1])
+
+    def dim_arg(self, items: list[Any]) -> DimExpr:
+        return items[0]
+
+    def shape_lit_arg(self, items: list[Any]) -> ShapeLit:
+        return ShapeLit(tuple(items))
 
     # ── let / if / lambda ────────────────────────────────────────────────
 
