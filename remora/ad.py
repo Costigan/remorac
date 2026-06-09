@@ -19,6 +19,7 @@ from remora.typechecker import (
     TypedExprNode,
     TypedFold,
     TypedIf,
+    TypedIndex,
     TypedLambda,
     TypedLet,
     TypedMap,
@@ -130,6 +131,12 @@ class EvalTape:
                 n = int(e.saved[1])
                 reverse_shift = shift % n
                 _accum(adjs, e.inputs[0], np.roll(np.asarray(adj), reverse_shift, axis=0))
+            elif e.kind == "index":
+                input_shape = tuple(int(dim) for dim in e.saved[0])
+                index_vals = e.saved[1]
+                result = np.zeros(input_shape, dtype=np.float64)
+                result[index_vals] = adj
+                _accum(adjs, e.inputs[0], result)
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -223,6 +230,8 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return _trace_subarray(expr, env, tape)
     if isinstance(expr, TypedRotate):
         return _trace_rotate(expr, env, tape)
+    if isinstance(expr, TypedIndex):
+        return _trace_index(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -394,6 +403,20 @@ def _trace_rotate(expr: TypedRotate, env: dict[str, int], tape: EvalTape) -> int
     result = np.roll(np.asarray(array), -shift, axis=0)
     return tape.push(
         TapeEntry("rotate", (array_idx,), (shift, n)),
+        result,
+    )
+
+
+def _trace_index(expr: TypedIndex, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    index_vals: list[int] = []
+    for idx in expr.indices:
+        idx_val = _value(tape, trace_expr(idx, env, tape))
+        index_vals.append(int(np.asarray(idx_val).item()))
+    result = np.asarray(array)[tuple(index_vals)]
+    return tape.push(
+        TapeEntry("index", (array_idx,), (array.shape, tuple(index_vals))),
         result,
     )
 

@@ -367,6 +367,14 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   the fold-input path, avoiding a linalg.generic / tensor.extract crash.
   Validated through CPU tape execution, generated-source interpretation,
   and compiled CPU execution. Not in the supported GPU subset.
+- Index VJP: tape traces `index(x, i)` for compile-time-known scalar
+  IntLit indices (rank-1 single-index only). Reverse scatters the scalar
+  cotangent back to the indexed position in a zero array. Source VJP uses
+  append-based zero padding: wraps the scalar adj into a 1-element array
+  via `adj * take(1, operand)`, then pads with take/drop-based zero
+  segments. Validated through CPU tape execution and interpreter execution.
+  Compiled CPU path is not yet exercised for index gradients.
+  Not in the supported GPU subset.
 
 Remaining AD5 work:
 
@@ -393,9 +401,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray/rotate VJPs | 905 |
+| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray/rotate/index VJPs | 909 |
 
-Full suite after this milestone: **905 passed, 1 skipped**.
+Full suite after this milestone: **909 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
