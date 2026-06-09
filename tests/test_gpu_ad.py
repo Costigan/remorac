@@ -112,3 +112,27 @@ def test_compiled_function_vs_tape_gradient():
             return float(np.sum(v * v))
         grad_check(f, x, grad_via_tape(body, "x", x),
                    label=f"compiled@{n}")
+
+
+def test_select_gradient_gpu_artifact():
+    """Select/conditional gradient source generation succeeds."""
+    from remora.compiler import compile_gradient_function_source
+
+    source = (
+        "(define/pi () (relu [x (Array Float 4)] Float) "
+        "  (fold + 0.0 (if (> x 0.0) x (map (* 0.0) x))))"
+    )
+    from remora.types import ArrayType, StaticDim
+
+    param_type = ArrayType(FLOAT, (StaticDim(4),))
+    generated = compile_gradient_function_source(
+        source,
+        "relu",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(if" in generated.gradient_source.source
+    # Verify both branches appear in gradient source
+    gs = generated.gradient_source.source

@@ -18,9 +18,10 @@ from typing import Any
 
 from remora._gpu_map_support import (
     F32BinaryExpr,
+    F32CmpExpr,
     F32ConstantExpr,
-    F32Expr,
     F32InputExpr,
+    F32SelectExpr,
     F32MapKernel,
     F32MapOperation,
 )
@@ -251,6 +252,18 @@ def _compute_expression(
             block,
             attributes={"value": ir_mod.FloatAttr.get(f32_t, expression.value)},
         )
+    if isinstance(expression, F32SelectExpr):
+        cond = _compute_expression(expression.condition, loaded, f32_t, block, ir_mod)
+        then_v = _compute_expression(expression.then_expr, loaded, f32_t, block, ir_mod)
+        else_v = _compute_expression(expression.else_expr, loaded, f32_t, block, ir_mod)
+        return _op(
+            ir_mod, "arith.select", f32_t, block,
+            operands=[cond, then_v, else_v],
+        )
+    if isinstance(expression, F32CmpExpr):
+        left = _compute_expression(expression.left, loaded, f32_t, block, ir_mod)
+        right = _compute_expression(expression.right, loaded, f32_t, block, ir_mod)
+        return _cmpf_op(ir_mod, expression.op, left, right, f32_t, block)
     assert isinstance(expression, F32BinaryExpr)
     left = _compute_expression(expression.left, loaded, f32_t, block, ir_mod)
     right = _compute_expression(expression.right, loaded, f32_t, block, ir_mod)
@@ -288,5 +301,23 @@ def _arith_op(
             "*": "arith.mulf", "/": "arith.divf"}.get(op, "arith.addf")
     return ir_mod.Operation.create(
         name, operands=[lhs, rhs], results=[result_t],
+        ip=ir_mod.InsertionPoint(block),
+    ).result
+
+
+def _cmpf_op(
+    ir_mod: Any, op: str, lhs: Any, rhs: Any,
+    f32_t: Any, block: Any,
+) -> Any:
+    predicate = {
+        ">": 2, "<": 4, ">=": 6, "<=": 3,
+        "==": 1, "!=": 5,
+    }.get(op, 2)
+    i1_t = ir_mod.IntegerType.get_signless(1)
+    return ir_mod.Operation.create(
+        "arith.cmpf",
+        operands=[lhs, rhs],
+        results=[i1_t],
+        attributes={"predicate": ir_mod.IntegerAttr.get(ir_mod.IntegerType.get_signless(64), predicate)},
         ip=ir_mod.InsertionPoint(block),
     ).result

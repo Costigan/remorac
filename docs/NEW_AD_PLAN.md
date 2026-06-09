@@ -414,9 +414,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: 7 structured VJPs, scatter-add (dynamic), select source, multi-input tape | 914 |
+| AD5 | In progress: 7 structured VJPs, scatter-add (dynamic), select source, multi-input tape, GPU select analysis | 915 |
 
-Full suite: **914 passed, 1 skipped**.
+Full suite: **915 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
