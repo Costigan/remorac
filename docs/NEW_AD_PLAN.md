@@ -363,9 +363,10 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 - Rotate VJP: tape traces `rotate(array, shift)` and saves the shift plus
   array length. Reverse rotates the cotangent back by `(n - shift) % n`,
   undoing the forward rotation. Source VJP emits `(rotate adj reverse_shift)`.
-  Validated through CPU tape execution and interpreter execution. Compiled
-  CPU execution is blocked by a linalg.generic / tensor.extract lowering
-  issue in the fold-input path. Not in the supported GPU subset.
+  The rotate lowering decomposes into `extract_slice` + `insert_slice` in
+  the fold-input path, avoiding a linalg.generic / tensor.extract crash.
+  Validated through CPU tape execution, generated-source interpretation,
+  and compiled CPU execution. Not in the supported GPU subset.
 
 Remaining AD5 work:
 
