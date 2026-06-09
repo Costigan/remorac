@@ -95,7 +95,7 @@ from remora.index import (
     ShapeExpr as IndexShapeExpr,
     ShapeLit,
 )
-from remora.operators import ALL_PRIMITIVE_OPS
+from remora.operators import ALL_PRIMITIVE_OPS, UNARY_FLOAT_OPS
 from remora.types import (
     BOOL,
     FLOAT,
@@ -137,6 +137,8 @@ _PRIMITIVE_FORALL = {
         FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
     ),
     "/": FuncType((FLOAT, FLOAT), FLOAT),
+    "exp": FuncType((FLOAT,), FLOAT),
+    "log": FuncType((FLOAT,), FLOAT),
     "<": ForallType(
         (_TypeBinder("t"),),
         FuncType((TypeVar("t"), TypeVar("t")), BOOL),
@@ -924,6 +926,10 @@ class TypeChecker:
             )
 
         if isinstance(expr, VarExpr) and expr.name in ALL_PRIMITIVE_OPS:
+            if expr.name in UNARY_FLOAT_OPS:
+                expected = FuncType((FLOAT,), FLOAT)
+                self._require(expected_type, expected, expr.loc)
+                return TypedExprNode(expr, expected)
             if len(expected_type.params) != 2:
                 raise RemoraTypeError(
                     f"primitive operator {expr.name} must be binary", expr.loc
@@ -1157,11 +1163,30 @@ class TypeChecker:
         return principal_frame([left_frame, right_frame], loc)
 
     def _infer_primitive_app(self, expr: AppExpr, env: TypeEnv) -> TypedExpr:
+        op = expr.func.name
+        if op in UNARY_FLOAT_OPS:
+            if len(expr.args) != 1:
+                raise RemoraTypeError(
+                    f"primitive operator {op} expects one argument", expr.loc
+                )
+            operand = self.infer(expr.args[0], env)
+            if isinstance(operand.type, ArrayType):
+                raise RemoraTypeError(
+                    f"primitive operator {op} expects a scalar cell", expr.loc
+                )
+            self._require_numeric(operand.type, expr.loc)
+            sig = _PRIMITIVE_FORALL[op]
+            assert isinstance(sig, FuncType)
+            return TypedApp(
+                expr,
+                TypedExprNode(expr.func, sig),
+                [self._coerce(operand, FLOAT, expr.loc)],
+                FLOAT,
+            )
         if len(expr.args) != 2:
             raise RemoraTypeError("primitive operators are binary", expr.loc)
         left = self.infer(expr.args[0], env)
         right = self.infer(expr.args[1], env)
-        op = expr.func.name
 
         # If both are arrays with incompatible shapes, reject here
         if isinstance(left.type, ArrayType) and isinstance(right.type, ArrayType):
@@ -1933,6 +1958,9 @@ class TypeChecker:
     def _infer_callable_type_for_map(
         self, expr: Expr, cell_type: RemoraType, env: TypeEnv
     ) -> FuncType:
+        if isinstance(expr, VarExpr) and expr.name in UNARY_FLOAT_OPS:
+            self._require_numeric(cell_type, expr.loc)
+            return FuncType((FLOAT,), FLOAT)
         if isinstance(expr, (LeftSectionExpr, RightSectionExpr)):
             section_arg = expr.arg
             typed_arg = self.infer(section_arg, env)

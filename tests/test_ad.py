@@ -59,6 +59,18 @@ def test_tape_div():
     assert adjs[y] == pytest.approx(-1.5)
 
 
+def test_tape_exp_and_log():
+    exp_tape = EvalTape()
+    exp_x = exp_tape.push_input(np.asarray(2.0))
+    exp_tape.push(TapeEntry("exp", (exp_x,), ()), np.exp(2.0))
+    assert exp_tape.reverse()[exp_x] == pytest.approx(np.exp(2.0))
+
+    log_tape = EvalTape()
+    log_x = log_tape.push_input(np.asarray(2.0))
+    log_tape.push(TapeEntry("log", (log_x,), ()), np.log(2.0))
+    assert log_tape.reverse()[log_x] == pytest.approx(0.5)
+
+
 def test_tape_composition():
     t = EvalTape()
     x = t.push_input(np.asarray(3.0))

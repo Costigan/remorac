@@ -201,6 +201,12 @@ def generate_gradient_source(
             numerator = _binary("*", adj, primals[left])
             denominator = _binary("*", primals[right], primals[right])
             _accumulate(adjs, right, _unbroadcast(_neg(_binary("/", numerator, denominator)), primals[right]))
+        elif entry.kind == "exp":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, primals[index]))
+        elif entry.kind == "log":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("/", adj, primals[operand]))
         elif entry.kind == "fold":
             operand = entry.inputs[0]
             axis = int(entry.saved[1]) if len(entry.saved) > 1 else 0
@@ -303,6 +309,8 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
         elif entry.kind in {"add", "sub", "mul", "div"}:
             op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[entry.kind]
             expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
+        elif entry.kind in {"exp", "log"}:
+            expr = _unary(entry.kind, primals[entry.inputs[0]])
         elif entry.kind == "fold":
             operand = primals[entry.inputs[0]]
             axis = int(entry.saved[1]) if len(entry.saved) > 1 else 0
@@ -401,6 +409,12 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
                 right,
                 _unbroadcast(_neg(_binary("/", numerator, denominator)), primals[right]),
             )
+        elif entry.kind == "exp":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, primals[index]))
+        elif entry.kind == "log":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("/", adj, primals[operand]))
         elif entry.kind == "fold":
             operand = entry.inputs[0]
             _accumulate(adjs, operand, _fill(adj, primals[operand]))
@@ -593,6 +607,8 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
         elif entry.kind in {"add", "sub", "mul", "div"}:
             op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[entry.kind]
             expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
+        elif entry.kind in {"exp", "log"}:
+            expr = _unary(entry.kind, primals[entry.inputs[0]])
         elif entry.kind == "fold":
             operand = primals[entry.inputs[0]]
             expr = _Op("fold", operand, None, shape)
@@ -696,6 +712,10 @@ def _binary(op: str, left: _Expr, right: _Expr) -> _Expr:
         if _is_one(right):
             return left
     return _Op(op, left, right, result_shape)
+
+
+def _unary(op: str, value: _Expr) -> _Expr:
+    return _Op(op, value, None, value.shape)
 
 
 def _neg(expr: _Expr) -> _Expr:
@@ -941,6 +961,11 @@ def _emit(expr: _Expr) -> str:
         return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "neg":
         return f"(- {_emit(expr.left)})"
+    if expr.op in {"exp", "log"}:
+        value = _emit(expr.left)
+        if expr.left.shape:
+            return f"(map {expr.op} {value})"
+        return f"({expr.op} {value})"
     assert expr.right is not None
     left = _emit(expr.left)
     right = _emit(expr.right)

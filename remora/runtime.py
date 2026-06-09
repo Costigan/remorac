@@ -1366,6 +1366,14 @@ def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
         return lambda left: _coerce_runtime_value(
             _apply_op(expr.expr.op, left, right), expr.type.result
         )
+    if (
+        isinstance(expr, TypedExprNode)
+        and isinstance(expr.expr, VarExpr)
+        and expr.expr.name in {"exp", "log"}
+    ):
+        return lambda value: _coerce_runtime_value(
+            _apply_op(expr.expr.name, value), expr.type.result
+        )
     value = _eval_expr(expr, env)
     if not callable(value):
         raise EvaluationError("expected a callable value")
@@ -1443,7 +1451,13 @@ def _binary_map_value(
     return _coerce_runtime_value(values[0], result_type)
 
 
-def _apply_op(op: str, left: Value, right: Value) -> Value:
+def _apply_op(op: str, left: Value, right: Value | None = None) -> Value:
+    if op == "exp":
+        return np.exp(left)
+    if op == "log":
+        return np.log(left)
+    if right is None:
+        raise EvaluationError(f"operator {op} expects two operands")
     if op == "+":
         return left + right
     if op == "-":

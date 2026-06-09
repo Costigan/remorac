@@ -15,9 +15,12 @@ from typing import ClassVar
 # ---------------------------------------------------------------------------
 
 ARITHMETIC_OPS = frozenset({"+", "-", "*", "/"})
+UNARY_FLOAT_OPS = frozenset({"exp", "log"})
 COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "==", "!="})
 BOOLEAN_OPS = frozenset({"&&", "||"})
-ALL_PRIMITIVE_OPS = ARITHMETIC_OPS | COMPARISON_OPS | BOOLEAN_OPS
+ALL_PRIMITIVE_OPS = (
+    ARITHMETIC_OPS | UNARY_FLOAT_OPS | COMPARISON_OPS | BOOLEAN_OPS
+)
 
 
 def is_primitive_op(name: str) -> bool:
@@ -208,6 +211,8 @@ _OPERATOR_TABLE: ClassVar[dict[str, OperatorMeta]] = {
     "-": OperatorMeta("-", is_arithmetic=True),
     "*": OperatorMeta("*", is_arithmetic=True),
     "/": OperatorMeta("/", is_arithmetic=True),
+    "exp": OperatorMeta("exp", arity=1, is_arithmetic=True),
+    "log": OperatorMeta("log", arity=1, is_arithmetic=True),
     "<": OperatorMeta("<", is_comparison=True),
     "<=": OperatorMeta("<=", is_comparison=True),
     "==": OperatorMeta("==", is_comparison=True),

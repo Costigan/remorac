@@ -101,6 +101,60 @@ def test_source_level_grad_executes_for_concrete_function():
     np.testing.assert_array_equal(specialized.value, [2.0, 4.0, 6.0])
 
 
+def test_unary_math_gradient_source_compiles_and_executes():
+    compiled = compile_gradient_function_source(
+        "def loss x = log (exp x)",
+        "loss",
+        (FLOAT,),
+        include_prelude=False,
+    )
+
+    assert "(exp x)" in compiled.gradient_source.source
+    assert "math.exp" in compiled.compiler.mlir_text
+    result = evaluate_source_compiled(
+        compiled.gradient_source.source + " (grad_loss 3.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert result.value == pytest.approx(1.0, rel=1e-6)
+
+
+def test_stable_bce_with_logit_is_finite_and_has_expected_gradient():
+    source = (
+        "def loss z y = if 0.0 <= z then "
+        "(1.0 - y) * z + log (1.0 + exp (0.0 - z)) else "
+        "(0.0 - y) * z + log (1.0 + exp z)"
+    )
+    artifacts = compile_gradient_functions_source(
+        source,
+        "loss",
+        (FLOAT, FLOAT),
+        include_prelude=False,
+        syntax="ml",
+    )
+
+    positive = evaluate_source(source + "\nloss 100.0 1.0", include_prelude=False)
+    negative = evaluate_source(source + "\nloss -100.0 1.0", include_prelude=False)
+    assert np.isfinite(positive.value)
+    assert np.isfinite(negative.value)
+
+    z_gradient = artifacts.gradients[0]
+    positive_grad = evaluate_source(
+        z_gradient.gradient_source.source
+        + f" ({z_gradient.gradient_source.function_name} 100.0 1.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    negative_grad = evaluate_source(
+        z_gradient.gradient_source.source
+        + f" ({z_gradient.gradient_source.function_name} -100.0 1.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert positive_grad.value == pytest.approx(0.0, abs=1e-12)
+    assert negative_grad.value == pytest.approx(-1.0, rel=1e-6)
+
+
 def test_generated_source_handles_division_negation_and_fold_fill():
     polynomial = EvalTape()
     px = polynomial.push_input(np.asarray(3.0))

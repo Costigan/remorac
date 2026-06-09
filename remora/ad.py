@@ -96,6 +96,10 @@ class EvalTape:
                 lv = np.asarray(e.saved[1], dtype=np.float64)
                 _bcast_acc(adjs, e.inputs[0], adj / rv, self.values[e.inputs[0]])
                 _bcast_acc(adjs, e.inputs[1], -adj * lv / (rv * rv), self.values[e.inputs[1]])
+            elif e.kind == "exp":
+                _bcast_acc(adjs, e.inputs[0], adj * self.values[i], self.values[e.inputs[0]])
+            elif e.kind == "log":
+                _bcast_acc(adjs, e.inputs[0], adj / self.values[e.inputs[0]], self.values[e.inputs[0]])
             elif e.kind == "fold":
                 iv = np.asarray(e.saved[0], dtype=np.float64)
                 axis = int(e.saved[1]) if len(e.saved) > 1 else 0
@@ -209,6 +213,16 @@ def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int
     return tape.push(TapeEntry(kind, (left_idx, right_idx), saved), result)
 
 
+def _record_unary_primitive(tape, op, input_idx, input_val) -> int:
+    if op == "exp":
+        result = np.exp(input_val)
+    elif op == "log":
+        result = np.log(input_val)
+    else:
+        raise NotImplementedError(f"no unary VJP registered for {op!r}")
+    return tape.push(TapeEntry(op, (input_idx,), ()), result)
+
+
 def _apply_bin_op(op, lv, rv):
     if op == "+": return lv + rv
     if op == "-": return lv - rv
@@ -316,10 +330,15 @@ def _trace_app(
             tape,
             fold_axis=fold_axis,
         )
+    op = _get_op(expr.func)
+    if len(args) == 1 and op in {"exp", "log"}:
+        input_idx = args[0]
+        return _record_unary_primitive(
+            tape, op, input_idx, _value(tape, input_idx)
+        )
     if len(args) != 2:
         raise NotImplementedError("trace app: non-binary")
     left_idx, right_idx = args
-    op = _get_op(expr.func)
     if op in _INACTIVE_BINARY_OPS:
         result = _apply_inactive_bin_op(
             op, _value(tape, left_idx), _value(tape, right_idx)
@@ -384,6 +403,15 @@ def _trace_map(
             fold_axis=fold_axis + len(expr.frame_shape),
         )
     if not expr.cell_shape:
+        if len(expr.arrays) == 1:
+            input_idx = trace_expr(
+                expr.arrays[0], env, tape, fold_axis=fold_axis
+            )
+            op = _get_op(expr.func)
+            if op in {"exp", "log"}:
+                return _record_unary_primitive(
+                    tape, op, input_idx, _value(tape, input_idx)
+                )
         if len(expr.arrays) == 2:
             left_idx = trace_expr(
                 expr.arrays[0], env, tape, fold_axis=fold_axis

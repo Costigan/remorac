@@ -723,16 +723,16 @@ def lower_callable(expr: TypedExpr) -> HIRCallable:
             expr.type.result,
             right_arg=lower_expr(expr.arg),
         )
+    if isinstance(expr, TypedExprNode) and isinstance(expr.type, FuncType):
+        op = _operator_like_expr(expr)
+        if op is not None:
+            return HIRPrimCallable(op, expr.type.params, expr.type.result)
 
     lowered = lower_expr(expr)
     if isinstance(lowered, (HIRLambda, HIRVar)):
         return lowered
     if isinstance(lowered, HIRPrimOp):
         raise HIRLoweringError("primitive operation expression is not a callable")
-    if isinstance(expr, TypedExprNode) and isinstance(expr.type, FuncType):
-        op = _operator_like_expr(expr)
-        if op is not None:
-            return HIRPrimCallable(op, expr.type.params, expr.type.result)
     raise HIRLoweringError(f"cannot lower callable {type(expr).__name__}")
 
 
@@ -850,6 +850,8 @@ def _typed_node_var_name(expr: TypedExpr) -> str | None:
 
 def _operator_like_expr(expr: TypedExprNode) -> str | None:
     ast = expr.expr
+    if isinstance(ast, VarExpr) and ast.name in ALL_PRIMITIVE_OPS:
+        return ast.name
     op = getattr(ast, "op", None)
     if isinstance(op, str):
         return op

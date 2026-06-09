@@ -628,6 +628,13 @@ def _build_map_callable_body(
 
     if isinstance(callable_, HIRPrimCallable):
         op = callable_.op
+        if op in {"exp", "log"}:
+            return ir_mod.Operation.create(
+                "math.exp" if op == "exp" else "math.log",
+                operands=[input_arg],
+                results=[result_type],
+                ip=ir_mod.InsertionPoint(body_block),
+            ).result
         elem_t = "f32" if result_type == _ir().F32Type.get() else "i32"
         if op == "+":
             return input_arg  # identity map
