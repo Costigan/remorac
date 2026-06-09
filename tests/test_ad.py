@@ -487,3 +487,53 @@ def test_subarray_vs_finite_diff():
         sub = v[1:5]
         return float(np.sum(sub * sub))
     grad_check(f, x, tape_g, label="subarray_sq")
+
+
+# ── AD rotate VJP ──────────────────────────────────────────────────────────
+
+
+def test_tape_rotate():
+    t = EvalTape()
+    arr = t.push_input(np.asarray([1.0, 2.0, 3.0, 4.0]))
+    t.push(
+        TapeEntry("rotate", (arr,), (2, 4)),
+        np.asarray([3.0, 4.0, 1.0, 2.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[arr], [1.0, 1.0, 1.0, 1.0])
+
+
+def test_grad_rotate_square():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4)] Float) "
+        "  (fold + 0.0 (* (rotate x 1) (rotate x 1))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(4),))
+    )
+    x = np.array([1.0, 2.0, 3.0, 4.0])
+    g = grad_via_tape(body, pname, x)
+    np.testing.assert_array_almost_equal(g, 2.0 * x)
+
+
+def test_rotate_vs_finite_diff():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 5)] Float) "
+        "  (fold + 0.0 (* (rotate x 2) (rotate x 2))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(5),))
+    )
+    rng = np.random.RandomState(42)
+    x = rng.randn(5) * 2.0
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        v = np.asarray(v, dtype=np.float64)
+        rotated = np.roll(v, -2)
+        return float(np.sum(rotated * rotated))
+    grad_check(f, x, tape_g, label="rotate_sq")

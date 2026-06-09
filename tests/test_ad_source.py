@@ -697,3 +697,18 @@ def test_subarray_full_gradient_source():
     expected = 2.0 * np.array([1.0, 2.0, 3.0, 4.0])
     np.testing.assert_array_equal(interpreted.value, expected)
     np.testing.assert_array_equal(compiled.value, expected)
+
+
+# ── Rotate VJP ───────────────────────────────────────────────────────────
+
+
+def test_rotate_gradient_interpreter():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4)] Float) "
+        "  (fold + 0.0 (* (rotate x 1) (rotate x 1))))"
+    )
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    expected = 2.0 * np.array([1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(interpreted.value, expected)

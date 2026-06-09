@@ -26,6 +26,7 @@ from remora.typechecker import (
     TypedRavel,
     TypedReshape,
     TypedReverse,
+    TypedRotate,
     TypedSubarray,
     TypedTake,
     TypedDrop,
@@ -124,6 +125,11 @@ class EvalTape:
                 slices = tuple(slice(o, o + s) for o, s in zip(offsets, sizes))
                 result[slices] = adj
                 _accum(adjs, e.inputs[0], result)
+            elif e.kind == "rotate":
+                shift = int(e.saved[0])
+                n = int(e.saved[1])
+                reverse_shift = shift % n
+                _accum(adjs, e.inputs[0], np.roll(np.asarray(adj), reverse_shift, axis=0))
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -215,6 +221,8 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return _trace_append(expr, env, tape)
     if isinstance(expr, TypedSubarray):
         return _trace_subarray(expr, env, tape)
+    if isinstance(expr, TypedRotate):
+        return _trace_rotate(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -374,6 +382,18 @@ def _trace_subarray(expr: TypedSubarray, env: dict[str, int], tape: EvalTape) ->
     result = np.asarray(array)[slices]
     return tape.push(
         TapeEntry("subarray", (array_idx,), (array.shape, offsets, sizes)),
+        result,
+    )
+
+
+def _trace_rotate(expr: TypedRotate, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    shift = int(expr.shift.value)
+    n = np.asarray(array).shape[0]
+    result = np.roll(np.asarray(array), -shift, axis=0)
+    return tape.push(
+        TapeEntry("rotate", (array_idx,), (shift, n)),
         result,
     )
 
