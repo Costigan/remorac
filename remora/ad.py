@@ -1,273 +1,213 @@
-"""Reverse-mode automatic differentiation for the Remora typed core.
+"""Reverse-mode AD via evaluation tape for the Remora interpreter.
 
-AD1: scalar Float arithmetic, lets, and direct calls.
+AD1: scalar Float arithmetic. Evaluates typed expressions while
+recording operations on a tape for the reverse pass.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from remora.elaborated import CoreExpr, CoreProgram
-from remora.types import (
-    BOOL,
-    FLOAT,
-    INT,
-    ArrayType,
-    FuncType,
-    RemoraType,
-    ScalarType,
-    StaticDim,
+import numpy as np
+
+from remora.ast_nodes import FloatLit, IntLit, OperatorFuncExpr, VarExpr
+from remora.typechecker import (
+    TypedApp,
+    TypedCast,
+    TypedExpr,
+    TypedExprNode,
+    TypedFold,
+    TypedLambda,
+    TypedLet,
+    TypedMap,
 )
-
-
-# ── Tape IR ────────────────────────────────────────────────────────────────
+from remora.types import FLOAT
 
 
 @dataclass
 class TapeEntry:
-    """One operation recorded during the forward pass."""
-
-    kind: str  # "add", "sub", "mul", "div", "const", "var", "neg"
-    inputs: tuple[int, ...]  # indices into tape value array
-    saved: tuple[int | float, ...]  # saved primal values for VJP
-    vjp_fn: object | None = None  # callable VJP for custom ops (not used in AD1)
+    kind: str
+    inputs: tuple[int, ...]
+    saved: tuple[Any, ...]
 
 
 @dataclass
-class Tape:
-    """Forward trace with value store."""
-
+class EvalTape:
     entries: list[TapeEntry] = field(default_factory=list)
-    values: list[float] = field(default_factory=list)
-    types: list[RemoraType | None] = field(default_factory=list)
+    values: list[np.ndarray] = field(default_factory=list)
     input_indices: list[int] = field(default_factory=list)
 
-    def push(self, entry: TapeEntry, value: float, typ: RemoraType | None = None) -> int:
+    def push(self, entry: TapeEntry, value: np.ndarray) -> int:
         idx = len(self.values)
         self.entries.append(entry)
         self.values.append(value)
-        self.types.append(typ)
         return idx
 
     def push_const(self, value: float) -> int:
-        return self.push(TapeEntry("const", (), (value,)), value)
+        return self.push(TapeEntry("const", (), (value,)), np.asarray(value, dtype=np.float64))
 
-    def push_input(self, value: float) -> int:
+    def push_input(self, value: np.ndarray) -> int:
         idx = self.push(TapeEntry("var", (), ()), value)
         self.input_indices.append(idx)
         return idx
 
-    def reverse(
-        self, output_adjoint: float = 1.0
-    ) -> dict[int, float]:
-        """Run reverse pass.  Returns dict mapping input tape indices to adjoints."""
-        adjoints = [0.0] * len(self.values)
-        adjoints[-1] = output_adjoint  # seed the output
-
+    def reverse(self) -> dict[int, np.ndarray]:
+        adjs: list[np.ndarray | None] = [None] * len(self.values)
+        adjs[-1] = np.ones_like(self.values[-1], dtype=np.float64)
         for i in reversed(range(len(self.entries))):
-            entry = self.entries[i]
-            adj = adjoints[i]
-            if adj == 0.0:
+            adj = adjs[i]
+            if adj is None:
                 continue
-
-            if entry.kind == "add":
-                adjoints[entry.inputs[0]] += adj
-                adjoints[entry.inputs[1]] += adj
-            elif entry.kind == "sub":
-                adjoints[entry.inputs[0]] += adj
-                adjoints[entry.inputs[1]] -= adj
-            elif entry.kind == "mul":
-                right_val = entry.saved[0]
-                left_val = entry.saved[1]
-                adjoints[entry.inputs[0]] += adj * right_val
-                adjoints[entry.inputs[1]] += adj * left_val
-            elif entry.kind == "div":
-                right_val = entry.saved[0]
-                left_val = entry.saved[1]
-                adjoints[entry.inputs[0]] += adj / right_val
-                adjoints[entry.inputs[1]] -= adj * left_val / (right_val * right_val)
-            elif entry.kind == "neg":
-                adjoints[entry.inputs[0]] -= adj
-            # "const" and "var" produce no gradient (const), or accumulate (var)
-
-        return {idx: adjoints[idx] for idx in self.input_indices}
-
-
-# ── Forward trace recording ────────────────────────────────────────────────
+            e = self.entries[i]
+            if e.kind == "add":
+                _acc(adjs, e.inputs[0], adj)
+                _acc(adjs, e.inputs[1], adj)
+            elif e.kind == "sub":
+                _acc(adjs, e.inputs[0], adj)
+                _acc(adjs, e.inputs[1], -adj)
+            elif e.kind == "mul":
+                rv = np.asarray(e.saved[0], dtype=np.float64)
+                lv = np.asarray(e.saved[1], dtype=np.float64)
+                _acc(adjs, e.inputs[0], adj * rv)
+                _acc(adjs, e.inputs[1], adj * lv)
+            elif e.kind == "div":
+                rv = np.asarray(e.saved[0], dtype=np.float64)
+                lv = np.asarray(e.saved[1], dtype=np.float64)
+                _acc(adjs, e.inputs[0], adj / rv)
+                _acc(adjs, e.inputs[1], -adj * lv / (rv * rv))
+            elif e.kind == "fold":
+                iv = np.asarray(e.saved[0], dtype=np.float64)
+                _acc(adjs, e.inputs[0], np.full_like(iv, adj.item()))
+        return {idx: adjs[idx] for idx in self.input_indices if adjs[idx] is not None}
 
 
-def _trace_expr(expr: CoreExpr, tape: Tape) -> int:
-    """Record the forward evaluation of a CoreExpr onto the tape.
-
-    Returns the tape index of the result.
-    """
-    kind = expr.kind
-
-    if kind == "TypedLit":
-        return _trace_lit(expr, tape)
-    if kind == "TypedExprNode":
-        return _trace_expr_node(expr, tape)
-    if kind == "TypedCast":
-        return _trace_expr(expr.children[0], tape)
-    if kind == "TypedLet":
-        return _trace_let(expr, tape)
-    if kind == "TypedApp":
-        return _trace_app(expr, tape)
-    if kind == "TypedFold":
-        return _trace_fold(expr, tape)  # sum reduction: trace each element
-    if kind == "TypedMap":
-        return _trace_map(expr, tape)
-
-    raise NotImplementedError(f"AD1: cannot trace {kind}")
+def _acc(adjs, idx, c):
+    if adjs[idx] is None:
+        adjs[idx] = np.asarray(c, dtype=np.float64)
+    else:
+        adjs[idx] = adjs[idx] + c
 
 
-def _trace_lit(expr: CoreExpr, tape: Tape) -> int:
-    from remora.typechecker import TypedExprNode
-    from remora.ast_nodes import FloatLit, IntLit
-
-    if isinstance(expr.typed, TypedExprNode):
-        val = expr.typed.expr
-        if isinstance(val, FloatLit):
-            return tape.push_const(val.value)
-        if isinstance(val, IntLit):
-            return tape.push_const(float(val.value))
-    if expr.type == FLOAT:
-        return tape.push_const(0.0)
-    raise NotImplementedError(f"AD1: unsupported literal {expr.type}")
+# ── Traced evaluation (returns tape index) ─────────────────────────────────
 
 
-def _trace_expr_node(expr: CoreExpr, tape: Tape) -> int:
-    """A TypedExprNode wrapping a VarExpr is an input parameter."""
-    from remora.typechecker import TypedExprNode
-    from remora.ast_nodes import VarExpr
+def trace_expr(
+    expr: TypedExpr, env: dict[str, int], tape: EvalTape
+) -> int:
+    """Evaluate expr, recording ops. Returns tape index of result."""
+    if isinstance(expr, TypedExprNode):
+        return _trace_node(expr, env, tape)
+    if isinstance(expr, TypedCast):
+        return trace_expr(expr.value, env, tape)
+    if isinstance(expr, TypedLet):
+        vidx = trace_expr(expr.value, env, tape)
+        local = dict(env)
+        local[expr.expr.name] = vidx
+        return trace_expr(expr.body, local, tape)
+    if isinstance(expr, TypedApp):
+        return _trace_app(expr, env, tape)
+    if isinstance(expr, TypedFold):
+        return _trace_fold(expr, env, tape)
+    raise NotImplementedError(f"trace: {type(expr).__name__}")
 
-    if isinstance(expr.typed, TypedExprNode) and isinstance(expr.typed.expr, VarExpr):
-        return tape.push_input(0.0)
-    # Fall back to literal tracing
-    return _trace_lit(expr, tape)
+
+def _value(tape: EvalTape, idx: int) -> np.ndarray:
+    return tape.values[idx]
 
 
-def _trace_let(expr: CoreExpr, tape: Tape) -> int:
-    if len(expr.children) < 2:
-        raise NotImplementedError("AD1: let with <2 children")
-    _trace_expr(expr.children[0], tape)
-    return _trace_expr(expr.children[1], tape)
+def _trace_node(expr: TypedExprNode, env: dict[str, int], tape: EvalTape) -> int:
+    ast = expr.expr
+    if isinstance(ast, FloatLit):
+        return tape.push_const(ast.value)
+    if isinstance(ast, IntLit):
+        return tape.push_const(float(ast.value))
+    if isinstance(ast, VarExpr):
+        if ast.name in env:
+            return env[ast.name]
+        raise RuntimeError(f"unexpected free variable {ast.name!r} in trace")
+    raise NotImplementedError(f"trace node: {type(ast).__name__}")
 
 
-def _trace_app(expr: CoreExpr, tape: Tape) -> int:
+def _trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
+    return trace_expr(expr, env, tape)
+
+
+def _trace_app(
+    expr: TypedApp, env: dict[str, int], tape: EvalTape
+) -> int:
     """Trace a binary primitive application."""
-    if len(expr.children) < 3:
-        raise NotImplementedError("AD1: app with <3 children")
+    func = expr.func
+    args = [trace_expr(a, env, tape) for a in expr.args]
 
-    func = expr.children[0]
-    left_core = expr.children[1]
-    right_core = expr.children[2]
+    if len(args) != 2:
+        raise NotImplementedError("trace app: non-binary")
 
-    left_idx = _trace_expr(left_core, tape)
-    right_idx = _trace_expr(right_core, tape)
+    left_idx, right_idx = args
+    left_val = _value(tape, left_idx)
+    right_val = _value(tape, right_idx)
 
-    left_val = tape.values[left_idx]
-    right_val = tape.values[right_idx]
-
-    op = func.kind
-    op_name = ""
-
-    # Determine the operation from the function kind/name
-    from remora.typechecker import TypedExprNode
-    from remora.ast_nodes import OperatorFuncExpr, VarExpr
-
-    if isinstance(func.typed, TypedExprNode):
-        f = func.typed.expr
+    # Determine the operation
+    op = ""
+    if isinstance(func, TypedExprNode):
+        f = func.expr
         if isinstance(f, OperatorFuncExpr):
-            op_name = f.op
+            op = f.op
         elif isinstance(f, VarExpr):
-            op_name = f.name
+            op = f.name
 
-    if op_name == "+":
+    if op == "+":
         result = left_val + right_val
-        entry = TapeEntry("add", (left_idx, right_idx), ())
-        return tape.push(entry, result)
-    elif op_name == "-":
+        return tape.push(TapeEntry("add", (left_idx, right_idx), ()), result)
+    elif op == "-":
         result = left_val - right_val
-        entry = TapeEntry("sub", (left_idx, right_idx), ())
-        return tape.push(entry, result)
-    elif op_name == "*":
+        return tape.push(TapeEntry("sub", (left_idx, right_idx), ()), result)
+    elif op == "*":
         result = left_val * right_val
-        entry = TapeEntry("mul", (left_idx, right_idx), (right_val, left_val))
-        return tape.push(entry, result)
-    elif op_name == "/":
-        if right_val == 0.0:
-            raise ZeroDivisionError("AD1: division by zero")
+        return tape.push(
+            TapeEntry("mul", (left_idx, right_idx), (right_val, left_val)), result
+        )
+    elif op == "/":
         result = left_val / right_val
-        entry = TapeEntry("div", (left_idx, right_idx), (right_val, left_val))
-        return tape.push(entry, result)
+        return tape.push(
+            TapeEntry("div", (left_idx, right_idx), (right_val, left_val)), result
+        )
+    raise NotImplementedError(f"trace app op: {op}")
 
-    raise NotImplementedError(f"AD1: unsupported primitive '{op_name}'")
+
+def _trace_fold(
+    expr: TypedFold, env: dict[str, int], tape: EvalTape
+) -> int:
+    """Trace a sum reduction."""
+    arr_idx = trace_expr(expr.array, env, tape)
+    arr_val = _value(tape, arr_idx)
+    result = arr_val.sum()
+    return tape.push(TapeEntry("fold", (arr_idx,), (arr_val,)), result)
 
 
-def _trace_fold(expr: CoreExpr, tape: Tape) -> int:
-    """Trace a fold (sum reduction) over an array.
+# ── Top-level gradient computation ─────────────────────────────────────────
 
-    For AD1, fold + on a float array: each element contributes equally.
-    The VJP of sum is broadcasting the adjoint to each element.
+
+def grad_via_tape(
+    body: TypedExpr,
+    param_name: str,
+    x: np.ndarray,
+) -> np.ndarray:
+    """Compute gradient of a scalar function via reverse-mode tape.
+
+    body: the typed expression for the function body
+    param_name: name of the input parameter
+    x: input value (scalar or array)
+
+    Returns gradient with same shape as x.
     """
-    from remora.typechecker import TypedExprNode
-    from remora.ast_nodes import VarExpr
-
-    if len(expr.children) < 3:
-        raise NotImplementedError("AD1: fold with <3 children")
-
-    array_core = expr.children[2]
-    array_idx = _trace_expr(array_core, tape)
-
-    # The fold sums the array; result is scalar
-    array_val = tape.values[array_idx]
-    result = array_val  # in evaluation, fold + 0.0 array = sum
-    entry = TapeEntry("add", (array_idx, array_idx), ())
-    return tape.push(entry, result)
-
-
-def _trace_map(expr: CoreExpr, tape: Tape) -> int:
-    """Trace a map (element-wise unary or binary operation).
-
-    For AD1 scalar, the map applies to the cell and the cell is scalar.
-    The map result is forwarded to the callable result.
-    """
-    if len(expr.children) < 2:
-        raise NotImplementedError("AD1: map with <2 children")
-
-    # For binary maps (implicit auto-lift), the actual operation
-    # is already traced as a primitive app. The map just lifts it.
-    # The cell is the scalar result of the primitive.
-    # For AD1, we can just trace the inner application.
-    if len(expr.children) == 3:
-        return _trace_expr(expr.children[1], tape)
-
-    return _trace_expr(expr.children[0], tape)
-
-
-# ── Core-level AD transform ────────────────────────────────────────────────
-
-
-def reverse_ad_body(body: CoreExpr) -> CoreExpr:
-    """Transform a scalar Float→Float function body into a gradient computation.
-
-    Returns a new CoreExpr that, given the input, computes the gradient.
-    """
-    tape = Tape()
-    _trace_expr(body, tape)
-
-    # Generate the backward pass as a symbolic expression
-    # For AD1, we just validate the tape works
-    adjoints = tape.reverse(1.0)
-
-    # Return the original core for now —
-    # the tape validates correctness but the actual gradient
-    # computation must be lowered through the compiler.
-    # AD1 exit criterion: tape-based reverse mode generates correct VJPs.
-    return body
-
-
-def reverse_ad_function(func_core: CoreExpr) -> CoreExpr:
-    """Transform a unary function body for gradient computation."""
-    return reverse_ad_body(func_core)
+    tape = EvalTape()
+    input_val = np.asarray(x, dtype=np.float64)
+    x_idx = tape.push_input(input_val)
+    env: dict[str, int] = {param_name: x_idx}
+    trace_expr(body, env, tape)
+    adjs = tape.reverse()
+    grad = adjs.get(x_idx)
+    if grad is None:
+        raise RuntimeError("AD1: input not found on tape")
+    return np.asarray(grad).reshape(np.asarray(x).shape)

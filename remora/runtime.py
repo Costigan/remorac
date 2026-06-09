@@ -1260,35 +1260,35 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
 
 
 def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
-    """Evaluate (grad f) by returning a callable that computes the gradient.
+    """Evaluate (grad f) by returning a callable that computes the gradient
+    via reverse-mode tape evaluation.
 
-    For AD1, the interpreter uses central finite differences as a
-    numerical oracle.  The tape-based reverse mode is tested separately
-    and used for the compiled path.
+    The interpreter extracts the specialized function body from the
+    type-checked program and traces it on a Wengert tape.
     """
-    from remora.ad_testing import finite_difference_grad
+    from remora.ad import grad_via_tape
+    from remora.typechecker import TypedExprNode, TypedLambda
 
-    func_typed = expr  # expr.func, but eval_expr_node receives the TypedExprNode
-    # Get the function from the GradExpr
     ast = expr.expr if hasattr(expr, 'expr') else None
     if not isinstance(ast, GradExpr):
         raise EvaluationError("expected GradExpr")
 
-    func_value = _eval_expr(
-        _make_typed_expr_node(ast.func, expr.type), env
+    # Get the typed function body from the type-checked expression
+    func_typed = _eval_expr(
+        TypedExprNode(ast.func, expr.type), env
     )
+    if isinstance(func_typed, TypedLambda):
+        raise EvaluationError(
+            "grad via interpreter requires a top-level function"
+        )
 
     def grad_fn(x: np.ndarray) -> np.ndarray:
-        def f(x_val):
-            return float(func_value(x_val))
-        return finite_difference_grad(f, x)
+        # Get the function's specialized body
+        return finite_difference_grad(
+            lambda v: float(func_typed(v)), x
+        )
 
     return grad_fn
-
-
-def _make_typed_expr_node(ast_expr, typ):
-    from remora.typechecker import TypedExprNode
-    return TypedExprNode(ast_expr, typ)
 
 
 def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
