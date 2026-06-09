@@ -1,14 +1,14 @@
-"""Tests for AD1: scalar reverse-mode with evaluation tape."""
+"""Tests for AD: reverse-mode with evaluation tape."""
 
 import numpy as np
 import pytest
 
-from remora.ad import EvalTape, TapeEntry, grad_via_tape
+from remora.ad import EvalTape, TapeEntry, grad_via_tape, trace_via_tape_multi
 from remora.ad_testing import finite_difference_grad, grad_check
 from remora.typechecker import TypedApp, TypedExprNode, TypedAppend, TypedSubarray
 from remora.typechecker import TypedIf
 from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr, IfExpr, AppendExpr
-from remora.types import FLOAT
+from remora.types import FLOAT, ArrayType, StaticDim, FuncType
 
 _LOC = SourceLoc("test", 0, 0)
 
@@ -672,3 +672,358 @@ def test_tape_liveness_frees_values():
     np.testing.assert_array_equal(adjs[x], expected)
     freed_count = sum(1 for v in t.values if v is None)
     assert freed_count >= 8, f"expected >= 8 freed, got {freed_count}"
+
+
+# ── Section 1 helpers: multi-param source specialization ────────────────────
+
+
+def _substitute_bindings(type_, bindings):
+    """Substitute DimExpr bindings in a type."""
+    from remora.typechecker import substitute_type
+    return substitute_type(type_, bindings)
+
+
+def _specialize_source_multi(source: str, func_name: str, *param_types):
+    """Typecheck Lisp source, specialize at concrete types, return (body, param_names)."""
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+
+    tc = TypeChecker()
+    tc.check_program(parse_lisp(source))
+    function = tc._functions[func_name]
+
+    declared_param_types = tc._declared_param_types(function)
+    if declared_param_types is not None:
+        bindings = tc._infer_index_bindings(
+            function, declared_param_types, param_types,
+        )
+        specialized_params = tuple(
+            _substitute_bindings(pt, bindings) for pt in declared_param_types
+        )
+        declared_result = tc._declared_result_type(function)
+        specialized_result = (
+            _substitute_bindings(declared_result, bindings)
+            if declared_result is not None
+            else FLOAT
+        )
+    else:
+        specialized_params = param_types
+        specialized_result = FLOAT
+
+    index_args = tc._inferred_index_args(function, param_types)
+    spec = tc._typed_top_level_function(
+        function,
+        FuncType(specialized_params, specialized_result),
+        tc._build_prelude_env(),
+        index_args=index_args,
+    )
+    return spec.body, [name for name, _ in spec.params]
+
+
+def _multi_tape_gradients(body, param_names, values):
+    """Trace multi-param body and return gradient dict {name: np.array}."""
+    tape, indices = trace_via_tape_multi(
+        body, [np.asarray(v, dtype=np.float64) for v in values], param_names,
+    )
+    adjs = tape.reverse()
+    return {name: np.asarray(adjs[idx]) for name, idx in zip(param_names, indices)}
+
+
+# ── Section 1: vector-cell map + fold AD ────────────────────────────────────
+
+
+_VEC_SUM_SRC = """\
+(define/pi ([h Dim] [w Dim])
+  (vec-sum [x (Array Float h w)] (Array Float h))
+  (map (lambda (row) (fold + 0.0 row)) x))
+"""
+
+
+def test_vec_sum_forward():
+    """Forward: (map (lambda (row) (fold + 0.0 row)) x) sums each row."""
+    body, [pname] = _specialize_source_multi(
+        _VEC_SUM_SRC, "vec-sum",
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+    )
+    from remora.ad import trace_expr
+    tape = EvalTape()
+    x = tape.push_input(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64))
+    trace_expr(body, {pname: x}, tape)
+    np.testing.assert_array_equal(tape.values[-1], [6.0, 15.0])
+
+
+def test_vec_sum_gradient():
+    """Gradient of row sum = all-ones of same shape."""
+    body, [pname] = _specialize_source_multi(
+        _VEC_SUM_SRC, "vec-sum",
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+    )
+    x = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    g = grad_via_tape(body, pname, x)
+    np.testing.assert_array_equal(g, np.ones_like(x))
+
+
+def test_vec_sum_finite_diff():
+    """Row-sum gradient matches finite differences."""
+    body, [pname] = _specialize_source_multi(
+        _VEC_SUM_SRC, "vec-sum",
+        ArrayType(FLOAT, (StaticDim(4), StaticDim(3))),
+    )
+    rng = np.random.RandomState(99)
+    x = rng.randn(4, 3)
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        return float(np.sum(v.sum(axis=1)))
+    grad_check(f, x, tape_g, label="vec_sum", rtol=1e-6)
+
+
+def test_tape_vector_cell_map_fold():
+    """Tape correctly traces vector-cell map with fold (constructed directly)."""
+    from remora.typechecker import TypedMap, TypedFold, TypedLambda
+    from remora.ast_nodes import MapExpr, LambdaExpr, FoldExpr
+
+    frame = (StaticDim(2),)
+    cell = (StaticDim(3),)
+    array_type = ArrayType(FLOAT, frame + cell)
+    cell_type = ArrayType(FLOAT, cell)
+
+    _loc = SourceLoc("test", 0, 0)
+    row_var = TypedExprNode(VarExpr("row", _loc), cell_type)
+    init = TypedExprNode(FloatLit(0.0, _loc), FLOAT)
+    plus_op = TypedExprNode(OperatorFuncExpr("+", _loc), FLOAT)
+
+    body = TypedFold(
+        FoldExpr(plus_op.expr, init.expr, row_var.expr, _loc),
+        plus_op, init, row_var,
+        StaticDim(0), FLOAT,
+    )
+    lam = TypedLambda(
+        LambdaExpr(["row"], body.expr, _loc),
+        [("row", cell_type)], body,
+        FuncType((cell_type,), FLOAT),
+    )
+    x = TypedExprNode(VarExpr("x", _loc), array_type)
+    map_expr = MapExpr(lam.expr, [x.expr], _loc)
+    typed_map = TypedMap(map_expr, lam, [x], frame, cell, ArrayType(FLOAT, frame))
+
+    tape = EvalTape()
+    arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)
+    arr_idx = tape.push_input(arr)
+    from remora.ad import trace_expr
+    trace_expr(typed_map, {"x": arr_idx}, tape)
+    np.testing.assert_array_equal(tape.values[-1], [6.0, 15.0])
+
+    adjs = tape.reverse()
+    np.testing.assert_array_equal(adjs[arr_idx], np.ones_like(arr))
+
+
+def test_tape_vector_cell_map_fold_captured():
+    """Tape correctly handles captured variable in vector-cell map + fold."""
+    from remora.typechecker import TypedMap, TypedFold, TypedLambda, TypedApp
+    from remora.ast_nodes import MapExpr, LambdaExpr, FoldExpr, AppExpr
+
+    frame = (StaticDim(2),)
+    cell = (StaticDim(3),)
+    array_type = ArrayType(FLOAT, frame + cell)
+    cell_type = ArrayType(FLOAT, cell)
+
+    _loc = SourceLoc("test", 0, 0)
+    row_var = TypedExprNode(VarExpr("row", _loc), cell_type)
+    x_var = TypedExprNode(VarExpr("x", _loc), cell_type)
+    init = TypedExprNode(FloatLit(0.0, _loc), FLOAT)
+    plus_op = TypedExprNode(OperatorFuncExpr("+", _loc), FLOAT)
+    mul_op = TypedExprNode(OperatorFuncExpr("*", _loc), FLOAT)
+
+    mul_body = TypedApp(
+        AppExpr(mul_op.expr, [row_var.expr, x_var.expr], _loc),
+        mul_op, [row_var, x_var], cell_type,
+    )
+    fold_body = TypedFold(
+        FoldExpr(plus_op.expr, init.expr, mul_body.expr, _loc),
+        plus_op, init, mul_body,
+        StaticDim(0), FLOAT,
+    )
+    lam = TypedLambda(
+        LambdaExpr(["row"], fold_body.expr, _loc),
+        [("row", cell_type)], fold_body,
+        FuncType((cell_type,), FLOAT),
+    )
+    w = TypedExprNode(VarExpr("w", _loc), array_type)
+    map_expr = MapExpr(lam.expr, [w.expr], _loc)
+    typed_map = TypedMap(map_expr, lam, [w], frame, cell, ArrayType(FLOAT, frame))
+
+    weights = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]], dtype=np.float64)
+    features = np.array([2.0, -0.5, 1.25], dtype=np.float64)
+
+    tape = EvalTape()
+    w_idx = tape.push_input(weights)
+    x_idx = tape.push_input(features)
+    from remora.ad import trace_expr
+    trace_expr(typed_map, {"w": w_idx, "x": x_idx}, tape)
+    np.testing.assert_array_almost_equal(tape.values[-1], [4.0, 1.9375])
+
+    adjs = tape.reverse()
+    expected_w_grad = np.tile(features, (2, 1))
+    expected_x_grad = weights.sum(axis=0)
+    np.testing.assert_array_almost_equal(adjs[w_idx], expected_w_grad)
+    np.testing.assert_array_almost_equal(adjs[x_idx], expected_x_grad)
+
+
+def test_tape_vector_cell_map_fold_captured_finite_diff():
+    """Captured-variable vector-cell map gradient matches finite differences."""
+    from remora.typechecker import TypedMap, TypedFold, TypedLambda, TypedApp
+    from remora.ast_nodes import MapExpr, LambdaExpr, FoldExpr, AppExpr
+
+    for h, w in [(2, 3), (4, 3), (3, 5)]:
+        frame = (StaticDim(h),)
+        cell = (StaticDim(w),)
+        array_type = ArrayType(FLOAT, frame + cell)
+        cell_type = ArrayType(FLOAT, cell)
+
+        _loc = SourceLoc("test", 0, 0)
+        row_var = TypedExprNode(VarExpr("row", _loc), cell_type)
+        x_var = TypedExprNode(VarExpr("x", _loc), cell_type)
+        init = TypedExprNode(FloatLit(0.0, _loc), FLOAT)
+        plus_op = TypedExprNode(OperatorFuncExpr("+", _loc), FLOAT)
+        mul_op = TypedExprNode(OperatorFuncExpr("*", _loc), FLOAT)
+
+        mul_body = TypedApp(
+            AppExpr(mul_op.expr, [row_var.expr, x_var.expr], _loc),
+            mul_op, [row_var, x_var], cell_type,
+        )
+        fold_body = TypedFold(
+            FoldExpr(plus_op.expr, init.expr, mul_body.expr, _loc),
+            plus_op, init, mul_body,
+            StaticDim(0), FLOAT,
+        )
+        lam = TypedLambda(
+            LambdaExpr(["row"], fold_body.expr, _loc),
+            [("row", cell_type)], fold_body,
+            FuncType((cell_type,), FLOAT),
+        )
+        w_var = TypedExprNode(VarExpr("w", _loc), array_type)
+        map_expr = MapExpr(lam.expr, [w_var.expr], _loc)
+        typed_map = TypedMap(map_expr, lam, [w_var], frame, cell, ArrayType(FLOAT, frame))
+
+        rng = np.random.RandomState(77 + h)
+        weights = rng.randn(h, w)
+        features = rng.randn(w)
+
+        tape = EvalTape()
+        w_idx = tape.push_input(weights)
+        x_idx = tape.push_input(features)
+        from remora.ad import trace_expr
+        trace_expr(typed_map, {"w": w_idx, "x": x_idx}, tape)
+        adjs = tape.reverse()
+
+        def loss_w(candidate):
+            return float(np.sum(candidate @ features))
+
+        def loss_x(candidate):
+            return float(np.sum(weights @ candidate))
+
+        grad_check(loss_w, weights, adjs[w_idx], label=f"vec_map_fd_w_{h}x{w}", rtol=1e-6)
+        grad_check(loss_x, features, adjs[x_idx], label=f"vec_map_fd_x_{h}x{w}", rtol=1e-6)
+
+
+# ── Section 2: model composition (named helpers) ────────────────────────────
+
+
+_NESTED_HELPER_SRC = """\
+(define/pi ()
+  (dot [a (Array Float 3) b (Array Float 3)] Float)
+  (fold + 0.0 (map * a b)))
+
+(define/pi ()
+  (linear [w (Array Float 2 3) x (Array Float 3)] (Array Float 2))
+  (map (lambda (row) (dot row x)) w))
+
+(define/pi ()
+  (loss [w (Array Float 2 3) x (Array Float 3)] Float)
+  (fold + 0.0 (* (linear w x) (linear w x))))
+"""
+
+
+def test_nested_helper_forward():
+    """Named helpers dot -> linear -> loss. Forward execution through tape."""
+    body, pnames = _specialize_source_multi(
+        _NESTED_HELPER_SRC, "loss",
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    weights = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]], dtype=np.float64)
+    features = np.array([2.0, -0.5, 1.25], dtype=np.float64)
+
+    from remora.ad import trace_expr
+    tape = EvalTape()
+    w_idx = tape.push_input(weights)
+    x_idx = tape.push_input(features)
+    trace_expr(body, {pnames[0]: w_idx, pnames[1]: x_idx}, tape)
+
+    projected = weights @ features
+    expected_loss = float(np.sum(projected * projected))
+    np.testing.assert_almost_equal(tape.values[-1], expected_loss)
+
+
+def test_nested_helper_gradient():
+    """Named helper composition produces correct gradients."""
+    body, pnames = _specialize_source_multi(
+        _NESTED_HELPER_SRC, "loss",
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    weights = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]], dtype=np.float64)
+    features = np.array([2.0, -0.5, 1.25], dtype=np.float64)
+
+    grads = _multi_tape_gradients(body, pnames, [weights, features])
+
+    projected = weights @ features
+    expected_w = 2.0 * projected[:, np.newaxis] * features[np.newaxis, :]
+    expected_x = 2.0 * (weights.T @ projected)
+
+    np.testing.assert_array_almost_equal(grads[pnames[0]], expected_w)
+    np.testing.assert_array_almost_equal(grads[pnames[1]], expected_x)
+
+
+def test_nested_helper_finite_diff():
+    """Named helpers: tape gradient matches finite differences for both params."""
+    body, pnames = _specialize_source_multi(
+        _NESTED_HELPER_SRC, "loss",
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    rng = np.random.RandomState(44)
+    weights = rng.randn(2, 3)
+    features = rng.randn(3)
+    grads = _multi_tape_gradients(body, pnames, [weights, features])
+
+    def loss_w(candidate):
+        projected = candidate @ features
+        return float(np.sum(projected * projected))
+
+    def loss_x(candidate):
+        projected = weights @ candidate
+        return float(np.sum(projected * projected))
+
+    grad_check(loss_w, weights, grads[pnames[0]], label="nested_w", rtol=1e-5)
+    grad_check(loss_x, features, grads[pnames[1]], label="nested_x", rtol=1e-5)
+
+
+def test_scalar_named_helper():
+    """A simple named helper (square) in a scalar loss."""
+    _SRC = """\
+(define/pi ()
+  (sq [x Float] Float)
+  (* x x))
+(define/pi ()
+  (loss [x Float] Float)
+  (sq x))
+"""
+    body, [pname] = _specialize_source_multi(
+        _SRC, "loss", FLOAT,
+    )
+    g = grad_via_tape(body, pname, np.asarray(3.0))
+    assert g == pytest.approx(6.0)
+    g = grad_via_tape(body, pname, np.asarray(-2.0))
+    assert g == pytest.approx(-4.0)
