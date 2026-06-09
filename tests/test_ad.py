@@ -76,6 +76,20 @@ def test_tape_fold():
     np.testing.assert_array_equal(adjs[arr], [1.0, 1.0, 1.0])
 
 
+def test_tape_fold_reduces_only_the_recorded_axis():
+    values = np.arange(1.0, 7.0).reshape(2, 3)
+    tape = EvalTape()
+    array = tape.push_input(values)
+    tape.push(
+        TapeEntry("fold", (array,), (values, 1)),
+        values.sum(axis=1),
+    )
+
+    adjs = tape.reverse()
+
+    np.testing.assert_array_equal(adjs[array], np.ones_like(values))
+
+
 # ── grad_via_tape tests ────────────────────────────────────────────────────
 
 

@@ -263,6 +263,14 @@ def _lower_tensor_input(
             node, prefix, functions, tensor_env=tensor_env
         )
 
+    if isinstance(node, (HIRFold, HIRReduce)) and isinstance(
+        node.result_type, ArrayType
+    ):
+        code, name, result_type = _lower_fold_result(
+            node, functions, tensor_env, prefix=prefix
+        )
+        return code, name, result_type, type_to_mlir(node.result_type.element)
+
     if isinstance(node, HIRScatterAdd):
         from remora.lowering.scalar import _lower_scalar_module
 
@@ -313,6 +321,13 @@ def _lower_tensor_input(
         return code, result_name, result_type, target_elem
 
     if isinstance(node, (HIRMap, HIRApply)):
+        if node.cell_shape:
+            code, name, result_type = _lower_map_cell_result(
+                node, functions, tensor_env
+            )
+            if not isinstance(node.result_type, ArrayType):
+                raise RemoraLoweringError("cell-map tensor input must be an array")
+            return code, name, result_type, type_to_mlir(node.result_type.element)
         return _lower_fold_input(
             node, functions, prefix, tensor_env=tensor_env
         )
@@ -999,9 +1014,13 @@ def _lower_fold_result(
     node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
+    *,
+    prefix: str = "",
 ) -> tuple[str, str, str]:
     if isinstance(node.result_type, ArrayType):
-        return _lower_array_fold_result(node, functions, tensor_env)
+        return _lower_array_fold_result(
+            node, functions, tensor_env, prefix=prefix
+        )
     return _lower_scalar_fold_result(node, functions, tensor_env)
 
 
@@ -1107,6 +1126,8 @@ def _lower_array_fold_result(
     node: HIRFold | HIRReduce,
     functions: dict[str, HIRFunction],
     tensor_env: TensorEnv | None = None,
+    *,
+    prefix: str = "",
 ) -> tuple[str, str, str]:
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError(
@@ -1125,11 +1146,12 @@ def _lower_array_fold_result(
     input_code, input_name, input_type, input_element_type = _lower_fold_input(
         node.array,
         functions,
+        _join_prefix(prefix, "fold_input"),
         tensor_env=tensor_env,
     )
     init_code, init_name, init_type, init_element_type = _lower_tensor_input(
         node.init,
-        "init",
+        _join_prefix(prefix, "fold_init"),
         functions,
         tensor_env,
     )
@@ -1158,9 +1180,10 @@ def _lower_array_fold_result(
         result_type=result_element_type,
     )
 
+    folded = f"%{_join_prefix(prefix, 'folded')}"
     body = f"""{input_code}
 {init_code}
-    %folded = linalg.generic {{
+    {folded} = linalg.generic {{
       indexing_maps = [{_identity_affine_map(rank)}, {_drop_first_affine_map(rank)}],
       iterator_types = {_fold_iterators(rank)}
     }} ins({input_name} : {input_type}) outs({init_name} : {result_type}) {{
@@ -1168,7 +1191,7 @@ def _lower_array_fold_result(
 {fold_body}
     }} -> {result_type}
 """
-    return body.rstrip(), "%folded", result_type
+    return body.rstrip(), folded, result_type
 
 
 def _lower_fold_input(
@@ -1212,9 +1235,12 @@ def _lower_fold_input(
 
     if isinstance(node, (HIRMap, HIRApply)):
         if node.cell_shape:
-            raise RemoraLoweringError(
-                "only scalar-cell map inputs lower to fold MLIR so far"
+            code, name, result_type = _lower_map_cell_result(
+                node, functions, tensor_env
             )
+            if not isinstance(node.result_type, ArrayType):
+                raise RemoraLoweringError("cell-map fold input must be an array")
+            return code, name, result_type, type_to_mlir(node.result_type.element)
         if not isinstance(node.result_type, ArrayType):
             raise RemoraLoweringError(
                 "map fold input must have array type"
@@ -1262,6 +1288,14 @@ def _lower_fold_input(
 {map_body}
     }} -> {map_type}"""
         return code, mapped, map_type, map_element_type
+
+    if isinstance(node, (HIRFold, HIRReduce)) and isinstance(
+        node.result_type, ArrayType
+    ):
+        code, name, result_type = _lower_fold_result(
+            node, functions, tensor_env, prefix=prefix
+        )
+        return code, name, result_type, type_to_mlir(node.result_type.element)
 
     raise RemoraLoweringError(
         "only folds over tensor literals, iota, or direct scalar maps lower to MLIR so far"

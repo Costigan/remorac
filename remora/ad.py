@@ -97,7 +97,9 @@ class EvalTape:
                 _bcast_acc(adjs, e.inputs[1], -adj * lv / (rv * rv), self.values[e.inputs[1]])
             elif e.kind == "fold":
                 iv = np.asarray(e.saved[0], dtype=np.float64)
-                _accum(adjs, e.inputs[0], np.full_like(iv, adj.item()))
+                axis = int(e.saved[1]) if len(e.saved) > 1 else 0
+                expanded = np.expand_dims(np.asarray(adj, dtype=np.float64), axis)
+                _accum(adjs, e.inputs[0], np.broadcast_to(expanded, iv.shape).copy())
             elif e.kind == "neg":
                 _bcast_acc(adjs, e.inputs[0], -adj, self.values[e.inputs[0]])
             elif e.kind in {"reshape", "ravel"}:
@@ -217,22 +219,33 @@ def _apply_bin_op(op, lv, rv):
 # ── Traced evaluation ─────────────────────────────────────────────────────
 
 
-def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
+def trace_expr(
+    expr: TypedExpr,
+    env: dict[str, int],
+    tape: EvalTape,
+    *,
+    fold_axis: int = 0,
+) -> int:
     if isinstance(expr, TypedExprNode):
         return _trace_node(expr, env, tape)
     if isinstance(expr, TypedCast):
-        return trace_expr(expr.value, env, tape)
+        return trace_expr(expr.value, env, tape, fold_axis=fold_axis)
     if isinstance(expr, TypedLet):
-        vidx = trace_expr(expr.value, env, tape)
-        return trace_expr(expr.body, {**env, expr.expr.name: vidx}, tape)
+        vidx = trace_expr(expr.value, env, tape, fold_axis=fold_axis)
+        return trace_expr(
+            expr.body,
+            {**env, expr.expr.name: vidx},
+            tape,
+            fold_axis=fold_axis,
+        )
     if isinstance(expr, TypedApp):
-        return _trace_app(expr, env, tape)
+        return _trace_app(expr, env, tape, fold_axis=fold_axis)
     if isinstance(expr, TypedFold):
-        return _trace_fold(expr, env, tape)
+        return _trace_fold(expr, env, tape, fold_axis=fold_axis)
     if isinstance(expr, TypedMap):
-        return _trace_map(expr, env, tape)
+        return _trace_map(expr, env, tape, fold_axis=fold_axis)
     if isinstance(expr, TypedIf):
-        return _trace_if(expr, env, tape)
+        return _trace_if(expr, env, tape, fold_axis=fold_axis)
     if isinstance(expr, TypedReshape):
         return _trace_reshape(expr, env, tape)
     if isinstance(expr, TypedRavel):
@@ -273,8 +286,14 @@ def _trace_node(expr: TypedExprNode, env: dict[str, int], tape: EvalTape) -> int
     raise NotImplementedError(f"trace node: {type(ast).__name__}")
 
 
-def _trace_app(expr: TypedApp, env: dict[str, int], tape: EvalTape) -> int:
-    args = [trace_expr(a, env, tape) for a in expr.args]
+def _trace_app(
+    expr: TypedApp,
+    env: dict[str, int],
+    tape: EvalTape,
+    *,
+    fold_axis: int = 0,
+) -> int:
+    args = [trace_expr(a, env, tape, fold_axis=fold_axis) for a in expr.args]
     if len(args) != 2:
         raise NotImplementedError("trace app: non-binary")
     left_idx, right_idx = args
@@ -307,17 +326,49 @@ def _apply_inactive_bin_op(op: str, left, right):
     raise NotImplementedError(f"inactive binary op: {op}")
 
 
-def _trace_fold(expr: TypedFold, env: dict[str, int], tape: EvalTape) -> int:
-    arr_idx = trace_expr(expr.array, env, tape)
+def _trace_fold(
+    expr: TypedFold,
+    env: dict[str, int],
+    tape: EvalTape,
+    *,
+    fold_axis: int = 0,
+) -> int:
+    arr_idx = trace_expr(expr.array, env, tape, fold_axis=fold_axis)
     arr_val = _value(tape, arr_idx)
-    return tape.push(TapeEntry("fold", (arr_idx,), (arr_val,)), arr_val.sum())
+    return tape.push(
+        TapeEntry("fold", (arr_idx,), (arr_val, fold_axis)),
+        np.asarray(arr_val).sum(axis=fold_axis),
+    )
 
 
-def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
+def _trace_map(
+    expr,
+    env: dict[str, int],
+    tape: EvalTape,
+    *,
+    fold_axis: int = 0,
+) -> int:
+    if expr.cell_shape and len(expr.arrays) == 1:
+        if not isinstance(expr.func, TypedLambda) or len(expr.func.params) != 1:
+            raise NotImplementedError("trace map: vector-cell map requires a unary lambda")
+        array_idx = trace_expr(
+            expr.arrays[0], env, tape, fold_axis=fold_axis
+        )
+        param_name, _param_type = expr.func.params[0]
+        return trace_expr(
+            expr.func.body,
+            {**env, param_name: array_idx},
+            tape,
+            fold_axis=fold_axis + len(expr.frame_shape),
+        )
     if not expr.cell_shape:
         if len(expr.arrays) == 2:
-            left_idx = trace_expr(expr.arrays[0], env, tape)
-            right_idx = trace_expr(expr.arrays[1], env, tape)
+            left_idx = trace_expr(
+                expr.arrays[0], env, tape, fold_axis=fold_axis
+            )
+            right_idx = trace_expr(
+                expr.arrays[1], env, tape, fold_axis=fold_axis
+            )
             op = _get_op(expr.func)
             if op in _INACTIVE_BINARY_OPS:
                 result = _apply_inactive_bin_op(
@@ -326,15 +377,21 @@ def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
                 return tape.push(TapeEntry("inactive", (left_idx, right_idx), (op,)), result)
             return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
     if expr.arrays:
-        return trace_expr(expr.arrays[0], env, tape)
+        return trace_expr(expr.arrays[0], env, tape, fold_axis=fold_axis)
     raise NotImplementedError("trace map: no arrays")
 
 
-def _trace_if(expr, env: dict[str, int], tape: EvalTape) -> int:
+def _trace_if(
+    expr,
+    env: dict[str, int],
+    tape: EvalTape,
+    *,
+    fold_axis: int = 0,
+) -> int:
     tape.has_data_dependent_control_flow = True
-    cond_idx = trace_expr(expr.condition, env, tape)
-    then_idx = trace_expr(expr.then_branch, env, tape)
-    else_idx = trace_expr(expr.else_branch, env, tape)
+    cond_idx = trace_expr(expr.condition, env, tape, fold_axis=fold_axis)
+    then_idx = trace_expr(expr.then_branch, env, tape, fold_axis=fold_axis)
+    else_idx = trace_expr(expr.else_branch, env, tape, fold_axis=fold_axis)
     cond_val = _value(tape, cond_idx)
     then_val = _value(tape, then_idx)
     else_val = _value(tape, else_idx)

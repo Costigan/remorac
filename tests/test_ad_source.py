@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 from remora.ad import EvalTape, TapeEntry, grad_via_tape, trace_via_tape
+from remora.ad_testing import finite_difference_grad
 from remora.ad_source import generate_gradient_source
 from remora.compiler import (
+    compile_gradient_functions_source,
     compile_gradient_function_source,
     compile_gradient_function_source_to_supported_gpu_artifacts,
     compile_source_gradient_function,
@@ -31,6 +33,12 @@ _SQ_LOSS = (
     "(define/pi ([n Dim]) "
     "  (sq-loss [x (Array Float n)] Float) "
     "  (fold + 0.0 (* x x)))"
+)
+
+_ROW_LINEAR_LOSS = (
+    "def loss w x = fold (+) 0.0 "
+    "((map (\\row -> fold (+) 0.0 (map (*) row x)) w) * "
+    " (map (\\row -> fold (+) 0.0 (map (*) row x)) w))"
 )
 
 
@@ -821,3 +829,86 @@ def test_multi_output_gradient_functions():
     assert len(result.gradients) == 2
     for g in result.gradients:
         assert g.compiler.mlir_text  # each compiles to MLIR
+
+
+def test_row_linear_gradients_match_finite_differences():
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    artifacts = compile_gradient_functions_source(
+        _ROW_LINEAR_LOSS,
+        "loss",
+        param_types,
+        include_prelude=False,
+        syntax="ml",
+    )
+    weights = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]])
+    features = np.array([2.0, -0.5, 1.25])
+
+    interpreted = []
+    weight_text = "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]"
+    feature_text = "[2.0 -0.5 1.25]"
+    for gradient in artifacts.gradients:
+        result = evaluate_source(
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} {weight_text} {feature_text})",
+            include_prelude=False,
+            syntax="lisp",
+        )
+        interpreted.append(np.asarray(result.value, dtype=np.float64))
+
+    def loss_w(candidate):
+        projected = candidate @ features
+        return float(np.sum(projected * projected))
+
+    def loss_x(candidate):
+        projected = weights @ candidate
+        return float(np.sum(projected * projected))
+
+    np.testing.assert_allclose(
+        interpreted[0],
+        finite_difference_grad(loss_w, weights),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        interpreted[1],
+        finite_difference_grad(loss_x, features),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert all(gradient.compiler.mlir_text for gradient in artifacts.gradients)
+
+
+def test_row_linear_generated_gradients_execute_on_cpu():
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    artifacts = compile_gradient_functions_source(
+        _ROW_LINEAR_LOSS,
+        "loss",
+        param_types,
+        include_prelude=False,
+        syntax="ml",
+    )
+    weight_text = "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]"
+    feature_text = "[2.0 -0.5 1.25]"
+    expected = (
+        np.array([[16.0, -4.0, 10.0], [7.75, -1.9375, 4.84375]]),
+        np.array([9.8125, -7.03125, 13.09375]),
+    )
+
+    for gradient, expected_value in zip(artifacts.gradients, expected):
+        request = (
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} {weight_text} {feature_text})"
+        )
+        try:
+            result = evaluate_source_compiled(
+                request, include_prelude=False, syntax="lisp"
+            )
+        except PipelineUnavailable as exc:
+            pytest.skip(str(exc))
+        np.testing.assert_allclose(result.value, expected_value, rtol=1e-6)
