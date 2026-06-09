@@ -14,6 +14,9 @@ from remora.hir import (
     HIRCast,
     HIRDrop,
     HIRExpr,
+    HIRFirst,
+    HIRSecond,
+    HIRPair,
     HIRFilter,
     HIRFold,
     HIRFoldRight,
@@ -217,6 +220,9 @@ class MLIRLowering:
                 HIRIndicesOf,
                 HIRWithShape,
                 HIRScatterAdd,
+                HIRPair,
+                HIRFirst,
+                HIRSecond,
                 HIRArrayLit,
                 HIRAppend,
                 HIRBox,
@@ -535,6 +541,28 @@ def _lower_main_module(
         return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRScatterAdd):
         return _lower_scatter_add_module(node, functions)
+    if isinstance(node, HIRFirst):
+        inner = node.pair
+        while isinstance(inner, HIRLet):
+            inner = inner.body
+        if isinstance(inner, HIRPair):
+            return _lower_main_module(inner.left, functions)
+        return _lower_main_module(inner, functions)
+    if isinstance(node, HIRSecond):
+        inner = node.pair
+        while isinstance(inner, HIRLet):
+            inner = inner.body
+        if isinstance(inner, HIRPair):
+            return _lower_main_module(inner.right, functions)
+        return _lower_main_module(inner, functions)
+    if isinstance(node, HIRVar):
+        # Variable reference — should have been resolved by let lowering
+        from remora.lowering.tensor_ops import _lower_tensor_input
+        code, name, ty, _elem = _lower_tensor_input(node, "var", functions)
+        from remora.lowering.module import _MLIRMainModuleBuilder
+        builder = _MLIRMainModuleBuilder(ty)
+        builder.add_block(code)
+        return builder.render(name)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):

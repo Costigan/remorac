@@ -30,7 +30,7 @@ from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedApp, TypedGrad, TypedProgram
 from remora.index import ShapeExpr
-from remora.types import DimExpr, FuncType, RemoraType, RemoraTypeError
+from remora.types import DimExpr, FuncType, PairType, RemoraType, RemoraTypeError
 from remora.ast_nodes import AppExpr, FuncDef, IndexAppExpr, Program, VarExpr
 
 
