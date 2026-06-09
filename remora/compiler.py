@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+    from remora.ad_source import GradientSourceArtifact
 
 from remora.codegen import (
     CodegenUnavailable,
@@ -84,6 +89,18 @@ class SupportedGPUFunctionArtifact:
     scaffold: GPUModuleScaffold
     ptx_text: str
     kernels: list[KernelMeta]
+
+
+@dataclass(frozen=True)
+class GradientCompilerArtifact:
+    gradient_source: GradientSourceArtifact
+    compiler: FunctionCompilerArtifact
+
+
+@dataclass(frozen=True)
+class GradientGPUArtifact:
+    gradient_source: GradientSourceArtifact
+    gpu: SupportedGPUFunctionArtifact
 
 
 def compile_source(
@@ -316,3 +333,72 @@ def compile_function_source(
         specialization_name=typed_function.specialization_name,
         index_args=typed_function.index_args,
     )
+
+
+def compile_gradient_function_source(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    verify: bool = True,
+) -> GradientCompilerArtifact:
+    """Generate and compile a specialized unary gradient for the CPU path."""
+    from remora.ad_source import generate_gradient_function_source
+
+    gradient = generate_gradient_function_source(
+        source,
+        function_name,
+        param_types,
+        example_input,
+        gradient_name=gradient_name,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    compiler = compile_function_source(
+        gradient.source,
+        gradient.function_name,
+        gradient.param_types,
+        verify=verify,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    return GradientCompilerArtifact(gradient, compiler)
+
+
+def compile_gradient_function_source_to_supported_gpu_artifacts(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    kernel_name: str | None = None,
+) -> GradientGPUArtifact:
+    """Generate and compile a specialized unary gradient for the GPU path."""
+    from remora.ad_source import generate_gradient_function_source
+
+    gradient = generate_gradient_function_source(
+        source,
+        function_name,
+        param_types,
+        example_input,
+        gradient_name=gradient_name,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    kernel = kernel_name or f"remora_{gradient.function_name.replace('-', '_')}"
+    gpu = compile_function_source_to_supported_gpu_artifacts(
+        gradient.source,
+        gradient.function_name,
+        gradient.param_types,
+        include_prelude=False,
+        kernel_name=kernel,
+        syntax="lisp",
+    )
+    return GradientGPUArtifact(gradient, gpu)

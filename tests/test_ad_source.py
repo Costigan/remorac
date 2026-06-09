@@ -6,6 +6,8 @@ import pytest
 from remora.ad import EvalTape, TapeEntry, grad_via_tape, trace_via_tape
 from remora.ad_source import generate_gradient_source
 from remora.compiler import (
+    compile_gradient_function_source,
+    compile_gradient_function_source_to_supported_gpu_artifacts,
     compile_function_source,
     compile_function_source_to_supported_gpu_artifacts,
 )
@@ -51,6 +53,23 @@ def test_generated_square_gradient_is_reusable_source():
         syntax="lisp",
     )
     np.testing.assert_array_equal(result.value, [10.0, 8.0, 6.0, 4.0, 2.0])
+
+
+def test_source_level_grad_executes_for_concrete_function():
+    result = evaluate_source(
+        "(define/pi () (sq [x Float] Float) (* x x)) ((grad sq) 3.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert result.value == pytest.approx(6.0)
+
+    renamed = evaluate_source(
+        "(define/pi () (sq [value Float] Float) (* value value)) "
+        "((grad sq) 4.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert renamed.value == pytest.approx(8.0)
 
 
 def test_generated_source_handles_division_negation_and_fold_fill():
@@ -135,6 +154,43 @@ def test_generated_gradient_compiles_for_cpu_and_gpu_artifacts():
     assert gpu_artifact.ptx_text
     assert gpu_artifact.kernels
     np.testing.assert_allclose(grad_via_tape(body, "x", x), 2.0 * x)
+
+
+def test_named_function_gradient_compiler_workflow():
+    n = 6
+    param_type = ArrayType(FLOAT, (StaticDim(n),))
+    x = np.linspace(-1.0, 1.0, n)
+
+    cpu = compile_gradient_function_source(
+        _SQ_LOSS,
+        "sq-loss",
+        (param_type,),
+        x,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert cpu.gradient_source.function_name == "grad_sq_loss"
+    assert "(map (* 2.0) x)" in cpu.gradient_source.source
+    assert cpu.compiler.mlir_text
+
+    gpu = compile_gradient_function_source_to_supported_gpu_artifacts(
+        _SQ_LOSS,
+        "sq-loss",
+        (param_type,),
+        x,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert gpu.gpu.ptx_text
+    assert gpu.gpu.kernels[0].name == "remora_grad_sq_loss"
+
+
+def test_gradient_source_rejects_branch_specialized_tape():
+    tape = EvalTape(has_data_dependent_control_flow=True)
+    tape.push_input(np.asarray(2.0))
+    with pytest.raises(NotImplementedError, match="conditionals"):
+        generate_gradient_source(tape, "x", ())
 
 
 @pytest.mark.skipif(not cuda_available(), reason="live CUDA driver is not available")

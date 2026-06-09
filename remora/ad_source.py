@@ -8,6 +8,8 @@ from typing import TypeAlias
 import numpy as np
 
 from remora.ad import EvalTape
+from remora.ast_nodes import FuncDef
+from remora.types import ArrayType, FLOAT, RemoraType, ScalarType, StaticDim
 
 
 Shape = tuple[int, ...]
@@ -37,6 +39,17 @@ class _Fill:
 _Expr: TypeAlias = _Atom | _Op | _Fill
 
 
+@dataclass(frozen=True)
+class GradientSourceArtifact:
+    """A specialized tape and the reusable gradient source generated from it."""
+
+    source: str
+    function_name: str
+    param_types: tuple[RemoraType, ...]
+    tape: EvalTape
+    input_index: int
+
+
 def generate_gradient_source(
     tape: EvalTape,
     param_name: str,
@@ -51,6 +64,10 @@ def generate_gradient_source(
     """
     if not tape.entries:
         raise ValueError("cannot generate a gradient from an empty tape")
+    if tape.has_data_dependent_control_flow:
+        raise NotImplementedError(
+            "gradient source does not yet preserve data-dependent conditionals"
+        )
     if len(tape.input_indices) != 1:
         raise ValueError("gradient source currently requires exactly one tape input")
 
@@ -130,6 +147,86 @@ def generate_gradient_source(
         f"(define/pi () ({function_name} [{param_name} {param_type}] {param_type}) "
         f"{body})"
     )
+
+
+def generate_gradient_function_source(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+) -> GradientSourceArtifact:
+    """Specialize, trace, and generate source for a named unary function."""
+    from remora.lisp_reader import parse_lisp
+    from remora.parser import parse_program
+    from remora.prelude import with_prelude
+    from remora.typechecker import TypeChecker, TypeEnv
+
+    if len(param_types) != 1:
+        raise ValueError("gradient source currently requires one parameter type")
+    _validate_example_input(param_types[0], example_input)
+    program_source = (
+        with_prelude(source) if include_prelude and syntax == "ml" else source
+    )
+    program = parse_lisp(program_source) if syntax == "lisp" else parse_program(program_source)
+    checker = TypeChecker()
+    env = TypeEnv()
+    function: FuncDef | None = None
+    for definition in program.definitions:
+        _, env = checker.check_definition(definition, env)
+        if isinstance(definition, FuncDef) and definition.name == function_name:
+            function = definition
+    if function is None:
+        raise ValueError(f"function {function_name!r} is not defined")
+
+    specialized = checker.specialize_top_level_function(function, param_types, env)
+    if len(specialized.params) != 1 or specialized.type.result != FLOAT:
+        raise ValueError("gradient source requires a unary function with Float result")
+    param_name = specialized.params[0][0]
+    tape, input_index = _trace_function_body(
+        specialized.body, param_name, example_input
+    )
+    generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
+    generated_source = generate_gradient_source(
+        tape,
+        param_name,
+        tuple(np.asarray(example_input).shape),
+        function_name=generated_name,
+    )
+    return GradientSourceArtifact(
+        generated_source,
+        generated_name,
+        param_types,
+        tape,
+        input_index,
+    )
+
+
+def _trace_function_body(body, param_name: str, example_input: np.ndarray):
+    from remora.ad import trace_via_tape
+
+    return trace_via_tape(body, param_name, example_input)
+
+
+def _validate_example_input(param_type: RemoraType, example_input: np.ndarray) -> None:
+    shape = tuple(np.asarray(example_input).shape)
+    if isinstance(param_type, ScalarType):
+        if param_type != FLOAT or shape:
+            raise ValueError("example input does not match scalar Float parameter")
+        return
+    if isinstance(param_type, ArrayType) and param_type.element == FLOAT:
+        if not all(isinstance(dim, StaticDim) for dim in param_type.shape):
+            raise ValueError("gradient source requires a concrete parameter shape")
+        expected = tuple(int(dim.value) for dim in param_type.shape)
+        if shape != expected:
+            raise ValueError(
+                f"example input shape {shape} does not match parameter shape {expected}"
+            )
+        return
+    raise ValueError("gradient source requires a scalar or array Float parameter")
 
 
 def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> list[_Expr]:

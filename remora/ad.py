@@ -38,6 +38,7 @@ class EvalTape:
     entries: list[TapeEntry] = field(default_factory=list)
     values: list[np.ndarray] = field(default_factory=list)
     input_indices: list[int] = field(default_factory=list)
+    has_data_dependent_control_flow: bool = False
 
     def push(self, entry: TapeEntry, value: np.ndarray) -> int:
         idx = len(self.values)
@@ -203,6 +204,7 @@ def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
 
 
 def _trace_if(expr, env: dict[str, int], tape: EvalTape) -> int:
+    tape.has_data_dependent_control_flow = True
     cond_idx = trace_expr(expr.condition, env, tape)
     if np.any(_value(tape, cond_idx)):
         return trace_expr(expr.then_branch, env, tape)
