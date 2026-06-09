@@ -1077,3 +1077,290 @@ def test_nested_model_helpers_generate_compiled_gradients():
             request, include_prelude=False, syntax="lisp"
         )
         np.testing.assert_allclose(interpreted.value, expected_value, rtol=1e-6)
+
+
+# ── Section 4: Multi-output linear layer and two-layer MLP ──────────────────
+
+
+_LINEAR_LISP_SRC = """\
+(define/pi ()
+  (dot [a (Array Float 3) b (Array Float 3)] Float)
+  (fold + 0.0 (map * a b)))
+
+(define/pi ()
+  (linear [w (Array Float 2 3) x (Array Float 3)] (Array Float 2))
+  (map (lambda (row) (dot row x)) w))
+
+(define/pi ()
+  (linear-loss [w (Array Float 2 3) b (Array Float 2) x (Array Float 3)] Float)
+  (fold + 0.0 (* (+ (linear w x) b) (+ (linear w x) b))))
+"""
+
+
+def test_linear_with_bias_gradients():
+    """Gradients of squared-error loss with linear + bias pair."""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    artifacts = compile_gradient_functions_source(
+        _LINEAR_LISP_SRC,
+        "linear-loss",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    weights = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]])
+    bias = np.array([0.1, -0.2])
+    features = np.array([2.0, -0.5, 1.25])
+
+    interpreted = []
+    weight_text = "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]"
+    bias_text = "[0.1 -0.2]"
+    feature_text = "[2.0 -0.5 1.25]"
+    for gradient in artifacts.gradients:
+        result = evaluate_source(
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} "
+            f"{weight_text} {bias_text} {feature_text})",
+            include_prelude=False,
+            syntax="lisp",
+        )
+        interpreted.append(np.asarray(result.value, dtype=np.float64))
+
+    projected = weights @ features + bias
+    # d/dw of sum((w@x+b)^2) = 2 * projected * x^T (outer product)
+    expected_w = 2.0 * projected[:, np.newaxis] * features[np.newaxis, :]
+    # d/db of sum((w@x+b)^2) = 2 * projected
+    expected_b = 2.0 * projected
+    # d/dx of sum((w@x+b)^2) = 2 * w^T @ projected
+    expected_x = 2.0 * (weights.T @ projected)
+
+    np.testing.assert_allclose(interpreted[0], expected_w, rtol=1e-6)
+    np.testing.assert_allclose(interpreted[1], expected_b, rtol=1e-6)
+    np.testing.assert_allclose(interpreted[2], expected_x, rtol=1e-6)
+
+    def loss_w(candidate):
+        return float(np.sum((candidate @ features + bias) ** 2))
+
+    def loss_b(candidate):
+        return float(np.sum((weights @ features + candidate) ** 2))
+
+    def loss_x(candidate):
+        return float(np.sum((weights @ candidate + bias) ** 2))
+
+    np.testing.assert_allclose(
+        interpreted[0], finite_difference_grad(loss_w, weights), rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        interpreted[1], finite_difference_grad(loss_b, bias), rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        interpreted[2], finite_difference_grad(loss_x, features), rtol=1e-5, atol=1e-6,
+    )
+    assert all(gradient.compiler.mlir_text for gradient in artifacts.gradients)
+
+
+_MLP2_LISP_SRC = """\
+(define/pi ()
+  (dot [a (Array Float 3) b (Array Float 3)] Float)
+  (fold + 0.0 (map * a b)))
+
+(define/pi ()
+  (linear [w (Array Float 2 3) x (Array Float 3)] (Array Float 2))
+  (map (lambda (row) (dot row x)) w))
+
+(define/pi ()
+  (relu [v Float] Float)
+  (select (> v 0.0) v 0.0))
+
+(define/pi ()
+  (mlp2-loss [w1 (Array Float 2 3) b1 (Array Float 2) w2 (Array Float 2) b2 Float x (Array Float 3) y Float] Float)
+  (:: hidden (map relu (+ (linear w1 x) b1))
+  (:: logit (+ (fold + 0.0 (* w2 hidden)) b2)
+  (* (- logit y) (- logit y)))))
+"""
+
+
+def test_mlp2_loss_forward():
+    """Two-layer MLP forward match NumPy."""
+    from remora.lisp_reader import parse_lisp
+    from remora.typechecker import TypeChecker
+    from remora.types import FuncType, ScalarType
+
+    tc = TypeChecker()
+    tc.check_program(parse_lisp(_MLP2_LISP_SRC))
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        FLOAT,
+        ArrayType(FLOAT, (StaticDim(3),)),
+        FLOAT,
+    )
+
+    func = tc._functions["mlp2-loss"]
+    func_type = FuncType(param_types, FLOAT)
+    index_args = tc._inferred_index_args(func, param_types)
+    spec = tc._typed_top_level_function(
+        func, func_type, tc._build_prelude_env(), index_args=index_args,
+    )
+
+    w1 = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]])
+    b1 = np.array([0.1, -0.2])
+    w2 = np.array([3.0, -2.0])
+    b2 = np.float64(0.5)
+    x = np.array([2.0, -0.5, 1.25])
+    y = np.float64(1.0)
+
+    hidden_np = np.maximum(w1 @ x + b1, 0.0)
+    logit_np = float(np.sum(w2 * hidden_np) + b2)
+    loss_np = (logit_np - y) ** 2
+
+    tape = EvalTape()
+    indices = [
+        tape.push_input(np.asarray(arr, dtype=np.float64))
+        for arr in [w1, b1, w2, b2, x, y]
+    ]
+    pnames = ["w1", "b1", "w2", "b2", "x", "y"]
+    from remora.ad import trace_expr
+    trace_expr(spec.body, dict(zip(pnames, indices)), tape)
+
+    np.testing.assert_almost_equal(tape.values[-1], loss_np, decimal=6)
+
+
+def test_mlp2_loss_gradients_match_numpy():
+    """Two-layer MLP: interpreted gradients match finite differences (all 5 trainable params)."""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        FLOAT,
+        ArrayType(FLOAT, (StaticDim(3),)),
+        FLOAT,
+    )
+    artifacts = compile_gradient_functions_source(
+        _MLP2_LISP_SRC,
+        "mlp2-loss",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    w1 = np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]])
+    b1 = np.array([0.1, -0.2])
+    w2 = np.array([3.0, -2.0])
+    b2 = np.float64(0.5)
+    x = np.array([2.0, -0.5, 1.25])
+    y = np.float64(1.0)
+
+    param_values = [w1, b1, w2, b2, x, y]
+    param_texts = [
+        "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]",
+        "[0.1 -0.2]",
+        "[3.0 -2.0]",
+        "0.5",
+        "[2.0 -0.5 1.25]",
+        "1.0",
+    ]
+    interpreted = []
+    for gradient in artifacts.gradients:
+        result = evaluate_source(
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} "
+            + " ".join(param_texts) + ")",
+            include_prelude=False,
+            syntax="lisp",
+        )
+        interpreted.append(np.asarray(result.value, dtype=np.float64))
+
+    def np_mlp2_loss(w1_c, b1_c, w2_c, b2_c, x_c, y_c):
+        hidden = np.maximum(w1_c @ x_c + b1_c, 0.0)
+        logit = float(np.sum(w2_c * hidden) + b2_c)
+        return (logit - y_c) ** 2
+
+    for i, (name, val) in enumerate(zip(
+        ["w1", "b1", "w2", "b2", "x"], param_values
+    )):
+        def make_loss(idx):
+            def f(candidate):
+                params = [p.copy() for p in param_values]
+                params[idx] = candidate
+                return np_mlp2_loss(*params)
+            return f
+
+        np.testing.assert_allclose(
+            interpreted[i],
+            finite_difference_grad(make_loss(i), val),
+            rtol=1e-5,
+            atol=1e-6,
+            err_msg=f"gradient check failed for {name}",
+        )
+
+
+def test_mlp2_loss_generated_gradients_execute():
+    """Two-layer MLP compiled gradient sources execute correctly via interpreter."""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        ArrayType(FLOAT, (StaticDim(2),)),
+        FLOAT,
+        ArrayType(FLOAT, (StaticDim(3),)),
+        FLOAT,
+    )
+    artifacts = compile_gradient_functions_source(
+        _MLP2_LISP_SRC,
+        "mlp2-loss",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    param_texts = [
+        "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]",
+        "[0.1 -0.2]",
+        "[3.0 -2.0]",
+        "0.5",
+        "[2.0 -0.5 1.25]",
+        "1.0",
+    ]
+
+    def np_mlp2_loss(w1_c, b1_c, w2_c, b2_c, x_c, y_c):
+        hidden = np.maximum(w1_c @ x_c + b1_c, 0.0)
+        logit = float(np.sum(w2_c * hidden) + b2_c)
+        return (logit - y_c) ** 2
+
+    param_values = [
+        np.array([[0.5, -1.0, 2.0], [1.5, 0.25, -0.75]]),
+        np.array([0.1, -0.2]),
+        np.array([3.0, -2.0]),
+        np.float64(0.5),
+        np.array([2.0, -0.5, 1.25]),
+        np.float64(1.0),
+    ]
+
+    for i, gradient in enumerate(artifacts.gradients):
+        request = (
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} "
+            + " ".join(param_texts) + ")"
+        )
+        result = evaluate_source(
+            request, include_prelude=False, syntax="lisp",
+        )
+
+        def make_loss(idx):
+            def f(candidate):
+                params = [p.copy() for p in param_values]
+                params[idx] = candidate
+                return np_mlp2_loss(*params)
+            return f
+
+        np.testing.assert_allclose(
+            result.value,
+            finite_difference_grad(make_loss(i), param_values[i]),
+            rtol=1e-5,
+            atol=1e-6,
+        )
