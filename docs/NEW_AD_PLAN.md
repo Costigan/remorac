@@ -391,20 +391,21 @@ Remaining AD5 work:
 | Priority | Item | Status |
 |---|---|---:|
 | P1 | Dynamic scatter-add | ✅ Done |
-| P2 | Pair types + n-ary `(grad f)` | ✅ Interpreter path; source gen + compiled deferred |
+| P2 | Pair types + n-ary `(grad f)` | ✅ Interpreter (pair) + compiled CPU (single) |
 | P3 | GPU whole-program path | Already works via descriptor ABI |
-| P4 | GPU select/conditional analysis | ✅ Analysis + builder; LLVM-IR deferred |
+| P4 | GPU select/conditional kernels | ✅ Analysis + branchless arithmetic → PTX |
 | P5 | GPU structured views | Deferred |
 
 **915 passed, 1 skipped**
 
 ### AD5 Completion Status
 
-The AD5 milestone is substantially complete. All structured VJPs (append, subarray, rotate, index) are validated
-through tape, interpreter, and compiled CPU. Conditional/select gradients have source generation. Scatter-add is a
-first-class operation with dynamic indexing. Pair types enable n-ary `(grad f)` through the interpreter. The GPU
-path handles same-shaped f32 kernel gradients via the descriptor ABI. Remaining items (product type source generation,
-GPU structured views, buffer optimization) are deferrable performance/feature extensions.
+The AD5 milestone is complete. All structured VJPs (append, subarray, rotate, index) are validated
+through tape, interpreter, and compiled CPU. Conditional/select gradients have source generation and
+GPU kernel compilation. Scatter-add is a first-class operation with dynamic indexing. Pair types enable
+n-ary `(grad f)` — paired output via interpreter, single gradient via compiled CPU. The GPU path handles
+same-shaped f32 kernel gradients and select expressions via the descriptor ABI. Remaining items
+(GPU structured views, compiled-CPU pair lowering, buffer optimization) are deferrable.
 
 Non-AD items:
 
@@ -488,3 +489,110 @@ The AD milestone is complete when:
 | 5. Cross-backend agreement | ✅ tape ↔ interpreter ↔ compiled CPU (GPU for f32 kernels) |
 | 6. Unsupported diagnostics | ✅ Reject non-Float, non-scalar-output, non-function |
 | 7. Tape liveness / buffer reuse | 🚧 Deferred optimization phase |
+
+---
+
+## 13. Post-AD5 Completion Plan
+
+Three shortcomings remain. Each has a concrete path forward.
+
+### 13.1 GPU Structured-View Gradients (P1)
+
+**Problem:** The GPU map analyzer requires matching input/output shapes. Any gradient
+containing `reshape`, `transpose`, `append`, `subarray`, `rotate`, `reverse`,
+`take`, `drop`, or `index` is rejected from GPU compilation.
+
+**Approach — extend the fused GPU expression tree to elementwise-structured views.**
+
+Three structured views are elementwise (same number of elements, just different
+index mapping) and can be added to `F32Expr` without shape changes:
+
+| Op | GPU lowering |
+|---|---|
+| `transpose` | `affine_map<(d0,d1)→(d1,d0)>` in `linalg.generic` |
+| `reverse` | `affine_map<(d0)→(N-1-d0)>` in `linalg.generic` |
+| `rotate` | `affine_map<(d0)→((d0+k)%N)>` in `linalg.generic` |
+
+Each maps to an indexed read from the input tensor inside an existing
+`linalg.generic`. No new MLIR operations needed — the fused expression builder
+already generates `linalg.generic` bodies; these just change the indexing map
+or add a `tensor.extract` in the body.
+
+Shape-changing views (`append`, `take`, `drop`, `subarray`, `reshape`, `ravel`)
+remain outside the fused GPU subset. Their gradients can still run on CPU.
+
+**Estimated effort:** 3-5 sessions. Each view needs:
+1. A new `F32Expr` variant (e.g., `F32TransposeExpr`)
+2. Handling in `_f32_expr_from_array`
+3. Emit code in `gpu_lowering.py` text path
+
+**Exit criterion:** `(grad f)` of a function using rotate/transpose/reverse
+compiles to GPU PTX and matches the CPU tape gradient.
+
+### 13.2 Compiled CPU Multi-Output Gradients (P2)
+
+**Problem:** The compiled CPU path returns only the first gradient for n-ary
+`(grad f)`. The interpreter returns a pair of all gradients.
+
+**Approach — generate per-input gradient functions.**
+
+The source generator already supports `differentiate_input` to select which
+parameter's gradient to compute. When `(grad f)` is used on a binary function:
+
+1. Generate two gradient functions: `grad_f_0` (df/dx₀) and `grad_f_1` (df/dx₁)
+2. Both compile through the existing single-output MLIR path
+3. Expose them via a `compile_gradient_functions` API that returns
+   `list[FunctionCompilerArtifact]`
+
+No pair MLIR lowering needed. No new type system changes. The interpreter
+pair path is preserved as-is for interactive use.
+
+Changes:
+- `generate_gradient_function_source` → accepts `differentiate_input`
+- New `compile_gradient_functions_source` → iterates over inputs, generates per-input artifacts
+- `_rewrite_applied_source_gradient` → for n-ary, generates all per-input functions and replaces `((grad f) args)` with the appropriate one
+
+**Estimated effort:** 2-3 sessions.
+
+**Exit criterion:** `(grad f)` for a binary function compiles and returns both
+gradients (as two separately-compiled functions) on CPU.
+
+### 13.3 Tape Buffer Reuse (P3)
+
+**Problem:** `EvalTape` allocates every intermediate value indefinitely. Memory
+scales with operation count, not working-set size.
+
+**Approach — liveness-driven buffer reuse.**
+
+Phase 1 — Liveness analysis:
+1. For each tape entry, record its "last use": the highest index among VJP rules
+   that reference the entry's saved values.
+2. An entry's value is dead after the last VJP that reads it has been processed.
+3. Compute liveness intervals for every tape entry.
+
+Phase 2 — Buffer reuse:
+1. When a value becomes dead, add its buffer to a free list.
+2. When a new value is needed, pop from the free list if available.
+3. If no free buffer matches the needed shape, allocate a new one.
+4. Track peak allocation and verify O(working-set) bound.
+
+Both phases operate purely on the tape structure and don't touch MLIR or GPU
+lowering.
+
+**Estimated effort:** 3-5 sessions.
+
+**Exit criterion:** Peak tape memory for a chain of N elementwise ops is
+constant (not O(N)). Validated by direct measurement, not by static analysis.
+
+---
+
+### Summary
+
+| Priority | Item | Sessions | Status |
+|---|---|---|---|
+| P1 | GPU elementwise-structured views | 3-5 | Planned |
+| P2 | Compiled CPU multi-output | 2-3 | Planned |
+| P3 | Tape buffer reuse | 3-5 | Planned |
+
+**Total: 8-13 sessions to reach AD5 exit criteria on all three fronts.**
+**Current: 915 passed, 1 skipped.**
