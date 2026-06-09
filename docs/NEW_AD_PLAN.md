@@ -311,11 +311,16 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   source programs such as `((grad sq) 3.0)` execute through the CPU tape.
 - Public compiler workflows `compile_gradient_function_source` and
   `compile_gradient_function_source_to_supported_gpu_artifacts` specialize a
-  named unary function, trace an example input, generate reusable source, and
-  compile that source without callers using private typechecker APIs.
+  named unary function, derive a deterministic trace placeholder from its
+  concrete parameter type, generate reusable source, and compile that source
+  without callers using private typechecker APIs. An explicit example input is
+  optional and used only when the caller wants additional shape validation.
 - Source generation rejects data-dependent conditionals for now. The CPU tape
   still differentiates the active branch, but emitting only that branch would
   not define a reusable gradient for inputs that take another branch.
+- Comparison and logical predicates are recorded as inactive tape entries, so
+  CPU conditional AD now reaches and differentiates the selected branch rather
+  than incorrectly requesting a VJP for the predicate operator.
 
 Remaining AD5 work:
 
@@ -339,9 +344,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: public generated-gradient compiler path | 864 |
+| AD5 | In progress: shape-driven generated-gradient compiler path | 868 |
 
-Full suite after this milestone: **864 passed, 1 skipped**.
+Full suite after this milestone: **868 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).

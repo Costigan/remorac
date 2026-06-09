@@ -159,13 +159,11 @@ def test_generated_gradient_compiles_for_cpu_and_gpu_artifacts():
 def test_named_function_gradient_compiler_workflow():
     n = 6
     param_type = ArrayType(FLOAT, (StaticDim(n),))
-    x = np.linspace(-1.0, 1.0, n)
 
     cpu = compile_gradient_function_source(
         _SQ_LOSS,
         "sq-loss",
         (param_type,),
-        x,
         include_prelude=False,
         syntax="lisp",
         verify=False,
@@ -178,12 +176,68 @@ def test_named_function_gradient_compiler_workflow():
         _SQ_LOSS,
         "sq-loss",
         (param_type,),
-        x,
         include_prelude=False,
         syntax="lisp",
     )
     assert gpu.gpu.ptx_text
     assert gpu.gpu.kernels[0].name == "remora_grad_sq_loss"
+
+
+def test_shape_driven_gradient_generation_validates_optional_example():
+    n = 4
+    param_type = ArrayType(FLOAT, (StaticDim(n),))
+    generated = compile_gradient_function_source(
+        _SQ_LOSS,
+        "sq-loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(Array Float 4)" in generated.gradient_source.source
+
+    with pytest.raises(ValueError, match="does not match parameter shape"):
+        compile_gradient_function_source(
+            _SQ_LOSS,
+            "sq-loss",
+            (param_type,),
+            np.ones(3),
+            include_prelude=False,
+            syntax="lisp",
+            verify=False,
+        )
+
+
+def test_shape_driven_scalar_gradient_compiles_without_example():
+    source = "(define/pi () (poly [value Float] Float) (* value value))"
+    compiled = compile_gradient_function_source(
+        source,
+        "poly",
+        (FLOAT,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert compiled.gradient_source.source == (
+        "(define/pi () (grad_poly [value Float] Float) (* 2.0 value))"
+    )
+    assert compiled.compiler.mlir_text
+
+
+def test_public_gradient_workflow_rejects_conditionals():
+    source = (
+        "(define/pi () (piecewise [value Float] Float) "
+        "(if (> value 0.0) (* value value) (- 0.0 value)))"
+    )
+    with pytest.raises(NotImplementedError, match="conditionals"):
+        compile_gradient_function_source(
+            source,
+            "piecewise",
+            (FLOAT,),
+            include_prelude=False,
+            syntax="lisp",
+            verify=False,
+        )
 
 
 def test_gradient_source_rejects_branch_specialized_tape():

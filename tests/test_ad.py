@@ -6,7 +6,8 @@ import pytest
 from remora.ad import EvalTape, TapeEntry, grad_via_tape
 from remora.ad_testing import finite_difference_grad, grad_check
 from remora.typechecker import TypedApp, TypedExprNode
-from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr
+from remora.typechecker import TypedIf
+from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr, IfExpr
 from remora.types import FLOAT
 
 _LOC = SourceLoc("test", 0, 0)
@@ -192,6 +193,22 @@ def test_tape_neg():
     r = t.push(TapeEntry("neg", (x,), ()), np.asarray([-1.0, -2.0, -3.0]))
     adjs = t.reverse()
     np.testing.assert_array_equal(adjs[x], [-1.0, -1.0, -1.0])
+
+
+def test_conditional_predicate_is_inactive():
+    condition = _app(_op(">"), _var("x"), _lit(0.0))
+    square = _app(_op("*"), _var("x"), _var("x"))
+    negative = _app(_op("-"), _lit(0.0), _var("x"))
+    body = TypedIf(
+        IfExpr(condition.expr, square.expr, negative.expr, _LOC),
+        condition,
+        square,
+        negative,
+        FLOAT,
+    )
+
+    assert grad_via_tape(body, "x", np.asarray(3.0)) == pytest.approx(6.0)
+    assert grad_via_tape(body, "x", np.asarray(-3.0)) == pytest.approx(-1.0)
 
 
 # ── AD5: performance / correctness benchmarks ──────────────────────────────
