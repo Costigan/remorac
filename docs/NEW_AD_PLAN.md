@@ -391,11 +391,20 @@ Remaining AD5 work:
 | Priority | Item | Status |
 |---|---|---:|
 | P1 | Dynamic scatter-add | ✅ Done |
-| P2 | Multi-input gradients (via `compile_gradient_function_source`) | ✅ Done; `(grad f)` remains unary |
+| P2 | Pair types + n-ary `(grad f)` | ✅ Interpreter path; source gen + compiled deferred |
 | P3 | GPU whole-program path | Already works via descriptor ABI |
 | P4 | GPU select/conditional analysis | ✅ Analysis + builder; LLVM-IR deferred |
 | P5 | GPU structured views | Deferred |
-| P6 | Product types for `(grad f)` multi-input | Deferred — major language feature |
+
+**915 passed, 1 skipped**
+
+### AD5 Completion Status
+
+The AD5 milestone is substantially complete. All structured VJPs (append, subarray, rotate, index) are validated
+through tape, interpreter, and compiled CPU. Conditional/select gradients have source generation. Scatter-add is a
+first-class operation with dynamic indexing. Pair types enable n-ary `(grad f)` through the interpreter. The GPU
+path handles same-shaped f32 kernel gradients via the descriptor ABI. Remaining items (product type source generation,
+GPU structured views, buffer optimization) are deferrable performance/feature extensions.
 
 Non-AD items:
 

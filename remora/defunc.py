@@ -39,6 +39,9 @@ from remora.hir import (
     HIRReverse,
     HIRRotate,
     HIRScatterAdd,
+    HIRPair,
+    HIRFirst,
+    HIRSecond,
     HIRScan,
     HIRSlice,
     HIRSort,
@@ -180,6 +183,19 @@ class _Defunctionalizer:
                 self._rewrite_expr(e.target, scalar_env),
                 self._rewrite_expr(e.index, scalar_env),
                 self._rewrite_expr(e.update, scalar_env),
+                e.result_type,
+            ),
+            HIRPair: lambda e: HIRPair(
+                self._rewrite_expr(e.left, scalar_env),
+                self._rewrite_expr(e.right, scalar_env),
+                e.result_type,
+            ),
+            HIRFirst: lambda e: HIRFirst(
+                self._rewrite_expr(e.pair, scalar_env),
+                e.result_type,
+            ),
+            HIRSecond: lambda e: HIRSecond(
+                self._rewrite_expr(e.pair, scalar_env),
                 e.result_type,
             ),
             HIRFilter: lambda e: HIRFilter(

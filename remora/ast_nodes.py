@@ -121,6 +121,25 @@ class ScatterAddExpr:
 
 
 @dataclass(frozen=True)
+class PairExpr:
+    left: Expr
+    right: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class FirstExpr:
+    pair: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class SecondExpr:
+    pair: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class BoxExpr:
     value: Expr
     loc: SourceLoc
@@ -411,6 +430,9 @@ Expr: TypeAlias = (
     | IndicesOfExpr
     | WithShapeExpr
     | ScatterAddExpr
+    | PairExpr
+    | FirstExpr
+    | SecondExpr
     | BoxExpr
     | UnboxExpr
     | Iota1Expr

@@ -57,6 +57,9 @@ from remora.typechecker import (
     TypedUnbox,
     TypedWithShape,
     TypedScatterAdd,
+    TypedPair,
+    TypedFirst,
+    TypedSecond,
     TypedDrop,
     TypedFilter,
     TypedReplicate,
@@ -68,6 +71,7 @@ from remora.types import (
     ArrayType,
     DimExpr,
     FuncType,
+    PairType,
     RemoraType,
     ScalarType,
     SigmaType,
@@ -292,6 +296,25 @@ class HIRScatterAdd:
 
 
 @dataclass(frozen=True)
+class HIRPair:
+    left: HIRExpr
+    right: HIRExpr
+    result_type: PairType
+
+
+@dataclass(frozen=True)
+class HIRFirst:
+    pair: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
+class HIRSecond:
+    pair: HIRExpr
+    result_type: RemoraType
+
+
+@dataclass(frozen=True)
 class HIRPrimOp:
     op: str
     args: list[HIRExpr]
@@ -402,6 +425,9 @@ HIRExpr: TypeAlias = (
     | HIRIndicesOf
     | HIRWithShape
     | HIRScatterAdd
+    | HIRPair
+    | HIRFirst
+    | HIRSecond
     | HIRBox
     | HIRUnbox
     | HIRFilter
@@ -554,6 +580,17 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             lower_expr(expr.update),
             expr.type,
         )
+
+    if isinstance(expr, TypedPair):
+        return HIRPair(
+            lower_expr(expr.left), lower_expr(expr.right), expr.type
+        )
+
+    if isinstance(expr, TypedFirst):
+        return HIRFirst(lower_expr(expr.pair), expr.type)
+
+    if isinstance(expr, TypedSecond):
+        return HIRSecond(lower_expr(expr.pair), expr.type)
 
     if isinstance(expr, TypedBox):
         return HIRBox(lower_expr(expr.value), expr.type)

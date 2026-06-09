@@ -92,6 +92,9 @@ from remora.typechecker import (
     TypedShape,
     TypedSort,
     TypedSubarray,
+    TypedPair,
+    TypedFirst,
+    TypedSecond,
     TypedUnbox,
     TypedWithShape,
     TypedScatterAdd,
@@ -1220,6 +1223,23 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         result[tuple([idx])] += update
         return _coerce_runtime_value(result, expr.type)
 
+    if isinstance(expr, TypedPair):
+        left = _eval_expr(expr.left, env)
+        right = _eval_expr(expr.right, env)
+        return (left, right)
+
+    if isinstance(expr, TypedFirst):
+        pair = _eval_expr(expr.pair, env)
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise EvaluationError("first expects a pair value")
+        return pair[0]
+
+    if isinstance(expr, TypedSecond):
+        pair = _eval_expr(expr.pair, env)
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise EvaluationError("second expects a pair value")
+        return pair[1]
+
     if isinstance(expr, TypedExprNode):
         return _eval_expr_node(expr, env)
 
@@ -1279,7 +1299,7 @@ def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
 
     Looks up the function body from the typed program and runs grad_via_tape.
     """
-    from remora.ad import grad_via_tape
+    from remora.ad import grad_via_tape, trace_via_tape_multi
     ast = expr.expr if hasattr(expr, 'expr') else None
     if not isinstance(ast, GradExpr):
         raise EvaluationError("expected GradExpr")
@@ -1287,14 +1307,28 @@ def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
     if (
         not isinstance(expr, TypedGrad)
         or expr.function_body is None
-        or expr.param_name is None
     ):
         raise EvaluationError("grad requires typed function body")
     func_body = expr.function_body
+    param_names = expr.param_names if expr.param_names else (
+        (expr.param_name,) if expr.param_name else ("x",)
+    )
 
-    def grad_fn(x: np.ndarray) -> np.ndarray:
-        return grad_via_tape(func_body, expr.param_name, x)
-
+    def grad_fn(*args: np.ndarray) -> np.ndarray:
+        if len(param_names) == 1 and len(args) == 1:
+            return grad_via_tape(func_body, param_names[0], args[0])
+        tape, indices = trace_via_tape_multi(func_body, list(args), list(param_names))
+        adjs = tape.reverse()
+        results = []
+        for idx in indices:
+            g = adjs.get(idx)
+            if g is not None:
+                results.append(np.asarray(g).reshape(np.asarray(next(
+                    a for a, i in zip(args, indices) if i == idx
+                )).shape))
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
     return grad_fn
 
 

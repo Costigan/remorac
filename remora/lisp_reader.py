@@ -49,6 +49,7 @@ from remora.ast_nodes import (
     Definition,
     Expr,
     FloatLit,
+    FirstExpr,
     FoldExpr,
     FoldRightExpr,
     FuncDef,
@@ -69,6 +70,7 @@ from remora.ast_nodes import (
     LetExpr,
     MapExpr,
     OperatorFuncExpr,
+    PairExpr,
     Program,
     RankExpr,
     RavelExpr,
@@ -82,6 +84,7 @@ from remora.ast_nodes import (
     ScatterAddExpr,
     ScanExpr,
     SelectExpr,
+    SecondExpr,
     ShapeExpr,
     SortExpr,
     SourceLoc,
@@ -95,7 +98,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, RemoraType, StaticDim, TypeBinder, TypeVar
+from remora.types import BOOL, FLOAT, INT, ArrayType, PairType, RemoraType, StaticDim, TypeBinder, TypeVar
 
 _GRAMMAR = r"""
 program: sexpr*
@@ -134,6 +137,9 @@ array_lit: "[" sexpr* "]"
            | indices_of_form
             | with_shape_form
             | scatter_add_form
+            | pair_form
+            | first_form
+            | second_form
             | box_form
            | unbox_form
            | boxes_form
@@ -179,6 +185,7 @@ typed_param_spec: name_token type_expr -> param_typed
 
 ?type_expr: scalar_type
           | "(" "Array" scalar_type dim_ref* ")" -> array_type
+          | "(" "Pair" type_expr type_expr ")" -> pair_type
 
 scalar_type: "Int" -> type_int
             | "Float" -> type_float
@@ -217,6 +224,9 @@ subarray_form: "subarray" sexpr sexpr sexpr -> subarray_expr
 indices_of_form: "indices-of" sexpr -> indices_of_expr
 with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
 scatter_add_form: "scatter-add" sexpr sexpr sexpr -> scatter_add_expr
+pair_form: "pair" sexpr sexpr -> pair_expr
+first_form: "first" sexpr -> first_expr
+second_form: "second" sexpr -> second_expr
 box_form: "box" sexpr -> box_expr
 unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
 boxes_form: "boxes" sexpr+ -> boxes_expr
@@ -399,6 +409,9 @@ class LispASTBuilder(Transformer):
             raise TypeError("array element type must be scalar or type variable")
         return ArrayType(element, tuple(items[1:]))
 
+    def pair_type(self, items: list[Any]) -> RemoraType:
+        return PairType(items[0], items[1])
+
     def dim_lit(self, items: list[Any]) -> StaticDim:
         return StaticDim(int(items[0]))
 
@@ -525,6 +538,15 @@ class LispASTBuilder(Transformer):
 
     def scatter_add_expr(self, items: list[Any]) -> ScatterAddExpr:
         return ScatterAddExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def pair_expr(self, items: list[Any]) -> PairExpr:
+        return PairExpr(items[0], items[1], self._loc_from(items))
+
+    def first_expr(self, items: list[Any]) -> FirstExpr:
+        return FirstExpr(items[0], self._loc_from(items))
+
+    def second_expr(self, items: list[Any]) -> SecondExpr:
+        return SecondExpr(items[0], self._loc_from(items))
 
     def box_expr(self, items: list[Any]) -> BoxExpr:
         return BoxExpr(items[0], self._loc_from(items))

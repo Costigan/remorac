@@ -693,19 +693,20 @@ def test_grad_typechecks_for_scalar_float_function():
     assert inner.params[0] == inner.result
 
 
-def test_grad_rejects_binary_function():
+def test_grad_accepts_binary_function():
     src = (
         "(define/pi ([n Dim]) "
         "  (add [x (Array Float n) y (Array Float n)] Float) "
         "  (fold + 0.0 (* x y))) "
-        "(grad add)"
     )
-    import pytest
-    from remora.types import RemoraTypeError
-    from remora.typechecker import TypeChecker
-    from remora.lisp_reader import parse_lisp
-    with pytest.raises(RemoraTypeError, match="unary"):
-        TypeChecker().check_program(parse_lisp(src))
+    import numpy as np
+    from remora.runtime import evaluate_source
+    result = evaluate_source(
+        src + "((grad (iapp add 3)) [1.0 2.0 3.0] [4.0 5.0 6.0])",
+        include_prelude=False, syntax='lisp',
+    )
+    np.testing.assert_array_equal(result.value[0], [4.0, 5.0, 6.0])
+    np.testing.assert_array_equal(result.value[1], [1.0, 2.0, 3.0])
 
 
 def test_grad_rejects_non_float_result():

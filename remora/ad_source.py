@@ -101,7 +101,14 @@ class _If:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If
+@dataclass(frozen=True)
+class _Pair:
+    left: "_Expr"
+    right: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If | _Pair
 
 
 @dataclass(frozen=True)
@@ -226,18 +233,37 @@ def generate_gradient_source(
         else:
             raise NotImplementedError(f"gradient source VJP: {entry.kind}")
 
-    diff_idx = tape.input_indices[differentiate_input]
-    gradient = adjs[diff_idx]
-    if gradient is None:
-        raise RuntimeError("AD source: input not found on tape")
+    if len(param_specs) == 1:
+        diff_idx = tape.input_indices[differentiate_input]
+        gradient = adjs[diff_idx]
+        if gradient is None:
+            raise RuntimeError("AD source: input not found on tape")
+        body = _emit(gradient)
+        return_type = _source_type(param_specs[0][1])
+    else:
+        # Multi-output: wrap all gradients in nested pair expressions
+        gradients: list[_Expr] = []
+        for i, (name, shape) in enumerate(param_specs):
+            idx = tape.input_indices[i]
+            g = adjs[idx]
+            if g is None:
+                raise RuntimeError(f"AD source: gradient for {name!r} not found")
+            gradients.append(g)
+        # Build nested pair: (pair g0 (pair g1 (...)))
+        result = gradients[-1]
+        for g in reversed(gradients[:-1]):
+            result = _Pair(g, result, ())
+        body = _emit(result)
+        # Build return PairType string
+        return_type = _pair_type_string(param_specs)
+
     param_parts = " ".join(
         f"{name} {_source_type(shape)}" for name, shape in param_specs
     )
     if param_parts:
         param_parts = f"[{param_parts}]"
-    body = _emit(gradient)
     return (
-        f"(define/pi () ({function_name} {param_parts} {_source_type(param_specs[differentiate_input][1])}) "
+        f"(define/pi () ({function_name} {param_parts} {return_type}) "
         f"{body})"
     )
 
@@ -749,6 +775,15 @@ def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     )
 
 
+def _pair_type_string(param_specs: list[tuple[str, tuple[int, ...]]]) -> str:
+    """Build nested Pair type string: (Pair Float (Pair (Array Float 3) Float))."""
+    types = [_source_type(shape) for _, shape in param_specs]
+    result = types[-1]
+    for t in reversed(types[:-1]):
+        result = f"(Pair {t} {result})"
+    return result
+
+
 def _accumulate(adjs: list[_Expr | None], index: int, contribution: _Expr) -> None:
     current = adjs[index]
     adjs[index] = contribution if current is None else _binary("+", current, contribution)
@@ -804,6 +839,8 @@ def _emit(expr: _Expr) -> str:
         return f"(scatter-add {_emit(expr.target)} {_emit(expr.index)} {_emit(expr.update)})"
     if isinstance(expr, _If):
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
+    if isinstance(expr, _Pair):
+        return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":
