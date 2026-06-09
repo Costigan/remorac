@@ -731,3 +731,22 @@ def test_index_gradient_interpreter():
     interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
     expected = np.array([0.0, 0.0, 6.0, 0.0])
     np.testing.assert_array_equal(interpreted.value, expected)
+
+
+# ── Scatter-add ──────────────────────────────────────────────────────────
+
+
+def test_scatter_add_runtime():
+    result = evaluate_source(
+        "(scatter-add [1.0 2.0 3.0 4.0] 2 5.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    np.testing.assert_array_equal(result.value, [1.0, 2.0, 8.0, 4.0])
+
+    compiled = evaluate_source_compiled(
+        "(scatter-add [1.0 2.0 3.0 4.0] 2 5.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    np.testing.assert_array_equal(compiled.value, [1.0, 2.0, 8.0, 4.0])

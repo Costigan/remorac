@@ -94,6 +94,7 @@ from remora.typechecker import (
     TypedSubarray,
     TypedUnbox,
     TypedWithShape,
+    TypedScatterAdd,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, SigmaType, StaticDim
 
@@ -1208,6 +1209,16 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedLength):
         return int(expr.dim.value)
+
+    if isinstance(expr, TypedScatterAdd):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("scatter-add expects an array value")
+        idx = int(_eval_expr(expr.index, env))
+        update = float(_eval_expr(expr.update, env))
+        result = np.copy(array)
+        result[tuple([idx])] += update
+        return _coerce_runtime_value(result, expr.type)
 
     if isinstance(expr, TypedExprNode):
         return _eval_expr_node(expr, env)

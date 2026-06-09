@@ -113,6 +113,14 @@ class WithShapeExpr:
 
 
 @dataclass(frozen=True)
+class ScatterAddExpr:
+    array: Expr
+    index: Expr
+    update: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class BoxExpr:
     value: Expr
     loc: SourceLoc
@@ -402,6 +410,7 @@ Expr: TypeAlias = (
     | SubarrayExpr
     | IndicesOfExpr
     | WithShapeExpr
+    | ScatterAddExpr
     | BoxExpr
     | UnboxExpr
     | Iota1Expr

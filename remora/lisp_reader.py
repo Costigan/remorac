@@ -79,6 +79,7 @@ from remora.ast_nodes import (
     ReverseExpr,
     RightSectionExpr,
     RotateExpr,
+    ScatterAddExpr,
     ScanExpr,
     SelectExpr,
     ShapeExpr,
@@ -131,8 +132,9 @@ array_lit: "[" sexpr* "]"
            | rotate_form
            | subarray_form
            | indices_of_form
-           | with_shape_form
-           | box_form
+            | with_shape_form
+            | scatter_add_form
+            | box_form
            | unbox_form
            | boxes_form
            | iota_form
@@ -214,6 +216,7 @@ rotate_form: "rotate" sexpr sexpr -> rotate_expr
 subarray_form: "subarray" sexpr sexpr sexpr -> subarray_expr
 indices_of_form: "indices-of" sexpr -> indices_of_expr
 with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
+scatter_add_form: "scatter-add" sexpr sexpr sexpr -> scatter_add_expr
 box_form: "box" sexpr -> box_expr
 unbox_form: "unbox" sexpr "(" name_token* name_token ")" sexpr -> unbox_expr
 boxes_form: "boxes" sexpr+ -> boxes_expr
@@ -519,6 +522,9 @@ class LispASTBuilder(Transformer):
 
     def with_shape_expr(self, items: list[Any]) -> WithShapeExpr:
         return WithShapeExpr(items[0], items[1], self._loc_from(items))
+
+    def scatter_add_expr(self, items: list[Any]) -> ScatterAddExpr:
+        return ScatterAddExpr(items[0], items[1], items[2], self._loc_from(items))
 
     def box_expr(self, items: list[Any]) -> BoxExpr:
         return BoxExpr(items[0], self._loc_from(items))
