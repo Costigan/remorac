@@ -1989,14 +1989,14 @@ def _lower_scan_module(
 
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("scan lowering requires an array result")
-    if node.result_type.rank < 1 or node.result_type.rank > 2:
-        raise RemoraLoweringError(
-            "scan lowering supports rank 1 and 2 so far"
-        )
+    result_rank = node.result_type.rank
+    if result_rank < 1:
+        raise RemoraLoweringError("scan lowering requires at least rank 1")
 
-    if node.result_type.rank == 1:
+    if result_rank == 1:
         return _lower_scan_rank1(node, functions)
-    return _lower_scan_rank2(node, functions)
+
+    return _lower_scan_multirank(node, functions, result_rank)
 
 
 def _lower_scan_rank1(
@@ -2067,16 +2067,31 @@ def _lower_scan_rank1(
     return builder.render("%scanned")
 
 
-def _lower_scan_rank2(
-    node: HIRScan, functions: dict[str, HIRFunction]
+def _lower_scan_multirank(
+    node: HIRScan, functions: dict[str, HIRFunction], rank: int
 ) -> str:
+    """Lower a scan over rank >= 2 using nested loops.
+
+    Outer loop over the leading dimension; inner loops over all trailing
+    dimensions do element-wise carry updates via flat indexing.
+    """
     from remora.lowering.module import _MLIRMainModuleBuilder
 
     N = node.reduction_dim.value
-    M = node.result_type.shape[1].value
     result_type = type_to_mlir(node.result_type)
     result_element_type = type_to_mlir(node.result_type.element)
-    trailing_type = f"tensor<{M}x{result_element_type}>"
+
+    if node.exclusive or node.right:
+        raise RemoraLoweringError(
+            "exclusive and right scans with rank >= 2 are deferred"
+        )
+
+    # Trailing dimensions
+    trailing_dims = [d.value for d in node.result_type.shape[1:]]
+    trailing_total = 1
+    for d in trailing_dims:
+        trailing_total *= d
+    trailing_type = _tensor_type_mlir(trailing_dims, result_element_type)
 
     init_code, init_name, _init_type, _ielem = _lower_tensor_input(
         node.init, "scan_init", functions
@@ -2086,30 +2101,93 @@ def _lower_scan_rank2(
     )
     op_name = _arith_op(node.func.op, result_element_type)
 
+    # Build constant definitions for all dimensions
+    dim_consts = "".join(
+        f"    %cD{di} = arith.constant {d} : index\n"
+        for di, d in enumerate(trailing_dims)
+    )
+
+    # Build product-of-suffixes for flat-index decomposition
+    # For trailing dims [d0, d1, d2], products: d1*d2, d2, 1
+    suffix_products = []
+    for i in range(1, len(trailing_dims)):
+        prod = 1
+        for d in trailing_dims[i:]:
+            prod *= d
+        suffix_products.append(prod)
+
+    # Build offset index list for row extraction: [%i, 0, 0, ...]
+    row_offsets = "%i" + ", %c0" * (rank - 1)
+    # Row sizes: [1, d0, d1, ...]
+    row_sizes = "1, " + ", ".join(str(d) for d in trailing_dims)
+    # Row strides: all 1s
+    row_strides = ", ".join(["1"] * rank)
+
+    # Build flat-index decomposition into multi-index
+    if len(trailing_dims) == 1:
+        # Single trailing dim: just use %k directly
+        multi_idx = "%k"
+        multi_idx_compute = ""
+    else:
+        # Multiple trailing dims: decompose flat index into (j0, j1, ...)
+        parts = []
+        compute = ""
+        remaining = "%k"
+        for di in range(len(trailing_dims)):
+            if di == len(trailing_dims) - 1:
+                idx = remaining
+            else:
+                suffix_var = f"%s{di}"
+                div_op = f"{suffix_var} = arith.divui {remaining}, %cS{di} : index"
+                rem_op = f"%r{di} = arith.remui {remaining}, %cS{di} : index"
+                compute += f"        {div_op}\n        {rem_op}\n"
+                idx = suffix_var
+                remaining = f"%r{di}"
+            parts.append(idx)
+        multi_idx = ", ".join(parts)
+        multi_idx_compute = compute
+
+    # Define suffix product constants
+    suffix_consts = "".join(
+        f"    %cS{si} = arith.constant {s} : index\n"
+        for si, s in enumerate(suffix_products)
+    )
+
+    # The carry update loop: for k in 0..trailing_total:
+    #   extract carry[k] and input[i, k0, k1, ...]
+    #   apply op, insert into carry[k]
     body = f"""{init_code}
 {input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %cN = arith.constant {N} : index
-    %cM = arith.constant {M} : index
+    %cTotal = arith.constant {trailing_total} : index
+{dim_consts}{suffix_consts}
     %empty = tensor.empty() : {result_type}
     %scanned, %_carry = "scf.for"(%c0, %cN, %c1, %empty, {init_name}) ({{
     ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {trailing_type}):
-      %new_carry = "scf.for"(%c0, %cM, %c1, %carry) ({{
-      ^bb1(%j: index, %c: {trailing_type}):
-        %in_elem = tensor.extract {input_name}[%i, %j] : {input_type}
-        %c_elem = tensor.extract %c[%j] : {trailing_type}
+      %new_carry = "scf.for"(%c0, %cTotal, %c1, %carry) ({{
+      ^bb1(%k: index, %c: {trailing_type}):
+{multi_idx_compute}        %c_elem = tensor.extract %c[{multi_idx}] : {trailing_type}
+        %in_elem = tensor.extract {input_name}[%i, {multi_idx}] : {input_type}
         %added = {op_name} %c_elem, %in_elem : {result_element_type}
-        %c_next = tensor.insert %added into %c[%j] : {trailing_type}
+        %c_next = tensor.insert %added into %c[{multi_idx}] : {trailing_type}
         "scf.yield"(%c_next) : ({trailing_type}) -> ()
       }}) : (index, index, index, {trailing_type}) -> {trailing_type}
-      %acc_next = tensor.insert_slice %new_carry into %acc_tensor[%i, 0] [1, {M}] [1, 1] : {trailing_type} into {result_type}
+      %acc_next = tensor.insert_slice %new_carry into %acc_tensor[{row_offsets}] [{row_sizes}] [{row_strides}] : {trailing_type} into {result_type}
       "scf.yield"(%acc_next, %new_carry) : ({result_type}, {trailing_type}) -> ()
     }}) : (index, index, index, {result_type}, {trailing_type}) -> ({result_type}, {trailing_type})"""
 
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)
     return builder.render("%scanned")
+
+
+def _tensor_type_mlir(dims: list[int], elem: str) -> str:
+    if not dims:
+        return elem
+    ds = "x".join(str(d) for d in dims)
+    return f"tensor<{ds}x{elem}>"
 
 
 # ---------------------------------------------------------------------------
