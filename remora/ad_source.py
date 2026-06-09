@@ -36,7 +36,19 @@ class _Fill:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill
+@dataclass(frozen=True)
+class _Reshape:
+    value: "_Expr"
+    shape: Shape
+
+
+@dataclass(frozen=True)
+class _Transpose:
+    value: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose
 
 
 @dataclass(frozen=True)
@@ -133,6 +145,11 @@ def generate_gradient_source(
             _accumulate(adjs, operand, _fill(adj, primals[operand]))
         elif entry.kind == "neg":
             _accumulate(adjs, entry.inputs[0], _neg(adj))
+        elif entry.kind in {"reshape", "ravel"}:
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _reshape(adj, primals[operand].shape))
+        elif entry.kind == "transpose":
+            _accumulate(adjs, entry.inputs[0], _transpose(adj))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -270,6 +287,10 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
             expr = _Op("fold", operand, None, shape)
         elif entry.kind == "neg":
             expr = _neg(primals[entry.inputs[0]])
+        elif entry.kind in {"reshape", "ravel"}:
+            expr = _reshape(primals[entry.inputs[0]], shape)
+        elif entry.kind == "transpose":
+            expr = _transpose(primals[entry.inputs[0]])
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -352,6 +373,19 @@ def _fill(value: _Expr, like: _Expr) -> _Expr:
     return _Fill(value, like, like.shape)
 
 
+def _reshape(value: _Expr, shape: Shape) -> _Expr:
+    if value.shape == shape:
+        return value
+    return _Reshape(value, shape)
+
+
+def _transpose(value: _Expr) -> _Expr:
+    if len(value.shape) < 2:
+        raise ValueError("transpose gradient requires rank at least two")
+    shape = (value.shape[1], value.shape[0], *value.shape[2:])
+    return _Transpose(value, shape)
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -389,6 +423,11 @@ def _emit(expr: _Expr) -> str:
         return expr.text
     if isinstance(expr, _Fill):
         return _emit(_binary("+", _binary("*", _constant(0.0), expr.like), expr.value))
+    if isinstance(expr, _Reshape):
+        shape = " ".join(str(dim) for dim in expr.shape)
+        return f"(reshape {_emit(expr.value)} [{shape}])"
+    if isinstance(expr, _Transpose):
+        return f"(transpose {_emit(expr.value)})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":

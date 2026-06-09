@@ -6,6 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from remora._gpu_map_support import (
+    F32BinaryExpr,
+    F32ConstantExpr,
+    F32Expr,
+    F32InputExpr,
     F32MapKernel,
     F32MapOperation,
     I32MapKernel,
@@ -409,7 +413,17 @@ def _operation_lines(kernel: F32MapKernel, memref_type: str, indices: list[str])
     """Return MLIR lines loading inputs, applying the map op, and storing the result."""
     index_text = ", ".join(indices)
     lines = [f"        %x0 = memref.load %input0[{index_text}] : {memref_type}"]
-    if kernel.num_inputs == 2:
+    if kernel.expression is not None:
+        for input_index in range(1, kernel.num_inputs):
+            lines.append(
+                f"        %x{input_index} = memref.load %input{input_index}"
+                f"[{index_text}] : {memref_type}"
+            )
+        expression_lines, result = _f32_expression_lines(kernel.expression, "arith", "        ")
+        lines.extend(expression_lines)
+        lines.append(f"        %y = arith.addf {result}, %zero_expr : f32")
+        lines.insert(len(lines) - 1, "        %zero_expr = arith.constant 0.000000e+00 : f32")
+    elif kernel.num_inputs == 2:
         lines.append(f"        %x1 = memref.load %input1[{index_text}] : {memref_type}")
         lines.append(f"        %y = {_binary_op_expr(kernel.operation)}")
     else:
@@ -736,6 +750,11 @@ def _linear_index_lines(prefix: str, rank: int) -> list[str]:
 
 def _descriptor_operation_lines(kernel: F32MapKernel) -> list[str]:
     """Return LLVM IR lines for f32 map operations using the descriptor ABI."""
+    if kernel.expression is not None:
+        lines, result = _f32_expression_lines(kernel.expression, "llvm", "      ")
+        lines.append("      %zero_expr = llvm.mlir.constant(0.000000e+00 : f32) : f32")
+        lines.append(f"      %y = llvm.fadd {result}, %zero_expr : f32")
+        return lines
     if kernel.num_inputs == 2:
         return [f"      %y = {_descriptor_binary_op_expr(kernel.operation)}"]
     assert kernel.operation.constant is not None
@@ -762,6 +781,39 @@ def _descriptor_binary_op_expr(operation: F32MapOperation) -> str:
         raise GPUScaffoldError(f"descriptor ABI GPU module does not support operator {operation.op}")
     mlir_op = llvm_op(operation.op, "f32")
     return f"{mlir_op} %x0, %x1  : f32"
+
+
+def _f32_expression_lines(
+    expression: F32Expr,
+    dialect: str,
+    indent: str,
+) -> tuple[list[str], str]:
+    lines: list[str] = []
+    counter = 0
+
+    def emit(expr: F32Expr) -> str:
+        nonlocal counter
+        if isinstance(expr, F32InputExpr):
+            return f"%x{expr.index}"
+        name = f"%expr{counter}"
+        counter += 1
+        if isinstance(expr, F32ConstantExpr):
+            if dialect == "llvm":
+                lines.append(
+                    f"{indent}{name} = llvm.mlir.constant({expr.value:.6e} : f32) : f32"
+                )
+            else:
+                lines.append(f"{indent}{name} = arith.constant {expr.value:.6e} : f32")
+            return name
+        assert isinstance(expr, F32BinaryExpr)
+        left = emit(expr.left)
+        right = emit(expr.right)
+        op = llvm_op(expr.op, "f32") if dialect == "llvm" else arith_op(expr.op, "f32")
+        spacing = "  " if dialect == "llvm" else " "
+        lines.append(f"{indent}{name} = {op} {left}, {right}{spacing}: f32")
+        return name
+
+    return lines, emit(expression)
 
 
 def _descriptor_i32_operation_lines(kernel: I32MapKernel) -> list[str]:

@@ -385,3 +385,145 @@ def test_generated_gradient_executes_on_gpu():
         gpu_gradient = executor.execute_main([x])
 
     np.testing.assert_allclose(gpu_gradient, grad_via_tape(body, "x", x), rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "source,expected_ops",
+    [
+        (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (* (+ x 1.0) (- x 2.0))))",
+            ("arith.addf", "arith.subf"),
+        ),
+        (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (* (* x x) x)))",
+            ("arith.mulf", "arith.addf"),
+        ),
+        (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (/ x (+ x 1.0))))",
+            ("arith.divf", "arith.addf"),
+        ),
+    ],
+)
+def test_fused_nested_gradient_compiles_to_one_gpu_kernel(source, expected_ops):
+    param_type = ArrayType(FLOAT, (StaticDim(8),))
+    artifact = compile_gradient_function_source_to_supported_gpu_artifacts(
+        source,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert len(artifact.gpu.kernels) == 1
+    assert artifact.gpu.kernels[0].num_inputs == 1
+    for operation in expected_ops:
+        assert operation in artifact.gpu.scaffold.text
+
+
+@pytest.mark.skipif(not cuda_available(), reason="live CUDA driver is not available")
+@pytest.mark.parametrize("case", ["polynomial", "cubic", "division"])
+def test_fused_nested_gradient_executes_on_gpu(case):
+    sources = {
+        "polynomial": (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (* (+ x 1.0) (- x 2.0))))"
+        ),
+        "cubic": (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (* (* x x) x)))"
+        ),
+        "division": (
+            "(define/pi ([n Dim]) (loss [x (Array Float n)] Float) "
+            "(fold + 0.0 (/ x (+ x 1.0))))"
+        ),
+    }
+    x = np.linspace(0.25, 2.0, 8, dtype=np.float32)
+    param_type = ArrayType(FLOAT, (StaticDim(len(x)),))
+    artifact = compile_gradient_function_source_to_supported_gpu_artifacts(
+        sources[case],
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+    )
+    expected = {
+        "polynomial": 2.0 * x - 1.0,
+        "cubic": 3.0 * x * x,
+        "division": 1.0 / ((x + 1.0) ** 2),
+    }[case]
+    try:
+        executor = RemoraExecutor(artifact.gpu.ptx_text, artifact.gpu.kernels)
+    except CUDAError as exc:
+        pytest.skip(f"live CUDA device is not available: {exc}")
+    with executor:
+        result = executor.execute_main([x])
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_ravel_vjp_restores_matrix_shape():
+    source = (
+        "(define/pi () "
+        "(loss [x (Array Float 2 3)] Float) "
+        "(fold + 0.0 (* (ravel x) (ravel x))))"
+    )
+    param_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+    generated = compile_gradient_function_source(
+        source,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(reshape" in generated.gradient_source.source
+    assert "[2 3]" in generated.gradient_source.source
+
+    request = source + " ((grad loss) [[1.0 2.0 3.0] [4.0 5.0 6.0]])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    expected = 2.0 * np.arange(1.0, 7.0).reshape(2, 3)
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
+
+
+def test_reshape_vjp_restores_vector_shape():
+    source = (
+        "(define/pi () (loss [x (Array Float 6)] Float) "
+        "(fold + 0.0 (* (ravel (reshape x [2 3])) "
+        "(ravel (reshape x [2 3])))))"
+    )
+    param_type = ArrayType(FLOAT, (StaticDim(6),))
+    generated = compile_gradient_function_source(
+        source,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "[6]" in generated.gradient_source.source
+
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0 5.0 6.0])"
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    np.testing.assert_array_equal(compiled.value, 2.0 * np.arange(1.0, 7.0))
+
+
+def test_transpose_vjp_swaps_cotangent_axes_back():
+    source = (
+        "(define/pi () (loss [x (Array Float 2 3)] Float) "
+        "(fold + 0.0 (* (ravel (transpose x)) (ravel (transpose x)))))"
+    )
+    request = source + " ((grad loss) [[1.0 2.0 3.0] [4.0 5.0 6.0]])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    expected = 2.0 * np.arange(1.0, 7.0).reshape(2, 3)
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
