@@ -537,3 +537,54 @@ def test_rotate_vs_finite_diff():
         rotated = np.roll(v, -2)
         return float(np.sum(rotated * rotated))
     grad_check(f, x, tape_g, label="rotate_sq")
+
+
+# ── AD index VJP ──────────────────────────────────────────────────────────
+
+
+def test_tape_index():
+    t = EvalTape()
+    arr = t.push_input(np.asarray([10.0, 20.0, 30.0, 40.0]))
+    t.push(
+        TapeEntry("index", (arr,), ((4,), (2,))),
+        np.asarray(30.0),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[arr], [0.0, 0.0, 1.0, 0.0])
+
+
+def test_grad_index_square():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4)] Float) "
+        "  (* (index x 2) (index x 2)))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(4),))
+    )
+    x = np.array([1.0, 2.0, 3.0, 4.0])
+    g = grad_via_tape(body, pname, x)
+    expected = np.zeros(4, dtype=np.float64)
+    expected[2] = 6.0
+    np.testing.assert_array_almost_equal(g, expected)
+
+
+def test_index_vs_finite_diff():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 5)] Float) "
+        "  (* (index x 3) (index x 3)))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(5),))
+    )
+    rng = np.random.RandomState(99)
+    x = rng.randn(5) * 2.0
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        v = np.asarray(v, dtype=np.float64)
+        return float(v[3] * v[3])
+    grad_check(f, x, tape_g, label="index_sq")

@@ -78,7 +78,14 @@ class _Rotate:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate
+@dataclass(frozen=True)
+class _Index:
+    value: "_Expr"
+    idx: int
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index
 
 
 @dataclass(frozen=True)
@@ -206,6 +213,10 @@ def generate_gradient_source(
             n = int(entry.saved[1])
             reverse_shift = (n - shift) % n
             _accumulate(adjs, entry.inputs[0], _rotate(adj, reverse_shift))
+        elif entry.kind == "index":
+            operand = primals[entry.inputs[0]]
+            index_vals = tuple(int(v) for v in entry.saved[1])
+            _accumulate(adjs, entry.inputs[0], _pad_index(operand, adj, index_vals))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -360,6 +371,9 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
         elif entry.kind == "rotate":
             shift = int(entry.saved[0])
             expr = _rotate(primals[entry.inputs[0]], shift)
+        elif entry.kind == "index":
+            i = int(entry.saved[1][0])
+            expr = _index(primals[entry.inputs[0]], i)
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -500,6 +514,28 @@ def _rotate(value: _Expr, shift: int) -> _Expr:
     return _Rotate(value, shift, value.shape)
 
 
+def _index(value: _Expr, idx: int) -> _Expr:
+    return _Index(value, idx, ())
+
+
+def _pad_index(operand: _Expr, adj: _Expr, index_vals: tuple[int, ...]) -> _Expr:
+    if len(index_vals) != 1:
+        raise NotImplementedError(
+            "index VJP: only rank-1 single-index is supported"
+        )
+    n = operand.shape[0]
+    i = index_vals[0]
+    wrapped = _binary("*", adj, _view("take", operand, 1))
+    result = wrapped
+    if i > 0:
+        zero_prefix = _binary("*", _constant(0.0), _view("take", operand, i))
+        result = _append(zero_prefix, result)
+    if i + 1 < n:
+        zero_suffix = _binary("*", _constant(0.0), _view("drop", operand, i + 1))
+        result = _append(result, zero_suffix)
+    return result
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -557,6 +593,8 @@ def _emit(expr: _Expr) -> str:
         return f"(subarray {_emit(expr.value)} [{off}] [{sz}])"
     if isinstance(expr, _Rotate):
         return f"(rotate {_emit(expr.value)} {expr.shift})"
+    if isinstance(expr, _Index):
+        return f"(index {_emit(expr.value)} {expr.idx})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":
