@@ -127,12 +127,14 @@ def generate_gradient_source(
     param_specs: list[tuple[str, tuple[int, ...]]],
     *,
     differentiate_input: int = 0,
+    multi_output: bool = False,
     function_name: str = "grad-f",
 ) -> str:
     """Return a gradient function for the traced tape graph with one or more params.
 
     *param_specs* is a list of (name, shape) for each tape input in order.
     *differentiate_input* selects which input's gradient to return (0-based).
+    If *multi_output* is True and n > 1, returns a pair of all gradients.
     """
     if not tape.entries:
         raise ValueError("cannot generate a gradient from an empty tape")
@@ -233,18 +235,34 @@ def generate_gradient_source(
         else:
             raise NotImplementedError(f"gradient source VJP: {entry.kind}")
 
-    diff_idx = tape.input_indices[differentiate_input]
-    gradient = adjs[diff_idx]
-    if gradient is None:
-        raise RuntimeError("AD source: input not found on tape")
+    if multi_output and len(param_specs) > 1:
+        gradients: list[_Expr] = []
+        for i, (name, shape) in enumerate(param_specs):
+            idx = tape.input_indices[i]
+            g = adjs[idx]
+            if g is None:
+                raise RuntimeError(f"AD source: gradient for {name!r} not found")
+            gradients.append(g)
+        result = gradients[-1]
+        for g in reversed(gradients[:-1]):
+            result = _Pair(g, result, ())
+        body = _emit(result)
+        return_type = _pair_type_string(param_specs)
+    else:
+        diff_idx = tape.input_indices[differentiate_input]
+        gradient = adjs[diff_idx]
+        if gradient is None:
+            raise RuntimeError("AD source: input not found on tape")
+        body = _emit(gradient)
+        return_type = _source_type(param_specs[differentiate_input][1])
+
     param_parts = " ".join(
         f"{name} {_source_type(shape)}" for name, shape in param_specs
     )
     if param_parts:
         param_parts = f"[{param_parts}]"
-    body = _emit(gradient)
     return (
-        f"(define/pi () ({function_name} {param_parts} {_source_type(param_specs[differentiate_input][1])}) "
+        f"(define/pi () ({function_name} {param_parts} {return_type}) "
         f"{body})"
     )
 
