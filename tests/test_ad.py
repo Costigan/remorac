@@ -6,7 +6,7 @@ import pytest
 from remora.ad import EvalTape, TapeEntry, grad_via_tape
 from remora.ad_testing import finite_difference_grad, grad_check
 from remora.typechecker import TypedApp, TypedExprNode
-from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc
+from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr
 from remora.types import FLOAT
 
 _LOC = SourceLoc("test", 0, 0)
@@ -116,3 +116,69 @@ def test_grad_vs_finite_diff():
     def f(v):
         return float((v[0] + 1.0) * (v[0] - 2.0))
     grad_check(f, x, tape_g, label="polynomial")
+
+
+# ── AD2: array broadcasting ────────────────────────────────────────────────
+
+
+def test_tape_broadcast_add_scalar():
+    """(+ arr 1.0) where arr is [3], 1.0 is scalar — cotangent of 1.0 is sum."""
+    t = EvalTape()
+    arr = t.push_input(np.asarray([1.0, 2.0, 3.0]))
+    one = t.push_const(1.0)
+    r = t.push(TapeEntry("add", (arr, one), ()), np.asarray([2.0, 3.0, 4.0]))
+    adjs = t.reverse()
+
+    np.testing.assert_array_equal(adjs[arr], [1.0, 1.0, 1.0])
+    assert adjs[one] == pytest.approx(3.0)  # sum([1,1,1])
+
+
+def test_tape_broadcast_mul_scalar():
+    """(* arr 2.0) — d/darr = 2, d/d2 = sum(arr) = 6"""
+    t = EvalTape()
+    arr = t.push_input(np.asarray([1.0, 2.0, 3.0]))
+    two = t.push_const(2.0)
+    r = t.push(
+        TapeEntry("mul", (arr, two), (np.asarray(2.0), np.asarray([1.0, 2.0, 3.0]))),
+        np.asarray([2.0, 4.0, 6.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[arr], [2.0, 2.0, 2.0])
+    assert adjs[two] == pytest.approx(6.0)  # sum([1,2,3])
+
+
+def test_grad_array_square():
+    """grad of fold + 0 (* x x) at x=[1,2,3] → 2*x = [2,4,6]"""
+    body = _make_fold(_app(_op("*"), _var("x"), _var("x")), _var("x"))
+    g = grad_via_tape(body, "x", np.array([1.0, 2.0, 3.0]))
+    np.testing.assert_array_almost_equal(g, [2.0, 4.0, 6.0])
+
+
+def test_grad_array_sum_of_squares():
+    """grad of fold + 0 (* x x) matches finite differences."""
+    body = _make_fold(_app(_op("*"), _var("x"), _var("x")), _var("x"))
+    rng = np.random.RandomState(42)
+    x = rng.randn(4)
+    tape_g = grad_via_tape(body, "x", x)
+
+    def f(v):
+        return float(np.sum(v * v))
+    grad_check(f, x, tape_g, label="sum_sq")
+
+
+def _make_fold(body, array_expr):
+    """Build a TypedFold: fold + 0 where body is the element-wise expression
+    applied to the array expression.  The 'array' field is the element-wise
+    result, which the fold then sums."""
+    from remora.typechecker import TypedFold
+    from remora.ast_nodes import FoldExpr
+    from remora.types import StaticDim
+
+    init = _lit(0.0)
+    func = _op("+")
+    # body is already the element-wise expression applied to array elements
+    return TypedFold(
+        FoldExpr(func.expr, init.expr, array_expr.expr, _LOC),
+        func, init, body,  # <-- body is the element-wise result
+        StaticDim(0), FLOAT,
+    )

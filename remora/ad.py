@@ -1,7 +1,6 @@
 """Reverse-mode AD via evaluation tape for the Remora interpreter.
 
-AD1: scalar Float arithmetic. Evaluates typed expressions while
-recording operations on a tape for the reverse pass.
+AD2: array operations with broadcasting-aware VJPs.
 """
 
 from __future__ import annotations
@@ -52,6 +51,8 @@ class EvalTape:
         self.input_indices.append(idx)
         return idx
 
+    # ── Broadcasting-aware reverse pass ────────────────────────────────────
+
     def reverse(self) -> dict[int, np.ndarray]:
         adjs: list[np.ndarray | None] = [None] * len(self.values)
         adjs[-1] = np.ones_like(self.values[-1], dtype=np.float64)
@@ -61,28 +62,52 @@ class EvalTape:
                 continue
             e = self.entries[i]
             if e.kind == "add":
-                _acc(adjs, e.inputs[0], adj)
-                _acc(adjs, e.inputs[1], adj)
+                _bcast_acc(adjs, e.inputs[0], adj, self.values[e.inputs[0]])
+                _bcast_acc(adjs, e.inputs[1], adj, self.values[e.inputs[1]])
             elif e.kind == "sub":
-                _acc(adjs, e.inputs[0], adj)
-                _acc(adjs, e.inputs[1], -adj)
+                _bcast_acc(adjs, e.inputs[0], adj, self.values[e.inputs[0]])
+                _bcast_acc(adjs, e.inputs[1], -adj, self.values[e.inputs[1]])
             elif e.kind == "mul":
                 rv = np.asarray(e.saved[0], dtype=np.float64)
                 lv = np.asarray(e.saved[1], dtype=np.float64)
-                _acc(adjs, e.inputs[0], adj * rv)
-                _acc(adjs, e.inputs[1], adj * lv)
+                _bcast_acc(adjs, e.inputs[0], adj * rv, self.values[e.inputs[0]])
+                _bcast_acc(adjs, e.inputs[1], adj * lv, self.values[e.inputs[1]])
             elif e.kind == "div":
                 rv = np.asarray(e.saved[0], dtype=np.float64)
                 lv = np.asarray(e.saved[1], dtype=np.float64)
-                _acc(adjs, e.inputs[0], adj / rv)
-                _acc(adjs, e.inputs[1], -adj * lv / (rv * rv))
+                _bcast_acc(adjs, e.inputs[0], adj / rv, self.values[e.inputs[0]])
+                _bcast_acc(adjs, e.inputs[1], -adj * lv / (rv * rv), self.values[e.inputs[1]])
             elif e.kind == "fold":
                 iv = np.asarray(e.saved[0], dtype=np.float64)
-                _acc(adjs, e.inputs[0], np.full_like(iv, adj.item()))
-        return {idx: adjs[idx] for idx in self.input_indices if adjs[idx] is not None}
+                _accum(adjs, e.inputs[0], np.full_like(iv, adj.item()))
+        return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
-def _acc(adjs, idx, c):
+def _bcast_acc(adjs, idx, contrib, target_val):
+    """Accumulate with broadcasting-aware sum.
+
+    If contrib has more dimensions than target_val (target was broadcast),
+    sum the extra dimensions.
+    """
+    contrib = np.asarray(contrib, dtype=np.float64)
+    target = np.asarray(target_val, dtype=np.float64)
+    if contrib.shape != target.shape and target.ndim < contrib.ndim:
+        # Target was broadcast: sum over the broadcast axes
+        reduce_axes = tuple(range(contrib.ndim - target.ndim))
+        contrib = contrib.sum(axis=reduce_axes, keepdims=False)
+        # If shapes still don't match after summing leading dims,
+        # sum over any remaining axes where target has size 1
+        if contrib.shape != target.shape:
+            squeeze_axes = tuple(
+                i for i, (cs, ts) in enumerate(zip(contrib.shape, target.shape))
+                if ts == 1 and cs > 1
+            )
+            if squeeze_axes:
+                contrib = contrib.sum(axis=squeeze_axes, keepdims=True)
+    _accum(adjs, idx, contrib)
+
+
+def _accum(adjs, idx, c):
     if adjs[idx] is None:
         adjs[idx] = np.asarray(c, dtype=np.float64)
     else:
