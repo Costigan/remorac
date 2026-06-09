@@ -13,6 +13,7 @@ import numpy as np
 from remora.ast_nodes import FloatLit, IntLit, OperatorFuncExpr, VarExpr
 from remora.typechecker import (
     TypedApp,
+    TypedAppend,
     TypedCast,
     TypedExpr,
     TypedExprNode,
@@ -25,6 +26,7 @@ from remora.typechecker import (
     TypedRavel,
     TypedReshape,
     TypedReverse,
+    TypedSubarray,
     TypedTake,
     TypedDrop,
     TypedTranspose,
@@ -107,6 +109,20 @@ class EvalTape:
                 count = int(e.saved[1])
                 result = np.zeros(input_shape, dtype=np.float64)
                 result[count:] = adj
+                _accum(adjs, e.inputs[0], result)
+            elif e.kind == "append":
+                left_len = int(e.saved[1])
+                left_target = self.values[e.inputs[0]]
+                right_target = self.values[e.inputs[1]]
+                _bcast_acc(adjs, e.inputs[0], adj[:left_len], left_target)
+                _bcast_acc(adjs, e.inputs[1], adj[left_len:], right_target)
+            elif e.kind == "subarray":
+                input_shape = tuple(int(dim) for dim in e.saved[0])
+                offsets = e.saved[1]
+                sizes = e.saved[2]
+                result = np.zeros(input_shape, dtype=np.float64)
+                slices = tuple(slice(o, o + s) for o, s in zip(offsets, sizes))
+                result[slices] = adj
                 _accum(adjs, e.inputs[0], result)
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
@@ -195,6 +211,10 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return _trace_take(expr, env, tape)
     if isinstance(expr, TypedDrop):
         return _trace_drop(expr, env, tape)
+    if isinstance(expr, TypedAppend):
+        return _trace_append(expr, env, tape)
+    if isinstance(expr, TypedSubarray):
+        return _trace_subarray(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -329,6 +349,32 @@ def _trace_drop(expr: TypedDrop, env: dict[str, int], tape: EvalTape) -> int:
     return tape.push(
         TapeEntry("drop", (array_idx,), (array.shape, count)),
         np.asarray(array)[count:],
+    )
+
+
+def _trace_append(expr: TypedAppend, env: dict[str, int], tape: EvalTape) -> int:
+    left_idx = trace_expr(expr.left, env, tape)
+    right_idx = trace_expr(expr.right, env, tape)
+    left_val = _value(tape, left_idx)
+    right_val = _value(tape, right_idx)
+    left_len = int(np.asarray(left_val).shape[0])
+    result = np.concatenate([np.asarray(left_val), np.asarray(right_val)], axis=0)
+    return tape.push(
+        TapeEntry("append", (left_idx, right_idx), (left_val.shape, left_len)),
+        result,
+    )
+
+
+def _trace_subarray(expr: TypedSubarray, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    offsets = tuple(int(o.value) for o in expr.offsets)
+    sizes = tuple(int(s.value) for s in expr.sizes)
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets, sizes))
+    result = np.asarray(array)[slices]
+    return tape.push(
+        TapeEntry("subarray", (array_idx,), (array.shape, offsets, sizes)),
+        result,
     )
 
 

@@ -12,6 +12,7 @@ from remora.hir import (
     HIRReshape,
     HIRReverse,
     HIRSlice,
+    HIRSubarray,
     HIRTake,
     HIRTranspose,
 )
@@ -55,7 +56,8 @@ def _lower_view_result(
     | HIRRavel
     | HIRReverse
     | HIRTake
-    | HIRDrop,
+    | HIRDrop
+    | HIRSubarray,
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
     prefix: str = "view",
@@ -170,6 +172,19 @@ def _lower_view_result(
             f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
             f"{input_type} to {result_type}"
         )
+    elif isinstance(node, HIRSubarray):
+        array_type = _expr_result_type(node.array)
+        if not isinstance(array_type, ArrayType):
+            raise RemoraLoweringError("subarray expects an array input")
+        rank = array_type.rank
+        offsets = [str(o.value) for o in node.offsets]
+        sizes = [str(s.value) for s in node.sizes]
+        strides = ["1"] * rank
+        result_line = (
+            f"    {result_name} = tensor.extract_slice {input_name}"
+            f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
+            f"{input_type} to {result_type}"
+        )
     else:
         raise AssertionError(
             f"unhandled view node type {type(node).__name__}"
@@ -209,7 +224,8 @@ def _lower_view_input(
     | HIRRavel
     | HIRReverse
     | HIRTake
-    | HIRDrop,
+    | HIRDrop
+    | HIRSubarray,
     functions: dict[str, Any],
     prefix: str,
     tensor_env: TensorEnv | None = None,

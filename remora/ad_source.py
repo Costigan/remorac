@@ -63,7 +63,15 @@ class _Append:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append
+@dataclass(frozen=True)
+class _SubarrayView:
+    value: "_Expr"
+    offsets: tuple[int, ...]
+    sizes: tuple[int, ...]
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,15 @@ def generate_gradient_source(
             count = int(entry.saved[1])
             zero_head = _binary("*", _constant(0.0), _view("take", operand, count))
             _accumulate(adjs, entry.inputs[0], _append(zero_head, adj))
+        elif entry.kind == "append":
+            left_count = int(entry.saved[1])
+            _accumulate(adjs, entry.inputs[0], _view("take", adj, left_count))
+            _accumulate(adjs, entry.inputs[1], _view("drop", adj, left_count))
+        elif entry.kind == "subarray":
+            operand = primals[entry.inputs[0]]
+            offsets = tuple(int(o) for o in entry.saved[1])
+            sizes = tuple(int(s) for s in entry.saved[2])
+            _accumulate(adjs, entry.inputs[0], _pad_subarray(operand, adj, offsets, sizes))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -322,6 +339,12 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
             expr = _view("reverse", primals[entry.inputs[0]])
         elif entry.kind in {"take", "drop"}:
             expr = _view(entry.kind, primals[entry.inputs[0]], int(entry.saved[1]))
+        elif entry.kind == "append":
+            expr = _append(primals[entry.inputs[0]], primals[entry.inputs[1]])
+        elif entry.kind == "subarray":
+            offsets = tuple(int(o) for o in entry.saved[1])
+            sizes = tuple(int(s) for s in entry.saved[2])
+            expr = _subarray_view(primals[entry.inputs[0]], offsets, sizes)
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -432,6 +455,32 @@ def _append(left: _Expr, right: _Expr) -> _Expr:
     return _Append(left, right, (left.shape[0] + right.shape[0], *left.shape[1:]))
 
 
+def _subarray_view(value: _Expr, offsets: tuple[int, ...], sizes: tuple[int, ...]) -> _Expr:
+    shape = tuple(
+        s if i == 0 else min(s, value.shape[i])  for i, s in enumerate(sizes)
+    )
+    return _SubarrayView(value, offsets, sizes, shape)
+
+
+def _pad_subarray(operand: _Expr, adj: _Expr, offsets: tuple[int, ...], sizes: tuple[int, ...]) -> _Expr:
+    if len(offsets) != 1:
+        raise NotImplementedError(
+            "subarray VJP: only rank-1 leading-dimension subarrays are supported"
+        )
+    n = operand.shape[0]
+    start = offsets[0]
+    size = sizes[0]
+    tail_count = n - start - size
+    result = adj
+    if tail_count > 0:
+        zero_tail = _binary("*", _constant(0.0), _view("drop", operand, start + size))
+        result = _append(result, zero_tail)
+    if start > 0:
+        zero_head = _binary("*", _constant(0.0), _view("take", operand, start))
+        result = _append(zero_head, result)
+    return result
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -480,6 +529,13 @@ def _emit(expr: _Expr) -> str:
         return f"({expr.kind} {expr.count} {_emit(expr.value)})"
     if isinstance(expr, _Append):
         return f"(append {_emit(expr.left)} {_emit(expr.right)})"
+    if isinstance(expr, _SubarrayView):
+        off = " ".join(str(o) for o in expr.offsets)
+        sz = " ".join(str(s) for s in expr.sizes)
+        if len(expr.offsets) == 1:
+            off = str(expr.offsets[0])
+            sz = str(expr.sizes[0])
+        return f"(subarray {_emit(expr.value)} [{off}] [{sz}])"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":

@@ -7,6 +7,7 @@ from typing import Any
 
 from remora.errors import RemoraError
 from remora.hir import (
+    HIRAppend,
     HIRApply,
     HIRArrayLit,
     HIRCast,
@@ -24,6 +25,7 @@ from remora.hir import (
     HIRReduce,
     HIRReshape,
     HIRReverse,
+    HIRSubarray,
     HIRTake,
     HIRTranspose,
     HIRVar,
@@ -121,6 +123,10 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRTake):
         return expr.result_type
     if isinstance(expr, HIRDrop):
+        return expr.result_type
+    if isinstance(expr, HIRAppend):
+        return expr.result_type
+    if isinstance(expr, HIRSubarray):
         return expr.result_type
     if isinstance(expr, HIRWithShape):
         return expr.result_type
