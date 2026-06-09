@@ -2591,6 +2591,8 @@ class TypeChecker:
     ) -> TypedExpr:
         if typed.type == expected_type:
             return typed
+        if _contains_type_var(typed.type) or _contains_type_var(expected_type):
+            return typed
         if typed.type == INT and expected_type == FLOAT:
             return TypedCast(typed, INT, FLOAT, FLOAT)
         raise RemoraTypeError(f"expected {expected_type}, got {typed.type}", loc)
@@ -2666,11 +2668,11 @@ class TypeChecker:
                 "grad input must be a scalar or array of Float", expr.loc,
             )
         param_elem = param_type.element if isinstance(param_type, ArrayType) else param_type
-        if param_elem != FLOAT:
+        if param_elem != FLOAT and not isinstance(param_elem, TypeVar):
             raise RemoraTypeError(
                 "grad requires Float input", expr.loc,
             )
-        if result_type != FLOAT:
+        if result_type != FLOAT and not isinstance(result_type, TypeVar):
             raise RemoraTypeError(
                 "grad requires a scalar Float result", expr.loc,
             )
@@ -2679,6 +2681,16 @@ class TypeChecker:
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()
+
+
+def _contains_type_var(value_type: RemoraType) -> bool:
+    if isinstance(value_type, TypeVar):
+        return True
+    if isinstance(value_type, ArrayType):
+        return _contains_type_var(value_type.element)
+    if isinstance(value_type, FuncType):
+        return any(_contains_type_var(p) for p in value_type.params) or _contains_type_var(value_type.result)
+    return False
 
 
 def _infer_type_vars(
