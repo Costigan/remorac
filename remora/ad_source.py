@@ -231,8 +231,10 @@ def generate_gradient_source(
     if gradient is None:
         raise RuntimeError("AD source: input not found on tape")
     param_parts = " ".join(
-        f"[{name} {_source_type(shape)}]" for name, shape in param_specs
+        f"{name} {_source_type(shape)}" for name, shape in param_specs
     )
+    if param_parts:
+        param_parts = f"[{param_parts}]"
     body = _emit(gradient)
     return (
         f"(define/pi () ({function_name} {param_parts} {_source_type(param_specs[differentiate_input][1])}) "
