@@ -44,7 +44,7 @@ def _get_remora_rt_o() -> str:
 
 from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_function_source, compile_source
-from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, IfExpr, IntLit, IotaExpr, ReplicateExpr, SortExpr, VarExpr
+from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, GradExpr, IfExpr, IntLit, IotaExpr, ReplicateExpr, SortExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS
@@ -1254,7 +1254,41 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
         if not isinstance(counts, np.ndarray) or not isinstance(array, np.ndarray):
             raise EvaluationError("replicate expects array values")
         return np.repeat(array, counts.astype(int))
+    if isinstance(ast, GradExpr):
+        return _eval_ad_grad(expr, env)
     raise EvaluationError(f"CPU evaluation for {type(ast).__name__} is deferred")
+
+
+def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
+    """Evaluate (grad f) by returning a callable that computes the gradient.
+
+    For AD1, the interpreter uses central finite differences as a
+    numerical oracle.  The tape-based reverse mode is tested separately
+    and used for the compiled path.
+    """
+    from remora.ad_testing import finite_difference_grad
+
+    func_typed = expr  # expr.func, but eval_expr_node receives the TypedExprNode
+    # Get the function from the GradExpr
+    ast = expr.expr if hasattr(expr, 'expr') else None
+    if not isinstance(ast, GradExpr):
+        raise EvaluationError("expected GradExpr")
+
+    func_value = _eval_expr(
+        _make_typed_expr_node(ast.func, expr.type), env
+    )
+
+    def grad_fn(x: np.ndarray) -> np.ndarray:
+        def f(x_val):
+            return float(func_value(x_val))
+        return finite_difference_grad(f, x)
+
+    return grad_fn
+
+
+def _make_typed_expr_node(ast_expr, typ):
+    from remora.typechecker import TypedExprNode
+    return TypedExprNode(ast_expr, typ)
 
 
 def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
