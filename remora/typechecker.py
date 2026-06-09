@@ -21,6 +21,7 @@ from remora.ast_nodes import (
     GradeExpr,
     GradExpr,
     FilterExpr,
+    FirstExpr,
     IfExpr,
     IndexAppExpr,
     IndexExpr,
@@ -35,6 +36,7 @@ from remora.ast_nodes import (
     LetExpr,
     MapExpr,
     OperatorFuncExpr,
+    PairExpr,
     Program,
     RankExpr,
     RavelExpr,
@@ -60,6 +62,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
     ScatterAddExpr,
+    SecondExpr,
 )
 from remora.constraints import (
     ConstraintError,
@@ -101,6 +104,7 @@ from remora.types import (
     DimExpr,
     ForallType,
     FuncType,
+    PairType,
     PiType,
     RemoraType,
     RemoraTypeError,
@@ -473,6 +477,31 @@ class TypedScatterAdd:
 
 
 @dataclass(frozen=True)
+class TypedPair:
+    """A typed pair construction."""
+    expr: object  # PairExpr
+    left: TypedExpr
+    right: TypedExpr
+    type: PairType
+
+
+@dataclass(frozen=True)
+class TypedFirst:
+    """First projection from a pair."""
+    expr: object  # FirstExpr
+    pair: TypedExpr
+    type: RemoraType
+
+
+@dataclass(frozen=True)
+class TypedSecond:
+    """Second projection from a pair."""
+    expr: object  # SecondExpr
+    pair: TypedExpr
+    type: RemoraType
+
+
+@dataclass(frozen=True)
 class TypedSort:
     """A typed sort expression."""
     expr: SortExpr
@@ -488,6 +517,7 @@ class TypedGrad:
     function_body: TypedExpr | None  # specialized body for tape
     param_name: str | None
     type: RemoraType
+    param_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -566,6 +596,9 @@ TypedExpr: TypeAlias = (
     | TypedIndicesOf
     | TypedWithShape
     | TypedScatterAdd
+    | TypedPair
+    | TypedFirst
+    | TypedSecond
     | TypedBox
     | TypedUnbox
     | TypedSort
@@ -791,6 +824,12 @@ class TypeChecker:
             return self._infer_with_shape(expr, env)
         if isinstance(expr, ScatterAddExpr):
             return self._infer_scatter_add(expr, env)
+        if isinstance(expr, PairExpr):
+            return self._infer_pair(expr, env)
+        if isinstance(expr, FirstExpr):
+            return self._infer_first(expr, env)
+        if isinstance(expr, SecondExpr):
+            return self._infer_second(expr, env)
         if isinstance(expr, BoxExpr):
             return self._infer_box(expr, env)
         if isinstance(expr, UnboxExpr):
@@ -1760,6 +1799,26 @@ class TypeChecker:
             expr, typed_array, typed_index, typed_update, typed_array.type
         )
 
+    def _infer_pair(self, expr: PairExpr, env: TypeEnv) -> TypedExpr:
+        typed_left = self.infer(expr.left, env)
+        typed_right = self.infer(expr.right, env)
+        return TypedPair(
+            expr, typed_left, typed_right,
+            PairType(typed_left.type, typed_right.type),
+        )
+
+    def _infer_first(self, expr: FirstExpr, env: TypeEnv) -> TypedExpr:
+        typed_pair = self.infer(expr.pair, env)
+        if not isinstance(typed_pair.type, PairType):
+            raise RemoraTypeError("first expects a pair", expr.loc)
+        return TypedFirst(expr, typed_pair, typed_pair.type.left)
+
+    def _infer_second(self, expr: SecondExpr, env: TypeEnv) -> TypedExpr:
+        typed_pair = self.infer(expr.pair, env)
+        if not isinstance(typed_pair.type, PairType):
+            raise RemoraTypeError("second expects a pair", expr.loc)
+        return TypedSecond(expr, typed_pair, typed_pair.type.right)
+
     def _infer_box(self, expr: BoxExpr, env: TypeEnv) -> TypedExpr:
         typed_value = self.infer(expr.value, env)
         if not isinstance(typed_value.type, ArrayType):
@@ -2382,7 +2441,7 @@ class TypeChecker:
         return self._require_remora_type(raw, function.loc)
 
     def _require_remora_type(self, value: object, loc) -> RemoraType:
-        if isinstance(value, (ScalarType, ArrayType, FuncType, SigmaType, PiType)):
+        if isinstance(value, (ScalarType, ArrayType, FuncType, SigmaType, PiType, ForallType, PairType)):
             return value
         raise RemoraTypeError(f"invalid type annotation {value!r}", loc)
 
@@ -2683,6 +2742,8 @@ class TypeChecker:
         func_type: RemoraType | None = None
         function_body: TypedExpr | None = None
         param_name: str | None = None
+        param_names: tuple[str, ...] = ()
+        function_body: TypedExpr | None = None
 
         if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
             function = self._functions[expr.func.name]
@@ -2703,6 +2764,15 @@ class TypeChecker:
                 )
                 function_body = typed_function.body
                 param_name = typed_function.params[0][0]
+                param_names = tuple(p[0] for p in typed_function.params)
+            else:
+                # Original type is PiType/ForallType — specialize it
+                typed_function = self._typed_top_level_function(
+                    function, func_type, env
+                )
+                function_body = typed_function.body
+                param_name = typed_function.params[0][0]
+                param_names = tuple(p[0] for p in typed_function.params)
         else:
             typed_func = self.infer(expr.func, env)
             original_type = typed_func.type
@@ -2710,28 +2780,32 @@ class TypeChecker:
             if isinstance(typed_func, TypedLambda):
                 function_body = typed_func.body
                 param_name = typed_func.params[0][0]
+                param_names = tuple(p[0] for p in typed_func.params)
             elif isinstance(typed_func, TypedIndexApp):
                 function_body = typed_func.function.body
                 param_name = typed_func.function.params[0][0]
+                param_names = tuple(p[0] for p in typed_func.function.params)
         if not isinstance(func_type, FuncType):
             raise RemoraTypeError("grad expects a function", expr.loc)
 
-        if len(func_type.params) != 1:
-            raise RemoraTypeError("grad expects a unary function", expr.loc)
-
-        param_type = func_type.params[0]
+        for param_type in func_type.params:
+            if not isinstance(param_type, (ScalarType, ArrayType)):
+                raise RemoraTypeError(
+                    "grad input must be a scalar or array of Float", expr.loc,
+                )
+            param_elem = param_type.element if isinstance(param_type, ArrayType) else param_type
+            if param_elem != FLOAT and not isinstance(param_elem, TypeVar):
+                raise RemoraTypeError("grad requires Float input", expr.loc)
         result_type = func_type.result
-        if not isinstance(param_type, (ScalarType, ArrayType)):
-            raise RemoraTypeError(
-                "grad input must be a scalar or array of Float", expr.loc,
-            )
-        param_elem = param_type.element if isinstance(param_type, ArrayType) else param_type
-        if param_elem != FLOAT and not isinstance(param_elem, TypeVar):
-            raise RemoraTypeError("grad requires Float input", expr.loc)
         if result_type != FLOAT and not isinstance(result_type, TypeVar):
             raise RemoraTypeError("grad requires a scalar Float result", expr.loc)
 
-        grad_type: RemoraType = FuncType((param_type,), param_type)
+        grad_result: RemoraType = func_type.params[0]
+        if len(func_type.params) > 1:
+            for pt in reversed(func_type.params[1:]):
+                grad_result = PairType(pt, grad_result)
+
+        grad_type: RemoraType = FuncType(func_type.params, grad_result)
 
         # AD3: re-wrap with PiType / ForallType from the original declaration
         if original_type is not None and original_type is not func_type:
@@ -2754,7 +2828,7 @@ class TypeChecker:
                     if isinstance(fa, ForallType):
                         grad_type = ForallType(fa.binders, grad_type)
 
-        return TypedGrad(expr, function_body, param_name, grad_type)
+        return TypedGrad(expr, function_body, param_name, grad_type, param_names)
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()

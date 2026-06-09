@@ -155,7 +155,27 @@ class ForallType:
         return f"(∀ ({binders}) {self.body})"
 
 
-RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType | ForallType
+@dataclass(frozen=True)
+class PairType:
+    """Product type for pairs: (PairType A B)."""
+    left: RemoraType
+    right: RemoraType
+
+    @property
+    def element(self) -> ScalarType | None:
+        if isinstance(self.left, ScalarType) and isinstance(self.right, ScalarType):
+            return self.left
+        return None
+
+    @property
+    def rank(self) -> int:
+        return 0
+
+    def __str__(self) -> str:
+        return f"(Pair {self.left} {self.right})"
+
+
+RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType | ForallType | PairType
 
 FLOAT = ScalarType("float")
 INT = ScalarType("int")
