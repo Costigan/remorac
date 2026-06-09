@@ -190,38 +190,32 @@ def _lower_view_result(
     elif isinstance(node, HIRRotate):
         rank = node.result_type.rank
         N = node.result_type.shape[0].value
-        shift = node.shift.value
-        dims = ", ".join(f"d{i}" for i in range(rank))
-        affine_map = f"affine_map<({dims}) -> ({dims})>"
-        iterators = "[" + ", ".join(f'"parallel"' for _ in range(rank)) + "]"
+        shift = node.shift.value % N
         elem_type = type_to_mlir(node.result_type.element)
-        empty_name = f"%{_join_prefix(prefix, 'empty')}"
-        rot_zero_name = f"%{_join_prefix(prefix, 'rzero')}"
-        rot_N_name = f"%{_join_prefix(prefix, 'rN')}"
-        rot_shift_name = f"%{_join_prefix(prefix, 'rshift')}"
-        trailing_defs = ""
-        trailing_indices = ""
-        if rank > 1:
-            trailing_defs = "\n".join(
-                f"      %d{i} = linalg.index {i} : index" for i in range(1, rank)
-            )
-            trailing_indices = ", " + ", ".join(f"%d{i}" for i in range(1, rank))
-        extract_indices = "%wrapped" + trailing_indices
-        result_line = f"""    {rot_zero_name} = arith.constant 0 : index
-    {rot_N_name} = arith.constant {N} : index
-    {rot_shift_name} = arith.constant {shift} : index
+        if shift == 0:
+            result_name = input_name
+            result_line = ""
+        else:
+            left_len = N - shift
+            right_len = shift
+            strides = ", ".join(["1"] * rank)
+            left_offsets = ", ".join([str(shift)] + ["0"] * (rank - 1))
+            suffixes = "".join(f", {d.value}" for d in node.result_type.shape[1:])
+            left_sizes = f"{left_len}{suffixes}"
+            right_offsets = ", ".join(["0"] * rank)
+            right_sizes = f"{right_len}{suffixes}"
+            left_name = f"%{_join_prefix(prefix, 'left')}"
+            right_name = f"%{_join_prefix(prefix, 'right')}"
+            empty_name = f"%{_join_prefix(prefix, 'empty')}"
+            tmp_name = f"%{_join_prefix(prefix, 'tmp')}"
+            result_name = f"%{_join_prefix(prefix, 'result')}"
+            left_mlir = f"tensor<{left_len}{suffixes.replace(', ', 'x')}x{elem_type}>"
+            right_mlir = f"tensor<{right_len}{suffixes.replace(', ', 'x')}x{elem_type}>"
+            result_line = f"""    {left_name} = tensor.extract_slice {input_name}[{left_offsets}] [{left_sizes}] [{strides}] : {input_type} to {left_mlir}
+    {right_name} = tensor.extract_slice {input_name}[{right_offsets}] [{right_sizes}] [{strides}] : {input_type} to {right_mlir}
     {empty_name} = tensor.empty() : {result_type}
-    {result_name} = linalg.generic {{
-      indexing_maps = [{affine_map}],
-      iterator_types = [{iterators}]
-    }} outs({empty_name} : {result_type}) {{
-    ^bb0(%out: {elem_type}):
-      %idx = linalg.index 0 : index
-      %shifted = arith.addi %idx, {rot_shift_name} : index
-      %wrapped = arith.remsi %shifted, {rot_N_name} : index{trailing_defs}
-      %elem = tensor.extract {input_name}[{extract_indices}] : {input_type}
-      linalg.yield %elem : {elem_type}
-    }} -> {result_type}"""
+    {tmp_name} = tensor.insert_slice {left_name} into {empty_name}[0{', 0' * (rank - 1)}] [{left_sizes}] [{strides}] : {left_mlir} into {result_type}
+    {result_name} = tensor.insert_slice {right_name} into {tmp_name}[{left_len}{', 0' * (rank - 1)}] [{right_sizes}] [{strides}] : {right_mlir} into {result_type}"""
     else:
         raise AssertionError(
             f"unhandled view node type {type(node).__name__}"
