@@ -625,3 +625,24 @@ def test_grad_select_scalar():
     # at x=-3: loss = 3.0, grad = -1.0
     g = grad_via_tape(body, pname, np.asarray(-3.0))
     assert g == pytest.approx(-1.0, rel=1e-4)
+
+
+# ── Liveness / buffer reuse test ────────────────────────────────────────────
+
+
+def test_tape_liveness_frees_values():
+    """Chained operations should not accumulate all primals in memory."""
+    t = EvalTape()
+    x = t.push_input(np.array([1.0, 2.0, 3.0]))
+    cur = x
+    for _ in range(10):
+        cur = t.push(
+            TapeEntry("add", (cur, cur), ()),
+            t.values[cur] + t.values[cur],
+        )
+    t.push(TapeEntry("fold", (cur,), (t.values[cur],)), t.values[cur].sum())
+    adjs = t.reverse()
+    expected = np.full(3, 2.0**10, dtype=np.float64)
+    np.testing.assert_array_equal(adjs[x], expected)
+    freed_count = sum(1 for v in t.values if v is None)
+    assert freed_count >= 8, f"expected >= 8 freed, got {freed_count}"
