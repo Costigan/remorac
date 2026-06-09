@@ -197,6 +197,13 @@ class IndexAppExpr:
 
 
 @dataclass(frozen=True)
+class GradExpr:
+    """grad f: differentiates a unary Float→Float function."""
+    func: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class MapExpr:
     func: Expr
     arrays: list[Expr]
@@ -407,6 +414,7 @@ Expr: TypeAlias = (
     | LambdaExpr
     | AppExpr
     | IndexAppExpr
+    | GradExpr
     | MapExpr
     | FoldExpr
     | ReduceExpr

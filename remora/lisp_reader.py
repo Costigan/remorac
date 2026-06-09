@@ -54,6 +54,7 @@ from remora.ast_nodes import (
     FuncDef,
     FilterExpr,
     GradeExpr,
+    GradExpr,
     IfExpr,
     IndexAppExpr,
     IndexExpr,
@@ -153,6 +154,7 @@ array_lit: "[" sexpr* "]"
             | index_app_form
             | index_form
             | index_item_form
+            | grad_form
             | application
 
 ?name_token: NAME | MINUS
@@ -235,11 +237,12 @@ ravel_form: "ravel" sexpr -> ravel_expr
 take_form: "take" sexpr sexpr -> take_expr
 drop_form: "drop" sexpr sexpr -> drop_expr
 index_app_form: "iapp" sexpr index_arg+ -> index_app_expr
+index_form: "index" sexpr sexpr+ -> index_expr
+index_item_form: "index-item" sexpr sexpr -> index_expr
 
 index_arg: dim_ref -> dim_arg
          | "(" "shape" dim_ref* ")" -> shape_lit_arg
-index_form: "index" sexpr sexpr+ -> index_expr
-index_item_form: "index-item" sexpr sexpr -> index_expr
+grad_form: "grad" sexpr -> grad_expr
 
 application: sexpr sexpr* -> app
 
@@ -598,6 +601,9 @@ class LispASTBuilder(Transformer):
         array = items[0]
         indices = list(items[1:])
         return IndexExpr(array, indices, self._loc_from(items))
+
+    def grad_expr(self, items: list[Any]) -> GradExpr:
+        return GradExpr(items[0], self._loc_from(items))
 
     # ── application / operators ──────────────────────────────────────────
 
