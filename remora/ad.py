@@ -224,11 +224,21 @@ def _get_op(func: object) -> str:
 
 
 def grad_via_tape(body: TypedExpr, param_name: str, x: np.ndarray) -> np.ndarray:
-    tape = EvalTape()
-    x_idx = tape.push_input(np.asarray(x, dtype=np.float64))
-    trace_expr(body, {param_name: x_idx}, tape)
+    tape, x_idx = trace_via_tape(body, param_name, x)
     adjs = tape.reverse()
     grad = adjs.get(x_idx)
     if grad is None:
         raise RuntimeError("AD: input not found on tape")
     return np.asarray(grad).reshape(np.asarray(x).shape)
+
+
+def trace_via_tape(
+    body: TypedExpr,
+    param_name: str,
+    x: np.ndarray,
+) -> tuple[EvalTape, int]:
+    """Trace one specialized unary function body and return its tape and input."""
+    tape = EvalTape()
+    x_idx = tape.push_input(np.asarray(x, dtype=np.float64))
+    trace_expr(body, {param_name: x_idx}, tape)
+    return tape, x_idx

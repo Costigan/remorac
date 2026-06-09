@@ -204,6 +204,7 @@ def compile_function_source_to_supported_gpu_artifacts(
     *,
     include_prelude: bool = True,
     kernel_name: str | None = None,
+    syntax: str = "ml",
 ) -> SupportedGPUFunctionArtifact:
     """Build the current inspection and execution GPU artifacts for one function.
 
@@ -219,6 +220,7 @@ def compile_function_source_to_supported_gpu_artifacts(
         param_types,
         verify=False,
         include_prelude=include_prelude,
+        syntax=syntax,
     )
     kernel = kernel_name or f"remora_{function_name}"
     ptx_text, kernels = generate_mlir_descriptor_abi_ptx(
