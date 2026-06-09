@@ -277,6 +277,7 @@ def _lower_tensor_input(
             HIRReverse,
             HIRTake,
             HIRDrop,
+            HIRSubarray,
         ),
     ):
         from remora.lowering.view_ops import _lower_view_input
@@ -568,9 +569,9 @@ def _lower_binary_map_result(
     op_lines = _lower_map_binary_callable_body(
         node.func,
         functions,
-        left_name="%left_in",
+        left_name="%left_map_in",
         left_type=left_element_type,
-        right_name="%right_in",
+        right_name="%right_map_in",
         right_type=right_element_type,
         result_type=result_element_type,
     )
@@ -582,7 +583,7 @@ def _lower_binary_map_result(
       indexing_maps = [{left_map}, {right_map}, {identity}],
       iterator_types = {iterators}
     }} ins({left_name}, {right_name} : {left_type}, {right_type}) outs(%map_empty : {result_type}) {{
-    ^bb0(%left_in: {left_element_type}, %right_in: {right_element_type}, %out: {result_element_type}):
+    ^bb0(%left_map_in: {left_element_type}, %right_map_in: {right_element_type}, %out: {result_element_type}):
 {op_lines}
     }} -> {result_type}
 """
@@ -1143,8 +1144,14 @@ def _lower_fold_input(
             HIRRavel,
             HIRTake,
             HIRDrop,
+            HIRSubarray,
         ),
     ):
+        return _lower_tensor_input(
+            node, _join_prefix(prefix, "input"), functions, tensor_env
+        )
+
+    if isinstance(node, HIRAppend):
         return _lower_tensor_input(
             node, _join_prefix(prefix, "input"), functions, tensor_env
         )

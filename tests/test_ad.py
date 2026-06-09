@@ -5,9 +5,9 @@ import pytest
 
 from remora.ad import EvalTape, TapeEntry, grad_via_tape
 from remora.ad_testing import finite_difference_grad, grad_check
-from remora.typechecker import TypedApp, TypedExprNode
+from remora.typechecker import TypedApp, TypedExprNode, TypedAppend, TypedSubarray
 from remora.typechecker import TypedIf
-from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr, IfExpr
+from remora.ast_nodes import FloatLit, VarExpr, OperatorFuncExpr, IntLit, SourceLoc, FoldExpr, IfExpr, AppendExpr
 from remora.types import FLOAT
 
 _LOC = SourceLoc("test", 0, 0)
@@ -293,3 +293,197 @@ def test_compiled_cross_validation(shape, func_name):
     def f(v):
         return float(np.sum(v * v))
     grad_check(f, x, tape_g, label=f"compiled_{func_name}_{shape}")
+
+
+# ── AD append VJP ───────────────────────────────────────────────────────────
+
+
+def test_tape_append_distinct():
+    t = EvalTape()
+    left = t.push_input(np.asarray([1.0, 2.0, 3.0]))
+    right = t.push_input(np.asarray([4.0, 5.0]))
+    t.push(
+        TapeEntry("append", (left, right), ((3,), 3)),
+        np.asarray([1.0, 2.0, 3.0, 4.0, 5.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[left], [1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(adjs[right], [1.0, 1.0])
+
+
+def test_tape_append_repeated():
+    t = EvalTape()
+    x = t.push_input(np.asarray([1.0, 2.0, 3.0]))
+    t.push(
+        TapeEntry("append", (x, x), ((3,), 3)),
+        np.asarray([1.0, 2.0, 3.0, 1.0, 2.0, 3.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[x], [2.0, 2.0, 2.0])
+
+
+def test_tape_append_rank2():
+    t = EvalTape()
+    left = t.push_input(np.asarray([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+    right = t.push_input(np.asarray([[7.0, 8.0], [9.0, 10.0]]))
+    t.push(
+        TapeEntry("append", (left, right), ((3, 2), 3)),
+        np.asarray(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]]
+        ),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[left], np.ones((3, 2)))
+    np.testing.assert_array_equal(adjs[right], np.ones((2, 2)))
+
+
+def _specialize_body(source: str, func_name: str, param_type):
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+    from remora.types import FuncType
+
+    tc = TypeChecker()
+    tc.check_program(parse_lisp(source))
+    spec = tc._typed_top_level_function(
+        tc._functions[func_name],
+        FuncType((param_type,), FLOAT),
+        tc._build_prelude_env(),
+        index_args=tuple(d for d in param_type.shape if hasattr(d, "value")),
+    )
+    return spec.body, spec.params[0][0]
+
+
+def test_grad_append_same_input_square():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 3)] Float) "
+        "  (fold + 0.0 (* (append x x) (append x x))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(3),))
+    )
+    x = np.array([1.0, 2.0, 3.0])
+    g = grad_via_tape(body, pname, x)
+    np.testing.assert_array_almost_equal(g, 4.0 * x)
+
+
+def test_grad_append_transformed_operands():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 3)] Float) "
+        "  (fold + 0.0 (* (append x (* 2.0 x)) "
+        "                 (append x (* 2.0 x)))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(3),))
+    )
+    x = np.array([1.0, 2.0, 3.0])
+    g = grad_via_tape(body, pname, x)
+    np.testing.assert_array_almost_equal(g, 10.0 * x)
+
+
+def test_append_vs_finite_diff():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4)] Float) "
+        "  (fold + 0.0 (* (append x x) (append x x))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(4),))
+    )
+    rng = np.random.RandomState(123)
+    x = rng.randn(4) * 2.0
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        v = np.asarray(v, dtype=np.float64)
+        cat = np.concatenate([v, v])
+        return float(np.sum(cat * cat))
+    grad_check(f, x, tape_g, label="append_sq")
+
+
+def test_append_rank2_vs_finite_diff():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4 2)] Float) "
+        "  (fold + 0.0 (ravel (* (append x x) (append x x)))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(4), StaticDim(2)))
+    )
+    rng = np.random.RandomState(456)
+    x = rng.randn(4, 2) * 2.0
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        v = np.asarray(v, dtype=np.float64)
+        cat = np.concatenate([v, v])
+        return float(np.sum(cat * cat))
+    grad_check(f, x, tape_g, label="append_rank2_sq")
+
+
+# ── AD subarray VJP ──────────────────────────────────────────────────────────
+
+
+def test_tape_subarray():
+    t = EvalTape()
+    arr = t.push_input(np.asarray([10.0, 20.0, 30.0, 40.0, 50.0]))
+    t.push(
+        TapeEntry("subarray", (arr,), ((5,), (2,), (3,))),
+        np.asarray([30.0, 40.0, 50.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[arr], [0.0, 0.0, 1.0, 1.0, 1.0])
+
+
+def test_tape_subarray_from_start():
+    t = EvalTape()
+    arr = t.push_input(np.asarray([1.0, 2.0, 3.0, 4.0]))
+    t.push(
+        TapeEntry("subarray", (arr,), ((4,), (0,), (2,))),
+        np.asarray([1.0, 2.0]),
+    )
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[arr], [1.0, 1.0, 0.0, 0.0])
+
+
+def test_grad_subarray_square():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 5)] Float) "
+        "  (fold + 0.0 (* (subarray x [2] [3]) (subarray x [2] [3]))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(5),))
+    )
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    g = grad_via_tape(body, pname, x)
+    expected = np.zeros(5, dtype=np.float64)
+    expected[2:5] = 2.0 * np.array([3.0, 4.0, 5.0])
+    np.testing.assert_array_almost_equal(g, expected)
+
+
+def test_subarray_vs_finite_diff():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 6)] Float) "
+        "  (fold + 0.0 (* (subarray x [1] [4]) (subarray x [1] [4]))))"
+    )
+    from remora.types import ArrayType, StaticDim
+    body, pname = _specialize_body(
+        source, "loss", ArrayType(FLOAT, (StaticDim(6),))
+    )
+    rng = np.random.RandomState(789)
+    x = rng.randn(6) * 2.0
+    tape_g = grad_via_tape(body, pname, x)
+
+    def f(v):
+        v = np.asarray(v, dtype=np.float64)
+        sub = v[1:5]
+        return float(np.sum(sub * sub))
+    grad_check(f, x, tape_g, label="subarray_sq")

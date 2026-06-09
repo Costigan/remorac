@@ -353,6 +353,20 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 - Concrete `reverse`, `take`, and `drop` VJPs now execute through the tape and
   generated-source paths. Take/drop emit append-based zero padding, and append
   lowering now composes as a tensor input so those gradients compile on CPU.
+- Append VJP: tape traces `append`, saves the left leading dimension.
+  Reverse splits the cotangent along axis 0: `take(len, dy)` for left and
+  `drop(len, dy)` for right. Supports repeated operands (e.g., `append(x, x)`)
+  with correct cotangent accumulation. Rank-2+ appends split only the leading
+  axis. Validated through: CPU tape execution, generated-source interpretation,
+  compiled CPU execution, and finite-difference agreement.
+  Not in the supported GPU subset (structured views required).
+- Subarray VJP: tape traces `subarray(array, offsets, sizes)`, saves shape
+  and position metadata. Reverse scatters the cotangent back into a zero
+  array at the extracted sub-region. Source VJP uses `append`-based zero
+  padding: pads the adjoint with zero prefix (via `take`) and zero suffix
+  (via `drop`). Currently supports rank-1 leading-dimension subarrays.
+  Validated through: CPU tape execution, generated-source interpretation,
+  compiled CPU execution. Not in the supported GPU subset.
 
 Remaining AD5 work:
 
@@ -362,8 +376,8 @@ Remaining AD5 work:
   the dedicated generated-gradient artifact facade.
 - Extend fused GPU expressions beyond same-shaped f32 arithmetic to structured
   views, broadcasts that require reduction, and conditional/select expressions.
-- Add VJPs for the structured operations listed in AD4 (index/scatter-add,
-  append, subarray) and support multiple active inputs.
+- Add VJPs for index/scatter-add operations.
+- Support multiple active inputs.
 - Add dimension multiplication to dependent index expressions so symbolic Pi
   `ravel` can represent the flattened length before concrete specialization.
 - Complete allocation-growth, buffer-reuse, fusion, and checkpointing criteria.
@@ -373,15 +387,15 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 ### Progress Summary (June 8, 2026)
 
 | Phase | Status | Tests |
-|---|---:|---|
+|---|---|---:|
 | AD0 | ✅ Complete | — |
 | AD1 | ✅ Complete | 833 |
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs and fused GPU arithmetic | 884 |
+| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray VJPs | 901 |
 
-Full suite after this milestone: **884 passed, 1 skipped**.
+Full suite after this milestone: **901 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).

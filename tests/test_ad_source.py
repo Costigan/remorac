@@ -569,3 +569,131 @@ def test_take_and_drop_vjps_zero_pad_cotangent(view, expected):
     )
     np.testing.assert_array_equal(interpreted.value, expected)
     np.testing.assert_array_equal(compiled.value, expected)
+
+
+# ── Append VJP ──────────────────────────────────────────────────────────
+
+
+def test_append_gradient_source_generation():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 3)] Float) "
+        "  (fold + 0.0 (* (append x x) (append x x))))"
+    )
+    param_type = ArrayType(FLOAT, (StaticDim(3),))
+    generated = compile_gradient_function_source(
+        source,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(take" in generated.gradient_source.source
+    assert "(drop" in generated.gradient_source.source
+    assert "(append" in generated.gradient_source.source
+
+
+_APPEND_LOSS = (
+    "(define/pi () "
+    "  (loss [x (Array Float 4)] Float) "
+    "  (fold + 0.0 (* (append x x) (append x x))))"
+)
+
+
+def test_compiled_append_gradient_cpu():
+    param_type = ArrayType(FLOAT, (StaticDim(4),))
+    generated = compile_gradient_function_source(
+        _APPEND_LOSS,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(append" in generated.gradient_source.source
+    assert "(take" in generated.gradient_source.source
+    assert "(drop" in generated.gradient_source.source
+
+    request = _APPEND_LOSS + " ((grad loss) [1.0 2.0 3.0 4.0])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    expected = 4.0 * np.array([1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
+
+
+def test_append_rank2_gradient_compiled():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4 2)] Float) "
+        "  (fold + 0.0 (ravel (* (append x x) (append x x)))))"
+    )
+    request = (
+        source
+        + " ((grad loss) [[1.0 2.0] [3.0 4.0] [5.0 6.0] [7.0 8.0]])"
+    )
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    x = np.arange(1.0, 9.0).reshape(4, 2)
+    expected = 4.0 * x
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
+
+
+# ── Subarray VJP ─────────────────────────────────────────────────────────
+
+
+def test_subarray_gradient_source_generation():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 5)] Float) "
+        "  (fold + 0.0 (* (subarray x [2] [3]) (subarray x [2] [3]))))"
+    )
+    param_type = ArrayType(FLOAT, (StaticDim(5),))
+    generated = compile_gradient_function_source(
+        source,
+        "loss",
+        (param_type,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(take" in generated.gradient_source.source
+    assert "(append" in generated.gradient_source.source
+
+
+def test_compiled_subarray_gradient_cpu():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 6)] Float) "
+        "  (fold + 0.0 (* (subarray x [1] [4]) (subarray x [1] [4]))))"
+    )
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0 5.0 6.0])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    expected = np.array([0.0, 4.0, 6.0, 8.0, 10.0, 0.0])
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
+
+
+def test_subarray_full_gradient_source():
+    source = (
+        "(define/pi () "
+        "  (loss [x (Array Float 4)] Float) "
+        "  (fold + 0.0 (* (subarray x [0] [4]) (subarray x [0] [4]))))"
+    )
+    request = source + " ((grad loss) [1.0 2.0 3.0 4.0])"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    expected = 2.0 * np.array([1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
