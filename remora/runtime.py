@@ -1048,7 +1048,13 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedIf):
         condition = _eval_expr(expr.condition, env)
-        return _eval_expr(expr.then_branch if bool(condition) else expr.else_branch, env)
+        if isinstance(condition, np.ndarray) and condition.dtype == bool:
+            then_val = _eval_expr(expr.then_branch, env)
+            else_val = _eval_expr(expr.else_branch, env)
+            return np.where(condition, then_val, else_val)
+        if bool(condition):
+            return _eval_expr(expr.then_branch, env)
+        return _eval_expr(expr.else_branch, env)
 
     if isinstance(expr, (TypedOperatorFunc, TypedLeftSection, TypedRightSection)):
         return _eval_callable(expr, env)

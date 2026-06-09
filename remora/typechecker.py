@@ -1997,7 +1997,7 @@ class TypeChecker:
             self._require_numeric(params[0], expr.loc)
             self._require_numeric(params[1], expr.loc)
             self._require(expected_type.result, FLOAT, expr.loc)
-        elif expr.op in {"<", "<=", "==", "!="}:
+        elif expr.op in {"<", "<=", ">", ">=", "==", "!="}:
             _common = common_numeric_type(params[0], params[1])
             self._require(expected_type.result, BOOL, expr.loc)
         elif expr.op in {"&&", "||"}:

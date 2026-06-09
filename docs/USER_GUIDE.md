@@ -192,6 +192,76 @@ Operations compilable to GPU via IREE:
 remorac --target gpu-nvidia program.remora
 ```
 
+## Automatic differentiation
+
+Remora supports reverse-mode automatic differentiation via the `grad` operator.
+`grad f` returns the gradient function of `f` with respect to its Float
+parameters.
+
+### Basic usage (Lisp syntax)
+
+```lisp
+;; Scalar function
+(define/pi () (sq [x Float] Float) (* x x))
+((grad sq) 3.0)                        ;; → 6.0
+
+;; Vector loss
+(define/pi ([n Dim])
+  (sq-loss [x (Array Float n)] Float)
+  (fold + 0.0 (* x x)))
+((grad (iapp sq-loss 5)) [1 2 3 4 5])  ;; → [2 4 6 8 10]
+
+;; Binary function — returns pair in interpreter, single gradient via compiler
+(define/pi ([n Dim])
+  (dot-loss [x (Array Float n) w (Array Float n)] Float)
+  (fold + 0.0 (* x w)))
+((grad (iapp dot-loss 4)) [1 2 3 4] [5 6 7 8])
+;; → ([5 6 7 8], [1 2 3 4])
+
+;; Conditional
+(define/pi () (relu [x Float] Float) (if (> x 0.0) x 0.0))
+((grad relu) 3.0)  ;; → 1.0
+((grad relu) -3.0) ;; → 0.0
+```
+
+### Supported differentiable operations
+
+| Operation | VJP | Notes |
+|---|---|---|
+| `+ - * /` | Standard | Scalar and elementwise |
+| `fold + 0.0` | Broadcast adjoint | Sum reduction |
+| `reshape`, `ravel` | Reshape cotangent | Shape-preserving |
+| `transpose`, `reverse` | Inverse view on cotangent | Elementwise |
+| `take`, `drop` | Zero-pad cotangent | Leading-dimension only |
+| `append` | Split cotangent via `take`/`drop` | Rank-N (axis 0) |
+| `subarray` | Scatter cotangent via zero-pad | Rank-1 only |
+| `rotate` | Counter-rotate cotangent | Elementwise |
+| `index` | Scatter via `scatter-add` | Compile-time-known indices |
+| `if` / `select` | Route cotangent through active branch | Both branches traced |
+
+### Compilation options
+
+```python
+# Compile a single gradient function (CPU)
+from remora.compiler import compile_gradient_function_source
+cpu = compile_gradient_function_source(source, "loss", (param_type,))
+
+# Compile for GPU (elementwise and select gradients)
+gpu = compile_gradient_function_source_to_supported_gpu_artifacts(
+    source, "loss", (param_type,))
+
+# Compile per-input gradients for multi-parameter functions
+from remora.compiler import compile_gradient_functions_source
+grads = compile_gradient_functions_source(source, "dot-loss", (tx, tw))
+```
+
+### Limitations
+
+- `(grad f)` requires `f` to return a scalar `Float`
+- All differentiated parameters must be `Float` or `Array Float`
+- GPU kernels support elementwise and select operations only (structured views run on CPU)
+- Multi-parameter `(grad f)` returns a pair in the interpreter but a single gradient via compiled CPU; use `compile_gradient_functions_source` for both
+
 ## Feature status by phase
 
 | Phase | Feature | Status |
@@ -202,6 +272,7 @@ remorac --target gpu-nvidia program.remora
 | 4 | Additional primitives | 11/12 (sort/grade typecheck only) |
 | 5 | Reranking | Full |
 | 6 | Boxes | Core done, execution deferred |
+| AD | Automatic differentiation | Reverse-mode via tape + source gen |
 | 8 | GPU | 8/14 (maps, reductions, views, scan, append) |
 
 ## Examples
