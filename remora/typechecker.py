@@ -2680,6 +2680,9 @@ class TypeChecker:
             if isinstance(typed_func, TypedLambda):
                 function_body = typed_func.body
                 param_name = typed_func.params[0][0]
+            elif isinstance(typed_func, TypedIndexApp):
+                function_body = typed_func.function.body
+                param_name = typed_func.function.params[0][0]
         if not isinstance(func_type, FuncType):
             raise RemoraTypeError("grad expects a function", expr.loc)
 

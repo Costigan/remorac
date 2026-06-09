@@ -8,13 +8,21 @@ from remora.ad_source import generate_gradient_source
 from remora.compiler import (
     compile_gradient_function_source,
     compile_gradient_function_source_to_supported_gpu_artifacts,
+    compile_source_gradient_function,
+    compile_source_gradient_function_to_supported_gpu_artifacts,
+    compile_source,
     compile_function_source,
     compile_function_source_to_supported_gpu_artifacts,
 )
 from remora.executor import RemoraExecutor
 from remora.lisp_reader import parse_lisp
 from remora.pipeline import PipelineUnavailable
-from remora.runtime import CUDAError, cuda_available, evaluate_source
+from remora.runtime import (
+    CUDAError,
+    cuda_available,
+    evaluate_source,
+    evaluate_source_compiled,
+)
 from remora.typechecker import TypeChecker
 from remora.types import ArrayType, FLOAT, FuncType, StaticDim
 
@@ -70,6 +78,13 @@ def test_source_level_grad_executes_for_concrete_function():
         syntax="lisp",
     )
     assert renamed.value == pytest.approx(8.0)
+
+    specialized = evaluate_source(
+        _SQ_LOSS + " ((grad (iapp sq-loss 3)) [1.0 2.0 3.0])",
+        include_prelude=False,
+        syntax="lisp",
+    )
+    np.testing.assert_array_equal(specialized.value, [2.0, 4.0, 6.0])
 
 
 def test_generated_source_handles_division_negation_and_fold_fill():
@@ -237,6 +252,101 @@ def test_public_gradient_workflow_rejects_conditionals():
             include_prelude=False,
             syntax="lisp",
             verify=False,
+        )
+
+
+def test_source_level_gradient_request_compiles_automatically():
+    request = _SQ_LOSS + " (grad (iapp sq-loss 5))"
+    cpu = compile_source_gradient_function(
+        request,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert cpu.gradient_source.function_name == "grad_sq_loss"
+    assert "(Array Float 5)" in cpu.gradient_source.source
+
+    applied_request = _SQ_LOSS + " ((grad (iapp sq-loss 5)) [1.0 2.0 3.0 4.0 5.0])"
+    gpu = compile_source_gradient_function_to_supported_gpu_artifacts(
+        applied_request,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert gpu.gpu.kernels[0].name == "remora_grad_sq_loss"
+
+    scalar_request = (
+        "(define/pi () (sq [value Float] Float) (* value value)) (grad sq)"
+    )
+    scalar = compile_source_gradient_function(
+        scalar_request,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert scalar.gradient_source.source.endswith("(* 2.0 value))")
+
+    with pytest.raises(ValueError, match="specialized"):
+        compile_source_gradient_function(
+            _SQ_LOSS + " (grad sq-loss)",
+            include_prelude=False,
+            syntax="lisp",
+            verify=False,
+        )
+
+
+def test_ordinary_compile_source_rewrites_applied_gradient():
+    source = _SQ_LOSS + " ((grad (iapp sq-loss 5)) [1.0 2.0 3.0 4.0 5.0])"
+    artifact = compile_source(
+        source,
+        verify=False,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert artifact.return_type == ArrayType(FLOAT, (StaticDim(5),))
+    assert "arith.mulf" in artifact.mlir_text
+    assert "2.000000e+00" in artifact.mlir_text
+
+    scalar = compile_source(
+        "(define/pi () (sq [value Float] Float) (* value value)) "
+        "((grad sq) 4.0)",
+        verify=False,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert scalar.return_type == FLOAT
+    assert "arith.mulf" in scalar.mlir_text
+
+    executed = evaluate_source_compiled(
+        source,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    np.testing.assert_array_equal(executed.value, [2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+def test_ordinary_gradient_rewrite_avoids_function_name_collision():
+    source = (
+        "(define/pi () (__remora_grad_sq [x Float] Float) x) "
+        "(define/pi () (sq [x Float] Float) (* x x)) "
+        "((grad sq) 3.0)"
+    )
+    artifact = compile_source(
+        source,
+        verify=False,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert artifact.return_type == FLOAT
+    assert "__remora_grad_sq_2" in str(artifact.typed)
+
+
+def test_ordinary_compile_source_rejects_bare_gradient_value():
+    with pytest.raises(ValueError, match="function value"):
+        compile_source(
+            _SQ_LOSS + " (grad (iapp sq-loss 5))",
+            verify=False,
+            include_prelude=False,
+            syntax="lisp",
         )
 
 

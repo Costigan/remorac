@@ -321,12 +321,27 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 - Comparison and logical predicates are recorded as inactive tape entries, so
   CPU conditional AD now reaches and differentiates the selected branch rather
   than incorrectly requesting a VJP for the predicate operator.
+- Source-level gradient compiler entry points now recognize a program body
+  containing `(grad f)` or an application of it. Pi-typed functions use the
+  concrete form `(grad (iapp f ...))`; the compiler extracts the specialization
+  and routes it through the generated CPU or GPU gradient workflow.
+- The same concrete Pi form now executes in the interpreter because `TypedGrad`
+  retains the body and parameter name from `TypedIndexApp`.
+- Ordinary `compile_source` now rewrites an applied concrete gradient before
+  elaboration: it appends a collision-safe generated gradient definition,
+  replaces the `TypedGrad` application with a normal function call, rechecks
+  the transformed AST, and continues through unchanged HIR/MLIR lowering.
+- Compiled CPU execution of
+  `((grad (iapp sq-loss 5)) [1.0 2.0 3.0 4.0 5.0])` produces the expected
+  `[2.0, 4.0, 6.0, 8.0, 10.0]`. Bare `(grad f)` remains a function value and
+  uses `compile_source_gradient_function` rather than whole-program lowering.
 
 Remaining AD5 work:
 
 - Connect generated gradients to the source-level `(grad f)` compilation and
-  backend lowering path. Concrete `(grad f)` interpreter calls work, while
-  Pi-polymorphic gradients still need specialization-aware compilation.
+  generic GPU program path. Ordinary CPU `compile_source` now rewrites applied
+  gradients automatically; the supported descriptor-ABI GPU path still uses
+  the dedicated generated-gradient artifact facade.
 - Expand GPU lowering support beyond a single primitive map so nested adjoint
   expressions and sum-broadcast gradients can execute as generated.
 - Add VJPs for the structured operations listed in AD4 (index/scatter-add,
@@ -344,9 +359,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: shape-driven generated-gradient compiler path | 868 |
+| AD5 | In progress: automatic ordinary CPU gradient compilation | 872 |
 
-Full suite after this milestone: **868 passed, 1 skipped**.
+Full suite after this milestone: **872 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
