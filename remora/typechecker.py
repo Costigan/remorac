@@ -470,6 +470,15 @@ class TypedSort:
 
 
 @dataclass(frozen=True)
+class TypedGrad:
+    """A typed gradient expression.  Carries the original function body
+    so the runtime can run the AD tape without accessing the typechecker."""
+    expr: GradExpr
+    function_body: TypedExpr | None  # specialized body for tape
+    type: RemoraType
+
+
+@dataclass(frozen=True)
 class TypedGrade:
     """A typed grade (argsort) expression."""
     expr: GradeExpr

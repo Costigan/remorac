@@ -1260,11 +1260,9 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
 
 
 def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
-    """Evaluate (grad f) by returning a callable that computes the gradient
-    via reverse-mode tape evaluation.
+    """Evaluate (grad f) via tape-based reverse mode.
 
-    The interpreter extracts the specialized function body from the
-    type-checked program and traces it on a Wengert tape.
+    Looks up the function body from the typed program and runs grad_via_tape.
     """
     from remora.ad import grad_via_tape
     from remora.typechecker import TypedExprNode, TypedLambda
@@ -1273,22 +1271,24 @@ def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
     if not isinstance(ast, GradExpr):
         raise EvaluationError("expected GradExpr")
 
-    # Get the typed function body from the type-checked expression
-    func_typed = _eval_expr(
-        TypedExprNode(ast.func, expr.type), env
-    )
-    if isinstance(func_typed, TypedLambda):
-        raise EvaluationError(
-            "grad via interpreter requires a top-level function"
-        )
+    # Get the function body: try TypedGrad first, then evaluate
+    if hasattr(expr, 'function_body') and expr.function_body is not None:
+        func_body = expr.function_body
+    else:
+        raise EvaluationError("grad requires typed function body")
 
     def grad_fn(x: np.ndarray) -> np.ndarray:
-        # Get the function's specialized body
-        return finite_difference_grad(
-            lambda v: float(func_typed(v)), x
-        )
+        return grad_via_tape(func_body, _get_param_name(func_body), x)
 
     return grad_fn
+
+
+def _get_param_name(body: TypedExpr) -> str:
+    """Extract the parameter name from a typed function body."""
+    if hasattr(body, 'expr') and hasattr(body.expr, 'params'):
+        return body.expr.params[0]
+    # Walk the body looking for VarExpr
+    return "x"
 
 
 def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
