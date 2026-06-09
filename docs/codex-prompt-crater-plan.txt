@@ -1,0 +1,62 @@
+You are reviewing a plan to extend the Remora array-language compiler so it can train a
+convolutional neural net for lunar crater detection using automatic differentiation.
+
+## Context
+
+Remora is an array programming language (APL/J/Futhark family) with two syntaxes (ML-like and
+Lisp s-expressions) that compiles via HIR/MLIR to CPU and GPU. A Python embedding lets you
+compile Remora source files and call the resulting functions with numpy arrays.
+
+Phase AD0-AD5 (automatic differentiation) is complete at 917 tests passed. The AD system has:
+
+- Reverse-mode tape (EvalTape) with liveness-driven buffer reuse
+- Source-to-source gradient generation (tape → typed Remora Lisp source)
+- VJPs for: +, -, *, /, neg, fold, reshape, ravel, transpose, reverse, take, drop,
+  append, subarray, rotate, index, scatter-add, select/if
+- N-ary (grad f) returning a pair type in the interpreter; per-input compiled functions via
+  compile_gradient_functions_source for CPU
+- GPU support: elementwise f32 kernels and select via descriptor ABI; structured views
+  (reverse, rotate, transpose) simplify to elementwise for quadratic losses
+
+Key files for AD:
+  remora/ad.py          — EvalTape, trace, VJPs, reference-count liveness
+  remora/ad_source.py   — tape-to-source reverse pass, view simplifications
+  remora/typechecker.py — type inference, (grad f) typing (including PairType)
+  remora/compiler.py    — compile_gradient_function_source,
+                          compile_gradient_functions_source (per-input),
+                          _rewrite_applied_source_gradient
+  remora/_gpu_map_support.py — fused f32 expression analyzer
+  remora/gpu_lowering.py     — GPU descriptor-ABI kernel generation
+  remora/runtime.py     — interpreter for pair, scatter-add, elementwise if
+  remora/ast_nodes.py   — GradExpr, ScatterAddExpr, PairExpr/FirstExpr/SecondExpr
+  remora/lisp_reader.py — grad, scatter-add, pair/first/second grammar
+  remora/types.py       — PairType
+  remora/hir.py         — HIRScatterAdd, HIRPair, HIRFirst, HIRSecond
+
+## The plan under review
+
+docs/CRATER_ML_PLAN.md proposes 8-10 sessions to add:
+
+1. exp and log (scalar primitives with VJPs) — needed for sigmoid, BCE loss
+2. random-uniform (inactive primitive, no VJP) — needed for dropout masks
+3. im2col / col2im (sliding window materialization and its VJP) — needed for conv2d
+4. Linear layer verification (does fold+dot auto-lift from [Out,In]×[In] → [Out]?)
+5. 2-layer CNN with gradient check
+6. Python training loop (data loading, dropout via random mask, parameter update)
+7. Benchmarks
+
+## What to review
+
+Read docs/CRATER_ML_PLAN.md and give feedback:
+
+- Is the plan realistic given what already exists?
+- Are there any hidden blockers in the AD pipeline that the plan doesn't account for?
+- Does the conv2d design (im2col + dot product) have issues with rank polymorphism or
+  the tape's shape assumptions?
+- Is the random primitive design sound for dropout (must be inactive, not traced)?
+- Are the effort estimates (8-10 sessions) reasonable?
+- What's the highest-risk item and what could go wrong?
+- Is there anything obvious missing that a first training run would hit immediately?
+
+Read the key source files to ground your answers in the actual implementation.
+Do not propose a new architecture. Work within the existing AD pipeline.

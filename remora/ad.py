@@ -319,6 +319,11 @@ def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
             left_idx = trace_expr(expr.arrays[0], env, tape)
             right_idx = trace_expr(expr.arrays[1], env, tape)
             op = _get_op(expr.func)
+            if op in _INACTIVE_BINARY_OPS:
+                result = _apply_inactive_bin_op(
+                    op, _value(tape, left_idx), _value(tape, right_idx)
+                )
+                return tape.push(TapeEntry("inactive", (left_idx, right_idx), (op,)), result)
             return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
     if expr.arrays:
         return trace_expr(expr.arrays[0], env, tape)
