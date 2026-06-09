@@ -974,6 +974,6 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | **AD2**: Dense array broadcasting and sum-fold VJPs | ✅ core |
 | **AD3**: Pi-preserving grad, specialization before tape | ✅ |
 | **AD4**: Derivative registry, negation, conditionals | ✅ |
-| **AD5**: Tape-to-source GPU gradient path | 🚧 public CPU/GPU gradient compiler workflow |
+| **AD5**: Tape-to-source GPU gradient path | 🚧 shape-driven CPU/GPU gradient compiler workflow |
 
-**Current: 864 tests passed, 1 skipped.**
+**Current: 868 tests passed, 1 skipped.**

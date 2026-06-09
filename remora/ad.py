@@ -118,6 +118,8 @@ _VJP_REGISTRY: dict[str, tuple[str, int]] = {
     "/": ("div", 2),
 }
 
+_INACTIVE_BINARY_OPS = {"<", "<=", ">", ">=", "==", "!=", "&&", "||"}
+
 
 def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int:
     info = _VJP_REGISTRY.get(op)
@@ -182,7 +184,32 @@ def _trace_app(expr: TypedApp, env: dict[str, int], tape: EvalTape) -> int:
         raise NotImplementedError("trace app: non-binary")
     left_idx, right_idx = args
     op = _get_op(expr.func)
+    if op in _INACTIVE_BINARY_OPS:
+        result = _apply_inactive_bin_op(
+            op, _value(tape, left_idx), _value(tape, right_idx)
+        )
+        return tape.push(TapeEntry("inactive", (left_idx, right_idx), ()), result)
     return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
+
+
+def _apply_inactive_bin_op(op: str, left, right):
+    if op == "<":
+        return left < right
+    if op == "<=":
+        return left <= right
+    if op == ">":
+        return left > right
+    if op == ">=":
+        return left >= right
+    if op == "==":
+        return left == right
+    if op == "!=":
+        return left != right
+    if op == "&&":
+        return np.logical_and(left, right)
+    if op == "||":
+        return np.logical_or(left, right)
+    raise NotImplementedError(f"inactive binary op: {op}")
 
 
 def _trace_fold(expr: TypedFold, env: dict[str, int], tape: EvalTape) -> int:

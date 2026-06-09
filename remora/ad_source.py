@@ -153,7 +153,7 @@ def generate_gradient_function_source(
     source: str,
     function_name: str,
     param_types: tuple[RemoraType, ...],
-    example_input: np.ndarray,
+    example_input: np.ndarray | None = None,
     *,
     gradient_name: str | None = None,
     include_prelude: bool = True,
@@ -167,11 +167,20 @@ def generate_gradient_function_source(
 
     if len(param_types) != 1:
         raise ValueError("gradient source currently requires one parameter type")
-    _validate_example_input(param_types[0], example_input)
+    trace_input = (
+        _placeholder_input(param_types[0])
+        if example_input is None
+        else np.asarray(example_input, dtype=np.float64)
+    )
+    _validate_example_input(param_types[0], trace_input)
     program_source = (
         with_prelude(source) if include_prelude and syntax == "ml" else source
     )
-    program = parse_lisp(program_source) if syntax == "lisp" else parse_program(program_source)
+    program = (
+        parse_lisp(program_source)
+        if syntax == "lisp"
+        else parse_program(program_source)
+    )
     checker = TypeChecker()
     env = TypeEnv()
     function: FuncDef | None = None
@@ -187,13 +196,13 @@ def generate_gradient_function_source(
         raise ValueError("gradient source requires a unary function with Float result")
     param_name = specialized.params[0][0]
     tape, input_index = _trace_function_body(
-        specialized.body, param_name, example_input
+        specialized.body, param_name, trace_input
     )
     generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
     generated_source = generate_gradient_source(
         tape,
         param_name,
-        tuple(np.asarray(example_input).shape),
+        tuple(trace_input.shape),
         function_name=generated_name,
     )
     return GradientSourceArtifact(
@@ -226,6 +235,20 @@ def _validate_example_input(param_type: RemoraType, example_input: np.ndarray) -
                 f"example input shape {shape} does not match parameter shape {expected}"
             )
         return
+    raise ValueError("gradient source requires a scalar or array Float parameter")
+
+
+def _placeholder_input(param_type: RemoraType) -> np.ndarray:
+    """Build a deterministic nonzero trace input from a concrete Float type."""
+    if isinstance(param_type, ScalarType):
+        if param_type != FLOAT:
+            raise ValueError("gradient source requires a Float parameter")
+        return np.asarray(1.0, dtype=np.float64)
+    if isinstance(param_type, ArrayType) and param_type.element == FLOAT:
+        if not all(isinstance(dim, StaticDim) for dim in param_type.shape):
+            raise ValueError("gradient source requires a concrete parameter shape")
+        shape = tuple(int(dim.value) for dim in param_type.shape)
+        return np.ones(shape, dtype=np.float64)
     raise ValueError("gradient source requires a scalar or array Float parameter")
 
 
