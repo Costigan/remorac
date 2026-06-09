@@ -30,6 +30,21 @@ class _Op:
 
 
 @dataclass(frozen=True)
+class _Fold:
+    value: "_Expr"
+    axis: int
+    shape: Shape
+
+
+@dataclass(frozen=True)
+class _FoldBroadcast:
+    value: "_Expr"
+    axis: int
+    input_shape: Shape
+    shape: Shape
+
+
+@dataclass(frozen=True)
 class _Fill:
     value: "_Expr"
     like: "_Expr"
@@ -108,7 +123,7 @@ class _Pair:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If | _Pair
+_Expr: TypeAlias = _Atom | _Op | _Fold | _FoldBroadcast | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If | _Pair
 
 
 @dataclass(frozen=True)
@@ -188,7 +203,12 @@ def generate_gradient_source(
             _accumulate(adjs, right, _unbroadcast(_neg(_binary("/", numerator, denominator)), primals[right]))
         elif entry.kind == "fold":
             operand = entry.inputs[0]
-            _accumulate(adjs, operand, _fill(adj, primals[operand]))
+            axis = int(entry.saved[1]) if len(entry.saved) > 1 else 0
+            _accumulate(
+                adjs,
+                operand,
+                _fold_broadcast(adj, primals[operand], axis),
+            )
         elif entry.kind == "neg":
             _accumulate(adjs, entry.inputs[0], _neg(adj))
         elif entry.kind in {"reshape", "ravel"}:
@@ -285,7 +305,8 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
             expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
         elif entry.kind == "fold":
             operand = primals[entry.inputs[0]]
-            expr = _Op("fold", operand, None, shape)
+            axis = int(entry.saved[1]) if len(entry.saved) > 1 else 0
+            expr = _Fold(operand, axis, shape)
         elif entry.kind == "neg":
             expr = _neg(primals[entry.inputs[0]])
         elif entry.kind in {"reshape", "ravel"}:
@@ -692,6 +713,19 @@ def _fill(value: _Expr, like: _Expr) -> _Expr:
     return _Fill(value, like, like.shape)
 
 
+def _fold_broadcast(value: _Expr, operand: _Expr, axis: int) -> _Expr:
+    if axis < 0 or axis >= len(operand.shape):
+        raise ValueError(f"fold gradient axis {axis} is invalid for {operand.shape}")
+    expected = operand.shape[:axis] + operand.shape[axis + 1 :]
+    if value.shape != expected:
+        raise ValueError(
+            f"fold cotangent shape {value.shape} does not match {expected}"
+        )
+    if axis == 0 and value.shape == ():
+        return _fill(value, operand)
+    return _FoldBroadcast(value, axis, operand.shape, operand.shape)
+
+
 def _reshape(value: _Expr, shape: Shape) -> _Expr:
     if value.shape == shape:
         return value
@@ -796,7 +830,15 @@ def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
     if target.shape == ():
-        return _Op("fold", expr, None, ())
+        result = expr
+        while result.shape:
+            result = _Fold(result, 0, result.shape[1:])
+        return result
+    if len(expr.shape) > len(target.shape) and expr.shape[-len(target.shape) :] == target.shape:
+        result = expr
+        while len(result.shape) > len(target.shape):
+            result = _Fold(result, 0, result.shape[1:])
+        return result
     raise NotImplementedError(
         f"gradient source cannot unbroadcast {expr.shape} to {target.shape}"
     )
@@ -836,6 +878,35 @@ def _is_one(expr: _Expr) -> bool:
 def _emit(expr: _Expr) -> str:
     if isinstance(expr, _Atom):
         return expr.text
+    if isinstance(expr, _Fold):
+        value = _emit(expr.value)
+        if expr.axis == 0:
+            if expr.shape:
+                dims = " ".join(str(dim) for dim in expr.shape)
+                init = f"(with-shape 0.0 [{dims}])"
+            else:
+                init = "0.0"
+            return f"(fold + {init} {value})"
+        if expr.axis == 1 and len(expr.value.shape) == 2:
+            output_extent = expr.value.shape[0]
+            init = f"(with-shape 0.0 [{output_extent}])"
+            return f"(fold + {init} (transpose {value}))"
+        raise NotImplementedError(
+            f"gradient source cannot emit fold axis {expr.axis} "
+            f"for shape {expr.value.shape}"
+        )
+    if isinstance(expr, _FoldBroadcast):
+        extent = expr.input_shape[expr.axis]
+        value = _emit(expr.value)
+        replicated = f"(with-shape {value} [{extent}])"
+        if expr.axis == 0:
+            return replicated
+        if expr.axis == 1 and len(expr.input_shape) == 2:
+            return f"(transpose {replicated})"
+        raise NotImplementedError(
+            f"gradient source cannot emit fold broadcast axis {expr.axis} "
+            f"for shape {expr.input_shape}"
+        )
     if isinstance(expr, _Fill):
         return _emit(_binary("+", _binary("*", _constant(0.0), expr.like), expr.value))
     if isinstance(expr, _Reshape):
@@ -868,8 +939,6 @@ def _emit(expr: _Expr) -> str:
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
     if isinstance(expr, _Pair):
         return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
-    if expr.op == "fold":
-        return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":
         return f"(- {_emit(expr.left)})"
     assert expr.right is not None
@@ -881,6 +950,20 @@ def _emit(expr: _Expr) -> str:
         return f"(map (lambda (v) ({expr.op} {left} v)) {right})"
     if expr.left.shape and expr.right.shape == ():
         return f"(map (lambda (v) ({expr.op} v {right})) {left})"
+    if (
+        len(expr.left.shape) == len(expr.right.shape) + 1
+        and expr.right.shape
+        and expr.left.shape[1:] == expr.right.shape
+    ):
+        copies = expr.left.shape[0]
+        return f"(map {expr.op} {left} (with-shape {right} [{copies}]))"
+    if (
+        len(expr.right.shape) == len(expr.left.shape) + 1
+        and expr.left.shape
+        and expr.right.shape[1:] == expr.left.shape
+    ):
+        copies = expr.right.shape[0]
+        return f"(map {expr.op} (with-shape {left} [{copies}]) {right})"
     if expr.left.shape or expr.right.shape:
         return f"(map {expr.op} {left} {right})"
     return f"({expr.op} {left} {right})"

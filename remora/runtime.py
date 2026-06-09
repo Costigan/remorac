@@ -92,6 +92,7 @@ from remora.typechecker import (
     TypedShape,
     TypedSort,
     TypedSubarray,
+    TypedTranspose,
     TypedPair,
     TypedFirst,
     TypedSecond,
@@ -1030,6 +1031,12 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
             raise EvaluationError("reverse expects an array value")
         return np.flip(array, axis=0)
 
+    if isinstance(expr, TypedTranspose):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("transpose expects an array value")
+        return np.swapaxes(array, 0, 1)
+
     if isinstance(expr, TypedApp):
         if isinstance(expr.func, TypedExprNode) and isinstance(expr.func.expr, VarExpr):
             if expr.func.expr.name in ALL_PRIMITIVE_OPS:
@@ -1112,7 +1119,9 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
     if isinstance(expr, TypedWithShape):
         source = _eval_expr(expr.source, env)
         shape = tuple(d.value for d in expr.type.shape)
-        return np.full(shape, source, dtype=_numpy_dtype(expr.type.element))
+        return np.broadcast_to(
+            np.asarray(source, dtype=_numpy_dtype(expr.type.element)), shape
+        ).copy()
 
     if isinstance(expr, TypedBox):
         return _eval_expr(expr.value, env)
@@ -1199,7 +1208,9 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
     if isinstance(expr, TypedWithShape):
         source = _eval_expr(expr.source, env)
         shape = tuple(d.value for d in expr.type.shape)
-        return np.full(shape, source, dtype=_numpy_dtype(expr.type.element))
+        return np.broadcast_to(
+            np.asarray(source, dtype=_numpy_dtype(expr.type.element)), shape
+        ).copy()
 
     if isinstance(expr, TypedBox):
         return _eval_expr(expr.value, env)
