@@ -66,7 +66,14 @@ class EvalTape:
 
     def reverse(self) -> dict[int, np.ndarray]:
         adjs: list[np.ndarray | None] = [None] * len(self.values)
+        # Liveness: count how many VJPs reference each primal value
+        remaining_refs = [0] * len(self.values)
+        for e in self.entries:
+            for inp in e.inputs:
+                remaining_refs[inp] += 1
         adjs[-1] = np.ones_like(self.values[-1], dtype=np.float64)
+        total_allocated = sum(v.nbytes for v in self.values)
+        freed_bytes = 0
         for i in reversed(range(len(self.entries))):
             adj = adjs[i]
             if adj is None:
@@ -145,6 +152,12 @@ class EvalTape:
                 else_contrib = np.where(~mask, adj_arr, 0.0)
                 _bcast_acc(adjs, e.inputs[1], then_contrib, self.values[e.inputs[1]])
                 _bcast_acc(adjs, e.inputs[2], else_contrib, self.values[e.inputs[2]])
+            # Liveness: decrement reference counts, free dead values
+            for inp in e.inputs:
+                remaining_refs[inp] -= 1
+                if remaining_refs[inp] == 0 and self.values[inp] is not None:
+                    freed_bytes += self.values[inp].nbytes
+                    self.values[inp] = None
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
