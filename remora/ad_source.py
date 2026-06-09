@@ -233,37 +233,18 @@ def generate_gradient_source(
         else:
             raise NotImplementedError(f"gradient source VJP: {entry.kind}")
 
-    if len(param_specs) == 1:
-        diff_idx = tape.input_indices[differentiate_input]
-        gradient = adjs[diff_idx]
-        if gradient is None:
-            raise RuntimeError("AD source: input not found on tape")
-        body = _emit(gradient)
-        return_type = _source_type(param_specs[0][1])
-    else:
-        # Multi-output: wrap all gradients in nested pair expressions
-        gradients: list[_Expr] = []
-        for i, (name, shape) in enumerate(param_specs):
-            idx = tape.input_indices[i]
-            g = adjs[idx]
-            if g is None:
-                raise RuntimeError(f"AD source: gradient for {name!r} not found")
-            gradients.append(g)
-        # Build nested pair: (pair g0 (pair g1 (...)))
-        result = gradients[-1]
-        for g in reversed(gradients[:-1]):
-            result = _Pair(g, result, ())
-        body = _emit(result)
-        # Build return PairType string
-        return_type = _pair_type_string(param_specs)
-
+    diff_idx = tape.input_indices[differentiate_input]
+    gradient = adjs[diff_idx]
+    if gradient is None:
+        raise RuntimeError("AD source: input not found on tape")
     param_parts = " ".join(
         f"{name} {_source_type(shape)}" for name, shape in param_specs
     )
     if param_parts:
         param_parts = f"[{param_parts}]"
+    body = _emit(gradient)
     return (
-        f"(define/pi () ({function_name} {param_parts} {return_type}) "
+        f"(define/pi () ({function_name} {param_parts} {_source_type(param_specs[differentiate_input][1])}) "
         f"{body})"
     )
 
