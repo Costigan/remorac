@@ -729,8 +729,12 @@ def test_index_gradient_interpreter():
     )
     request = source + " ((grad loss) [1.0 2.0 3.0 4.0])"
     interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
     expected = np.array([0.0, 0.0, 6.0, 0.0])
     np.testing.assert_array_equal(interpreted.value, expected)
+    np.testing.assert_array_equal(compiled.value, expected)
 
 
 # ── Scatter-add ──────────────────────────────────────────────────────────

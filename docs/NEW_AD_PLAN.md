@@ -370,12 +370,15 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 - Index VJP: tape traces `index(x, i)` for compile-time-known scalar
   IntLit indices (rank-1 single-index only). Reverse scatters the scalar
   cotangent back to the indexed position in a zero array. Source VJP uses
-  append-based zero padding: wraps the scalar adj into a 1-element array
-  via `adj * take(1, operand)`, then pads with take/drop-based zero
-  segments.   Validated through CPU tape execution and interpreter execution.
-  Compiled CPU path is blocked by a lowerings limitation (non-literal
-  captured values in map operator sections cannot be lowered to MLIR).
+  `scatter-add` to place the adjoint at the index position. Validated
+  through CPU tape execution, generated-source interpretation, and
+  compiled CPU execution (via scatter-add lowering for known indices).
   Not in the supported GPU subset.
+- Scatter-add: first-class language operation `(scatter-add array index update)`
+  that adds `update` at position `index` in `array`. Full pipeline support:
+  Lisp reader, typechecker, HIR lowering via `tensor.extract` → `arith.addf`
+  → `tensor.insert`, runtime interpreter. Standalone use compiles on CPU.
+  Used as the VJP primitive for index gradients.
 
 Remaining AD5 work:
 
@@ -402,9 +405,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray/rotate/index VJPs | 909 |
+| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, scatter-add, append/subarray/rotate/index VJPs | 910 |
 
-Full suite after this milestone: **909 passed, 1 skipped**.
+Full suite after this milestone: **910 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
