@@ -809,17 +809,60 @@ def _f32_expression_lines(
             return name
         assert isinstance(expr, (F32BinaryExpr, F32SelectExpr, F32CmpExpr))
         if isinstance(expr, F32CmpExpr):
+            # Emit comparison, then convert i1 → f32 for branchless select
             left = emit(expr.left)
             right = emit(expr.right)
             pred = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge",
                     "==": "oeq", "!=": "one"}.get(expr.op, "ogt")
-            lines.append(f"{indent}{name} = arith.cmpf {pred}, {left}, {right} : f32")
+            i1_name = f"%cmp_i1_{counter}"
+            counter += 1
+            if dialect == "llvm":
+                lines.append(f'{indent}{i1_name} = llvm.fcmp "{pred}" {left}, {right} : f32')
+                # Convert i1 → i32 → f32
+                i32_name = f"%cmp_i32_{counter}"
+                counter += 1
+                lines.append(f"{indent}{i32_name} = llvm.zext {i1_name} : i1 to i32")
+                lines.append(f"{indent}{name} = llvm.sitofp {i32_name} : i32 to f32")
+            else:
+                lines.append(f"{indent}{i1_name} = arith.cmpf {pred}, {left}, {right} : f32")
+                i32_name = f"%cmp_i32_{counter}"
+                counter += 1
+                lines.append(f"{indent}{i32_name} = arith.extui {i1_name} : i1 to i32")
+                lines.append(f"{indent}{name} = arith.uitofp {i32_name} : i32 to f32")
             return name
         if isinstance(expr, F32SelectExpr):
-            cond = emit(expr.condition)
+            # Compute as: cond_f32 * then + (1 - cond_f32) * else
+            cond_f = emit(expr.condition)  # already f32 from F32CmpExpr
             then_v = emit(expr.then_expr)
             else_v = emit(expr.else_expr)
-            lines.append(f"{indent}{name} = arith.select {cond}, {then_v}, {else_v} : f32")
+            one_name = f"%one_{counter}"
+            counter += 1
+            neg_name = f"%neg_cond_{counter}"
+            counter += 1
+            w_then = f"%w_then_{counter}"
+            counter += 1
+            w_else = f"%w_else_{counter}"
+            counter += 1
+            if dialect == "llvm":
+                op = llvm_op("*", "f32")
+                add = llvm_op("+", "f32")
+                sub = llvm_op("-", "f32")
+                spacing = "  "
+                lines.append(f'{indent}{one_name} = llvm.mlir.constant(1.000000e+00 : f32) : f32')
+                lines.append(f'{indent}{neg_name} = {sub} {one_name}, {cond_f}  : f32')
+                lines.append(f'{indent}{w_then} = {op} {cond_f}, {then_v}  : f32')
+                lines.append(f'{indent}{w_else} = {op} {neg_name}, {else_v}  : f32')
+                lines.append(f'{indent}{name} = {add} {w_then}, {w_else}  : f32')
+            else:
+                op = arith_op("*", "f32")
+                add = arith_op("+", "f32")
+                sub = arith_op("-", "f32")
+                spacing = " "
+                lines.append(f"{indent}{one_name} = arith.constant 1.000000e+00 : f32")
+                lines.append(f"{indent}{neg_name} = {sub} {one_name}, {cond_f}{spacing}: f32")
+                lines.append(f"{indent}{w_then} = {op} {cond_f}, {then_v}{spacing}: f32")
+                lines.append(f"{indent}{w_else} = {op} {neg_name}, {else_v}{spacing}: f32")
+                lines.append(f"{indent}{name} = {add} {w_then}, {w_else}{spacing}: f32")
             return name
         left = emit(expr.left)
         right = emit(expr.right)
