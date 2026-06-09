@@ -56,6 +56,7 @@ from remora.typechecker import (
     TypedTranspose,
     TypedUnbox,
     TypedWithShape,
+    TypedScatterAdd,
     TypedDrop,
     TypedFilter,
     TypedReplicate,
@@ -283,6 +284,14 @@ class HIRPrimCallable:
 
 
 @dataclass(frozen=True)
+class HIRScatterAdd:
+    target: HIRExpr
+    index: int
+    update: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRPrimOp:
     op: str
     args: list[HIRExpr]
@@ -392,6 +401,7 @@ HIRExpr: TypeAlias = (
     | HIRSubarray
     | HIRIndicesOf
     | HIRWithShape
+    | HIRScatterAdd
     | HIRBox
     | HIRUnbox
     | HIRFilter
@@ -536,6 +546,21 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedWithShape):
         return HIRWithShape(lower_expr(expr.source), expr.type)
+
+    if isinstance(expr, TypedScatterAdd):
+        from remora.ast_nodes import IntLit
+
+        idx_val = expr.index
+        if isinstance(idx_val, TypedExprNode) and isinstance(idx_val.expr, IntLit):
+            index_int = idx_val.expr.value
+        else:
+            index_int = 0
+        return HIRScatterAdd(
+            lower_expr(expr.array),
+            index_int,
+            lower_expr(expr.update),
+            expr.type,
+        )
 
     if isinstance(expr, TypedBox):
         return HIRBox(lower_expr(expr.value), expr.type)

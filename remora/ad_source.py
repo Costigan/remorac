@@ -85,7 +85,15 @@ class _Index:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index
+@dataclass(frozen=True)
+class _ScatterAdd:
+    target: "_Expr"
+    index: int
+    update: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd
 
 
 @dataclass(frozen=True)
@@ -525,15 +533,8 @@ def _pad_index(operand: _Expr, adj: _Expr, index_vals: tuple[int, ...]) -> _Expr
         )
     n = operand.shape[0]
     i = index_vals[0]
-    wrapped = _binary("*", adj, _view("take", operand, 1))
-    result = wrapped
-    if i > 0:
-        zero_prefix = _binary("*", _constant(0.0), _view("take", operand, i))
-        result = _append(zero_prefix, result)
-    if i + 1 < n:
-        zero_suffix = _binary("*", _constant(0.0), _view("drop", operand, i + 1))
-        result = _append(result, zero_suffix)
-    return result
+    zero_array = _binary("*", _constant(0.0), operand)
+    return _ScatterAdd(zero_array, i, adj, operand.shape)
 
 
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
@@ -595,6 +596,8 @@ def _emit(expr: _Expr) -> str:
         return f"(rotate {_emit(expr.value)} {expr.shift})"
     if isinstance(expr, _Index):
         return f"(index {_emit(expr.value)} {expr.idx})"
+    if isinstance(expr, _ScatterAdd):
+        return f"(scatter-add {_emit(expr.target)} {expr.index} {_emit(expr.update)})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":

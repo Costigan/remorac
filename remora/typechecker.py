@@ -59,6 +59,7 @@ from remora.ast_nodes import (
     ValDef,
     VarExpr,
     WithShapeExpr,
+    ScatterAddExpr,
 )
 from remora.constraints import (
     ConstraintError,
@@ -462,6 +463,16 @@ class TypedWithShape:
 
 
 @dataclass(frozen=True)
+class TypedScatterAdd:
+    """A typed scatter-add: scatter update into array at index, adding to existing."""
+    expr: object  # ScatterAddExpr
+    array: TypedExpr
+    index: TypedExpr
+    update: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedSort:
     """A typed sort expression."""
     expr: SortExpr
@@ -554,6 +565,7 @@ TypedExpr: TypeAlias = (
     | TypedSubarray
     | TypedIndicesOf
     | TypedWithShape
+    | TypedScatterAdd
     | TypedBox
     | TypedUnbox
     | TypedSort
@@ -777,6 +789,8 @@ class TypeChecker:
             return self._infer_indices_of(expr, env)
         if isinstance(expr, WithShapeExpr):
             return self._infer_with_shape(expr, env)
+        if isinstance(expr, ScatterAddExpr):
+            return self._infer_scatter_add(expr, env)
         if isinstance(expr, BoxExpr):
             return self._infer_box(expr, env)
         if isinstance(expr, UnboxExpr):
@@ -1729,6 +1743,22 @@ class TypeChecker:
         else:
             raise RemoraTypeError("with-shape expects a scalar or array target", expr.loc)
         return TypedWithShape(expr, typed_target, result_type)
+
+    def _infer_scatter_add(self, expr: ScatterAddExpr, env: TypeEnv) -> TypedExpr:
+        typed_array = self._require_array(expr.array, "scatter-add", env)
+        typed_index = self.infer(expr.index, env)
+        if not isinstance(typed_index.type, ScalarType) or typed_index.type != INT:
+            raise RemoraTypeError(
+                "scatter-add expects an integer index", expr.loc
+            )
+        typed_update = self.infer(expr.update, env)
+        if not isinstance(typed_update.type, ScalarType):
+            raise RemoraTypeError(
+                "scatter-add expects a scalar update value", expr.loc
+            )
+        return TypedScatterAdd(
+            expr, typed_array, typed_index, typed_update, typed_array.type
+        )
 
     def _infer_box(self, expr: BoxExpr, env: TypeEnv) -> TypedExpr:
         typed_value = self.infer(expr.value, env)

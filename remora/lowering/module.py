@@ -35,6 +35,7 @@ from remora.hir import (
     HIRReshape,
     HIRReverse,
     HIRRotate,
+    HIRScatterAdd,
     HIRScan,
     HIRSlice,
     HIRSort,
@@ -85,6 +86,7 @@ from remora.lowering.tensor_ops import (
     _lower_map_cell_result,
     _lower_map_cell_fold_result,
     _lower_rotate_module,
+    _lower_scatter_add_module,
     _lower_scalar_fold_module,
     _lower_scalar_fold_result,
     _lower_scalar_map_binary_module,
@@ -214,6 +216,7 @@ class MLIRLowering:
                 HIRIota,
                 HIRIndicesOf,
                 HIRWithShape,
+                HIRScatterAdd,
                 HIRArrayLit,
                 HIRAppend,
                 HIRBox,
@@ -530,6 +533,8 @@ def _lower_main_module(
         return _lower_replicate_module(node, functions)
     if isinstance(node, HIRWithShape):
         return _lower_with_shape_module(node, functions)
+    if isinstance(node, HIRScatterAdd):
+        return _lower_scatter_add_module(node, functions)
     if isinstance(node, HIRIota):
         return _lower_iota_module(node)
     if isinstance(node, HIRArrayLit):

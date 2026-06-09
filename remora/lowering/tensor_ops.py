@@ -36,6 +36,7 @@ from remora.hir import (
     HIRSlice,
     HIRSort,
     HIRSubarray,
+    HIRScatterAdd,
     HIRTake,
     HIRTranspose,
     HIRVar,
@@ -262,6 +263,29 @@ def _lower_tensor_input(
             node, prefix, functions, tensor_env=tensor_env
         )
 
+    if isinstance(node, HIRScatterAdd):
+        from remora.lowering.scalar import _lower_scalar_module
+
+        target_code, target_name, target_type, target_elem = _lower_tensor_input(
+            node.target, _join_prefix(prefix, "target"), functions, tensor_env
+        )
+        if isinstance(node.update, HIRLit):
+            lit_val = _literal_value(node.update, target_elem)
+            update_name = f"%{_join_prefix(prefix, 'update')}"
+            update_code = f"    {update_name} = arith.constant {lit_val} : {target_elem}"
+        else:
+            update_code = _lower_scalar_module(node.update, functions)
+            update_name = "%result"
+        result_type = type_to_mlir(node.result_type)
+        result_name = f"%{prefix}"
+        code = f"""{target_code}
+{update_code}
+    {result_name}_idx = arith.constant {node.index} : index
+    {result_name}_extracted = tensor.extract {target_name}[{result_name}_idx] : {target_type}
+    {result_name}_added = arith.addf {result_name}_extracted, {update_name} : {target_elem}
+    {result_name} = tensor.insert {result_name}_added into {target_name}[{result_name}_idx] : {target_type}"""
+        return code, result_name, result_type, target_elem
+
     if isinstance(node, (HIRMap, HIRApply)):
         return _lower_fold_input(
             node, functions, prefix, tensor_env=tensor_env
@@ -280,6 +304,7 @@ def _lower_tensor_input(
             HIRDrop,
             HIRSubarray,
             HIRRotate,
+            HIRScatterAdd,
         ),
     ):
         from remora.lowering.view_ops import _lower_view_input
@@ -1945,6 +1970,36 @@ def _lower_with_shape_module(
         return builder.render("%result")
 
     raise RemoraLoweringError("only scalar→tensor with-shape lowers to MLIR so far")
+
+
+def _lower_scatter_add_module(
+    node: HIRScatterAdd, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    target_code, target_name, target_type, target_elem = _lower_tensor_input(
+        node.target, "target", functions
+    )
+    from remora.lowering.scalar import _lower_scalar_module
+
+    if isinstance(node.update, HIRLit):
+        lit_val = _literal_value(node.update, target_elem)
+        update_code = f"    %update = arith.constant {lit_val} : {target_elem}"
+        update_name = "%update"
+    else:
+        update_code = _lower_scalar_module(node.update, functions)
+        update_name = "%result"
+
+    result_type = type_to_mlir(node.result_type)
+    body = f"""{target_code}
+{update_code}
+    %idx = arith.constant {node.index} : index
+    %extracted = tensor.extract {target_name}[%idx] : {target_type}
+    %added = arith.addf %extracted, {update_name} : {target_elem}
+    %result = tensor.insert %added into {target_name}[%idx] : {target_type}"""
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%result")
 
 
 # ---------------------------------------------------------------------------
