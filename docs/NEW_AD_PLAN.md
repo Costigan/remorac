@@ -374,7 +374,13 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   through CPU tape execution, generated-source interpretation, and
   compiled CPU execution (via scatter-add lowering for known indices).
   Not in the supported GPU subset.
-- Scatter-add: first-class language operation `(scatter-add array index update)`
+- Conditional/select gradient source: tape traces both branches of `if`/`select`
+  and records a `select` entry. Reverse routes adjoint through the taken branch
+  based on the predicate. Source generator reconstructs both branches, emits
+  `(if pred then else)` in the gradient, and splits cotangents accordingly.
+  Validated through CPU tape, interpreter, and compiled CPU execution for
+  scalar conditionals. The control-flow rejection is relaxed when select entries
+  are present.
   that adds `update` at position `index` in `array`. Full pipeline support:
   Lisp reader, typechecker, HIR lowering via `tensor.extract` → `arith.addf`
   → `tensor.insert`, runtime interpreter. Standalone use compiles on CPU.
@@ -405,9 +411,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, scatter-add, append/subarray/rotate/index VJPs | 910 |
+| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, scatter-add, select source, multi-input, append/subarray/rotate/index VJPs | 913 |
 
-Full suite after this milestone: **910 passed, 1 skipped**.
+Full suite after this milestone: **913 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).

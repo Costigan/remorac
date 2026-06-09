@@ -93,7 +93,15 @@ class _ScatterAdd:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd
+@dataclass(frozen=True)
+class _If:
+    condition: "_Expr"
+    then_expr: "_Expr"
+    else_expr: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If
 
 
 @dataclass(frozen=True)
@@ -109,22 +117,182 @@ class GradientSourceArtifact:
 
 def generate_gradient_source(
     tape: EvalTape,
-    param_name: str,
-    param_shape: tuple[int, ...],
+    param_specs: list[tuple[str, tuple[int, ...]]],
     *,
+    differentiate_input: int = 0,
     function_name: str = "grad-f",
 ) -> str:
-    """Return a unary Float gradient function for the traced tape graph.
+    """Return a gradient function for the traced tape graph with one or more params.
 
-    The generated function recomputes symbolic primal intermediates from its
-    parameter. Concrete tape values are used only to recover source constants.
+    *param_specs* is a list of (name, shape) for each tape input in order.
+    *differentiate_input* selects which input's gradient to return (0-based).
     """
     if not tape.entries:
         raise ValueError("cannot generate a gradient from an empty tape")
     if tape.has_data_dependent_control_flow:
-        raise NotImplementedError(
-            "gradient source does not yet preserve data-dependent conditionals"
+        has_select = any(e.kind == "select" for e in tape.entries)
+        if not has_select:
+            raise NotImplementedError(
+                "gradient source does not yet preserve data-dependent conditionals"
+            )
+    if len(tape.input_indices) < 1:
+        raise ValueError("gradient source requires at least one tape input")
+    if len(tape.input_indices) != len(param_specs):
+        raise ValueError(
+            f"param_specs length {len(param_specs)} does not match "
+            f"tape input count {len(tape.input_indices)}"
         )
+
+    # Validate shapes
+    for (pname, pshape), idx in zip(param_specs, tape.input_indices):
+        shape = tuple(int(dim) for dim in pshape)
+        if tuple(np.asarray(tape.values[idx]).shape) != shape:
+            raise ValueError(
+                f"parameter {pname!r} shape does not match the traced tape input"
+            )
+
+    primals = _reconstruct_primals_multi(tape, {idx: name for name, _, idx in _enumerate_params(param_specs, tape)})
+    adjs: list[_Expr | None] = [None] * len(tape.entries)
+    output_shape = _shape_of(tape.values[-1])
+    adjs[-1] = _constant(1.0, output_shape)
+
+    for index in reversed(range(len(tape.entries))):
+        adj = adjs[index]
+        if adj is None:
+            continue
+        entry = tape.entries[index]
+        if entry.kind == "add":
+            _accumulate(adjs, entry.inputs[0], _unbroadcast(adj, primals[entry.inputs[0]]))
+            _accumulate(adjs, entry.inputs[1], _unbroadcast(adj, primals[entry.inputs[1]]))
+        elif entry.kind == "sub":
+            _accumulate(adjs, entry.inputs[0], _unbroadcast(adj, primals[entry.inputs[0]]))
+            _accumulate(adjs, entry.inputs[1], _unbroadcast(_neg(adj), primals[entry.inputs[1]]))
+        elif entry.kind == "mul":
+            left, right = entry.inputs
+            _accumulate(adjs, left, _unbroadcast(_binary("*", adj, primals[right]), primals[left]))
+            _accumulate(adjs, right, _unbroadcast(_binary("*", adj, primals[left]), primals[right]))
+        elif entry.kind == "div":
+            left, right = entry.inputs
+            _accumulate(adjs, left, _unbroadcast(_binary("/", adj, primals[right]), primals[left]))
+            numerator = _binary("*", adj, primals[left])
+            denominator = _binary("*", primals[right], primals[right])
+            _accumulate(adjs, right, _unbroadcast(_neg(_binary("/", numerator, denominator)), primals[right]))
+        elif entry.kind == "fold":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _fill(adj, primals[operand]))
+        elif entry.kind == "neg":
+            _accumulate(adjs, entry.inputs[0], _neg(adj))
+        elif entry.kind in {"reshape", "ravel"}:
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _reshape(adj, primals[operand].shape))
+        elif entry.kind == "transpose":
+            _accumulate(adjs, entry.inputs[0], _transpose(adj))
+        elif entry.kind == "reverse":
+            _accumulate(adjs, entry.inputs[0], _view("reverse", adj))
+        elif entry.kind == "take":
+            operand = primals[entry.inputs[0]]
+            count = int(entry.saved[1])
+            zero_tail = _binary("*", _constant(0.0), _view("drop", operand, count))
+            _accumulate(adjs, entry.inputs[0], _append(adj, zero_tail))
+        elif entry.kind == "drop":
+            operand = primals[entry.inputs[0]]
+            count = int(entry.saved[1])
+            zero_head = _binary("*", _constant(0.0), _view("take", operand, count))
+            _accumulate(adjs, entry.inputs[0], _append(zero_head, adj))
+        elif entry.kind == "append":
+            left_count = int(entry.saved[1])
+            _accumulate(adjs, entry.inputs[0], _view("take", adj, left_count))
+            _accumulate(adjs, entry.inputs[1], _view("drop", adj, left_count))
+        elif entry.kind == "subarray":
+            operand = primals[entry.inputs[0]]
+            offsets = tuple(int(o) for o in entry.saved[1])
+            sizes = tuple(int(s) for s in entry.saved[2])
+            _accumulate(adjs, entry.inputs[0], _pad_subarray(operand, adj, offsets, sizes))
+        elif entry.kind == "rotate":
+            shift = int(entry.saved[0])
+            n = int(entry.saved[1])
+            reverse_shift = (n - shift) % n
+            _accumulate(adjs, entry.inputs[0], _rotate(adj, reverse_shift))
+        elif entry.kind == "index":
+            operand = primals[entry.inputs[0]]
+            index_vals = tuple(int(v) for v in entry.saved[1])
+            _accumulate(adjs, entry.inputs[0], _pad_index(operand, adj, index_vals))
+        elif entry.kind == "select":
+            cond = primals[entry.inputs[0]]
+            _accumulate(adjs, entry.inputs[1], _If(cond, adj, _fill(_constant(0.0), primals[entry.inputs[1]]), adj.shape))
+            _accumulate(adjs, entry.inputs[2], _If(cond, _fill(_constant(0.0), primals[entry.inputs[2]]), adj, adj.shape))
+        elif entry.kind in {"const", "var"}:
+            continue
+        else:
+            raise NotImplementedError(f"gradient source VJP: {entry.kind}")
+
+    diff_idx = tape.input_indices[differentiate_input]
+    gradient = adjs[diff_idx]
+    if gradient is None:
+        raise RuntimeError("AD source: input not found on tape")
+    param_parts = " ".join(
+        f"[{name} {_source_type(shape)}]" for name, shape in param_specs
+    )
+    body = _emit(gradient)
+    return (
+        f"(define/pi () ({function_name} {param_parts} {_source_type(param_specs[differentiate_input][1])}) "
+        f"{body})"
+    )
+
+
+def _enumerate_params(param_specs, tape):
+    return [(name, shape, idx) for (name, shape), idx in zip(param_specs, tape.input_indices)]
+
+
+def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list[_Expr]:
+    primals: list[_Expr] = []
+    for index, entry in enumerate(tape.entries):
+        shape = _shape_of(tape.values[index])
+        if entry.kind == "var":
+            name = name_map.get(index, f"_unknown_{index}")
+            expr = _Atom(name, shape)
+        elif entry.kind == "const":
+            expr = _constant_value(entry.saved[0], shape)
+        elif entry.kind in {"add", "sub", "mul", "div"}:
+            op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[entry.kind]
+            expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
+        elif entry.kind == "fold":
+            operand = primals[entry.inputs[0]]
+            expr = _Op("fold", operand, None, shape)
+        elif entry.kind == "neg":
+            expr = _neg(primals[entry.inputs[0]])
+        elif entry.kind in {"reshape", "ravel"}:
+            expr = _reshape(primals[entry.inputs[0]], shape)
+        elif entry.kind == "transpose":
+            expr = _transpose(primals[entry.inputs[0]])
+        elif entry.kind == "reverse":
+            expr = _view("reverse", primals[entry.inputs[0]])
+        elif entry.kind in {"take", "drop"}:
+            expr = _view(entry.kind, primals[entry.inputs[0]], int(entry.saved[1]))
+        elif entry.kind == "append":
+            expr = _append(primals[entry.inputs[0]], primals[entry.inputs[1]])
+        elif entry.kind == "subarray":
+            offsets = tuple(int(o) for o in entry.saved[1])
+            sizes = tuple(int(s) for s in entry.saved[2])
+            expr = _subarray_view(primals[entry.inputs[0]], offsets, sizes)
+        elif entry.kind == "rotate":
+            shift = int(entry.saved[0])
+            expr = _rotate(primals[entry.inputs[0]], shift)
+        elif entry.kind == "index":
+            i = int(entry.saved[1][0])
+            expr = _index(primals[entry.inputs[0]], i)
+        elif entry.kind == "select":
+            expr = _If(primals[entry.inputs[0]], primals[entry.inputs[1]], primals[entry.inputs[2]], shape)
+        elif entry.kind == "inactive":
+            inp_count = len(entry.inputs)
+            if inp_count == 2 and entry.saved:
+                expr = _inactive_binary(primals[entry.inputs[0]], primals[entry.inputs[1]], shape, str(entry.saved[0]))
+            else:
+                expr = _Atom("true", shape)
+        else:
+            raise NotImplementedError(f"gradient source primal: {entry.kind}")
+        primals.append(expr)
+    return primals
     if len(tape.input_indices) != 1:
         raise ValueError("gradient source currently requires exactly one tape input")
 
@@ -225,6 +393,10 @@ def generate_gradient_source(
             operand = primals[entry.inputs[0]]
             index_vals = tuple(int(v) for v in entry.saved[1])
             _accumulate(adjs, entry.inputs[0], _pad_index(operand, adj, index_vals))
+        elif entry.kind == "select":
+            cond = primals[entry.inputs[0]]
+            _accumulate(adjs, entry.inputs[1], _If(cond, adj, _fill(_constant(0.0), primals[entry.inputs[1]]), adj.shape))
+            _accumulate(adjs, entry.inputs[2], _If(cond, _fill(_constant(0.0), primals[entry.inputs[2]]), adj, adj.shape))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -251,20 +423,25 @@ def generate_gradient_function_source(
     include_prelude: bool = True,
     syntax: str = "ml",
 ) -> GradientSourceArtifact:
-    """Specialize, trace, and generate source for a named unary function."""
+    """Specialize, trace, and generate source for a named unary or multi-param function."""
     from remora.lisp_reader import parse_lisp
     from remora.parser import parse_program
     from remora.prelude import with_prelude
     from remora.typechecker import TypeChecker, TypeEnv
 
-    if len(param_types) != 1:
-        raise ValueError("gradient source currently requires one parameter type")
-    trace_input = (
-        _placeholder_input(param_types[0])
-        if example_input is None
-        else np.asarray(example_input, dtype=np.float64)
-    )
-    _validate_example_input(param_types[0], trace_input)
+    if len(param_types) < 1:
+        raise ValueError("gradient source requires at least one parameter type")
+
+    if example_input is None:
+        trace_inputs = [_placeholder_input(pt) for pt in param_types]
+    elif isinstance(example_input, np.ndarray) and len(param_types) == 1:
+        trace_inputs = [np.asarray(example_input, dtype=np.float64)]
+    else:
+        raise ValueError("example input requires shape validation; use param_types alone")
+
+    for pt, ti in zip(param_types, trace_inputs):
+        _validate_example_input(pt, ti)
+
     program_source = (
         with_prelude(source) if include_prelude and syntax == "ml" else source
     )
@@ -284,17 +461,17 @@ def generate_gradient_function_source(
         raise ValueError(f"function {function_name!r} is not defined")
 
     specialized = checker.specialize_top_level_function(function, param_types, env)
-    if len(specialized.params) != 1 or specialized.type.result != FLOAT:
-        raise ValueError("gradient source requires a unary function with Float result")
-    param_name = specialized.params[0][0]
-    tape, input_index = _trace_function_body(
-        specialized.body, param_name, trace_input
+    if specialized.type.result != FLOAT:
+        raise ValueError("gradient source requires a function with Float result")
+    param_specs = [(name, tuple(ti.shape)) for (name, _pt), ti in zip(specialized.params, trace_inputs)]
+    tape, _input_indices = _trace_function_body_multi(
+        specialized.body, trace_inputs, [name for name, _pt in specialized.params]
     )
     generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
     generated_source = generate_gradient_source(
         tape,
-        param_name,
-        tuple(trace_input.shape),
+        param_specs,
+        differentiate_input=0,
         function_name=generated_name,
     )
     return GradientSourceArtifact(
@@ -302,7 +479,7 @@ def generate_gradient_function_source(
         generated_name,
         param_types,
         tape,
-        input_index,
+        tape.input_indices[0] if tape.input_indices else 0,
     )
 
 
@@ -310,6 +487,12 @@ def _trace_function_body(body, param_name: str, example_input: np.ndarray):
     from remora.ad import trace_via_tape
 
     return trace_via_tape(body, param_name, example_input)
+
+
+def _trace_function_body_multi(body, trace_inputs: list[np.ndarray], param_names: list[str]):
+    from remora.ad import trace_via_tape_multi
+
+    return trace_via_tape_multi(body, trace_inputs, param_names)
 
 
 def _validate_example_input(param_type: RemoraType, example_input: np.ndarray) -> None:
@@ -382,6 +565,19 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
         elif entry.kind == "index":
             i = int(entry.saved[1][0])
             expr = _index(primals[entry.inputs[0]], i)
+        elif entry.kind == "select":
+            expr = _If(
+                primals[entry.inputs[0]],
+                primals[entry.inputs[1]],
+                primals[entry.inputs[2]],
+                shape,
+            )
+        elif entry.kind == "inactive":
+            inp_count = len(entry.inputs)
+            if inp_count == 2 and entry.saved:
+                expr = _inactive_binary(primals[entry.inputs[0]], primals[entry.inputs[1]], shape, str(entry.saved[0]))
+            else:
+                expr = _Atom("true", shape)
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -537,6 +733,10 @@ def _pad_index(operand: _Expr, adj: _Expr, index_vals: tuple[int, ...]) -> _Expr
     return _ScatterAdd(zero_array, i, adj, operand.shape)
 
 
+def _inactive_binary(left: _Expr, right: _Expr, shape: Shape, op: str) -> _Op:
+    return _Op(op, left, right, shape)
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -598,6 +798,8 @@ def _emit(expr: _Expr) -> str:
         return f"(index {_emit(expr.value)} {expr.idx})"
     if isinstance(expr, _ScatterAdd):
         return f"(scatter-add {_emit(expr.target)} {expr.index} {_emit(expr.update)})"
+    if isinstance(expr, _If):
+        return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":
