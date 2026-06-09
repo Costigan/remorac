@@ -24,6 +24,9 @@ from remora.typechecker import (
     TypedOperatorFunc,
     TypedRavel,
     TypedReshape,
+    TypedReverse,
+    TypedTake,
+    TypedDrop,
     TypedTranspose,
 )
 from remora.types import FLOAT
@@ -91,6 +94,20 @@ class EvalTape:
                 _accum(adjs, e.inputs[0], np.asarray(adj).reshape(input_shape))
             elif e.kind == "transpose":
                 _accum(adjs, e.inputs[0], np.swapaxes(np.asarray(adj), 0, 1))
+            elif e.kind == "reverse":
+                _accum(adjs, e.inputs[0], np.flip(np.asarray(adj), axis=0))
+            elif e.kind == "take":
+                input_shape = tuple(int(dim) for dim in e.saved[0])
+                count = int(e.saved[1])
+                result = np.zeros(input_shape, dtype=np.float64)
+                result[:count] = adj
+                _accum(adjs, e.inputs[0], result)
+            elif e.kind == "drop":
+                input_shape = tuple(int(dim) for dim in e.saved[0])
+                count = int(e.saved[1])
+                result = np.zeros(input_shape, dtype=np.float64)
+                result[count:] = adj
+                _accum(adjs, e.inputs[0], result)
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -172,6 +189,12 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return _trace_ravel(expr, env, tape)
     if isinstance(expr, TypedTranspose):
         return _trace_transpose(expr, env, tape)
+    if isinstance(expr, TypedReverse):
+        return _trace_reverse(expr, env, tape)
+    if isinstance(expr, TypedTake):
+        return _trace_take(expr, env, tape)
+    if isinstance(expr, TypedDrop):
+        return _trace_drop(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -277,6 +300,35 @@ def _trace_transpose(expr: TypedTranspose, env: dict[str, int], tape: EvalTape) 
     return tape.push(
         TapeEntry("transpose", (array_idx,), ()),
         np.swapaxes(np.asarray(array), 0, 1),
+    )
+
+
+def _trace_reverse(expr: TypedReverse, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    return tape.push(
+        TapeEntry("reverse", (array_idx,), ()),
+        np.flip(np.asarray(array), axis=0),
+    )
+
+
+def _trace_take(expr: TypedTake, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    count = int(expr.count.expr.value)
+    return tape.push(
+        TapeEntry("take", (array_idx,), (array.shape, count)),
+        np.asarray(array)[:count],
+    )
+
+
+def _trace_drop(expr: TypedDrop, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    count = int(expr.count.expr.value)
+    return tape.push(
+        TapeEntry("drop", (array_idx,), (array.shape, count)),
+        np.asarray(array)[count:],
     )
 
 

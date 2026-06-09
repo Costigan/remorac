@@ -6,6 +6,7 @@ from typing import Any
 
 from remora.hir import (
     HIRApply,
+    HIRAppend,
     HIRArrayLit,
     HIRCall,
     HIRCast,
@@ -254,6 +255,11 @@ def _lower_tensor_input(
             f"    %{prefix} = tensor.from_elements {values} : {result_type}"
         )
         return "\n".join(lines), f"%{prefix}", result_type, element_type
+
+    if isinstance(node, HIRAppend):
+        return _lower_append_input(
+            node, prefix, functions, tensor_env=tensor_env
+        )
 
     if isinstance(node, (HIRMap, HIRApply)):
         return _lower_fold_input(
@@ -1936,18 +1942,20 @@ def _lower_with_shape_module(
 # ---------------------------------------------------------------------------
 
 
-def _lower_append_module(
-    node: HIRAppend, functions: dict[str, HIRFunction]
-) -> str:
-    from remora.lowering.module import _MLIRMainModuleBuilder
-
+def _lower_append_input(
+    node: HIRAppend,
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+) -> tuple[str, str, str, str]:
     left_code, left_name, left_type, _left_elem = _lower_tensor_input(
-        node.left, "left", functions
+        node.left, f"{prefix}_left", functions, tensor_env=tensor_env
     )
     right_code, right_name, right_type, _right_elem = _lower_tensor_input(
-        node.right, "right", functions
+        node.right, f"{prefix}_right", functions, tensor_env=tensor_env
     )
     result_type_mlir = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
     result_rank = node.result_type.rank
 
     left_remora = _expr_result_type(node.left)
@@ -1956,25 +1964,37 @@ def _lower_append_module(
     right_shape = right_remora.shape if isinstance(right_remora, ArrayType) else ()
 
     left_dim = left_shape[0].value
-    right_dim = right_shape[0].value
 
-    # Build N-D offsets, sizes, and strides for tensor.insert_slice
     zero_offsets = ", ".join(["0"] * result_rank)
     left_sizes = ", ".join(str(d.value) for d in left_shape)
     right_sizes = ", ".join(str(d.value) for d in right_shape)
     strides = ", ".join(["1"] * result_rank)
+    right_offsets = f"{left_dim}" + (
+        ", 0" * (result_rank - 1) if result_rank > 1 else ""
+    )
 
-    right_offsets = f"{left_dim}" + (", 0" * (result_rank - 1) if result_rank > 1 else "")
-
-    body = f"""{left_code}
+    empty_name = f"%{prefix}_empty"
+    tmp_name = f"%{prefix}_tmp"
+    result_name = f"%{prefix}"
+    code = f"""{left_code}
 {right_code}
-    %empty = tensor.empty() : {result_type_mlir}
-    %tmp = tensor.insert_slice {left_name} into %empty[{zero_offsets}] [{left_sizes}] [{strides}] : {left_type} into {result_type_mlir}
-    %result = tensor.insert_slice {right_name} into %tmp[{right_offsets}] [{right_sizes}] [{strides}] : {right_type} into {result_type_mlir}"""
+    {empty_name} = tensor.empty() : {result_type_mlir}
+    {tmp_name} = tensor.insert_slice {left_name} into {empty_name}[{zero_offsets}] [{left_sizes}] [{strides}] : {left_type} into {result_type_mlir}
+    {result_name} = tensor.insert_slice {right_name} into {tmp_name}[{right_offsets}] [{right_sizes}] [{strides}] : {right_type} into {result_type_mlir}"""
+    return code, result_name, result_type_mlir, result_element_type
 
+
+def _lower_append_module(
+    node: HIRAppend, functions: dict[str, HIRFunction]
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    body, result_name, result_type_mlir, _result_element_type = (
+        _lower_append_input(node, "result", functions)
+    )
     builder = _MLIRMainModuleBuilder(result_type_mlir)
     builder.add_block(body)
-    return builder.render("%result")
+    return builder.render(result_name)
 
 
 # ---------------------------------------------------------------------------

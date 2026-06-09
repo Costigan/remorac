@@ -48,7 +48,22 @@ class _Transpose:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose
+@dataclass(frozen=True)
+class _View:
+    kind: str
+    value: "_Expr"
+    count: int | None
+    shape: Shape
+
+
+@dataclass(frozen=True)
+class _Append:
+    left: "_Expr"
+    right: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append
 
 
 @dataclass(frozen=True)
@@ -150,6 +165,18 @@ def generate_gradient_source(
             _accumulate(adjs, operand, _reshape(adj, primals[operand].shape))
         elif entry.kind == "transpose":
             _accumulate(adjs, entry.inputs[0], _transpose(adj))
+        elif entry.kind == "reverse":
+            _accumulate(adjs, entry.inputs[0], _view("reverse", adj))
+        elif entry.kind == "take":
+            operand = primals[entry.inputs[0]]
+            count = int(entry.saved[1])
+            zero_tail = _binary("*", _constant(0.0), _view("drop", operand, count))
+            _accumulate(adjs, entry.inputs[0], _append(adj, zero_tail))
+        elif entry.kind == "drop":
+            operand = primals[entry.inputs[0]]
+            count = int(entry.saved[1])
+            zero_head = _binary("*", _constant(0.0), _view("take", operand, count))
+            _accumulate(adjs, entry.inputs[0], _append(zero_head, adj))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -291,6 +318,10 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
             expr = _reshape(primals[entry.inputs[0]], shape)
         elif entry.kind == "transpose":
             expr = _transpose(primals[entry.inputs[0]])
+        elif entry.kind == "reverse":
+            expr = _view("reverse", primals[entry.inputs[0]])
+        elif entry.kind in {"take", "drop"}:
+            expr = _view(entry.kind, primals[entry.inputs[0]], int(entry.saved[1]))
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -386,6 +417,21 @@ def _transpose(value: _Expr) -> _Expr:
     return _Transpose(value, shape)
 
 
+def _view(kind: str, value: _Expr, count: int | None = None) -> _Expr:
+    if kind == "reverse":
+        return _View(kind, value, None, value.shape)
+    if not value.shape or count is None:
+        raise ValueError(f"{kind} gradient requires a non-scalar value and count")
+    leading = count if kind == "take" else value.shape[0] - count
+    return _View(kind, value, count, (leading, *value.shape[1:]))
+
+
+def _append(left: _Expr, right: _Expr) -> _Expr:
+    if not left.shape or not right.shape or left.shape[1:] != right.shape[1:]:
+        raise ValueError("append gradient operands must have compatible array shapes")
+    return _Append(left, right, (left.shape[0] + right.shape[0], *left.shape[1:]))
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -428,6 +474,12 @@ def _emit(expr: _Expr) -> str:
         return f"(reshape {_emit(expr.value)} [{shape}])"
     if isinstance(expr, _Transpose):
         return f"(transpose {_emit(expr.value)})"
+    if isinstance(expr, _View):
+        if expr.kind == "reverse":
+            return f"(reverse {_emit(expr.value)})"
+        return f"({expr.kind} {expr.count} {_emit(expr.value)})"
+    if isinstance(expr, _Append):
+        return f"(append {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":
