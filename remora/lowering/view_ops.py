@@ -11,6 +11,7 @@ from remora.hir import (
     HIRRavel,
     HIRReshape,
     HIRReverse,
+    HIRRotate,
     HIRSlice,
     HIRSubarray,
     HIRTake,
@@ -57,7 +58,8 @@ def _lower_view_result(
     | HIRReverse
     | HIRTake
     | HIRDrop
-    | HIRSubarray,
+    | HIRSubarray
+    | HIRRotate,
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
     prefix: str = "view",
@@ -185,6 +187,41 @@ def _lower_view_result(
             f"[{', '.join(offsets)}] [{', '.join(sizes)}] [{', '.join(strides)}] : "
             f"{input_type} to {result_type}"
         )
+    elif isinstance(node, HIRRotate):
+        rank = node.result_type.rank
+        N = node.result_type.shape[0].value
+        shift = node.shift.value
+        dims = ", ".join(f"d{i}" for i in range(rank))
+        affine_map = f"affine_map<({dims}) -> ({dims})>"
+        iterators = "[" + ", ".join(f'"parallel"' for _ in range(rank)) + "]"
+        elem_type = type_to_mlir(node.result_type.element)
+        empty_name = f"%{_join_prefix(prefix, 'empty')}"
+        rot_zero_name = f"%{_join_prefix(prefix, 'rzero')}"
+        rot_N_name = f"%{_join_prefix(prefix, 'rN')}"
+        rot_shift_name = f"%{_join_prefix(prefix, 'rshift')}"
+        trailing_defs = ""
+        trailing_indices = ""
+        if rank > 1:
+            trailing_defs = "\n".join(
+                f"      %d{i} = linalg.index {i} : index" for i in range(1, rank)
+            )
+            trailing_indices = ", " + ", ".join(f"%d{i}" for i in range(1, rank))
+        extract_indices = "%wrapped" + trailing_indices
+        result_line = f"""    {rot_zero_name} = arith.constant 0 : index
+    {rot_N_name} = arith.constant {N} : index
+    {rot_shift_name} = arith.constant {shift} : index
+    {empty_name} = tensor.empty() : {result_type}
+    {result_name} = linalg.generic {{
+      indexing_maps = [{affine_map}],
+      iterator_types = [{iterators}]
+    }} outs({empty_name} : {result_type}) {{
+    ^bb0(%out: {elem_type}):
+      %idx = linalg.index 0 : index
+      %shifted = arith.addi %idx, {rot_shift_name} : index
+      %wrapped = arith.remsi %shifted, {rot_N_name} : index{trailing_defs}
+      %elem = tensor.extract {input_name}[{extract_indices}] : {input_type}
+      linalg.yield %elem : {elem_type}
+    }} -> {result_type}"""
     else:
         raise AssertionError(
             f"unhandled view node type {type(node).__name__}"
@@ -225,7 +262,8 @@ def _lower_view_input(
     | HIRReverse
     | HIRTake
     | HIRDrop
-    | HIRSubarray,
+    | HIRSubarray
+    | HIRRotate,
     functions: dict[str, Any],
     prefix: str,
     tensor_env: TensorEnv | None = None,

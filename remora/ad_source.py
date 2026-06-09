@@ -71,7 +71,14 @@ class _SubarrayView:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView
+@dataclass(frozen=True)
+class _Rotate:
+    value: "_Expr"
+    shift: int
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate
 
 
 @dataclass(frozen=True)
@@ -194,6 +201,11 @@ def generate_gradient_source(
             offsets = tuple(int(o) for o in entry.saved[1])
             sizes = tuple(int(s) for s in entry.saved[2])
             _accumulate(adjs, entry.inputs[0], _pad_subarray(operand, adj, offsets, sizes))
+        elif entry.kind == "rotate":
+            shift = int(entry.saved[0])
+            n = int(entry.saved[1])
+            reverse_shift = (n - shift) % n
+            _accumulate(adjs, entry.inputs[0], _rotate(adj, reverse_shift))
         elif entry.kind in {"const", "var"}:
             continue
         else:
@@ -345,6 +357,9 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
             offsets = tuple(int(o) for o in entry.saved[1])
             sizes = tuple(int(s) for s in entry.saved[2])
             expr = _subarray_view(primals[entry.inputs[0]], offsets, sizes)
+        elif entry.kind == "rotate":
+            shift = int(entry.saved[0])
+            expr = _rotate(primals[entry.inputs[0]], shift)
         else:
             raise NotImplementedError(f"gradient source primal: {entry.kind}")
         primals.append(expr)
@@ -481,6 +496,10 @@ def _pad_subarray(operand: _Expr, adj: _Expr, offsets: tuple[int, ...], sizes: t
     return result
 
 
+def _rotate(value: _Expr, shift: int) -> _Expr:
+    return _Rotate(value, shift, value.shape)
+
+
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:
     if expr.shape == target.shape:
         return expr
@@ -536,6 +555,8 @@ def _emit(expr: _Expr) -> str:
             off = str(expr.offsets[0])
             sz = str(expr.sizes[0])
         return f"(subarray {_emit(expr.value)} [{off}] [{sz}])"
+    if isinstance(expr, _Rotate):
+        return f"(rotate {_emit(expr.value)} {expr.shift})"
     if expr.op == "fold":
         return f"(fold + 0.0 {_emit(expr.left)})"
     if expr.op == "neg":

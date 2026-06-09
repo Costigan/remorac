@@ -360,13 +360,12 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   axis. Validated through: CPU tape execution, generated-source interpretation,
   compiled CPU execution, and finite-difference agreement.
   Not in the supported GPU subset (structured views required).
-- Subarray VJP: tape traces `subarray(array, offsets, sizes)`, saves shape
-  and position metadata. Reverse scatters the cotangent back into a zero
-  array at the extracted sub-region. Source VJP uses `append`-based zero
-  padding: pads the adjoint with zero prefix (via `take`) and zero suffix
-  (via `drop`). Currently supports rank-1 leading-dimension subarrays.
-  Validated through: CPU tape execution, generated-source interpretation,
-  compiled CPU execution. Not in the supported GPU subset.
+- Rotate VJP: tape traces `rotate(array, shift)` and saves the shift plus
+  array length. Reverse rotates the cotangent back by `(n - shift) % n`,
+  undoing the forward rotation. Source VJP emits `(rotate adj reverse_shift)`.
+  Validated through CPU tape execution and interpreter execution. Compiled
+  CPU execution is blocked by a linalg.generic / tensor.extract lowering
+  issue in the fold-input path. Not in the supported GPU subset.
 
 Remaining AD5 work:
 
@@ -393,9 +392,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray VJPs | 901 |
+| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, append/subarray/rotate VJPs | 905 |
 
-Full suite after this milestone: **901 passed, 1 skipped**.
+Full suite after this milestone: **905 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).

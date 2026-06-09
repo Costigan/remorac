@@ -31,6 +31,7 @@ from remora.hir import (
     HIRReplicate,
     HIRReshape,
     HIRReverse,
+    HIRRotate,
     HIRScan,
     HIRSlice,
     HIRSort,
@@ -278,6 +279,7 @@ def _lower_tensor_input(
             HIRTake,
             HIRDrop,
             HIRSubarray,
+            HIRRotate,
         ),
     ):
         from remora.lowering.view_ops import _lower_view_input
@@ -1145,6 +1147,7 @@ def _lower_fold_input(
             HIRTake,
             HIRDrop,
             HIRSubarray,
+            HIRRotate,
         ),
     ):
         return _lower_tensor_input(
