@@ -120,6 +120,24 @@ def test_lowers_scalar_primitive_expressions(source: str, return_type: str, expe
     assert f": {return_type}" in lowered.text
 
 
+@pytest.mark.parametrize(("op", "expected_op"), [("exp", "math.exp"), ("log", "math.log")])
+def test_lowers_unary_float_function_to_math_dialect(op: str, expected_op: str):
+    artifact = compile_function_source(
+        f"def f x = {op} x", "f", (FLOAT,)
+    )
+
+    assert expected_op in artifact.mlir_text
+
+
+def test_lowers_lifted_unary_float_primitive():
+    lowered = compile_source_to_mlir(
+        "let xs = [1.0, 2.0] in log xs"
+    )
+
+    assert "linalg.generic" in lowered
+    assert "math.log" in lowered
+
+
 @pytest.mark.parametrize(
     ("source", "return_type", "constant"),
     [

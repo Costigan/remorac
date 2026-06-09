@@ -42,6 +42,17 @@ def test_scalar_literal_typing():
     assert infer("true").type == BOOL
 
 
+def test_unary_float_primitives_typecheck_and_lift_over_arrays():
+    assert infer("exp 1.0").type == FLOAT
+    assert infer("log 2").type == FLOAT
+
+    typed = infer("let xs = [1.0, 2.0, 3.0] in exp xs")
+
+    assert isinstance(typed, TypedLet)
+    assert isinstance(typed.body, TypedMap)
+    assert typed.type == ArrayType(FLOAT, (StaticDim(3),))
+
+
 def test_rank_1_array_literal_typing():
     typed = infer("[1, 2, 3]")
 

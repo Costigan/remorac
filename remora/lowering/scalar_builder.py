@@ -135,6 +135,16 @@ class _BuilderRegionEmitter:
     def _emit_prim_op(
         self, op: str, args: list[_Operand], result_type: str
     ) -> _Operand:
+        if op in {"expf", "logf"}:
+            if len(args) != 1:
+                raise RemoraLoweringError(f"{op[:-1]} expects one operand")
+            operand = self._coerce(args[0], "f32")
+            result = self.temp()
+            mlir_op = "math.exp" if op == "expf" else "math.log"
+            self.lines.append(
+                f"      {result} = {mlir_op} {operand.value} : f32"
+            )
+            return _Operand(result, [], "f32")
         if len(args) != 2:
             raise RemoraLoweringError("only binary primitive operations lower to MLIR")
         if op in {"+f", "-f", "*f", "/f", "+i", "-i", "*i"}:

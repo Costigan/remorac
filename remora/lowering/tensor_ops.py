@@ -1619,6 +1619,17 @@ def _lower_primitive_callable_result(
     input_type: str,
     result_type: str,
 ) -> tuple[list[str], str]:
+    if callable_.op in {"exp", "log"}:
+        input_lines = _cast_if_needed(
+            input_name, input_type, "f32", "%input_cast"
+        )
+        input_value = "%input_cast" if input_lines else input_name
+        mlir_op = "math.exp" if callable_.op == "exp" else "math.log"
+        return [
+            *input_lines,
+            f"      %result = {mlir_op} {input_value} : f32",
+        ], "%result"
+
     op_type = result_type
     if callable_.op in {"==", "!=", "<", "<="}:
         op_type = input_type

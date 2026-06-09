@@ -16,6 +16,14 @@ def test_cpu_evaluates_scalar_expression():
     assert result.value == 3.0
 
 
+def test_cpu_evaluates_unary_float_primitives_for_scalars_and_arrays():
+    scalar = evaluate_source("log (exp 2.0)")
+    array = evaluate_source("let xs = [0.0, 1.0] in exp xs")
+
+    assert scalar.value == 2.0
+    np.testing.assert_allclose(array.value, np.exp([0.0, 1.0]), rtol=1e-6)
+
+
 def test_cpu_evaluates_iota_map_and_fold():
     mapped = evaluate_source("map (* 2.0) (iota 5)")
     folded = evaluate_source("fold (+) 0.0 (iota 10)")

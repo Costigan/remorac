@@ -442,6 +442,12 @@ class _BuilderRegionEmitter:
         result_type = type_to_mlir(expr.result_type)
         op = expr.op
 
+        if op in {"expf", "logf"}:
+            if len(args) != 1:
+                raise RemoraLoweringError(f"{op[:-1]} expects one operand")
+            operand = self._coerce(args[0], "f32")
+            return self._emit_math_op(op, operand)
+
         if len(args) != 2:
             raise RemoraLoweringError(
                 "only binary primitive operations lower to builder"
@@ -483,6 +489,24 @@ class _BuilderRegionEmitter:
         "-i": "arith.subi",
         "*i": "arith.muli",
     }
+
+    def _emit_math_op(
+        self, op: str, operand: _BuilderOperand
+    ) -> _BuilderOperand:
+        mlir_op_name = "math.exp" if op == "expf" else "math.log"
+        result_name = self.temp()
+        ir_type = _ir_type_for("f32", self._ctx)
+        ir_value = None
+        if operand.ir_value is not None:
+            math_op = self._create_op(
+                mlir_op_name, operands=[operand.ir_value], results=[ir_type]
+            )
+            ir_value = math_op.result
+        line = f"      {result_name} = {mlir_op_name} {operand.value} : f32"
+        self._emit_text(line)
+        return _BuilderOperand(
+            value=result_name, type="f32", ir_value=ir_value, lines=[line]
+        )
 
     def _emit_arith_op(
         self, op: str, args: list[_BuilderOperand], result_type: str
