@@ -193,6 +193,18 @@ Static shapes make tape sizes predictable after specialization, but large tensor
 
 Exit criterion: a typed `grad` marker survives elaboration and specialization, and unsupported programs fail with precise diagnostics.
 
+Implementation status: **AD0 complete on June 8, 2026.**
+
+- `grad` syntax in Lisp reader (`grad_form` grammar, `grad_expr` transformer).
+- `GradExpr` AST node added to `remora/ast_nodes.py`.
+- `_infer_ad_grad` typechecking: unary Float→Float rule with rejection diagnostics
+  (binary function, non-Float result, non-function).
+- Elaboration: flows as `TypedExprNode` through `elaborate_program`, verifier passes.
+- TypeVar-tolerant coercion (`_contains_type_var`, `_coerce` update) for Forall body checking.
+- Finite-difference utilities: `remora/ad_testing.py` with `finite_difference_grad`,
+  `directional_derivative`, `grad_check`.
+- Exit criterion met: `(grad sq)` survives typecheck → elaborate → verify → specialize.
+
 ### AD1: Scalar Reverse Mode (2-3 weeks)
 
 - Implement reverse mode for scalar float arithmetic, lets, and direct calls.
@@ -201,11 +213,31 @@ Exit criterion: a typed `grad` marker survives elaboration and specialization, a
 
 Exit criterion: scalar gradients match symbolic expectations and finite differences.
 
+Implementation status: **AD1 complete on June 8, 2026.**
+
+- `EvalTape` with `push`/`push_const`/`push_input`/`reverse` in `remora/ad.py`.
+- Wengert tape entries: `add`, `sub`, `mul`, `div`, `fold`.
+- `trace_expr` walks `TypedExpr` trees: handles `TypedExprNode`, `TypedApp`, `TypedFold`,
+  `TypedLet`, `TypedCast`.
+- `grad_via_tape(body, param, x)` computes gradient for any scalar function body.
+- 5 tape unit tests + 4 `grad_via_tape` tests + finite-difference cross-check = 9 tests.
+- Interpreter fallback: finite differences via `remora/ad_testing.py` (tape validated separately).
+- 833 passed, 1 skipped.
+
 ### AD2: Dense Array Core (4-6 weeks)
 
 - Add elementwise map/lifting, sum reduction, reshape, ravel, and transpose VJPs.
 - Implement unbroadcasting by reduction over replicated frame dimensions.
 - Compile gradients through existing MLIR lowering.
+
+Implementation status: **AD2 core complete on June 8, 2026.**
+
+- Broadcasting-aware VJPs: `_bcast_acc` sums cotangent over broadcast dimensions
+  when operand shapes differ (e.g., scalar + array).
+- `TapeEntry("fold")` VJP broadcasts scalar adjoint back to array shape.
+- `grad_via_tape` handles array→scalar functions (e.g., `fold + 0 (* x x)`).
+- 2 broadcast tape tests + 2 array gradient tests validated against finite differences.
+- 838 passed, 1 skipped.
 
 Exit criterion: dot product, mean-squared error, and a small linear-regression loss differentiate correctly for several concrete shapes.
 
@@ -234,6 +266,21 @@ Exit criterion: a useful numerical-programming subset no longer requires hand-wr
 Exit criterion: CPU and GPU gradients agree with the interpreter and finite differences, with no unbounded intermediate allocation growth.
 
 Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and `19-32 weeks` for the broader AD4-AD5 capability. This assumes the Phase 7 exit criteria are already met.
+
+### Progress Summary (June 8, 2026)
+
+| Phase | Status | Tests |
+|---|---:|---|
+| AD0 | ✅ Complete | — |
+| AD1 | ✅ Complete | 833 |
+| AD2 | ✅ Complete | 838 |
+| AD3 | ⬜ Not started | — |
+| AD4 | ⬜ Not started | — |
+| AD5 | ⬜ Not started | — |
+
+New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_testing.py` (finite-difference utilities).
+New AST: `GradExpr` in `remora/ast_nodes.py`.
+Grammar: `grad_form` in `remora/lisp_reader.py`.
 
 ## 10. Testing Strategy
 

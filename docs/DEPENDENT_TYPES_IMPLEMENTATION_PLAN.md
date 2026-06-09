@@ -968,3 +968,9 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | Take/drop result-shape arithmetic (`(- n k)` in annotations) | ✅ |
 | Full linear solver (`solve_linear`, fixed-point iteration) | ✅ |
 | Alpha-equivalence (`index_alpha_equivalent`, `type_alpha_equivalent`) | ✅ |
+| Rank-N compiled scan (flat-indexed inner loop, any rank) | ✅ |
+| **AD0**: `grad` syntax, typechecking, elaboration, finite-diff utilities | ✅ |
+| **AD1**: Scalar reverse-mode tape (Wengert tape, VJPs for +-*/) | ✅ |
+| **AD2**: Array reverse-mode (broadcasting VJPs, fold, array→scalar grad) | ✅ |
+
+**Final: 838 tests passed, 1 skipped.**
