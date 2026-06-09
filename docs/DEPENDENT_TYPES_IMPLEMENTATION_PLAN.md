@@ -962,7 +962,7 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 ### Post-Milestone Additions
 
 | Feature | Status |
-|---|---|
+|---|---|---|
 | Rest-variable syntax (`da rest` patterns in annotations) | ✅ |
 | Rank-2 compiled scan support (nested `scf.for`) | ✅ |
 | Take/drop result-shape arithmetic (`(- n k)` in annotations) | ✅ |
@@ -974,6 +974,7 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | **AD2**: Dense array broadcasting and sum-fold VJPs | ✅ core |
 | **AD3**: Pi-preserving grad, specialization before tape | ✅ |
 | **AD4**: Derivative registry, negation, conditionals | ✅ |
-| **AD5**: Tape-to-source GPU gradient path | 🚧 fused f32 kernels; concrete reshape/ravel/transpose/reverse/take/drop/append/subarray/rotate/index/scatter-add VJPs |
+| **AD5**: Structured CPU VJPs, scatter-add, select source, multi-input | ✅ 7 structured VJPs + scatter-add + select + multi-input tape |
+| **AD5 GPU**: Fused f32 kernels, descriptor-ABI path | 🚧 same-shaped f32 only; structured views deferred |
 
-**Current: 910 tests passed, 1 skipped.**
+**Current: 913 tests passed, 1 skipped.**
