@@ -19,6 +19,7 @@ from remora.ast_nodes import (
     FoldRightExpr,
     FuncDef,
     GradeExpr,
+    GradExpr,
     FilterExpr,
     IfExpr,
     IndexAppExpr,
@@ -787,6 +788,8 @@ class TypeChecker:
             return self._infer_app(expr, env)
         if isinstance(expr, IndexAppExpr):
             return self._infer_index_app(expr, env)
+        if isinstance(expr, GradExpr):
+            return self._infer_ad_grad(expr, env)
         if isinstance(expr, LambdaExpr):
             raise RemoraTypeError(
                 "lambda expressions require an expected function type", expr.loc
@@ -1096,6 +1099,17 @@ class TypeChecker:
         right = self.infer(expr.args[1], env)
         op = expr.func.name
 
+        # If both are arrays with incompatible shapes, reject here
+        if isinstance(left.type, ArrayType) and isinstance(right.type, ArrayType):
+            if left.type.shape != right.type.shape:
+                raise RemoraTypeError(
+                    f"incompatible shapes for {op} application: "
+                    f"{left.type} and {right.type}",
+                    expr.loc,
+                )
+            # Matching arrays: auto-lift already handled by implicit map
+            # But this can happen for lambda/ranked funcs; delegate to Forall
+
         sig = _PRIMITIVE_FORALL.get(op)
         if sig is None:
             raise RemoraTypeError(f"unknown primitive operator '{op}'", expr.loc)
@@ -1120,10 +1134,10 @@ class TypeChecker:
         # Forall-typed: infer type variable from operands
         if isinstance(sig, ForallType):
             func_type = self._resolve_primitive_forall(op, sig, left.type, right.type, expr.loc)
-            param_type = func_type.params[0]  # promoted operand type
+            param_type = func_type.params[0]
             result_type = func_type.result
-            # Post-resolution numeric validation
-            if op in {"+", "-", "*"} and not is_numeric(param_type):
+            # Numeric validation: only fail when type is concretely non-numeric
+            if op in {"+", "-", "*"} and isinstance(param_type, ScalarType) and not isinstance(param_type, TypeVar) and not is_numeric(param_type):
                 raise RemoraTypeError(f"operator {op} expects numeric operands", expr.loc)
             return TypedApp(
                 expr,
@@ -1145,15 +1159,30 @@ class TypeChecker:
         right_type: RemoraType,
         loc,
     ) -> FuncType:
-        """Infer type variable bindings from operands and instantiate the Forall."""
-        # For arithmetic/comparison ops, promote to common numeric type first
+        # For arithmetic/comparison ops, promote to common type first
         if op in {"+", "-", "*", "<", "<=", ">", ">=", "==", "!="}:
-            promoted = common_numeric_type(left_type, right_type)
+            left_elem = left_type.element if isinstance(left_type, ArrayType) else left_type
+            right_elem = right_type.element if isinstance(right_type, ArrayType) else right_type
+            if isinstance(left_elem, TypeVar) or isinstance(right_elem, TypeVar):
+                # At least one is a TypeVar; use whichever is concrete, or the TypeVar
+                promoted = left_elem if not isinstance(left_elem, TypeVar) else right_elem
+            else:
+                promoted = common_numeric_type(left_elem, right_elem)
             bindings = {b.name: promoted for b in sig.binders}
             return instantiate_forall_type(  # type: ignore[return-value]
                 sig,
                 tuple(bindings[b.name] for b in sig.binders),
             )
+        # For purely polymorphic ops, infer directly from operand types
+        bindings: dict[str, ScalarType] = {}
+        binder_names = frozenset(b.name for b in sig.binders)
+        declared_params = sig.body.params if isinstance(sig.body, FuncType) else ()
+        for dtype, atype in zip(declared_params, (left_type, right_type)):
+            _infer_type_vars(dtype, atype, bindings, binder_names)
+        return instantiate_forall_type(  # type: ignore[return-value]
+            sig,
+            tuple(bindings[b.name] for b in sig.binders),
+        )
         # For purely polymorphic ops, infer directly from operand types
         bindings: dict[str, ScalarType] = {}
         binder_names = frozenset(b.name for b in sig.binders)
@@ -2591,10 +2620,62 @@ class TypeChecker:
                 raise RemoraTypeError(f"expected matching array operands, got {left} and {right}", loc)
             if left != right:
                 raise RemoraTypeError(f"expected matching array operands, got {left} and {right}", loc)
+            if isinstance(left.element, TypeVar) or isinstance(right.element, TypeVar):
+                return left
             if not is_numeric(left.element):
                 raise RemoraTypeError(f"expected numeric array elements, got {left.element}", loc)
             return left
+        if isinstance(left, TypeVar) or isinstance(right, TypeVar):
+            return left if isinstance(left, TypeVar) else right
         return common_numeric_type(left, right)
+
+    def _infer_ad_grad(self, expr: GradExpr, env: TypeEnv) -> TypedExprNode:
+        """Typecheck (grad f).  f must be unary Float→Float."""
+        from remora.ast_nodes import VarExpr
+        func_type: RemoraType | None = None
+        if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
+            func_type = self._declared_function_type(self._functions[expr.func.name])
+            if func_type is None:
+                raise RemoraTypeError("grad: function has no declared type", expr.loc)
+            # Unwrap PiType / ForallType to get the concrete FuncType
+            if isinstance(func_type, PiType):
+                func_type = func_type.body
+            if isinstance(func_type, ForallType):
+                func_type = func_type.body
+                if isinstance(func_type, PiType):
+                    func_type = func_type.body
+            if not isinstance(func_type, FuncType):
+                raise RemoraTypeError("grad: could not determine function type", expr.loc)
+            typed_func: TypedExpr = TypedExprNode(expr.func, func_type)
+        else:
+            typed_func = self.infer(expr.func, env)
+            func_type = typed_func.type
+        if not isinstance(func_type, FuncType):
+            raise RemoraTypeError(
+                "grad expects a function", expr.loc,
+            )
+        func_type = typed_func.type
+        if len(func_type.params) != 1:
+            raise RemoraTypeError(
+                "grad expects a unary function", expr.loc,
+            )
+        param_type = func_type.params[0]
+        result_type = func_type.result
+        if not isinstance(param_type, (ScalarType, ArrayType)):
+            raise RemoraTypeError(
+                "grad input must be a scalar or array of Float", expr.loc,
+            )
+        param_elem = param_type.element if isinstance(param_type, ArrayType) else param_type
+        if param_elem != FLOAT:
+            raise RemoraTypeError(
+                "grad requires Float input", expr.loc,
+            )
+        if result_type != FLOAT:
+            raise RemoraTypeError(
+                "grad requires a scalar Float result", expr.loc,
+            )
+        grad_type = FuncType((param_type,), param_type)
+        return TypedExprNode(expr, grad_type)
 
     def _build_prelude_env(self) -> TypeEnv:
         return TypeEnv()

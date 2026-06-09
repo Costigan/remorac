@@ -670,6 +670,57 @@ def test_iapp_with_shape_literal():
     assert typed.body.type.result == ArrayType(FLOAT, (StaticDim(3),))
 
 
+# ── AD0: grad typing ──────────────────────────────────────────────────────
+
+def test_grad_typechecks_for_scalar_float_function():
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (sq [x (Array Float n)] Float) "
+        "  (fold + 0.0 (* x x))) "
+        "(grad sq)"
+    )
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+    from remora.types import FuncType, ArrayType, FLOAT
+    tc = TypeChecker()
+    typed = tc.check_program(parse_lisp(src))
+    assert typed.type is not None
+    assert isinstance(typed.type, FuncType)
+    # grad sq: input type = array, output type = same shape array
+    assert isinstance(typed.type.params[0], ArrayType)
+    assert typed.type.params[0] == typed.type.result
+
+
+def test_grad_rejects_binary_function():
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (add [x (Array Float n) y (Array Float n)] Float) "
+        "  (fold + 0.0 (* x y))) "
+        "(grad add)"
+    )
+    import pytest
+    from remora.types import RemoraTypeError
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+    with pytest.raises(RemoraTypeError, match="unary"):
+        TypeChecker().check_program(parse_lisp(src))
+
+
+def test_grad_rejects_non_float_result():
+    from remora.types import RemoraTypeError
+    import pytest
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (sq [x (Array Float n)] (Array Float n)) "
+        "  (+ x x)) "
+        "(grad sq)"
+    )
+    with pytest.raises(RemoraTypeError, match="scalar Float"):
+        from remora.typechecker import TypeChecker
+        from remora.lisp_reader import parse_lisp
+        TypeChecker().check_program(parse_lisp(src))
+
+
 def test_iapp_with_shape_literal_specialization():
     from remora.compiler import compile_function_source
     from remora.types import ArrayType, FLOAT, StaticDim
