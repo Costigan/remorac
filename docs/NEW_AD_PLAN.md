@@ -394,7 +394,7 @@ Remaining AD5 work:
 | P2 | Pair types + n-ary `(grad f)` | ✅ Interpreter (pair) + compiled CPU (single) |
 | P3 | GPU whole-program path | Already works via descriptor ABI |
 | P4 | GPU select/conditional kernels | ✅ Analysis + branchless arithmetic → PTX |
-| P5 | GPU structured views | Deferred |
+| P5 | GPU structured views | Partial: reverse/rotate simplify to identity when paired with their inverse in quadratic, square, and shift losses. Transpose requires fold/ravel chain simplification. |
 
 **915 passed, 1 skipped**
 
