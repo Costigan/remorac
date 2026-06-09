@@ -28,10 +28,10 @@ from remora.lisp_reader import parse_lisp as parse_lisp_program
 from remora.pipeline import run_validation_pipeline, verify_module_text
 from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
-from remora.typechecker import TypeChecker, TypeEnv, TypedProgram
+from remora.typechecker import TypeChecker, TypeEnv, TypedApp, TypedGrad, TypedProgram
 from remora.index import ShapeExpr
 from remora.types import DimExpr, FuncType, RemoraType, RemoraTypeError
-from remora.ast_nodes import FuncDef, Program
+from remora.ast_nodes import AppExpr, FuncDef, IndexAppExpr, Program, VarExpr
 
 
 def _parse_source(source: str, syntax: str = "ml") -> Program:
@@ -115,6 +115,15 @@ def compile_source(
     program_source = with_prelude(source) if _maybe_include_prelude else source
     ast = _parse_source(program_source, syntax)
     typed = TypeChecker().check_program(ast)
+    rewritten = _rewrite_applied_source_gradient(
+        source,
+        ast,
+        typed,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    if rewritten is not None:
+        typed = TypeChecker().check_program(rewritten)
     core = elaborate_program(typed)
     hir = defunctionalize(erase_to_hir(core))
     mlir_module = MLIRLowering().lower_program(
@@ -402,3 +411,152 @@ def compile_gradient_function_source_to_supported_gpu_artifacts(
         syntax="lisp",
     )
     return GradientGPUArtifact(gradient, gpu)
+
+
+def compile_source_gradient_function(
+    source: str,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    verify: bool = True,
+) -> GradientCompilerArtifact:
+    """Compile the concrete source-level `(grad f)` request in a program body."""
+    function_name, param_types = _source_gradient_request(
+        source, include_prelude=include_prelude, syntax=syntax
+    )
+    return compile_gradient_function_source(
+        source,
+        function_name,
+        param_types,
+        gradient_name=gradient_name,
+        include_prelude=include_prelude,
+        syntax=syntax,
+        verify=verify,
+    )
+
+
+def compile_source_gradient_function_to_supported_gpu_artifacts(
+    source: str,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    kernel_name: str | None = None,
+) -> GradientGPUArtifact:
+    """Compile a concrete source-level `(grad f)` request for the GPU path."""
+    function_name, param_types = _source_gradient_request(
+        source, include_prelude=include_prelude, syntax=syntax
+    )
+    return compile_gradient_function_source_to_supported_gpu_artifacts(
+        source,
+        function_name,
+        param_types,
+        gradient_name=gradient_name,
+        include_prelude=include_prelude,
+        syntax=syntax,
+        kernel_name=kernel_name,
+    )
+
+
+def _source_gradient_request(
+    source: str,
+    *,
+    include_prelude: bool,
+    syntax: str,
+) -> tuple[str, tuple[RemoraType, ...]]:
+    program_source = with_prelude(source) if include_prelude and syntax == "ml" else source
+    typed = TypeChecker().check_program(_parse_source(program_source, syntax))
+    body = typed.body
+    typed_grad = body.func if isinstance(body, TypedApp) else body
+    if not isinstance(typed_grad, TypedGrad):
+        raise ValueError("program body must be `(grad f)` or an application of it")
+    if not isinstance(typed_grad.type, FuncType):
+        raise ValueError("source-level gradient must be specialized to concrete parameter types")
+
+    target = typed_grad.expr.func
+    if isinstance(target, VarExpr):
+        function_name = target.name
+    elif isinstance(target, IndexAppExpr) and isinstance(target.func, VarExpr):
+        function_name = target.func.name
+    else:
+        raise ValueError("source-level gradient must target a named function")
+    return function_name, typed_grad.type.params
+
+
+def _rewrite_applied_source_gradient(
+    source: str,
+    program: Program,
+    typed: TypedProgram,
+    *,
+    include_prelude: bool,
+    syntax: str,
+) -> Program | None:
+    """Replace an applied concrete `grad` body with a generated function call."""
+    if not isinstance(typed.body, TypedApp) or not isinstance(typed.body.func, TypedGrad):
+        if isinstance(typed.body, TypedGrad):
+            raise ValueError(
+                "bare `(grad f)` is a function value; use "
+                "compile_source_gradient_function or apply it to an argument"
+            )
+        return None
+    if not isinstance(program.body, AppExpr):
+        raise AssertionError("typed gradient application must retain an AppExpr body")
+
+    typed_grad = typed.body.func
+    function_name = _typed_gradient_target_name(typed_grad)
+    if not isinstance(typed_grad.type, FuncType):
+        raise ValueError("source-level gradient must be specialized before application")
+
+    existing_names = {
+        definition.name
+        for definition in program.definitions
+        if isinstance(definition, FuncDef)
+    }
+    generated_name = _unique_gradient_name(function_name, existing_names)
+    from remora.ad_source import generate_gradient_function_source
+
+    gradient = generate_gradient_function_source(
+        source,
+        function_name,
+        typed_grad.type.params,
+        gradient_name=generated_name,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    generated_program = parse_lisp_program(gradient.source)
+    if len(generated_program.definitions) != 1:
+        raise AssertionError("generated gradient source must define one function")
+    generated_definition = generated_program.definitions[0]
+    if not isinstance(generated_definition, FuncDef):
+        raise AssertionError("generated gradient source must define a function")
+
+    replacement = AppExpr(
+        VarExpr(generated_name, program.body.loc),
+        list(program.body.args),
+        program.body.loc,
+    )
+    return Program(
+        [*program.definitions, generated_definition],
+        replacement,
+        program.loc,
+    )
+
+
+def _typed_gradient_target_name(typed_grad: TypedGrad) -> str:
+    target = typed_grad.expr.func
+    if isinstance(target, VarExpr):
+        return target.name
+    if isinstance(target, IndexAppExpr) and isinstance(target.func, VarExpr):
+        return target.func.name
+    raise ValueError("source-level gradient must target a named function")
+
+
+def _unique_gradient_name(function_name: str, existing_names: set[str]) -> str:
+    base = f"__remora_grad_{function_name.replace('-', '_')}"
+    candidate = base
+    suffix = 2
+    while candidate in existing_names:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
