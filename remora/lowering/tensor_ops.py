@@ -43,7 +43,7 @@ from remora.hir import (
     HIRWithShape,
     HIRIndicesOf,
 )
-from remora.types import ArrayType, ScalarType, SigmaType, StaticDim
+from remora.types import ArrayType, BOOL, FLOAT, INT, ScalarType, SigmaType, StaticDim
 
 from remora.lowering.scalar import (
     _Operand,
@@ -269,6 +269,16 @@ def _lower_tensor_input(
         target_code, target_name, target_type, target_elem = _lower_tensor_input(
             node.target, _join_prefix(prefix, "target"), functions, tensor_env
         )
+        # Lower the index: literal → constant, non-literal → scalar module
+        if isinstance(node.index, HIRLit) and node.index.type == INT:
+            idx_val = int(node.index.value)
+            idx_code = f"    %{_join_prefix(prefix, 'idx')} = arith.constant {idx_val} : index"
+            idx_name = f"%{_join_prefix(prefix, 'idx')}"
+        else:
+            raise RemoraLoweringError(
+                "scatter-add fold input only supports literal index values"
+            )
+        # Lower update
         if isinstance(node.update, HIRLit):
             lit_val = _literal_value(node.update, target_elem)
             update_name = f"%{_join_prefix(prefix, 'update')}"
@@ -277,13 +287,13 @@ def _lower_tensor_input(
             idx_item = node.update.indices[0]
             if isinstance(idx_item, HIRLit):
                 idx_val = int(idx_item.value)
-                idx_code, idx_name, idx_type, idx_elem = _lower_tensor_input(
+                arr_code, arr_name, arr_type, arr_elem = _lower_tensor_input(
                     node.update.array, _join_prefix(prefix, "idx_arr"), functions, tensor_env
                 )
                 update_name = f"%{_join_prefix(prefix, 'update')}"
-                update_code = f"""{idx_code}
+                update_code = f"""{arr_code}
     {update_name}_pos = arith.constant {idx_val} : index
-    {update_name} = tensor.extract {idx_name}[{update_name}_pos] : {idx_type}"""
+    {update_name} = tensor.extract {arr_name}[{update_name}_pos] : {arr_type}"""
             else:
                 raise RemoraLoweringError(
                     "scatter-add cannot lower non-literal index in fold input"
@@ -295,11 +305,11 @@ def _lower_tensor_input(
         result_type = type_to_mlir(node.result_type)
         result_name = f"%{prefix}"
         code = f"""{target_code}
+{idx_code}
 {update_code}
-    {result_name}_idx = arith.constant {node.index} : index
-    {result_name}_extracted = tensor.extract {target_name}[{result_name}_idx] : {target_type}
+    {result_name}_extracted = tensor.extract {target_name}[{idx_name}] : {target_type}
     {result_name}_added = arith.addf {result_name}_extracted, {update_name} : {target_elem}
-    {result_name} = tensor.insert {result_name}_added into {target_name}[{result_name}_idx] : {target_type}"""
+    {result_name} = tensor.insert {result_name}_added into {target_name}[{idx_name}] : {target_type}"""
         return code, result_name, result_type, target_elem
 
     if isinstance(node, (HIRMap, HIRApply)):
@@ -2006,13 +2016,20 @@ def _lower_scatter_add_module(
         update_code = _lower_scalar_module(node.update, functions)
         update_name = "%result"
 
+    if isinstance(node.index, HIRLit) and node.index.type == INT:
+        idx_code = f"    %idx = arith.constant {int(node.index.value)} : index"
+        idx_name = "%idx"
+    else:
+        idx_code = _lower_scalar_module(node.index, functions)
+        idx_name = "%result"
+
     result_type = type_to_mlir(node.result_type)
     body = f"""{target_code}
 {update_code}
-    %idx = arith.constant {node.index} : index
-    %extracted = tensor.extract {target_name}[%idx] : {target_type}
+{idx_code}
+    %extracted = tensor.extract {target_name}[{idx_name}] : {target_type}
     %added = arith.addf %extracted, {update_name} : {target_elem}
-    %result = tensor.insert %added into {target_name}[%idx] : {target_type}"""
+    %result = tensor.insert %added into {target_name}[{idx_name}] : {target_type}"""
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)
     return builder.render("%result")
