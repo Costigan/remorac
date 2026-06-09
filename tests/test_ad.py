@@ -176,9 +176,103 @@ def _make_fold(body, array_expr):
 
     init = _lit(0.0)
     func = _op("+")
-    # body is already the element-wise expression applied to array elements
     return TypedFold(
         FoldExpr(func.expr, init.expr, array_expr.expr, _LOC),
-        func, init, body,  # <-- body is the element-wise result
+        func, init, body,
         StaticDim(0), FLOAT,
     )
+
+
+# ── AD4: additional VJPs ──────────────────────────────────────────────────
+
+def test_tape_neg():
+    """neg(x): VJP = -adj"""
+    t = EvalTape()
+    x = t.push_input(np.asarray([1.0, 2.0, 3.0]))
+    r = t.push(TapeEntry("neg", (x,), ()), np.asarray([-1.0, -2.0, -3.0]))
+    adjs = t.reverse()
+    np.testing.assert_array_equal(adjs[x], [-1.0, -1.0, -1.0])
+
+
+# ── AD5: performance / correctness benchmarks ──────────────────────────────
+
+def test_tape_vs_fd_accuracy():
+    """Tape gradient must match finite differences within tight tolerance."""
+    rng = np.random.RandomState(123)
+    for _ in range(20):
+        x = rng.randn(rng.randint(1, 10)) * 2.0
+        body = _make_fold(_app(_op("*"), _var("x"), _var("x")), _var("x"))
+        tape_g = grad_via_tape(body, "x", x)
+
+        def f(v):
+            return float(np.sum(v * v))
+        grad_check(f, x, tape_g, rtol=1e-6, atol=1e-8, label="bench_fd")
+
+
+def test_tape_vs_fd_speed():
+    """Tape should be faster than finite differences for moderate arrays."""
+    import time
+    rng = np.random.RandomState(42)
+    body = _make_fold(_app(_op("*"), _var("x"), _var("x")), _var("x"))
+
+    sizes = [5, 10, 50, 100]
+    for n in sizes:
+        x = rng.randn(n)
+        t0 = time.perf_counter()
+        for _ in range(10):
+            grad_via_tape(body, "x", x)
+        tape_time = (time.perf_counter() - t0) / 10
+
+        def f(v):
+            return float(np.sum(v * v))
+        t0 = time.perf_counter()
+        for _ in range(10):
+            finite_difference_grad(f, x)
+        fd_time = (time.perf_counter() - t0) / 10
+
+        speedup = fd_time / tape_time if tape_time > 0 else float('inf')
+        # Tape should be faster (n evaluations vs 2n+1 evaluations)
+        assert speedup > 1.0, f"Tape not faster than FD for n={n}"
+
+
+@pytest.mark.parametrize("shape,func_name", [
+    ((3,), "sq"),
+    ((5,), "sq"),
+    ((10,), "sq"),
+    ((4,), "sq"),
+])
+def test_compiled_cross_validation(shape, func_name):
+    """Tape gradient on compiled specialized body must match finite differences."""
+    from remora.compiler import compile_function_source
+    from remora.typechecker import TypeChecker
+    from remora.lisp_reader import parse_lisp
+    from remora.types import ArrayType, FLOAT, StaticDim, FuncType
+
+    src = '''(define/pi ([n Dim]) (sq [x (Array Float n)] Float) (fold + 0.0 (* x x)))'''
+    static_dim = StaticDim(shape[0])
+
+    # Compile it
+    art = compile_function_source(
+        src, func_name,
+        (ArrayType(FLOAT, (static_dim,)),),
+        verify=False, include_prelude=False, syntax='lisp',
+    )
+    assert art.specialization_name is not None
+
+    # Get specialized body for tape
+    tc = TypeChecker()
+    tc.check_program(parse_lisp(src))
+    spec = tc._typed_top_level_function(
+        tc._functions[func_name],
+        FuncType((ArrayType(FLOAT, (static_dim,)),), FLOAT),
+        tc._build_prelude_env(),
+        index_args=(static_dim,),
+    )
+
+    rng = np.random.RandomState(42 + shape[0])
+    x = rng.randn(*shape).astype(np.float64) * 2.0
+    tape_g = grad_via_tape(spec.body, "x", x)
+
+    def f(v):
+        return float(np.sum(v * v))
+    grad_check(f, x, tape_g, label=f"compiled_{func_name}_{shape}")

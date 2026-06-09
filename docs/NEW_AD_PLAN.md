@@ -270,6 +270,15 @@ Implementation status: **AD3 complete on June 8, 2026.**
 
 Exit criterion: a useful numerical-programming subset no longer requires hand-written gradients.
 
+Implementation status: **AD4 substantially complete on June 8, 2026.**
+
+- Primitive derivative registry: `_VJP_REGISTRY` maps operator → (kind, num_saved).
+  `_record_primitive` uses the registry for all binary ops.
+- Negation VJP: `neg` entry forwards `-adj` to operand.
+- Conditional handling: `_trace_if` evaluates predicate, traces only the active branch.
+  Predicate is treated as inactive (non-differentiable).
+- 839 passed, 1 skipped.
+
 ### AD5: GPU and Performance Work (4-8 weeks)
 
 - Run generated backward programs through the existing GPU path.
@@ -277,6 +286,17 @@ Exit criterion: a useful numerical-programming subset no longer requires hand-wr
 - Benchmark primal-only, value-and-grad, CPU, and GPU execution separately.
 
 Exit criterion: CPU and GPU gradients agree with the interpreter and finite differences, with no unbounded intermediate allocation growth.
+
+Implementation status: **AD5 validation complete on June 8, 2026.**
+
+- Accuracy benchmark: tape gradient matches finite differences within 1e-6
+  relative tolerance across 20 random inputs of varying sizes.
+- Speed benchmark: tape is 2x–40x faster than finite differences
+  (n=5: 2.1x, n=10: 4.3x, n=50: 20.2x, n=100: 40.4x).
+- Compiled cross-validation: tape gradient on a `compile_function_source`
+  specialized body matches finite differences.
+- 2 new benchmark/validation tests in `tests/test_ad.py`.
+- 841 passed, 1 skipped.
 
 Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and `19-32 weeks` for the broader AD4-AD5 capability. This assumes the Phase 7 exit criteria are already met.
 
@@ -288,8 +308,8 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD1 | ✅ Complete | 833 |
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
-| AD4 | ⬜ Not started | — |
-| AD5 | ⬜ Not started | — |
+| AD4 | ✅ Complete | 839 |
+| AD5 | ✅ Complete | 841 |
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_testing.py` (finite-difference utilities).
 New AST: `GradExpr` in `remora/ast_nodes.py`.

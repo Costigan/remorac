@@ -1,6 +1,6 @@
-"""Reverse-mode AD via evaluation tape for the Remora interpreter.
+"""Reverse-mode AD via evaluation tape for Remora.
 
-AD3: preserves Pi-typed gradient signatures.
+AD4: primitive derivative registry, conditionals, negation.
 """
 
 from __future__ import annotations
@@ -17,9 +17,11 @@ from remora.typechecker import (
     TypedExpr,
     TypedExprNode,
     TypedFold,
+    TypedIf,
     TypedLambda,
     TypedLet,
     TypedMap,
+    TypedOperatorFunc,
 )
 from remora.types import FLOAT
 
@@ -78,6 +80,8 @@ class EvalTape:
             elif e.kind == "fold":
                 iv = np.asarray(e.saved[0], dtype=np.float64)
                 _accum(adjs, e.inputs[0], np.full_like(iv, adj.item()))
+            elif e.kind == "neg":
+                _bcast_acc(adjs, e.inputs[0], -adj, self.values[e.inputs[0]])
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -104,7 +108,35 @@ def _accum(adjs, idx, c):
         adjs[idx] = adjs[idx] + c
 
 
-# ── Traced evaluation (returns tape index) ─────────────────────────────────
+# ── Primitive derivative registry ─────────────────────────────────────────
+
+_VJP_REGISTRY: dict[str, tuple[str, int]] = {
+    "+": ("add", 0),
+    "-": ("sub", 0),
+    "*": ("mul", 2),
+    "/": ("div", 2),
+}
+
+
+def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int:
+    info = _VJP_REGISTRY.get(op)
+    if info is None:
+        raise NotImplementedError(f"no VJP registered for {op!r}")
+    kind, n_saved = info
+    saved = (right_val, left_val) if n_saved == 2 else ()
+    result = _apply_bin_op(op, left_val, right_val)
+    return tape.push(TapeEntry(kind, (left_idx, right_idx), saved), result)
+
+
+def _apply_bin_op(op, lv, rv):
+    if op == "+": return lv + rv
+    if op == "-": return lv - rv
+    if op == "*": return lv * rv
+    if op == "/": return lv / rv
+    raise NotImplementedError(f"apply bin op: {op}")
+
+
+# ── Traced evaluation ─────────────────────────────────────────────────────
 
 
 def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
@@ -114,15 +146,15 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return trace_expr(expr.value, env, tape)
     if isinstance(expr, TypedLet):
         vidx = trace_expr(expr.value, env, tape)
-        local = dict(env)
-        local[expr.expr.name] = vidx
-        return trace_expr(expr.body, local, tape)
+        return trace_expr(expr.body, {**env, expr.expr.name: vidx}, tape)
     if isinstance(expr, TypedApp):
         return _trace_app(expr, env, tape)
     if isinstance(expr, TypedFold):
         return _trace_fold(expr, env, tape)
     if isinstance(expr, TypedMap):
         return _trace_map(expr, env, tape)
+    if isinstance(expr, TypedIf):
+        return _trace_if(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -139,86 +171,62 @@ def _trace_node(expr: TypedExprNode, env: dict[str, int], tape: EvalTape) -> int
     if isinstance(ast, VarExpr):
         if ast.name in env:
             return env[ast.name]
-        raise RuntimeError(f"unexpected free variable {ast.name!r} in trace")
+        raise RuntimeError(f"free variable {ast.name!r}")
     raise NotImplementedError(f"trace node: {type(ast).__name__}")
 
 
 def _trace_app(expr: TypedApp, env: dict[str, int], tape: EvalTape) -> int:
-    func = expr.func
     args = [trace_expr(a, env, tape) for a in expr.args]
     if len(args) != 2:
         raise NotImplementedError("trace app: non-binary")
     left_idx, right_idx = args
-    left_val = _value(tape, left_idx)
-    right_val = _value(tape, right_idx)
-    op = ""
-    if isinstance(func, TypedExprNode):
-        f = func.expr
-        if isinstance(f, OperatorFuncExpr):
-            op = f.op
-        elif isinstance(f, VarExpr):
-            op = f.name
-    return _record_primitive(tape, op, left_idx, right_idx, left_val, right_val)
-
-
-def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int:
-    if op == "+":
-        return tape.push(TapeEntry("add", (left_idx, right_idx), ()), left_val + right_val)
-    elif op == "-":
-        return tape.push(TapeEntry("sub", (left_idx, right_idx), ()), left_val - right_val)
-    elif op == "*":
-        return tape.push(TapeEntry("mul", (left_idx, right_idx), (right_val, left_val)), left_val * right_val)
-    elif op == "/":
-        return tape.push(TapeEntry("div", (left_idx, right_idx), (right_val, left_val)), left_val / right_val)
-    raise NotImplementedError(f"record primitive: {op}")
+    op = _get_op(expr.func)
+    return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
 
 
 def _trace_fold(expr: TypedFold, env: dict[str, int], tape: EvalTape) -> int:
     arr_idx = trace_expr(expr.array, env, tape)
     arr_val = _value(tape, arr_idx)
-    result = arr_val.sum()
-    return tape.push(TapeEntry("fold", (arr_idx,), (arr_val,)), result)
+    return tape.push(TapeEntry("fold", (arr_idx,), (arr_val,)), arr_val.sum())
 
 
 def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
     if not expr.cell_shape:
-        if len(expr.arrays) == 1:
-            return trace_expr(expr.arrays[0], env, tape)
         if len(expr.arrays) == 2:
             left_idx = trace_expr(expr.arrays[0], env, tape)
             right_idx = trace_expr(expr.arrays[1], env, tape)
-            func = expr.func
-            op = _get_op(func)
+            op = _get_op(expr.func)
             return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
     if expr.arrays:
         return trace_expr(expr.arrays[0], env, tape)
     raise NotImplementedError("trace map: no arrays")
 
 
+def _trace_if(expr, env: dict[str, int], tape: EvalTape) -> int:
+    cond_idx = trace_expr(expr.condition, env, tape)
+    if np.any(_value(tape, cond_idx)):
+        return trace_expr(expr.then_branch, env, tape)
+    return trace_expr(expr.else_branch, env, tape)
+
+
 def _get_op(func: object) -> str:
-    """Extract the operator name from a function expression."""
-    from remora.typechecker import TypedOperatorFunc, TypedExprNode
     from remora.ast_nodes import OperatorFuncExpr, VarExpr
     if isinstance(func, TypedExprNode):
         f = func.expr
-        if isinstance(f, OperatorFuncExpr):
-            return f.op
-        if isinstance(f, VarExpr):
-            return f.name
+        if isinstance(f, OperatorFuncExpr): return f.op
+        if isinstance(f, VarExpr): return f.name
     if isinstance(func, TypedOperatorFunc):
         return func.expr.op
     return ""
 
 
-# ── Top-level gradient computation ─────────────────────────────────────────
+# ── Gradient computation ──────────────────────────────────────────────────
 
 
 def grad_via_tape(body: TypedExpr, param_name: str, x: np.ndarray) -> np.ndarray:
     tape = EvalTape()
-    input_val = np.asarray(x, dtype=np.float64)
-    x_idx = tape.push_input(input_val)
-    env: dict[str, int] = {param_name: x_idx}
-    trace_expr(body, env, tape)
+    x_idx = tape.push_input(np.asarray(x, dtype=np.float64))
+    trace_expr(body, {param_name: x_idx}, tape)
     adjs = tape.reverse()
     grad = adjs.get(x_idx)
     if grad is None:
