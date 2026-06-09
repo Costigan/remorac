@@ -137,6 +137,14 @@ class EvalTape:
                 result = np.zeros(input_shape, dtype=np.float64)
                 result[index_vals] = adj
                 _accum(adjs, e.inputs[0], result)
+            elif e.kind == "select":
+                cond_val = self.values[e.inputs[0]]
+                mask = np.asarray(cond_val, dtype=bool)
+                adj_arr = np.asarray(adj, dtype=np.float64)
+                then_contrib = np.where(mask, adj_arr, 0.0)
+                else_contrib = np.where(~mask, adj_arr, 0.0)
+                _bcast_acc(adjs, e.inputs[1], then_contrib, self.values[e.inputs[1]])
+                _bcast_acc(adjs, e.inputs[2], else_contrib, self.values[e.inputs[2]])
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -262,7 +270,7 @@ def _trace_app(expr: TypedApp, env: dict[str, int], tape: EvalTape) -> int:
         result = _apply_inactive_bin_op(
             op, _value(tape, left_idx), _value(tape, right_idx)
         )
-        return tape.push(TapeEntry("inactive", (left_idx, right_idx), ()), result)
+        return tape.push(TapeEntry("inactive", (left_idx, right_idx), (op,)), result)
     return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
 
 
@@ -307,9 +315,20 @@ def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
 def _trace_if(expr, env: dict[str, int], tape: EvalTape) -> int:
     tape.has_data_dependent_control_flow = True
     cond_idx = trace_expr(expr.condition, env, tape)
-    if np.any(_value(tape, cond_idx)):
-        return trace_expr(expr.then_branch, env, tape)
-    return trace_expr(expr.else_branch, env, tape)
+    then_idx = trace_expr(expr.then_branch, env, tape)
+    else_idx = trace_expr(expr.else_branch, env, tape)
+    cond_val = _value(tape, cond_idx)
+    then_val = _value(tape, then_idx)
+    else_val = _value(tape, else_idx)
+    mask = np.asarray(cond_val, dtype=bool)
+    if mask.ndim == 0:
+        result = then_val if mask else else_val
+    else:
+        result = np.where(mask, then_val, else_val)
+    return tape.push(
+        TapeEntry("select", (cond_idx, then_idx, else_idx), ()),
+        result,
+    )
 
 
 def _trace_reshape(expr: TypedReshape, env: dict[str, int], tape: EvalTape) -> int:
@@ -454,3 +473,17 @@ def trace_via_tape(
     x_idx = tape.push_input(np.asarray(x, dtype=np.float64))
     trace_expr(body, {param_name: x_idx}, tape)
     return tape, x_idx
+
+
+def trace_via_tape_multi(
+    body: TypedExpr,
+    inputs: list[np.ndarray],
+    param_names: list[str] | None = None,
+) -> tuple[EvalTape, list[int]]:
+    """Trace a specialized multi-param function body and return its tape and inputs."""
+    tape = EvalTape()
+    indices = [tape.push_input(np.asarray(x, dtype=np.float64)) for x in inputs]
+    names = param_names if param_names else [f"_p{i}" for i in range(len(inputs))]
+    env = {name: idx for name, idx in zip(names, indices)}
+    trace_expr(body, env, tape)
+    return tape, indices

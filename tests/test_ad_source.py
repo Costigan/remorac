@@ -52,7 +52,7 @@ def test_generated_square_gradient_is_reusable_source():
     traced_at = np.arange(1.0, 6.0)
     tape, _ = trace_via_tape(body, "x", traced_at)
 
-    source = generate_gradient_source(tape, "x", traced_at.shape)
+    source = generate_gradient_source(tape, [("x", traced_at.shape)])
 
     assert "(map (* 2.0) x)" in source
     result = evaluate_source(
@@ -98,7 +98,7 @@ def test_generated_source_handles_division_negation_and_fold_fill():
         TapeEntry("mul", (plus, minus), (np.asarray(1.0), np.asarray(4.0))),
         np.asarray(4.0),
     )
-    polynomial_source = generate_gradient_source(polynomial, "x", ())
+    polynomial_source = generate_gradient_source(polynomial, [("x", ())])
     polynomial_result = evaluate_source(
         polynomial_source + " (grad-f 7.0)",
         include_prelude=False,
@@ -114,7 +114,7 @@ def test_generated_source_handles_division_negation_and_fold_fill():
         np.asarray(4.0),
     )
     tape.push(TapeEntry("neg", (quotient,), ()), np.asarray(-4.0))
-    source = generate_gradient_source(tape, "x", ())
+    source = generate_gradient_source(tape, [("x", ())])
     result = evaluate_source(
         source + " (grad-f 13.0)", include_prelude=False, syntax="lisp"
     )
@@ -124,7 +124,7 @@ def test_generated_source_handles_division_negation_and_fold_fill():
     values = np.asarray([2.0, 4.0, 6.0])
     array = sum_tape.push_input(values)
     sum_tape.push(TapeEntry("fold", (array,), (values,)), np.asarray(12.0))
-    sum_source = generate_gradient_source(sum_tape, "x", values.shape)
+    sum_source = generate_gradient_source(sum_tape, [("x", values.shape)])
     sum_result = evaluate_source(
         sum_source + " (grad-f [9.0 8.0 7.0])",
         include_prelude=False,
@@ -141,7 +141,7 @@ def test_generated_gradient_compiles_for_cpu_and_gpu_artifacts():
     x = np.linspace(-2.0, 2.0, n)
     tape, _ = trace_via_tape(body, "x", x)
     source = generate_gradient_source(
-        tape, "x", x.shape, function_name="grad_f"
+        tape, [("x", x.shape)], function_name="grad_f"
     )
 
     cpu_artifact = compile_function_source(
@@ -239,20 +239,21 @@ def test_shape_driven_scalar_gradient_compiles_without_example():
     assert compiled.compiler.mlir_text
 
 
-def test_public_gradient_workflow_rejects_conditionals():
+def test_public_gradient_workflow_accepts_conditionals():
     source = (
         "(define/pi () (piecewise [value Float] Float) "
         "(if (> value 0.0) (* value value) (- 0.0 value)))"
     )
-    with pytest.raises(NotImplementedError, match="conditionals"):
-        compile_gradient_function_source(
-            source,
-            "piecewise",
-            (FLOAT,),
-            include_prelude=False,
-            syntax="lisp",
-            verify=False,
-        )
+    compiled = compile_gradient_function_source(
+        source,
+        "piecewise",
+        (FLOAT,),
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert "(if" in compiled.gradient_source.source
+    assert "grad_piecewise" in compiled.gradient_source.source
 
 
 def test_source_level_gradient_request_compiles_automatically():
@@ -354,7 +355,7 @@ def test_gradient_source_rejects_branch_specialized_tape():
     tape = EvalTape(has_data_dependent_control_flow=True)
     tape.push_input(np.asarray(2.0))
     with pytest.raises(NotImplementedError, match="conditionals"):
-        generate_gradient_source(tape, "x", ())
+        generate_gradient_source(tape, [("x", ())])
 
 
 @pytest.mark.skipif(not cuda_available(), reason="live CUDA driver is not available")
@@ -366,7 +367,7 @@ def test_generated_gradient_executes_on_gpu():
     x = np.linspace(-2.0, 2.0, n, dtype=np.float32)
     tape, _ = trace_via_tape(body, "x", x)
     source = generate_gradient_source(
-        tape, "x", x.shape, function_name="grad_f"
+        tape, [("x", x.shape)], function_name="grad_f"
     )
     artifact = compile_function_source_to_supported_gpu_artifacts(
         source,
@@ -754,3 +755,26 @@ def test_scatter_add_runtime():
         syntax="lisp",
     )
     np.testing.assert_array_equal(compiled.value, [1.0, 2.0, 8.0, 4.0])
+
+
+# ── Select VJP ────────────────────────────────────────────────────────────
+
+
+def test_select_gradient_interpreter():
+    source = (
+        "(define/pi () "
+        "  (loss [x Float] Float) "
+        "  (if (> x 0.0) (* x x) (- 0.0 x)))"
+    )
+    request = source + " ((grad loss) 3.0)"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    assert interpreted.value == pytest.approx(6.0)
+
+    request2 = source + " ((grad loss) -3.0)"
+    interpreted2 = evaluate_source(request2, include_prelude=False, syntax="lisp")
+    assert interpreted2.value == pytest.approx(-1.0)
+
+    compiled = evaluate_source_compiled(
+        source + " ((grad loss) 3.0)", include_prelude=False, syntax="lisp"
+    )
+    assert compiled.value == pytest.approx(6.0)

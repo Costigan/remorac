@@ -340,15 +340,19 @@ def test_tape_append_rank2():
 def _specialize_body(source: str, func_name: str, param_type):
     from remora.typechecker import TypeChecker
     from remora.lisp_reader import parse_lisp
-    from remora.types import FuncType
+    from remora.types import FuncType, ScalarType
 
     tc = TypeChecker()
     tc.check_program(parse_lisp(source))
+    if isinstance(param_type, ScalarType):
+        index_args = ()
+    else:
+        index_args = tuple(d for d in param_type.shape if hasattr(d, "value"))
     spec = tc._typed_top_level_function(
         tc._functions[func_name],
         FuncType((param_type,), FLOAT),
         tc._build_prelude_env(),
-        index_args=tuple(d for d in param_type.shape if hasattr(d, "value")),
+        index_args=index_args,
     )
     return spec.body, spec.params[0][0]
 
@@ -588,3 +592,36 @@ def test_index_vs_finite_diff():
         v = np.asarray(v, dtype=np.float64)
         return float(v[3] * v[3])
     grad_check(f, x, tape_g, label="index_sq")
+
+
+# ── AD select VJP ─────────────────────────────────────────────────────────
+
+
+def test_tape_select_scalar():
+    t = EvalTape()
+    x = t.push_input(np.asarray(3.0))
+    cond = t.push(TapeEntry("inactive", (x, x), (">",)), np.asarray(True))
+    then_val = t.push(TapeEntry("mul", (x, x), (np.asarray(3.0), np.asarray(3.0))), np.asarray(9.0))
+    else_val = t.push(TapeEntry("neg", (x,), ()), np.asarray(-3.0))
+    t.push(TapeEntry("select", (cond, then_val, else_val), ()), np.asarray(9.0))
+    adjs = t.reverse()
+    # adj = 1.0, cond=True → then branch gets adj → mul(x,x) d/dx = 2*x = 6.0
+    assert adjs[x] == pytest.approx(6.0)
+
+
+def test_grad_select_scalar():
+    source = (
+        "(define/pi () "
+        "  (loss [x Float] Float) "
+        "  (if (> x 0.0) (* x x) (- 0.0 x)))"
+    )
+    from remora.types import FuncType
+    body, pname = _specialize_body(
+        source, "loss", FLOAT
+    )
+    # at x=3: loss = 9.0, grad = 6.0
+    g = grad_via_tape(body, pname, np.asarray(3.0))
+    assert g == pytest.approx(6.0, rel=1e-4)
+    # at x=-3: loss = 3.0, grad = -1.0
+    g = grad_via_tape(body, pname, np.asarray(-3.0))
+    assert g == pytest.approx(-1.0, rel=1e-4)
