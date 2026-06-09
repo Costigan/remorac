@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from remora.hir import (
     HIRExpr,
     HIRFunction,
+    HIRIf,
     HIRLambda,
     HIRLit,
     HIRMap,
@@ -42,7 +43,21 @@ class F32BinaryExpr:
     right: "F32Expr"
 
 
-F32Expr = F32InputExpr | F32ConstantExpr | F32BinaryExpr
+@dataclass(frozen=True)
+class F32SelectExpr:
+    condition: "F32Expr"
+    then_expr: "F32Expr"
+    else_expr: "F32Expr"
+
+
+@dataclass(frozen=True)
+class F32CmpExpr:
+    op: str
+    left: "F32Expr"
+    right: "F32Expr"
+
+
+F32Expr = F32InputExpr | F32ConstantExpr | F32BinaryExpr | F32SelectExpr | F32CmpExpr
 
 
 @dataclass(frozen=True)
@@ -187,12 +202,13 @@ def _analyze_fused_f32_map(
         raise on_unsupported(f"{context} input and output shapes must match")
     param_indices = {param.name: index for index, param in enumerate(function.params)}
     expression = _f32_expr_from_array(function.body, param_indices, {}, on_unsupported, context)
-    root = expression if isinstance(expression, F32BinaryExpr) else None
+    root = expression if isinstance(expression, (F32BinaryExpr, F32SelectExpr, F32CmpExpr)) else None
     if root is None:
         raise on_unsupported(f"{context} fused map result must be arithmetic")
+    root_op = root.op if isinstance(root, F32BinaryExpr) else "select"
     return F32MapKernel(
         tuple(dim.value for dim in function.return_type.shape),
-        F32MapOperation(root.op),
+        F32MapOperation(root_op),
         len(function.params),
         expression,
     )
@@ -207,6 +223,12 @@ def _f32_expr_from_array(
 ) -> F32Expr:
     if isinstance(expr, HIRVar) and expr.name in param_indices:
         return F32InputExpr(param_indices[expr.name])
+    if isinstance(expr, HIRIf):
+        return F32SelectExpr(
+            _f32_expr_from_array(expr.condition, param_indices, scalar_env, on_unsupported, context),
+            _f32_expr_from_array(expr.then_branch, param_indices, scalar_env, on_unsupported, context),
+            _f32_expr_from_array(expr.else_branch, param_indices, scalar_env, on_unsupported, context),
+        )
     if not isinstance(expr, HIRMap):
         raise on_unsupported(f"{context} fused maps require parameter or map operands")
     array_exprs = [
@@ -246,13 +268,29 @@ def _f32_expr_from_scalar(
     if isinstance(expr, HIRLit) and expr.type == FLOAT:
         return F32ConstantExpr(float(expr.value))
     if isinstance(expr, HIRPrimOp) and len(expr.args) == 2:
-        op = expr.op[:-1] if expr.op.endswith("f") else expr.op
-        if op not in {"+", "-", "*", "/"}:
-            raise on_unsupported(f"{context} does not support fused scalar operator {expr.op}")
-        return F32BinaryExpr(
-            op,
-            _f32_expr_from_scalar(expr.args[0], env, on_unsupported, context),
-            _f32_expr_from_scalar(expr.args[1], env, on_unsupported, context),
+        op = expr.op
+        for suffix in ("f", "b", "i"):
+            if op.endswith(suffix):
+                op = op[:-1]
+                break
+        if op in {"+", "-", "*", "/"}:
+            return F32BinaryExpr(
+                op,
+                _f32_expr_from_scalar(expr.args[0], env, on_unsupported, context),
+                _f32_expr_from_scalar(expr.args[1], env, on_unsupported, context),
+            )
+        if op in {">", "<", ">=", "<=", "==", "!="}:
+            return F32CmpExpr(
+                op,
+                _f32_expr_from_scalar(expr.args[0], env, on_unsupported, context),
+                _f32_expr_from_scalar(expr.args[1], env, on_unsupported, context),
+            )
+        raise on_unsupported(f"{context} does not support fused scalar operator {expr.op}")
+    if isinstance(expr, HIRIf):
+        return F32SelectExpr(
+            _f32_expr_from_scalar(expr.condition, env, on_unsupported, context),
+            _f32_expr_from_scalar(expr.then_branch, env, on_unsupported, context),
+            _f32_expr_from_scalar(expr.else_branch, env, on_unsupported, context),
         )
     raise on_unsupported(f"{context} fused scalar expression is not supported")
 

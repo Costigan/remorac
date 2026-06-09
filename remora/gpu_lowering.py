@@ -7,11 +7,13 @@ from dataclasses import dataclass
 
 from remora._gpu_map_support import (
     F32BinaryExpr,
+    F32CmpExpr,
     F32ConstantExpr,
     F32Expr,
     F32InputExpr,
     F32MapKernel,
     F32MapOperation,
+    F32SelectExpr,
     I32MapKernel,
     I32MapOperation,
     analyze_supported_f32_map_function,
@@ -805,7 +807,20 @@ def _f32_expression_lines(
             else:
                 lines.append(f"{indent}{name} = arith.constant {expr.value:.6e} : f32")
             return name
-        assert isinstance(expr, F32BinaryExpr)
+        assert isinstance(expr, (F32BinaryExpr, F32SelectExpr, F32CmpExpr))
+        if isinstance(expr, F32CmpExpr):
+            left = emit(expr.left)
+            right = emit(expr.right)
+            pred = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge",
+                    "==": "oeq", "!=": "one"}.get(expr.op, "ogt")
+            lines.append(f"{indent}{name} = arith.cmpf {pred}, {left}, {right} : f32")
+            return name
+        if isinstance(expr, F32SelectExpr):
+            cond = emit(expr.condition)
+            then_v = emit(expr.then_expr)
+            else_v = emit(expr.else_expr)
+            lines.append(f"{indent}{name} = arith.select {cond}, {then_v}, {else_v} : f32")
+            return name
         left = emit(expr.left)
         right = emit(expr.right)
         op = llvm_op(expr.op, "f32") if dialect == "llvm" else arith_op(expr.op, "f32")
