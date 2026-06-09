@@ -22,6 +22,9 @@ from remora.typechecker import (
     TypedLet,
     TypedMap,
     TypedOperatorFunc,
+    TypedRavel,
+    TypedReshape,
+    TypedTranspose,
 )
 from remora.types import FLOAT
 
@@ -83,6 +86,11 @@ class EvalTape:
                 _accum(adjs, e.inputs[0], np.full_like(iv, adj.item()))
             elif e.kind == "neg":
                 _bcast_acc(adjs, e.inputs[0], -adj, self.values[e.inputs[0]])
+            elif e.kind in {"reshape", "ravel"}:
+                input_shape = tuple(int(dim) for dim in e.saved[0])
+                _accum(adjs, e.inputs[0], np.asarray(adj).reshape(input_shape))
+            elif e.kind == "transpose":
+                _accum(adjs, e.inputs[0], np.swapaxes(np.asarray(adj), 0, 1))
         return {idx: adjs[idx] for idx in range(len(adjs)) if adjs[idx] is not None}
 
 
@@ -158,6 +166,12 @@ def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
         return _trace_map(expr, env, tape)
     if isinstance(expr, TypedIf):
         return _trace_if(expr, env, tape)
+    if isinstance(expr, TypedReshape):
+        return _trace_reshape(expr, env, tape)
+    if isinstance(expr, TypedRavel):
+        return _trace_ravel(expr, env, tape)
+    if isinstance(expr, TypedTranspose):
+        return _trace_transpose(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -236,6 +250,34 @@ def _trace_if(expr, env: dict[str, int], tape: EvalTape) -> int:
     if np.any(_value(tape, cond_idx)):
         return trace_expr(expr.then_branch, env, tape)
     return trace_expr(expr.else_branch, env, tape)
+
+
+def _trace_reshape(expr: TypedReshape, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    output_shape = tuple(int(dim.value) for dim in expr.type.shape)
+    return tape.push(
+        TapeEntry("reshape", (array_idx,), (array.shape, output_shape)),
+        np.asarray(array).reshape(output_shape),
+    )
+
+
+def _trace_ravel(expr: TypedRavel, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    return tape.push(
+        TapeEntry("ravel", (array_idx,), (array.shape,)),
+        np.asarray(array).reshape(-1),
+    )
+
+
+def _trace_transpose(expr: TypedTranspose, env: dict[str, int], tape: EvalTape) -> int:
+    array_idx = trace_expr(expr.array, env, tape)
+    array = _value(tape, array_idx)
+    return tape.push(
+        TapeEntry("transpose", (array_idx,), ()),
+        np.swapaxes(np.asarray(array), 0, 1),
+    )
 
 
 def _get_op(func: object) -> str:

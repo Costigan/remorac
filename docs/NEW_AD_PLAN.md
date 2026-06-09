@@ -277,6 +277,10 @@ Implementation status: **AD4 substantially complete on June 8, 2026.**
 - Negation VJP: `neg` entry forwards `-adj` to operand.
 - Conditional handling: `_trace_if` evaluates predicate, traces only the active branch.
   Predicate is treated as inactive (non-differentiable).
+- Structured view VJPs: `ravel` and `reshape` restore the original operand shape;
+  transpose swaps the first two cotangent axes back. These rules flow through
+  tape evaluation, generated source, ordinary compiler rewriting, and compiled
+  CPU execution for concrete shapes.
 - 839 passed, 1 skipped.
 
 ### AD5: GPU and Performance Work (4-8 weeks)
@@ -335,6 +339,16 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   `((grad (iapp sq-loss 5)) [1.0 2.0 3.0 4.0 5.0])` produces the expected
   `[2.0, 4.0, 6.0, 8.0, 10.0]`. Bare `(grad f)` remains a function value and
   uses `compile_source_gradient_function` rather than whole-program lowering.
+- The shared f32 GPU map analyzer now accepts nested elementwise HIR map trees
+  and unary scalar lambda bodies. It converts them to a fused expression tree
+  over input elements and float literals, then emits recursive SSA arithmetic
+  through the text scaffold, descriptor-ABI LLVM path, and builder API.
+- Polynomial, cubic, and division gradients compile to one GPU kernel instead
+  of being rejected for nested maps. Existing simple unary and binary kernels
+  retain their original operation representation and generated structure.
+- Generated gradients containing `ravel`, `reshape`, and transpose now compile
+  on CPU. They are intentionally outside the fused GPU expression subset until
+  GPU indexing supports shape-remapping views.
 
 Remaining AD5 work:
 
@@ -342,10 +356,12 @@ Remaining AD5 work:
   generic GPU program path. Ordinary CPU `compile_source` now rewrites applied
   gradients automatically; the supported descriptor-ABI GPU path still uses
   the dedicated generated-gradient artifact facade.
-- Expand GPU lowering support beyond a single primitive map so nested adjoint
-  expressions and sum-broadcast gradients can execute as generated.
+- Extend fused GPU expressions beyond same-shaped f32 arithmetic to structured
+  views, broadcasts that require reduction, and conditional/select expressions.
 - Add VJPs for the structured operations listed in AD4 (index/scatter-add,
-  append, subarray, reshape/ravel/transpose) and support multiple active inputs.
+  append, subarray) and support multiple active inputs.
+- Add dimension multiplication to dependent index expressions so symbolic Pi
+  `ravel` can represent the flattened length before concrete specialization.
 - Complete allocation-growth, buffer-reuse, fusion, and checkpointing criteria.
 
 Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and `19-32 weeks` for the broader AD4-AD5 capability. This assumes the Phase 7 exit criteria are already met.
@@ -359,9 +375,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: automatic ordinary CPU gradient compilation | 872 |
+| AD5 | In progress: structured CPU VJPs and fused GPU arithmetic | 881 |
 
-Full suite after this milestone: **872 passed, 1 skipped**.
+Full suite after this milestone: **881 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).

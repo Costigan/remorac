@@ -17,6 +17,10 @@ from importlib import import_module
 from typing import Any
 
 from remora._gpu_map_support import (
+    F32BinaryExpr,
+    F32ConstantExpr,
+    F32Expr,
+    F32InputExpr,
     F32MapKernel,
     F32MapOperation,
 )
@@ -217,6 +221,8 @@ def _compute(
     ir_mod: Any,
 ) -> Any:
     """Apply the map operation to loaded inputs."""
+    if kernel.expression is not None:
+        return _compute_expression(kernel.expression, loaded, f32_t, block, ir_mod)
     if kernel.num_inputs == 2:
         return _arith_op(ir_mod, kernel.operation.op, loaded[0], loaded[1],
                          f32_t, block)
@@ -226,6 +232,29 @@ def _compute(
     lhs = c_val if kernel.operation.constant_side == "left" else loaded[0]
     rhs = loaded[0] if kernel.operation.constant_side == "left" else c_val
     return _arith_op(ir_mod, kernel.operation.op, lhs, rhs, f32_t, block)
+
+
+def _compute_expression(
+    expression: F32Expr,
+    loaded: list[Any],
+    f32_t: Any,
+    block: Any,
+    ir_mod: Any,
+) -> Any:
+    if isinstance(expression, F32InputExpr):
+        return loaded[expression.index]
+    if isinstance(expression, F32ConstantExpr):
+        return _op(
+            ir_mod,
+            "arith.constant",
+            f32_t,
+            block,
+            attributes={"value": ir_mod.FloatAttr.get(f32_t, expression.value)},
+        )
+    assert isinstance(expression, F32BinaryExpr)
+    left = _compute_expression(expression.left, loaded, f32_t, block, ir_mod)
+    right = _compute_expression(expression.right, loaded, f32_t, block, ir_mod)
+    return _arith_op(ir_mod, expression.op, left, right, f32_t, block)
 
 
 # ---------------------------------------------------------------------------

@@ -134,7 +134,11 @@ def generate_mlir_descriptor_abi_ptx(
             raise CodegenUnavailable(
                 "MLIR-derived descriptor-ABI PTX currently supports rank-1 through rank-10 f32 maps only"
             )
-        if map_kernel.num_inputs == 1 and map_kernel.operation.constant is None:
+        if (
+            map_kernel.expression is None
+            and map_kernel.num_inputs == 1
+            and map_kernel.operation.constant is None
+        ):
             raise CodegenUnavailable(
                 "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary f32 maps only"
             )
@@ -338,4 +342,3 @@ def _direct_i32_map_kernel(function: HIRFunction) -> I32MapKernel:
             "literal i32 section constant",
         )
         raise CodegenUnavailable(message) from exc
-
