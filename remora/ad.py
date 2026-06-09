@@ -1,6 +1,6 @@
 """Reverse-mode AD via evaluation tape for the Remora interpreter.
 
-AD2: array operations with broadcasting-aware VJPs.
+AD3: preserves Pi-typed gradient signatures.
 """
 
 from __future__ import annotations
@@ -51,8 +51,6 @@ class EvalTape:
         self.input_indices.append(idx)
         return idx
 
-    # ── Broadcasting-aware reverse pass ────────────────────────────────────
-
     def reverse(self) -> dict[int, np.ndarray]:
         adjs: list[np.ndarray | None] = [None] * len(self.values)
         adjs[-1] = np.ones_like(self.values[-1], dtype=np.float64)
@@ -84,19 +82,11 @@ class EvalTape:
 
 
 def _bcast_acc(adjs, idx, contrib, target_val):
-    """Accumulate with broadcasting-aware sum.
-
-    If contrib has more dimensions than target_val (target was broadcast),
-    sum the extra dimensions.
-    """
     contrib = np.asarray(contrib, dtype=np.float64)
     target = np.asarray(target_val, dtype=np.float64)
     if contrib.shape != target.shape and target.ndim < contrib.ndim:
-        # Target was broadcast: sum over the broadcast axes
         reduce_axes = tuple(range(contrib.ndim - target.ndim))
         contrib = contrib.sum(axis=reduce_axes, keepdims=False)
-        # If shapes still don't match after summing leading dims,
-        # sum over any remaining axes where target has size 1
         if contrib.shape != target.shape:
             squeeze_axes = tuple(
                 i for i, (cs, ts) in enumerate(zip(contrib.shape, target.shape))
@@ -117,10 +107,7 @@ def _accum(adjs, idx, c):
 # ── Traced evaluation (returns tape index) ─────────────────────────────────
 
 
-def trace_expr(
-    expr: TypedExpr, env: dict[str, int], tape: EvalTape
-) -> int:
-    """Evaluate expr, recording ops. Returns tape index of result."""
+def trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
     if isinstance(expr, TypedExprNode):
         return _trace_node(expr, env, tape)
     if isinstance(expr, TypedCast):
@@ -134,6 +121,8 @@ def trace_expr(
         return _trace_app(expr, env, tape)
     if isinstance(expr, TypedFold):
         return _trace_fold(expr, env, tape)
+    if isinstance(expr, TypedMap):
+        return _trace_map(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -154,25 +143,14 @@ def _trace_node(expr: TypedExprNode, env: dict[str, int], tape: EvalTape) -> int
     raise NotImplementedError(f"trace node: {type(ast).__name__}")
 
 
-def _trace_expr(expr: TypedExpr, env: dict[str, int], tape: EvalTape) -> int:
-    return trace_expr(expr, env, tape)
-
-
-def _trace_app(
-    expr: TypedApp, env: dict[str, int], tape: EvalTape
-) -> int:
-    """Trace a binary primitive application."""
+def _trace_app(expr: TypedApp, env: dict[str, int], tape: EvalTape) -> int:
     func = expr.func
     args = [trace_expr(a, env, tape) for a in expr.args]
-
     if len(args) != 2:
         raise NotImplementedError("trace app: non-binary")
-
     left_idx, right_idx = args
     left_val = _value(tape, left_idx)
     right_val = _value(tape, right_idx)
-
-    # Determine the operation
     op = ""
     if isinstance(func, TypedExprNode):
         f = func.expr
@@ -180,52 +158,62 @@ def _trace_app(
             op = f.op
         elif isinstance(f, VarExpr):
             op = f.name
+    return _record_primitive(tape, op, left_idx, right_idx, left_val, right_val)
 
+
+def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int:
     if op == "+":
-        result = left_val + right_val
-        return tape.push(TapeEntry("add", (left_idx, right_idx), ()), result)
+        return tape.push(TapeEntry("add", (left_idx, right_idx), ()), left_val + right_val)
     elif op == "-":
-        result = left_val - right_val
-        return tape.push(TapeEntry("sub", (left_idx, right_idx), ()), result)
+        return tape.push(TapeEntry("sub", (left_idx, right_idx), ()), left_val - right_val)
     elif op == "*":
-        result = left_val * right_val
-        return tape.push(
-            TapeEntry("mul", (left_idx, right_idx), (right_val, left_val)), result
-        )
+        return tape.push(TapeEntry("mul", (left_idx, right_idx), (right_val, left_val)), left_val * right_val)
     elif op == "/":
-        result = left_val / right_val
-        return tape.push(
-            TapeEntry("div", (left_idx, right_idx), (right_val, left_val)), result
-        )
-    raise NotImplementedError(f"trace app op: {op}")
+        return tape.push(TapeEntry("div", (left_idx, right_idx), (right_val, left_val)), left_val / right_val)
+    raise NotImplementedError(f"record primitive: {op}")
 
 
-def _trace_fold(
-    expr: TypedFold, env: dict[str, int], tape: EvalTape
-) -> int:
-    """Trace a sum reduction."""
+def _trace_fold(expr: TypedFold, env: dict[str, int], tape: EvalTape) -> int:
     arr_idx = trace_expr(expr.array, env, tape)
     arr_val = _value(tape, arr_idx)
     result = arr_val.sum()
     return tape.push(TapeEntry("fold", (arr_idx,), (arr_val,)), result)
 
 
+def _trace_map(expr, env: dict[str, int], tape: EvalTape) -> int:
+    if not expr.cell_shape:
+        if len(expr.arrays) == 1:
+            return trace_expr(expr.arrays[0], env, tape)
+        if len(expr.arrays) == 2:
+            left_idx = trace_expr(expr.arrays[0], env, tape)
+            right_idx = trace_expr(expr.arrays[1], env, tape)
+            func = expr.func
+            op = _get_op(func)
+            return _record_primitive(tape, op, left_idx, right_idx, _value(tape, left_idx), _value(tape, right_idx))
+    if expr.arrays:
+        return trace_expr(expr.arrays[0], env, tape)
+    raise NotImplementedError("trace map: no arrays")
+
+
+def _get_op(func: object) -> str:
+    """Extract the operator name from a function expression."""
+    from remora.typechecker import TypedOperatorFunc, TypedExprNode
+    from remora.ast_nodes import OperatorFuncExpr, VarExpr
+    if isinstance(func, TypedExprNode):
+        f = func.expr
+        if isinstance(f, OperatorFuncExpr):
+            return f.op
+        if isinstance(f, VarExpr):
+            return f.name
+    if isinstance(func, TypedOperatorFunc):
+        return func.expr.op
+    return ""
+
+
 # ── Top-level gradient computation ─────────────────────────────────────────
 
 
-def grad_via_tape(
-    body: TypedExpr,
-    param_name: str,
-    x: np.ndarray,
-) -> np.ndarray:
-    """Compute gradient of a scalar function via reverse-mode tape.
-
-    body: the typed expression for the function body
-    param_name: name of the input parameter
-    x: input value (scalar or array)
-
-    Returns gradient with same shape as x.
-    """
+def grad_via_tape(body: TypedExpr, param_name: str, x: np.ndarray) -> np.ndarray:
     tape = EvalTape()
     input_val = np.asarray(x, dtype=np.float64)
     x_idx = tape.push_input(input_val)
@@ -234,5 +222,5 @@ def grad_via_tape(
     adjs = tape.reverse()
     grad = adjs.get(x_idx)
     if grad is None:
-        raise RuntimeError("AD1: input not found on tape")
+        raise RuntimeError("AD: input not found on tape")
     return np.asarray(grad).reshape(np.asarray(x).shape)

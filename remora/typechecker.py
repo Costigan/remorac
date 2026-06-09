@@ -2632,35 +2632,38 @@ class TypeChecker:
         return common_numeric_type(left, right)
 
     def _infer_ad_grad(self, expr: GradExpr, env: TypeEnv) -> TypedExprNode:
-        """Typecheck (grad f).  f must be unary Float→Float."""
+        """Typecheck (grad f).  f must be unary Float→Float.
+
+        AD3: preserves PiType wrappers so that grad of a Pi-typed function
+        is also Pi-typed.
+        """
         from remora.ast_nodes import VarExpr
+        original_type: RemoraType | None = None
         func_type: RemoraType | None = None
+
         if isinstance(expr.func, VarExpr) and expr.func.name in self._functions:
-            func_type = self._declared_function_type(self._functions[expr.func.name])
-            if func_type is None:
+            original_type = self._declared_function_type(self._functions[expr.func.name])
+            if original_type is None:
                 raise RemoraTypeError("grad: function has no declared type", expr.loc)
-            # Unwrap PiType / ForallType to get the concrete FuncType
-            if isinstance(func_type, PiType):
-                func_type = func_type.body
-            if isinstance(func_type, ForallType):
-                func_type = func_type.body
-                if isinstance(func_type, PiType):
-                    func_type = func_type.body
-            if not isinstance(func_type, FuncType):
+            func_type = original_type
+            # Unwrap to find the concrete FuncType for validation
+            inner = func_type
+            while isinstance(inner, (PiType, ForallType)):
+                inner = inner.body
+            if not isinstance(inner, FuncType):
                 raise RemoraTypeError("grad: could not determine function type", expr.loc)
+            func_type = inner
             typed_func: TypedExpr = TypedExprNode(expr.func, func_type)
         else:
             typed_func = self.infer(expr.func, env)
+            original_type = typed_func.type
             func_type = typed_func.type
         if not isinstance(func_type, FuncType):
-            raise RemoraTypeError(
-                "grad expects a function", expr.loc,
-            )
-        func_type = typed_func.type
+            raise RemoraTypeError("grad expects a function", expr.loc)
+
         if len(func_type.params) != 1:
-            raise RemoraTypeError(
-                "grad expects a unary function", expr.loc,
-            )
+            raise RemoraTypeError("grad expects a unary function", expr.loc)
+
         param_type = func_type.params[0]
         result_type = func_type.result
         if not isinstance(param_type, (ScalarType, ArrayType)):
@@ -2669,14 +2672,33 @@ class TypeChecker:
             )
         param_elem = param_type.element if isinstance(param_type, ArrayType) else param_type
         if param_elem != FLOAT and not isinstance(param_elem, TypeVar):
-            raise RemoraTypeError(
-                "grad requires Float input", expr.loc,
-            )
+            raise RemoraTypeError("grad requires Float input", expr.loc)
         if result_type != FLOAT and not isinstance(result_type, TypeVar):
-            raise RemoraTypeError(
-                "grad requires a scalar Float result", expr.loc,
-            )
-        grad_type = FuncType((param_type,), param_type)
+            raise RemoraTypeError("grad requires a scalar Float result", expr.loc)
+
+        grad_type: RemoraType = FuncType((param_type,), param_type)
+
+        # AD3: re-wrap with PiType / ForallType from the original declaration
+        if original_type is not None and original_type is not func_type:
+            # Walk the wrappers from outermost to innermost and stack them
+            wrappers: list = []
+            cur = original_type
+            while isinstance(cur, (PiType, ForallType)):
+                wrappers.append(type(cur))
+                cur = cur.body
+            # Re-wrap gradient type from innermost to outermost
+            for wrapper_cls in reversed(wrappers):
+                if wrapper_cls is PiType:
+                    pi = original_type
+                    while isinstance(pi, ForallType):
+                        pi = pi.body
+                    if isinstance(pi, PiType):
+                        grad_type = PiType(pi.binders, grad_type)
+                elif wrapper_cls is ForallType:
+                    fa = original_type
+                    if isinstance(fa, ForallType):
+                        grad_type = ForallType(fa.binders, grad_type)
+
         return TypedExprNode(expr, grad_type)
 
     def _build_prelude_env(self) -> TypeEnv:
