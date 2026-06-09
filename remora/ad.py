@@ -20,6 +20,7 @@ from remora.typechecker import (
     TypedFold,
     TypedIf,
     TypedIndex,
+    TypedIndexApp,
     TypedLambda,
     TypedLet,
     TypedMap,
@@ -294,6 +295,27 @@ def _trace_app(
     fold_axis: int = 0,
 ) -> int:
     args = [trace_expr(a, env, tape, fold_axis=fold_axis) for a in expr.args]
+    call_target = (
+        expr.func.function if isinstance(expr.func, TypedIndexApp) else expr.func
+    )
+    if isinstance(call_target, TypedLambda):
+        if len(args) != len(call_target.params):
+            raise NotImplementedError("trace app: function arity mismatch")
+        call_env = {
+            **env,
+            **{
+                param_name: arg_idx
+                for (param_name, _param_type), arg_idx in zip(
+                    call_target.params, args
+                )
+            },
+        }
+        return trace_expr(
+            call_target.body,
+            call_env,
+            tape,
+            fold_axis=fold_axis,
+        )
     if len(args) != 2:
         raise NotImplementedError("trace app: non-binary")
     left_idx, right_idx = args

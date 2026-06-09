@@ -41,6 +41,12 @@ _ROW_LINEAR_LOSS = (
     " (map (\\row -> fold (+) 0.0 (map (*) row x)) w))"
 )
 
+_NESTED_ROW_LINEAR_LOSS = (
+    "def dot a b = fold (+) 0.0 (map (*) a b)\n"
+    "def linear w x = map (\\row -> dot row x) w\n"
+    "def loss w x = fold (+) 0.0 ((linear w x) * (linear w x))"
+)
+
 
 def _sq_loss_body(n: int):
     checker = TypeChecker()
@@ -204,6 +210,80 @@ def test_named_function_gradient_compiler_workflow():
     )
     assert gpu.gpu.ptx_text
     assert gpu.gpu.kernels[0].name == "remora_grad_sq_loss"
+
+
+def test_gradient_traces_scalar_named_helper_call():
+    source = "def square z = z * z\ndef loss x = square x"
+    compiled = compile_gradient_function_source(
+        source,
+        "loss",
+        (FLOAT,),
+        include_prelude=False,
+        syntax="ml",
+    )
+
+    request = compiled.gradient_source.source + " (grad_loss 3.0)"
+    interpreted = evaluate_source(
+        request, include_prelude=False, syntax="lisp"
+    )
+    native = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+
+    assert interpreted.value == pytest.approx(6.0)
+    assert native.value == pytest.approx(6.0)
+
+
+def test_gradient_traces_array_named_helper_call():
+    source = (
+        "def square z = z * z\n"
+        "def loss x = fold (+) 0.0 (square x)"
+    )
+    vector_type = ArrayType(FLOAT, (StaticDim(3),))
+    compiled = compile_gradient_function_source(
+        source,
+        "loss",
+        (vector_type,),
+        include_prelude=False,
+        syntax="ml",
+    )
+
+    request = compiled.gradient_source.source + " (grad_loss [1.0 2.0 3.0])"
+    interpreted = evaluate_source(
+        request, include_prelude=False, syntax="lisp"
+    )
+    native = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+
+    np.testing.assert_array_equal(interpreted.value, [2.0, 4.0, 6.0])
+    np.testing.assert_array_equal(native.value, [2.0, 4.0, 6.0])
+
+
+def test_gradient_traces_explicitly_specialized_helper_call():
+    source = (
+        "(define/pi ([n Dim]) "
+        "  (sum-squares [x (Array Float n)] Float) "
+        "  (fold + 0.0 (* x x))) "
+        "(define/pi () "
+        "  (loss [x (Array Float 3)] Float) "
+        "  ((iapp sum-squares 3) x))"
+    )
+    vector_type = ArrayType(FLOAT, (StaticDim(3),))
+    compiled = compile_gradient_function_source(
+        source,
+        "loss",
+        (vector_type,),
+        include_prelude=False,
+        syntax="lisp",
+    )
+
+    request = compiled.gradient_source.source + " (grad_loss [1.0 2.0 3.0])"
+    result = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+
+    np.testing.assert_array_equal(result.value, [2.0, 4.0, 6.0])
 
 
 def test_shape_driven_gradient_generation_validates_optional_example():
@@ -912,3 +992,34 @@ def test_row_linear_generated_gradients_execute_on_cpu():
         except PipelineUnavailable as exc:
             pytest.skip(str(exc))
         np.testing.assert_allclose(result.value, expected_value, rtol=1e-6)
+
+
+def test_nested_model_helpers_generate_compiled_gradients():
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(2), StaticDim(3))),
+        ArrayType(FLOAT, (StaticDim(3),)),
+    )
+    artifacts = compile_gradient_functions_source(
+        _NESTED_ROW_LINEAR_LOSS,
+        "loss",
+        param_types,
+        include_prelude=False,
+        syntax="ml",
+    )
+    weight_text = "[[0.5 -1.0 2.0] [1.5 0.25 -0.75]]"
+    feature_text = "[2.0 -0.5 1.25]"
+    expected = (
+        np.array([[16.0, -4.0, 10.0], [7.75, -1.9375, 4.84375]]),
+        np.array([9.8125, -7.03125, 13.09375]),
+    )
+
+    assert all(gradient.compiler.mlir_text for gradient in artifacts.gradients)
+    for gradient, expected_value in zip(artifacts.gradients, expected):
+        request = (
+            gradient.gradient_source.source
+            + f" ({gradient.gradient_source.function_name} {weight_text} {feature_text})"
+        )
+        interpreted = evaluate_source(
+            request, include_prelude=False, syntax="lisp"
+        )
+        np.testing.assert_allclose(interpreted.value, expected_value, rtol=1e-6)
