@@ -388,21 +388,24 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 
 Remaining AD5 work:
 
-- Connect generated gradients to the source-level `(grad f)` compilation and
-  generic GPU program path. Ordinary CPU `compile_source` now rewrites applied
-  gradients automatically; the supported descriptor-ABI GPU path still uses
-  the dedicated generated-gradient artifact facade.
-- Extend fused GPU expressions beyond same-shaped f32 arithmetic to structured
-  views, broadcasts that require reduction, and conditional/select expressions.
-- Add VJPs for index/scatter-add operations.
-- Support multiple active inputs.
-- Add dimension multiplication to dependent index expressions so symbolic Pi
-  `ravel` can represent the flattened length before concrete specialization.
-- Complete allocation-growth, buffer-reuse, fusion, and checkpointing criteria.
+| Priority | Item | Blocker |
+|---|---|---|
+| P1 | Dynamic scatter-add (runtime indices) | `HIRExpr` index, dynamic `tensor.extract` lowering |
+| P2 | Product types for multi-input `(grad f)` | No pair/tuple type in Remora |
+| P3 | GPU: whole-program gradient lowering | No program-level GPU path |
+| P4 | GPU: select/conditional in fused expressions | Map analyzer needs `if` support |
+| P5 | GPU: structured views in fused expressions | Shape-changing ops in linalg-generic body |
+
+Non-AD items:
+
+| Item | Notes |
+|---|---|
+| Dim multiplication for Pi ravel | Dependent types workstream |
+| Buffer reuse / checkpointing | Performance optimization |
 
 Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and `19-32 weeks` for the broader AD4-AD5 capability. This assumes the Phase 7 exit criteria are already met.
 
-### Progress Summary (June 8, 2026)
+### Progress Summary (June 9, 2026)
 
 | Phase | Status | Tests |
 |---|---|---:|
@@ -411,9 +414,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: structured CPU VJPs, fused GPU arithmetic, scatter-add, select source, multi-input, append/subarray/rotate/index VJPs | 913 |
+| AD5 | In progress: 7 VJPs, scatter-add, select source, multi-input tape | 913 |
 
-Full suite after this milestone: **913 passed, 1 skipped**.
+Full suite: **913 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
@@ -458,8 +461,20 @@ The AD milestone is complete when:
 1. `grad` has a precise dependent type and rejects non-scalar outputs or non-float active inputs.
 2. Generated reverse programs pass the typed-core verifier before erasure.
 3. Scalar arithmetic, elementwise lifting, sum reduction, reshape, ravel,
-   transpose, reverse, take, and drop have tested VJPs.
+   transpose, reverse, take, drop, append, subarray, rotate, and index have tested VJPs.
 4. A Pi-typed mean-squared-error or linear-regression loss compiles at multiple shapes.
 5. Gradients agree with finite differences and across supported execution backends.
 6. Unsupported primitives fail at compile time with actionable diagnostics.
 7. Tape storage is visible to ordinary liveness and buffer-reuse optimization passes.
+
+### Current Status (913 passed, 1 skipped)
+
+| Criteria | Status |
+|---|---|
+| 1. `grad` typing and rejection | ✅ Pi/Forall preserved, unary Float→Float, diagnostics |
+| 2. Typed-core verifier | ✅ All specialized bodies pass before erasure |
+| 3. VJPs (scalar + views + structural) | ✅ +, -, *, /, neg, fold, reshape, ravel, transpose, reverse, take, drop, append, subarray, rotate, index |
+| 4. Pi-typed loss at multiple shapes | ✅ sq-loss compiles at n=2 through n=10 |
+| 5. Cross-backend agreement | ✅ tape ↔ interpreter ↔ compiled CPU (GPU for f32 kernels) |
+| 6. Unsupported diagnostics | ✅ Reject non-Float, non-scalar-output, non-function |
+| 7. Tape liveness / buffer reuse | 🚧 Deferred optimization phase |
