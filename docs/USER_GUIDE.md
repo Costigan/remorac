@@ -261,6 +261,7 @@ grads = compile_gradient_functions_source(source, "dot-loss", (tx, tw))
 - All differentiated parameters must be `Float` or `Array Float`
 - GPU kernels support elementwise and select operations only (structured views run on CPU)
 - Multi-parameter `(grad f)` returns a pair in the interpreter but a single gradient via compiled CPU; use `compile_gradient_functions_source` for both
+- Inline lambdas inside `map` that capture array variables may resolve to scalar-cell instead of vector-cell lifting. Use a named helper with explicit parameter types (e.g., `(define ([dot row x]) ...)`) to force vector-cell behavior
 
 ## Feature status by phase
 
