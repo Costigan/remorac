@@ -287,16 +287,36 @@ Implementation status: **AD4 substantially complete on June 8, 2026.**
 
 Exit criterion: CPU and GPU gradients agree with the interpreter and finite differences, with no unbounded intermediate allocation growth.
 
-Implementation status: **AD5 validation complete on June 8, 2026.**
+Implementation status: **AD5 in progress as of June 9, 2026.**
 
 - Accuracy benchmark: tape gradient matches finite differences within 1e-6
   relative tolerance across 20 random inputs of varying sizes.
 - Speed benchmark: tape is 2x–40x faster than finite differences
   (n=5: 2.1x, n=10: 4.3x, n=50: 20.2x, n=100: 40.4x).
 - Compiled cross-validation: tape gradient on a `compile_function_source`
-  specialized body matches finite differences.
+  specialized primal body matches finite differences. This validates the CPU
+  tape against a compilable primal, but does not compile the gradient itself.
 - 2 new benchmark/validation tests in `tests/test_ad.py`.
-- 841 passed, 1 skipped.
+- Source-to-source slice: `remora/ad_source.py` reconstructs symbolic primal
+  expressions from an `EvalTape`, applies VJPs for `+`, `-`, `*`, `/`, sum
+  `fold`, and negation, and emits a reusable typed Remora Lisp function.
+- Generated square-loss gradients simplify to a single supported map such as
+  `(map (* 2.0) x)`. The same generated source compiles through the CPU
+  function path and the descriptor-ABI GPU path.
+- GPU execution validation: the generated `sum(x*x)` gradient executes through
+  `RemoraExecutor` and agrees with the CPU tape when a live CUDA driver exists.
+- `compile_function_source_to_supported_gpu_artifacts` now accepts the source
+  syntax explicitly, allowing generated Lisp functions to use the GPU facade.
+
+Remaining AD5 work:
+
+- Connect generated gradients to the source-level `(grad f)` compilation and
+  runtime path instead of requiring an explicit trace/generate/compile call.
+- Expand GPU lowering support beyond a single primitive map so nested adjoint
+  expressions and sum-broadcast gradients can execute as generated.
+- Add VJPs for the structured operations listed in AD4 (index/scatter-add,
+  append, subarray, reshape/ravel/transpose) and support multiple active inputs.
+- Complete allocation-growth, buffer-reuse, fusion, and checkpointing criteria.
 
 Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and `19-32 weeks` for the broader AD4-AD5 capability. This assumes the Phase 7 exit criteria are already met.
 
@@ -309,9 +329,12 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | ✅ Complete | 841 |
+| AD5 | In progress: first generated GPU gradient | 861 |
 
-New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_testing.py` (finite-difference utilities).
+Full suite after this milestone: **861 passed, 1 skipped**.
+
+New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
+(tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
 New AST: `GradExpr` in `remora/ast_nodes.py`.
 Grammar: `grad_form` in `remora/lisp_reader.py`.
 

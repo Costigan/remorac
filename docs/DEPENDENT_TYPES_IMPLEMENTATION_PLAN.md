@@ -971,8 +971,9 @@ The first implementation PR should not touch MLIR lowering except to prove that 
 | Rank-N compiled scan (flat-indexed inner loop, any rank) | ✅ |
 | **AD0**: `grad` syntax, typechecking, elaboration, finite-diff utilities | ✅ |
 | **AD1**: Scalar reverse-mode tape (Wengert tape, VJPs for +-*/) | ✅ |
+| **AD2**: Dense array broadcasting and sum-fold VJPs | ✅ core |
 | **AD3**: Pi-preserving grad, specialization before tape | ✅ |
 | **AD4**: Derivative registry, negation, conditionals | ✅ |
-| **AD5**: Tape benchmarks, compiled cross-validation | ✅ |
+| **AD5**: Tape-to-source GPU gradient path | 🚧 first square-loss gradient compiled and executed |
 
-**Final: 841 tests passed, 1 skipped.**
+**Current: 861 tests passed, 1 skipped.**
