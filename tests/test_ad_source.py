@@ -757,6 +757,22 @@ def test_scatter_add_runtime():
     np.testing.assert_array_equal(compiled.value, [1.0, 2.0, 8.0, 4.0])
 
 
+def test_scatter_add_dynamic_index():
+    """Scatter-add with runtime-index parameter works interpreter + compiled."""
+    source = (
+        "(define/pi () (update [x (Array Float 4) i Int] (Array Float 4)) "
+        "  (scatter-add x i 5.0))"
+    )
+    request = source + " (update [1.0 2.0 3.0 4.0] 2)"
+    interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
+    np.testing.assert_array_equal(interpreted.value, [1.0, 2.0, 8.0, 4.0])
+
+    compiled = evaluate_source_compiled(
+        request, include_prelude=False, syntax="lisp"
+    )
+    np.testing.assert_array_equal(compiled.value, [1.0, 2.0, 8.0, 4.0])
+
+
 # ── Select VJP ────────────────────────────────────────────────────────────
 
 

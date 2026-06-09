@@ -88,7 +88,7 @@ class _Index:
 @dataclass(frozen=True)
 class _ScatterAdd:
     target: "_Expr"
-    index: int
+    index: "_Expr | int"
     update: "_Expr"
     shape: Shape
 
@@ -797,7 +797,9 @@ def _emit(expr: _Expr) -> str:
     if isinstance(expr, _Index):
         return f"(index {_emit(expr.value)} {expr.idx})"
     if isinstance(expr, _ScatterAdd):
-        return f"(scatter-add {_emit(expr.target)} {expr.index} {_emit(expr.update)})"
+        if isinstance(expr.index, int):
+            return f"(scatter-add {_emit(expr.target)} {expr.index} {_emit(expr.update)})"
+        return f"(scatter-add {_emit(expr.target)} {_emit(expr.index)} {_emit(expr.update)})"
     if isinstance(expr, _If):
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
     if expr.op == "fold":

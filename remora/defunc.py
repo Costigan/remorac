@@ -178,7 +178,7 @@ class _Defunctionalizer:
             ),
             HIRScatterAdd: lambda e: HIRScatterAdd(
                 self._rewrite_expr(e.target, scalar_env),
-                e.index,
+                self._rewrite_expr(e.index, scalar_env),
                 self._rewrite_expr(e.update, scalar_env),
                 e.result_type,
             ),

@@ -286,7 +286,7 @@ class HIRPrimCallable:
 @dataclass(frozen=True)
 class HIRScatterAdd:
     target: HIRExpr
-    index: int
+    index: HIRExpr
     update: HIRExpr
     result_type: ArrayType
 
@@ -548,16 +548,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
         return HIRWithShape(lower_expr(expr.source), expr.type)
 
     if isinstance(expr, TypedScatterAdd):
-        from remora.ast_nodes import IntLit
-
-        idx_val = expr.index
-        if isinstance(idx_val, TypedExprNode) and isinstance(idx_val.expr, IntLit):
-            index_int = idx_val.expr.value
-        else:
-            index_int = 0
         return HIRScatterAdd(
             lower_expr(expr.array),
-            index_int,
+            lower_expr(expr.index),
             lower_expr(expr.update),
             expr.type,
         )
