@@ -696,12 +696,17 @@ def _reshape(value: _Expr, shape: Shape) -> _Expr:
 def _transpose(value: _Expr) -> _Expr:
     if len(value.shape) < 2:
         raise ValueError("transpose gradient requires rank at least two")
+    if isinstance(value, _Transpose) and value.shape and len(value.shape) >= 2:
+        if value.shape[1] == value.value.shape[0] and value.shape[0] == value.value.shape[1]:
+            return value.value
     shape = (value.shape[1], value.shape[0], *value.shape[2:])
     return _Transpose(value, shape)
 
 
 def _view(kind: str, value: _Expr, count: int | None = None) -> _Expr:
     if kind == "reverse":
+        if isinstance(value, _View) and value.kind == "reverse":
+            return value.value
         return _View(kind, value, None, value.shape)
     if not value.shape or count is None:
         raise ValueError(f"{kind} gradient requires a non-scalar value and count")
@@ -742,6 +747,11 @@ def _pad_subarray(operand: _Expr, adj: _Expr, offsets: tuple[int, ...], sizes: t
 
 
 def _rotate(value: _Expr, shift: int) -> _Expr:
+    if isinstance(value, _Rotate) and value.shape and value.shape[0] > 0:
+        combined = (value.shift + shift) % value.shape[0]
+        if combined == 0:
+            return value.value
+        return _Rotate(value.value, combined, value.shape)
     return _Rotate(value, shift, value.shape)
 
 
