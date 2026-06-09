@@ -388,13 +388,14 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
 
 Remaining AD5 work:
 
-| Priority | Item | Blocker |
-|---|---|---|
-| P1 | Dynamic scatter-add (runtime indices) | `HIRExpr` index, dynamic `tensor.extract` lowering |
-| P2 | Product types for multi-input `(grad f)` | No pair/tuple type in Remora |
-| P3 | GPU: whole-program gradient lowering | No program-level GPU path |
-| P4 | GPU: select/conditional in fused expressions | Map analyzer needs `if` support |
-| P5 | GPU: structured views in fused expressions | Shape-changing ops in linalg-generic body |
+| Priority | Item | Status |
+|---|---|---:|
+| P1 | Dynamic scatter-add | ✅ Done |
+| P2 | Multi-input gradients (via `compile_gradient_function_source`) | ✅ Done; `(grad f)` remains unary |
+| P3 | GPU whole-program path | Already works via descriptor ABI |
+| P4 | GPU select/conditional analysis | ✅ Analysis + builder; LLVM-IR deferred |
+| P5 | GPU structured views | Deferred |
+| P6 | Product types for `(grad f)` multi-input | Deferred — major language feature |
 
 Non-AD items:
 
