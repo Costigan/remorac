@@ -71,6 +71,7 @@ from remora.typechecker import (
     TypedFold,
     TypedFoldRight,
     TypedGrade,
+    TypedGrad,
     TypedIf,
     TypedIndex,
     TypedIndexApp,
@@ -971,6 +972,9 @@ def _bind_definition(definition: TypedDefinition, env: Env) -> None:
 
 
 def _eval_expr(expr: TypedExpr, env: Env) -> Value:
+    if isinstance(expr, TypedGrad):
+        return _eval_ad_grad(expr, env)
+
     if isinstance(expr, TypedCast):
         return _cast_scalar(_eval_expr(expr.value, env), expr.to_type)
 
@@ -1265,30 +1269,22 @@ def _eval_ad_grad(expr: TypedExpr, env: Env) -> CallableValue:
     Looks up the function body from the typed program and runs grad_via_tape.
     """
     from remora.ad import grad_via_tape
-    from remora.typechecker import TypedExprNode, TypedLambda
-
     ast = expr.expr if hasattr(expr, 'expr') else None
     if not isinstance(ast, GradExpr):
         raise EvaluationError("expected GradExpr")
 
-    # Get the function body: try TypedGrad first, then evaluate
-    if hasattr(expr, 'function_body') and expr.function_body is not None:
-        func_body = expr.function_body
-    else:
+    if (
+        not isinstance(expr, TypedGrad)
+        or expr.function_body is None
+        or expr.param_name is None
+    ):
         raise EvaluationError("grad requires typed function body")
+    func_body = expr.function_body
 
     def grad_fn(x: np.ndarray) -> np.ndarray:
-        return grad_via_tape(func_body, _get_param_name(func_body), x)
+        return grad_via_tape(func_body, expr.param_name, x)
 
     return grad_fn
-
-
-def _get_param_name(body: TypedExpr) -> str:
-    """Extract the parameter name from a typed function body."""
-    if hasattr(body, 'expr') and hasattr(body.expr, 'params'):
-        return body.expr.params[0]
-    # Walk the body looking for VarExpr
-    return "x"
 
 
 def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:

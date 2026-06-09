@@ -307,11 +307,21 @@ Implementation status: **AD5 in progress as of June 9, 2026.**
   `RemoraExecutor` and agrees with the CPU tape when a live CUDA driver exists.
 - `compile_function_source_to_supported_gpu_artifacts` now accepts the source
   syntax explicitly, allowing generated Lisp functions to use the GPU facade.
+- `TypedGrad` now carries the concrete function body it was designed for, so
+  source programs such as `((grad sq) 3.0)` execute through the CPU tape.
+- Public compiler workflows `compile_gradient_function_source` and
+  `compile_gradient_function_source_to_supported_gpu_artifacts` specialize a
+  named unary function, trace an example input, generate reusable source, and
+  compile that source without callers using private typechecker APIs.
+- Source generation rejects data-dependent conditionals for now. The CPU tape
+  still differentiates the active branch, but emitting only that branch would
+  not define a reusable gradient for inputs that take another branch.
 
 Remaining AD5 work:
 
 - Connect generated gradients to the source-level `(grad f)` compilation and
-  runtime path instead of requiring an explicit trace/generate/compile call.
+  backend lowering path. Concrete `(grad f)` interpreter calls work, while
+  Pi-polymorphic gradients still need specialization-aware compilation.
 - Expand GPU lowering support beyond a single primitive map so nested adjoint
   expressions and sum-broadcast gradients can execute as generated.
 - Add VJPs for the structured operations listed in AD4 (index/scatter-add,
@@ -329,9 +339,9 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD2 | ✅ Complete | 838 |
 | AD3 | ✅ Complete | 838 |
 | AD4 | ✅ Complete | 839 |
-| AD5 | In progress: first generated GPU gradient | 861 |
+| AD5 | In progress: public generated-gradient compiler path | 864 |
 
-Full suite after this milestone: **861 passed, 1 skipped**.
+Full suite after this milestone: **864 passed, 1 skipped**.
 
 New modules: `remora/ad.py` (tape IR, trace, VJPs), `remora/ad_source.py`
 (tape-to-source reverse pass), `remora/ad_testing.py` (finite-difference utilities).
