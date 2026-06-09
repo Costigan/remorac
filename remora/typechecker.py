@@ -967,10 +967,23 @@ class TypeChecker:
                 f"function {function.name!r} does not have a Pi type",
                 expr.loc,
             )
+        # Validate each arg: Dim→concrete, Shape→ShapeLit
         for arg in expr.args:
-            if not isinstance(arg, StaticDim):
+            if isinstance(arg, DimExpr):
+                if _static_dim_value(arg) is None:
+                    raise RemoraTypeError(
+                        f"explicit index argument {arg} must be concrete",
+                        expr.loc,
+                    )
+            elif isinstance(arg, IndexShapeExpr):
+                if not isinstance(arg, ShapeLit):
+                    raise RemoraTypeError(
+                        f"explicit shape argument {arg} must be a concrete shape literal",
+                        expr.loc,
+                    )
+            else:
                 raise RemoraTypeError(
-                    "Phase 7a explicit index arguments must be dimension literals",
+                    f"unexpected index argument type {type(arg).__name__}",
                     expr.loc,
                 )
         try:

@@ -113,7 +113,7 @@ def verify_core_program(program: CoreProgram) -> None:
 
 
 def _verify_expr(expr: CoreExpr, *, require_concrete: bool) -> None:
-    if expr.type != expr.typed.type:
+    if expr.typed is not None and expr.type != expr.typed.type:
         raise CoreVerificationError(
             f"{expr.kind} core type {expr.type} does not match typed node {expr.typed.type}"
         )
