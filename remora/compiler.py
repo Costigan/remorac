@@ -378,6 +378,67 @@ def compile_gradient_function_source(
     return GradientCompilerArtifact(gradient, compiler)
 
 
+@dataclass(frozen=True)
+class MultiGradientCompilerArtifact:
+    """Per-input compiled gradient artifacts for an n-ary function."""
+    source: str
+    function_name: str
+    gradients: list[GradientCompilerArtifact]
+
+
+def compile_gradient_functions_source(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray | None = None,
+    *,
+    gradient_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    verify: bool = True,
+) -> MultiGradientCompilerArtifact:
+    """Generate and compile one gradient function per active input.
+
+    For a function f: (A, B) → Float, returns two compiled gradients:
+    df/dA and df/dB, each as a separate GradientCompilerArtifact.
+    """
+    from remora.ad_source import generate_gradient_function_source
+
+    if len(param_types) < 2:
+        raise ValueError("multi-gradient compilation requires at least 2 param types")
+
+    base_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
+    gradients: list[GradientCompilerArtifact] = []
+
+    for i in range(len(param_types)):
+        grad_name = f"{base_name}_{i}"
+        gradient = generate_gradient_function_source(
+            source,
+            function_name,
+            param_types,
+            example_input,
+            gradient_name=grad_name,
+            differentiate_input=i,
+            include_prelude=include_prelude,
+            syntax=syntax,
+        )
+        compiler = compile_function_source(
+            gradient.source,
+            gradient.function_name,
+            gradient.param_types,
+            verify=verify,
+            include_prelude=False,
+            syntax="lisp",
+        )
+        gradients.append(GradientCompilerArtifact(gradient, compiler))
+
+    return MultiGradientCompilerArtifact(
+        source=source,
+        function_name=function_name,
+        gradients=gradients,
+    )
+
+
 def compile_gradient_function_source_to_supported_gpu_artifacts(
     source: str,
     function_name: str,

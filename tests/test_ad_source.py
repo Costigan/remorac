@@ -794,3 +794,30 @@ def test_select_gradient_interpreter():
         source + " ((grad loss) 3.0)", include_prelude=False, syntax="lisp"
     )
     assert compiled.value == pytest.approx(6.0)
+
+
+def test_multi_output_gradient_functions():
+    """compile_gradient_functions_source produces per-input compiled gradients."""
+    source = (
+        "(define/pi ([n Dim]) "
+        "  (dot-loss [x (Array Float n) w (Array Float n)] Float) "
+        "  (fold + 0.0 (* x w)))"
+    )
+    from remora.compiler import compile_gradient_functions_source
+    from remora.types import ArrayType, StaticDim
+
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(4),)),
+        ArrayType(FLOAT, (StaticDim(4),)),
+    )
+    result = compile_gradient_functions_source(
+        source,
+        "dot-loss",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert len(result.gradients) == 2
+    for g in result.gradients:
+        assert g.compiler.mlir_text  # each compiles to MLIR

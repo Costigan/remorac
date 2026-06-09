@@ -447,10 +447,15 @@ def generate_gradient_function_source(
     example_input: np.ndarray | None = None,
     *,
     gradient_name: str | None = None,
+    differentiate_input: int = 0,
     include_prelude: bool = True,
     syntax: str = "ml",
 ) -> GradientSourceArtifact:
-    """Specialize, trace, and generate source for a named unary or multi-param function."""
+    """Specialize, trace, and generate source for a named unary or multi-param function.
+
+    *differentiate_input* selects which parameter (0-based) to differentiate.
+    For n-ary functions, call with differentiate_input=0, 1, ... n-1.
+    """
     from remora.lisp_reader import parse_lisp
     from remora.parser import parse_program
     from remora.prelude import with_prelude
@@ -498,7 +503,7 @@ def generate_gradient_function_source(
     generated_source = generate_gradient_source(
         tape,
         param_specs,
-        differentiate_input=0,
+        differentiate_input=differentiate_input,
         function_name=generated_name,
     )
     return GradientSourceArtifact(
@@ -690,6 +695,19 @@ def _fill(value: _Expr, like: _Expr) -> _Expr:
 def _reshape(value: _Expr, shape: Shape) -> _Expr:
     if value.shape == shape:
         return value
+    # Simplify: reshape(fill(constant, ravel(x)), original_shape) → fill(constant, x)
+    if isinstance(value, _Fill) and value.value.shape == ():
+        like = value.like
+        if isinstance(like, _Reshape) and like.shape == value.shape:
+            return _Fill(value.value, like.value, shape)
+    # Simplify: (reshape (+ (* 0.0 (reshape inner [N])) c) [orig_shape])
+    if isinstance(value, _Op) and value.op == "+":
+        left, right = value.left, value.right
+        if (_is_zero(left) and isinstance(right, _Op) and right is not None
+                and right.op == "*"
+                and isinstance(right.left, _Reshape) and right.left.shape == shape):
+            inner = right.left.value
+            return _binary("+", _binary("*", _constant(0.0), inner), value.right)
     return _Reshape(value, shape)
 
 
