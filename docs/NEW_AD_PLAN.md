@@ -249,6 +249,19 @@ Exit criterion: dot product, mean-squared error, and a small linear-regression l
 
 Exit criterion: one Pi-typed loss function differentiates and compiles at multiple shapes without separate source definitions.
 
+Implementation status: **AD3 complete on June 8, 2026.**
+
+- Pi-preserving gradient type: `_infer_ad_grad` re-wraps `PiType` and `ForallType`
+  around the gradient `FuncType`.  `(grad f)` of `Pi([n], Float[n] → Float)` has
+  type `Pi([n], Float[n] → Float[n])`.
+- Specialization before AD: `_typed_top_level_function` produces a concrete
+  `TypedLambda` body; `grad_via_tape` runs on the specialized body.
+- `_trace_map` handles `TypedOperatorFunc` (auto-lifted primitives) for binary
+  scalar-cell maps.
+- Exit criterion met: one Pi-typed `sq` function produces correct gradients
+  at n=3 and n=5 via `grad_via_tape`.
+- 838 passed, 1 skipped.
+
 ### AD4: Structured Operations and Control Flow (4-7 weeks)
 
 - Add VJPs for indexing/scatter-add, append, subarray, and selected reductions.
@@ -274,7 +287,7 @@ Expected effort is roughly `11-17 weeks` for a credible CPU MVP through AD3, and
 | AD0 | ✅ Complete | — |
 | AD1 | ✅ Complete | 833 |
 | AD2 | ✅ Complete | 838 |
-| AD3 | ⬜ Not started | — |
+| AD3 | ✅ Complete | 838 |
 | AD4 | ⬜ Not started | — |
 | AD5 | ⬜ Not started | — |
 

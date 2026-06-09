@@ -681,14 +681,16 @@ def test_grad_typechecks_for_scalar_float_function():
     )
     from remora.typechecker import TypeChecker
     from remora.lisp_reader import parse_lisp
-    from remora.types import FuncType, ArrayType, FLOAT
+    from remora.types import FuncType, ArrayType, FLOAT, PiType
     tc = TypeChecker()
     typed = tc.check_program(parse_lisp(src))
     assert typed.type is not None
-    assert isinstance(typed.type, FuncType)
+    # AD3: grad of Pi-typed function is also Pi-typed
+    inner = typed.type.body if isinstance(typed.type, PiType) else typed.type
+    assert isinstance(inner, FuncType)
     # grad sq: input type = array, output type = same shape array
-    assert isinstance(typed.type.params[0], ArrayType)
-    assert typed.type.params[0] == typed.type.result
+    assert isinstance(inner.params[0], ArrayType)
+    assert inner.params[0] == inner.result
 
 
 def test_grad_rejects_binary_function():
