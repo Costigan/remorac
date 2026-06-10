@@ -277,7 +277,20 @@ Acceptance criteria:
 - Checkpoints and seed values make the run reproducible.
 - Data normalization and label encoding are documented.
 
-### 8. Add Dropout Without Inconsistent Gradients (1-2 sessions, optional)
+### 8. Add Dropout Without Inconsistent Gradients (1-2 sessions, optional) **DONE**
+
+Implemented inverted dropout via externally-supplied masks. The CNN model accepts a
+`mask (Array Float 900)` parameter applied as elementwise multiplication after the
+first ReLU layer: `(* (map relu (conv2d x k b1)) mask)`. The mask is generated in
+Python with `{0.0, 1/keep_prob}` values so the AD traces `*` normally — gradients
+flow through kept neurons and are zero for dropped ones. The mask is excluded from
+`differentiate_inputs` so no gradient artifact is compiled for it.
+
+- `make_dropout_mask(size, keep_prob, seed)` — Bernoulli mask scaled for inverted dropout
+- `make_inference_mask(size)` — all-ones mask with no scaling (inference mode)
+- `mean_loss()` uses inference mask; training steps use per-example dropout mask
+- CLI supports `--dropout-keep` flag (default 0.5)
+- Training test verifies loss still decreases with dropout enabled
 
 Dropout is not required for the first successful training run.
 
@@ -321,7 +334,7 @@ shapes; it is a separate optimization milestone rather than part of readiness.
 5. ✅ Implement static-case `im2col` and overlap-correct `col2im`.
 6. ✅ Gradient-check the deterministic CNN.
 7. ✅ Overfit a tiny dataset with the Python loop.
-8. ⬜ Add externally supplied dropout masks if needed.
+8. ✅ Add externally supplied dropout masks if needed.
 9. ⬜ Benchmark, then consider batching, generalized convolution, and GPU support.
 
 ## Estimated Effort
@@ -335,7 +348,7 @@ shapes; it is a separate optimization milestone rather than part of readiness.
 | Static `im2col` + `col2im` + conv2d | 3-4 | ✅ |
 | CNN integration and gradient checks | 2 | ✅ |
 | Python training loop and tiny-data overfit | 1-2 | ✅ |
-| Dropout with shared external masks | 1-2 optional | ⬜ |
+| Dropout with shared external masks | 1-2 optional | ✅ |
 | Benchmarking | 1 | ⬜ |
 | **First deterministic training run** | **11-16** | |
 | **Including dropout** | **12-18** | |
@@ -347,3 +360,19 @@ compiled CPU path for `im2col`/`col2im`; the interpreter training path works
 but remains slow because every parameter gradient reevaluates the full model.
 
 ## Current Test Count: 959 passed, 1 skipped, 4 xfailed
+
+## Known Issues to Address Before Production
+
+### Compilation speed (P2)
+
+`compile_gradient_functions_source` calls `compile_function_source` (full MLIR pipeline)
+for each parameter. For the 6-parameter CNN this takes ~106s, but the compiled MLIR is
+never executed — the training loop uses the interpreter (`evaluate_source`) on the
+generated gradient sources. The MLIR validation subprocess (`verify_module_text` →
+`llvm.mlir-opt`) dominates the time. For `im2col`/`col2im`, MLIR lowering is deferred
+so the fallback path is always taken.
+
+**Fix:** Factor out a `generate_gradient_functions_source` that only generates source
+without compiling. Skip `compile_function_source` and call `generate_gradient_function_source`
+directly for each `differentiate_input`. This drops compilation from ~106s to near-zero
+(tape tracing + source generation). Address after the training pipeline is stable.
