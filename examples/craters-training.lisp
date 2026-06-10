@@ -1,0 +1,285 @@
+;;;; ==========================================================================
+;;;; LUNAR CRATER DETECTION - TRAINING ENGINE
+;;;; ==========================================================================
+;;;; This module handles dataset loading, parameter initialization, mini-batch
+;;;; shuffling steps, and the core gradient optimization loop.
+;;;; ==========================================================================
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 1: HYPERPARAMETERS & STRUCTURAL INITIALIZATION
+;;; --------------------------------------------------------------------------
+
+;;; (init-weights shape)
+;;; Generates an array of a specified shape filled with small random values.
+;;; Used to break symmetry during network weight initialization.
+(define (init-weights shape)
+  ;; Implemented via built-in uniform or Gaussian distribution generation
+  (* 0.01 (random-normal shape)))
+
+;;; (initialize-network-parameters)
+;;; Packs the architectural weights and biases into a nested array structure.
+;;;   - Conv Kernel:  [3, 3] spatial footprint
+;;;   - Conv Bias:    Scalar (0.0)
+;;;   - FC Weights:   Vector of length 900 (based on a 30x30 feature output)
+;;;   - FC Bias:      Scalar (0.0)
+(define (initialize-network-parameters)
+  (let* ((conv-kernel (init-weights (vector 3 3)))
+         (conv-bias   0.0)
+         (fc-weights  (init-weights (vector 900)))
+         (fc-bias     0.0))
+    (vector conv-kernel conv-bias fc-weights fc-bias)))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 2: SINGLE BATCH GRADIENT DESCENT
+;;; --------------------------------------------------------------------------
+
+;;; (train-on-batch params batch-x batch-y learning-rate)
+;;; Updates all parameters across the network model using a single mini-batch.
+;;; Inputs:
+;;;   params        - Nested array of current weights and biases
+;;;   batch-x       - 3D Tensor of images, shape: [BatchSize, 32, 32]
+;;;   batch-y       - 1D Tensor of true labels, shape: [BatchSize]
+;;;   learning-rate - Scalar step multiplier (eta)
+(define (train-on-batch params batch-x batch-y learning-rate)
+  ;; 'grad' calls the built-in automatic differentiation mechanism.
+  ;; It differentiates loss-objective with respect to its 1st argument (params).
+  (let* ((gradients (grad loss-objective params batch-x batch-y)))
+    ;; Pure functional update: subtract scaled gradients from current parameters.
+    ;; Remora's rank-lifting automatically subtracts matching shapes.
+    (- params (* learning-rate gradients))))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 3: EPOCH ITERATION & ENTIRE DATASET OPTIMIZATION
+;;; --------------------------------------------------------------------------
+
+;;; (train-epoch params dataset-x dataset-y batch-size learning-rate)
+;;; Iterates through an entire dataset by slicing it into sequence batches.
+;;; Inputs:
+;;;   dataset-x - Full training dataset tensor, shape: [TotalImages, 32, 32]
+;;;   dataset-y - Full training labels tensor,  shape: [TotalImages]
+(define (train-epoch params dataset-x dataset-y batch-size learning-rate)
+  (let* ((total-items (len dataset-y))
+         ;; Reshape the dataset into an explicit sequence of mini-batches
+         ;; New Shape X: [NumBatches, BatchSize, 32, 32]
+         ;; New Shape Y: [NumBatches, BatchSize]
+         (batched-x   (reshape (vector (/ total-items batch-size) batch-size 32 32) dataset-x))
+         (batched-y   (reshape (vector (/ total-items batch-size) batch-size) dataset-y)))
+    
+    ;; Use a left fold reduction over the batch dimension to sequentially update parameters.
+    ;; 'reduce' behaves like a functional loop, passing updated weights to the next batch step.
+    (reduce (lambda (current-params batch-data)
+              (let* ((b-x (idx batch-data 0))
+                     (b-y (idx batch-data 1)))
+                (train-on-batch current-params b-x b-y learning-rate)))
+            params
+            ;; Zips batched-x and batched-y together along the batch dimension
+            (zip batched-x batched-y))))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 4: MAIN TRAINING ENTRYPOINT
+;;; --------------------------------------------------------------------------
+
+;;; (train-crater-model dataset-x dataset-y epochs batch-size lr)
+;;; Top-level coordinator function executed to train the neural network from scratch.
+;;; Returns the final optimized parameter structure ready for the inference application.
+(define (train-crater-model dataset-x dataset-y epochs batch-size lr)
+  (let* ((initial-params (initialize-network-parameters)))
+    ;; Recursively execute epochs until the target threshold count is satisfied
+    (let loop ((current-epoch 0)
+               (params        initial-params))
+      (if (>= current-epoch epochs)
+          ;; Training Complete: Return optimized weight tensors
+          params
+          
+          ;; Training Ongoing: Print epoch progress, shuffle data, and loop
+          (let* ((shuffled-indices (shuffle (range (len dataset-y))))
+                 (shuffled-x       (idx dataset-x shuffled-indices))
+                 (shuffled-y       (idx dataset-y shuffled-indices))
+                 ;; Train across all mini-batches in this epoch pass
+                 (updated-params   (train-epoch params shuffled-x shuffled-y batch-size lr)))
+            
+            ;; Compute and monitor current training loss diagnostics
+            (display "Epoch ") (display current-epoch)
+            (display " | Loss: ") (display (loss-objective updated-params dataset-x dataset-y))
+            (newline)
+            
+            ;; Proceed to next structural epoch step
+            (loop (+ current-epoch 1) updated-params))))))
+
+;;;; ==========================================================================
+;;;; MULTI-SCALE LUNAR CRATER DETECTION PIPELINE WITH AUTOMATIC DIFFERENTIATION
+;;;; ==========================================================================
+;;;; Designed for the Remora Array Language (Shivers et al.)
+;;;; Intended for processing high-resolution lunar imagery via rank-polymorphism.
+;;;; ==========================================================================
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 1: ACTIVATION FUNCTIONS & OPTIMIZATION METRICS
+;;; --------------------------------------------------------------------------
+
+;;; (relu x)
+;;; Rectified Linear Unit activation function.
+;;; Operates on individual scalars. When applied to arrays of higher rank,
+;;; Remora automatically lifts it element-wise across the entire array shape.
+(define (relu x)
+  (max 0.0 x))
+
+;;; (sigmoid x)
+;;; Maps any real-valued scalar input into a probability range [0.0, 1.0].
+;;; Crucial for binary classification (Crater vs. No-Crater).
+(define (sigmoid x)
+  (/ 1.0 (+ 1.0 (exp (- 0.0 x)))))
+
+;;; (bce-loss prediction target)
+;;; Computes the Binary Cross-Entropy loss between a single prediction scalar
+;;; and its corresponding binary ground-truth target (0.0 or 1.0).
+(define (bce-loss prediction target)
+  (- 0.0 (+ (* target (log prediction))
+            (* (- 1.0 target) (log (- 1.0 prediction))))))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 2: NEURAL NETWORK CORE LAYERS
+;;; --------------------------------------------------------------------------
+
+;;; (conv2d patch kernel bias)
+;;; Computes a 2D spatial convolution over a single image patch.
+;;; Inputs:
+;;;   patch  - A 2D array [Height, Width] representing an individual image tile
+;;;   kernel - A 2D array [3, 3] representing the spatial feature weights
+;;;   bias   - A scalar bias value
+;;; Mechanics:
+;;;   The expression (* patch kernel) multiplies the 3x3 kernel element-wise
+;;;   against the patch. The (reduce + 0.0 ...) collapses the resulting 2D matrix
+;;;   down into a single scalar, and the bias is added.
+(define (conv2d patch kernel bias)
+  (+ bias (reduce + 0.0 (* patch kernel))))
+
+;;; (linear features weights bias)
+;;; Computes a standard fully connected linear transformation.
+;;; Inputs:
+;;;   features - A flattened 1D array of extracted spatial features
+;;;   weights  - A 1D array of weight coefficients matching features in length
+;;;   bias     - A scalar bias value
+(define (linear features weights bias)
+  (+ bias (reduce + 0.0 (* features weights))))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 3: FORWARD PASS & TRAINING ENGINE
+;;; --------------------------------------------------------------------------
+
+;;; (forward params patch)
+;;; Executes the complete forward inference pipeline for a given patch.
+;;; Inputs:
+;;;   params - An aggregate array/tuple containing:
+;;;            [(3x3 kernel), (scalar conv-bias), (1D fc-weights), (scalar fc-bias)]
+;;;   patch  - An image array tile.
+;;; Note: Because of Remora's frame-polymorphism, if 'patch' is actually an array
+;;; of many patches (e.g., shape [N, 32, 32]), 'forward' will automatically lift
+;;; and execute concurrently across all N patches.
+(define (forward params patch)
+  (let* ((kernel    (idx params 0))
+         (conv-bias (idx params 1))
+         (fc-w      (idx params 2))
+         (fc-b      (idx params 3))
+         
+         ;; Step 1: Spatial feature extraction via convolution + ReLU
+         (c-out     (relu (conv2d patch kernel conv-bias)))
+         
+         ;; Step 2: Flatten spatial dimensions into a 1D vector for the linear layer
+         (flat-feat (reshape (shape c-out) c-out)))
+         
+    ;; Step 3: Compute final logit and squash into a binary probability
+    (sigmoid (linear flat-feat fc-w fc-b))))
+
+;;; (loss-objective params batch-inputs batch-targets)
+;;; Calculates the mean training loss over an entire mini-batch of training patches.
+;;; This is the target function fed directly into the auto-differentiation engine.
+(define (loss-objective params batch-inputs batch-targets)
+  (let* ((predictions (forward params batch-inputs))
+         (losses       (bce-loss predictions batch-targets)))
+    ;; Average the total loss by dividing by the batch size
+    (reduce + 0.0 (/ losses (len batch-targets)))))
+
+;;; (train-step params batch-inputs batch-targets learning-rate)
+;;; Executes a single step of Stochastic Gradient Descent (SGD).
+;;; Uses Shivers' implementation's built-in reverse-mode AD primitive 'grad'.
+(define (train-step params batch-inputs batch-targets learning-rate)
+  ;; 'grad' automatically computes the partial derivatives of loss-objective
+  ;; with respect to its first parameter ('params') evaluated at these inputs.
+  (let* ((grads (grad loss-objective params batch-inputs batch-targets)))
+    ;; Perform a rank-polymorphic matrix subtraction to update all weights
+    (- params (* learning-rate grads))))
+
+
+;;; --------------------------------------------------------------------------
+;;; SECTION 4: IMAGE PYRAMID & MULTI-SCALE DETECTION APPLICATION
+;;; --------------------------------------------------------------------------
+
+;;; (image->patches big-image patch-size stride)
+;;; Slices a massive high-resolution lunar image into a dense array of overlapping
+;;; patches. This materializes the sliding-window iteration space into an explicit
+;;; array axis that Remora can parallelize over.
+(define (image->patches big-image patch-size stride)
+  (window big-image (vector patch-size patch-size) (vector stride stride)))
+
+;;; (downsample-twice image)
+;;; Smooths and drops the spatial resolution of an image by a factor of 2.
+;;; This constructs the next progressive layer of our multi-scale image pyramid.
+(define (downsample-twice image)
+  (let* ((blocks (window image (vector 2 2) (vector 2 2))))
+    (reduce + 0.0 (/ blocks 4.0))))
+
+;;; (detect-craters big-image params threshold)
+;;; Core single-scale application. Processes a full image at its current resolution,
+;;; evaluates all window patches, and isolates matching coordinate pairs.
+(define (detect-craters big-image params threshold)
+  (let* ((patch-size 32)
+         (stride     8)
+         ;; Slice image into shape: [NumPatches, 32, 32]
+         (patches    (image->patches big-image patch-size stride))
+         ;; Generate absolute (X,Y) pixel locations matching the window steps
+         (coords     (generate-grid-coords (shape patches) stride))
+         
+         ;; CRITICAL LIFTING STEP: 'patches' has an extra dimension. 
+         ;; Remora replicates 'params' and maps 'forward' over every patch concurrently.
+         (scores     (forward params patches))
+         
+         ;; Produce a boolean mask where pixel configurations match a crater profile
+         (mask       (> scores threshold)))
+         
+    ;; Return an array of top-left coordinates for positive matches
+    (filter-coordinates coords mask patch-size)))
+
+;;; (detect-craters-multiscale big-image params threshold scale-factor)
+;;; The ultimate top-level application wrapper. Recursively scales down the 
+;;; lunar surface image to capture craters that span thousands of physical pixels.
+(define (detect-craters-multiscale big-image params threshold scale-factor)
+  (let* ((patch-size 32))
+    ;; Base Case: If the remaining downscaled image is smaller than our 32x32 
+    ;; sliding classifier window, terminate recursion.
+    (if (< (min (shape big-image)) patch-size)
+        (empty-array)
+        
+        ;; Recursive Case:
+        (let* ((current-detections (detect-craters big-image params threshold))
+               ;; Project the small-scale detections BACK to original full-resolution 
+               ;; pixels by scaling their coordinate tracking arrays.
+               (scaled-detections  (* current-detections scale-factor))
+               
+               ;; Step down the pyramid scale
+               (next-image         (downsample-twice big-image))
+               ;; Tail call to process the next pyramid tier at double the relative scale
+               (next-detections    (detect-craters-multiscale next-image 
+                                                              params 
+                                                              threshold 
+                                                              (* scale-factor 2.0))))
+          
+          ;; Concatenate the resulting structural arrays into a single master tensor
+          (concat scaled-detections next-detections)))))
