@@ -92,6 +92,8 @@ from remora.lowering.tensor_ops import (
     _lower_map_cell_fold_result,
     _lower_rotate_module,
     _lower_scatter_add_module,
+    _lower_im2col_module,
+    _lower_col2im_module,
     _lower_scalar_fold_module,
     _lower_scalar_fold_result,
     _lower_scalar_map_binary_module,
@@ -222,6 +224,8 @@ class MLIRLowering:
                 HIRIndicesOf,
                 HIRWithShape,
                 HIRScatterAdd,
+                HIRIm2col,
+                HIRCol2im,
                 HIRPair,
                 HIRFirst,
                 HIRSecond,
@@ -543,10 +547,10 @@ def _lower_main_module(
         return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRScatterAdd):
         return _lower_scatter_add_module(node, functions)
-    if isinstance(node, (HIRIm2col, HIRCol2im)):
-        raise RemoraLoweringError(
-            f"{type(node).__name__} CPU lowering is deferred"
-        )
+    if isinstance(node, HIRIm2col):
+        return _lower_im2col_module(node, functions)
+    if isinstance(node, HIRCol2im):
+        return _lower_col2im_module(node, functions)
     if isinstance(node, HIRFirst):
         inner = node.pair
         while isinstance(inner, HIRLet):
