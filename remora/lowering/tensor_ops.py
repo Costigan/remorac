@@ -413,9 +413,49 @@ def _lower_tensor_input(
     if isinstance(node, HIRCol2im):
         return _lower_col2im_tensor_input(node, functions, prefix, tensor_env)
 
+    if isinstance(node, HIRIf) and isinstance(node.result_type, ArrayType):
+        return _lower_if_tensor_input(node, functions, prefix, tensor_env)
+
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
     )
+
+
+def _lower_if_tensor_input(node, functions, prefix, tensor_env):
+    """Lower an array-typed HIRIf as a tensor input via linalg.generic select."""
+    cond_code, cond_name, cond_type, cond_elem = _lower_tensor_input(
+        node.condition, f"{prefix}_cond", functions, tensor_env
+    )
+    then_code, then_name, then_type, then_elem = _lower_tensor_input(
+        node.then_branch, f"{prefix}_then", functions, tensor_env
+    )
+    else_code, else_name, else_type, else_elem = _lower_tensor_input(
+        node.else_branch, f"{prefix}_else", functions, tensor_env
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    rank = node.result_type.rank
+    
+    identity = ", ".join(f"d{a}" for a in range(rank))
+    identity_map = f"affine_map<({identity}) -> ({identity})>"
+    iterators = "[" + ", ".join('"parallel"' for _ in range(rank)) + "]"
+    
+    empty_name = f"%{prefix}_empty"
+    result_name = f"%{prefix}"
+    code = f"""{cond_code}
+{then_code}
+{else_code}
+    {empty_name} = tensor.empty() : {result_type}
+    {result_name} = linalg.generic {{
+      indexing_maps = [{identity_map}, {identity_map}, {identity_map}, {identity_map}],
+      iterator_types = {iterators}
+    }} ins({cond_name}, {then_name}, {else_name} : {cond_type}, {then_type}, {else_type})
+      outs({empty_name} : {result_type}) {{
+    ^bb0(%c: {cond_elem}, %t: {result_elem}, %e: {result_elem}, %o: {result_elem}):
+      %sel = arith.select %c, %t, %e : {result_elem}
+      linalg.yield %sel : {result_elem}
+    }} -> {result_type}"""
+    return code, result_name, result_type, result_elem
 
 
 def _lower_transpose_input(
@@ -1305,8 +1345,9 @@ def _lower_fold_input(
         )
         return code, name, result_type, type_to_mlir(node.result_type.element)
 
-    raise RemoraLoweringError(
-        "only folds over tensor literals, iota, or direct scalar maps lower to MLIR so far"
+    # Fallback: lower as a general tensor input
+    return _lower_tensor_input(
+        node, _join_prefix(prefix, "fold_input"), functions, tensor_env
     )
 
 
@@ -2748,7 +2789,7 @@ def _lower_im2col_module(node, functions: dict[str, HIRFunction]) -> str:
 
     # Index constants
     index_vars: dict[int, str] = {}
-    for idx_val in range(max(out_h * stride + kh, out_w * stride + kw, patch_size)):
+    for idx_val in range(max(out_h * stride + kh, out_w * stride + kw, patch_size) + 1):
         name = f"%c{idx_val}"
         index_vars[idx_val] = name
         lines.append(
@@ -2827,7 +2868,7 @@ def _lower_col2im_module(node, functions: dict[str, HIRFunction]) -> str:
 
     # Index constants
     index_vars: dict[int, str] = {}
-    for idx_val in range(max(h, w, n_patches if n_patches else 0, patch_size)):
+    for idx_val in range(max(h, w, n_patches if n_patches else 0, patch_size) + 1):
         name = f"%c{idx_val}"
         index_vars[idx_val] = name
         lines.append(
@@ -2899,9 +2940,9 @@ def _lower_im2col_tensor_input(
     empty_name = f"%{_join_prefix(prefix, 'empty')}"
     lines.append(f"    {empty_name} = tensor.empty() : {result_type}")
 
-    max_idx = max(out_h * stride + kh, out_w * stride + kw, kh * kw)
+    max_idx = max(h, w, out_h * out_w, kh * kw)
     index_vars: dict[int, str] = {}
-    for idx_val in range(max_idx):
+    for idx_val in range(max_idx + 1):
         name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
         index_vars[idx_val] = name
         lines.append(f"    {name} = arith.constant {idx_val} : index")
@@ -2959,7 +3000,7 @@ def _lower_col2im_tensor_input(
 
     max_idx = max(h, w, out_h * out_w, kh * kw)
     index_vars: dict[int, str] = {}
-    for idx_val in range(max_idx):
+    for idx_val in range(max_idx + 1):
         name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
         index_vars[idx_val] = name
         lines.append(f"    {name} = arith.constant {idx_val} : index")

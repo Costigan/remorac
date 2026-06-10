@@ -424,6 +424,66 @@ def _inline_lets(
         return HIRCall(
             expr.func_name, args, expr.result_type  # type: ignore[arg-type]
         )
+    if isinstance(expr, HIRWithShape):
+        source = _inline_lets(expr.source, env)
+        if source is None:
+            raise RemoraLoweringError("with-shape source cannot be empty")
+        return HIRWithShape(source, expr.result_type)
+    if isinstance(expr, HIRIm2col):
+        image = _inline_lets(expr.image, env)
+        if image is None:
+            raise RemoraLoweringError("im2col image cannot be empty")
+        return HIRIm2col(image, expr.kernel_shape, expr.stride, expr.result_type)
+    if isinstance(expr, HIRCol2im):
+        columns = _inline_lets(expr.columns, env)
+        if columns is None:
+            raise RemoraLoweringError("col2im columns cannot be empty")
+        return HIRCol2im(columns, expr.image_shape, expr.kernel_shape, expr.stride, expr.result_type)
+    if isinstance(expr, HIRScatterAdd):
+        target = _inline_lets(expr.target, env)
+        index = _inline_lets(expr.index, env)
+        update = _inline_lets(expr.update, env)
+        if target is None or index is None or update is None:
+            raise RemoraLoweringError("scatter-add operands cannot be empty")
+        return HIRScatterAdd(target, index, update, expr.result_type)
+    if isinstance(expr, HIRTranspose):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("transpose array cannot be empty")
+        return HIRTranspose(array, expr.result_type)
+    if isinstance(expr, HIRReshape):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("reshape array cannot be empty")
+        return HIRReshape(array, expr.result_type)
+    if isinstance(expr, HIRRavel):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("ravel array cannot be empty")
+        return HIRRavel(array, expr.result_type)
+    if isinstance(expr, HIRReverse):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("reverse array cannot be empty")
+        return HIRReverse(array, expr.result_type)
+    if isinstance(expr, HIRTake):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("take array cannot be empty")
+        return HIRTake(expr.count, array, expr.result_type)
+    if isinstance(expr, HIRDrop):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("drop array cannot be empty")
+        return HIRDrop(expr.count, array, expr.result_type)
+    if isinstance(expr, HIRRotate):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("rotate array cannot be empty")
+        return HIRRotate(array, expr.shift, expr.result_type)
+    if isinstance(expr, HIRSubarray):
+        array = _inline_lets(expr.array, env)
+        if array is None: raise RemoraLoweringError("subarray array cannot be empty")
+        return HIRSubarray(array, expr.offsets, expr.sizes, expr.result_type)
+    if isinstance(expr, HIRAppend):
+        left = _inline_lets(expr.left, env)
+        right = _inline_lets(expr.right, env)
+        if left is None or right is None:
+            raise RemoraLoweringError("append operands cannot be empty")
+        return HIRAppend(left, right, expr.result_type)
     return expr
 
 
@@ -847,6 +907,9 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
             scalar_env[param.name] = _Operand(
                 f"%arg{index}", [], param_type
             )
+            tensor_env[param.name] = _TensorValue(
+                f"%arg{index}", param_type, param_type,
+            )
         elif isinstance(param.type, ArrayType):
             tensor_env[param.name] = _TensorValue(
                 f"%arg{index}",
@@ -1080,6 +1143,9 @@ def _lower_descriptor_internal_function(
         if isinstance(param.type, ScalarType):
             scalar_env[param.name] = _Operand(
                 f"%arg{index}", [], param_type
+            )
+            tensor_env[param.name] = _TensorValue(
+                f"%arg{index}", param_type, param_type,
             )
         elif isinstance(param.type, ArrayType):
             tensor_env[param.name] = _TensorValue(
