@@ -374,7 +374,13 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
             stride = int(entry.saved[3])
             expr = _Im2col(primals[entry.inputs[0]], image_shape, kh, kw, stride, shape)
         elif entry.kind == "select":
-            expr = _If(primals[entry.inputs[0]], primals[entry.inputs[1]], primals[entry.inputs[2]], shape)
+            then_expr = primals[entry.inputs[1]]
+            else_expr = primals[entry.inputs[2]]
+            if then_expr.shape != shape and else_expr.shape:
+                then_expr = _fill(then_expr, else_expr)
+            if else_expr.shape != shape and then_expr.shape:
+                else_expr = _fill(else_expr, then_expr)
+            expr = _If(primals[entry.inputs[0]], then_expr, else_expr, shape)
         elif entry.kind == "inactive":
             inp_count = len(entry.inputs)
             if inp_count == 2 and entry.saved:
@@ -880,6 +886,25 @@ def _pad_index(operand: _Expr, adj: _Expr, index_vals: tuple[int, ...]) -> _Expr
 
 def _inactive_binary(left: _Expr, right: _Expr, shape: Shape, op: str) -> _Op:
     return _Op(op, left, right, shape)
+
+
+def _broadcast_if_needed(expr: _Expr, target_shape: Shape) -> _Expr:
+    """If *expr* is scalar and *target_shape* is non-empty, broadcast it via fill."""
+    if expr.shape == target_shape:
+        return expr
+    if not expr.shape and target_shape:
+        return _binary("+", _binary("*", _constant(0.0), _dummy_array(target_shape)), expr)
+    return expr
+
+
+def _dummy_array(shape: Shape) -> _Expr:
+    """Create a dummy expression with the given shape."""
+    result = _Atom("0.0", ())
+    for dim in reversed(shape):
+        dims = " ".join(str(d) for _ in range(dim))
+        result = _Op("with-shape", result, _Atom(dims, ()), (dim,) if len(shape) == 1 else None)
+    return result
+    return expr
 
 
 def _unbroadcast(expr: _Expr, target: _Expr) -> _Expr:

@@ -51,6 +51,7 @@ class EvalTape:
     values: list[np.ndarray] = field(default_factory=list)
     input_indices: list[int] = field(default_factory=list)
     has_data_dependent_control_flow: bool = False
+    _typed_lambda_cache: dict[tuple[int, tuple[int, ...], int], int] = field(default_factory=dict)
 
     def push(self, entry: TapeEntry, value: np.ndarray) -> int:
         idx = len(self.values)
@@ -334,6 +335,13 @@ def _trace_app(
     if isinstance(call_target, TypedLambda):
         if len(args) != len(call_target.params):
             raise NotImplementedError("trace app: function arity mismatch")
+
+        # Check cache: (lambda_id, arg_indices, fold_axis) → result
+        cache_key = (id(call_target), tuple(args), fold_axis)
+        cached = tape._typed_lambda_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         call_env = {
             **env,
             **{
@@ -343,12 +351,14 @@ def _trace_app(
                 )
             },
         }
-        return trace_expr(
+        result_idx = trace_expr(
             call_target.body,
             call_env,
             tape,
             fold_axis=fold_axis,
         )
+        tape._typed_lambda_cache[cache_key] = result_idx
+        return result_idx
     op = _get_op(expr.func)
     if len(args) == 1 and op in {"exp", "log"}:
         input_idx = args[0]
@@ -431,6 +441,14 @@ def _trace_map(
                 return _record_unary_primitive(
                     tape, op, input_idx, _value(tape, input_idx)
                 )
+            if isinstance(expr.func, TypedLambda) and len(expr.func.params) == 1:
+                param_name = expr.func.params[0][0]
+                body_env = {**env, param_name: input_idx}
+                if isinstance(expr.func.body, TypedIf):
+                    return _trace_if(expr.func.body, body_env, tape, fold_axis=fold_axis)
+                return trace_expr(expr.func.body, body_env, tape, fold_axis=fold_axis)
+            # Pass through: return input unchanged for unknown unary functions
+            return input_idx
         if len(expr.arrays) == 2:
             left_idx = trace_expr(
                 expr.arrays[0], env, tape, fold_axis=fold_axis
