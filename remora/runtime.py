@@ -99,6 +99,8 @@ from remora.typechecker import (
     TypedUnbox,
     TypedWithShape,
     TypedScatterAdd,
+    TypedIm2col,
+    TypedCol2im,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, SigmaType, StaticDim
 
@@ -1238,6 +1240,39 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         update = float(_eval_expr(expr.update, env))
         result = np.copy(array)
         result[tuple([idx])] += update
+        return _coerce_runtime_value(result, expr.type)
+
+    if isinstance(expr, TypedIm2col):
+        image = _eval_expr(expr.image, env)
+        ast = expr.expr
+        kh = int(ast.kernel_shape.elements[0].value)
+        kw = int(ast.kernel_shape.elements[1].value)
+        stride = int(ast.stride.value)
+        h, w = image.shape
+        out_h = (h - kh) // stride + 1
+        out_w = (w - kw) // stride + 1
+        result = np.zeros((out_h * out_w, kh * kw), dtype=np.float64)
+        for i in range(out_h):
+            for j in range(out_w):
+                patch = image[i * stride : i * stride + kh, j * stride : j * stride + kw]
+                result[i * out_w + j, :] = patch.ravel()
+        return _coerce_runtime_value(result, expr.type)
+
+    if isinstance(expr, TypedCol2im):
+        columns = _eval_expr(expr.columns, env)
+        ast = expr.expr
+        h = int(ast.image_shape.elements[0].value)
+        w = int(ast.image_shape.elements[1].value)
+        kh = int(ast.kernel_shape.elements[0].value)
+        kw = int(ast.kernel_shape.elements[1].value)
+        stride = int(ast.stride.value)
+        out_h = (h - kh) // stride + 1
+        out_w = (w - kw) // stride + 1
+        result = np.zeros((h, w), dtype=np.float64)
+        for i in range(out_h):
+            for j in range(out_w):
+                patch = columns[i * out_w + j, :].reshape(kh, kw)
+                result[i * stride : i * stride + kh, j * stride : j * stride + kw] += patch
         return _coerce_runtime_value(result, expr.type)
 
     if isinstance(expr, TypedPair):

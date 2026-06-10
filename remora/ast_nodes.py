@@ -121,6 +121,23 @@ class ScatterAddExpr:
 
 
 @dataclass(frozen=True)
+class Im2colExpr:
+    image: Expr
+    kernel_shape: Expr
+    stride: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
+class Col2imExpr:
+    columns: Expr
+    image_shape: Expr
+    kernel_shape: Expr
+    stride: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class PairExpr:
     left: Expr
     right: Expr
@@ -430,6 +447,8 @@ Expr: TypeAlias = (
     | IndicesOfExpr
     | WithShapeExpr
     | ScatterAddExpr
+    | Im2colExpr
+    | Col2imExpr
     | PairExpr
     | FirstExpr
     | SecondExpr

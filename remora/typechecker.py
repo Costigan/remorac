@@ -62,6 +62,8 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
     ScatterAddExpr,
+    Im2colExpr,
+    Col2imExpr,
     SecondExpr,
 )
 from remora.constraints import (
@@ -479,6 +481,22 @@ class TypedScatterAdd:
 
 
 @dataclass(frozen=True)
+class TypedIm2col:
+    """A typed im2col: extract patches from image into columns."""
+    expr: object  # Im2colExpr
+    image: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
+class TypedCol2im:
+    """A typed col2im: scatter columns back to image shape."""
+    expr: object  # Col2imExpr
+    columns: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedPair:
     """A typed pair construction."""
     expr: object  # PairExpr
@@ -598,6 +616,8 @@ TypedExpr: TypeAlias = (
     | TypedIndicesOf
     | TypedWithShape
     | TypedScatterAdd
+    | TypedIm2col
+    | TypedCol2im
     | TypedPair
     | TypedFirst
     | TypedSecond
@@ -826,6 +846,10 @@ class TypeChecker:
             return self._infer_with_shape(expr, env)
         if isinstance(expr, ScatterAddExpr):
             return self._infer_scatter_add(expr, env)
+        if isinstance(expr, Im2colExpr):
+            return self._infer_im2col(expr, env)
+        if isinstance(expr, Col2imExpr):
+            return self._infer_col2im(expr, env)
         if isinstance(expr, PairExpr):
             return self._infer_pair(expr, env)
         if isinstance(expr, FirstExpr):
@@ -1823,6 +1847,51 @@ class TypeChecker:
         return TypedScatterAdd(
             expr, typed_array, typed_index, typed_update, typed_array.type
         )
+
+    def _infer_im2col(self, expr: Im2colExpr, env: TypeEnv) -> TypedExpr:
+        typed_image = self._require_array(expr.image, "im2col", env)
+        if len(typed_image.type.shape) != 2:
+            raise RemoraTypeError("im2col expects a rank-2 image array", expr.loc)
+        if typed_image.type.element != FLOAT:
+            raise RemoraTypeError("im2col expects a Float image", expr.loc)
+
+        if not isinstance(expr.kernel_shape, ArrayLit):
+            raise RemoraTypeError("im2col kernel_shape must be a literal array", expr.loc)
+        kh = int(expr.kernel_shape.elements[0].value)
+        kw = int(expr.kernel_shape.elements[1].value)
+
+        if not isinstance(expr.stride, IntLit):
+            raise RemoraTypeError("im2col stride must be an integer literal", expr.loc)
+        stride = int(expr.stride.value)
+
+        h_dim, w_dim = typed_image.type.shape
+        if not isinstance(h_dim, StaticDim) or not isinstance(w_dim, StaticDim):
+            raise RemoraTypeError("im2col requires concrete image dimensions", expr.loc)
+        h = int(h_dim.value)
+        w = int(w_dim.value)
+
+        out_h = (h - kh) // stride + 1
+        out_w = (w - kw) // stride + 1
+        n = out_h * out_w
+        patch_size = kh * kw
+
+        result_type = ArrayType(FLOAT, (StaticDim(n), StaticDim(patch_size)))
+        return TypedIm2col(expr, typed_image, result_type)
+
+    def _infer_col2im(self, expr: Col2imExpr, env: TypeEnv) -> TypedExpr:
+        typed_columns = self._require_array(expr.columns, "col2im", env)
+        if len(typed_columns.type.shape) != 2:
+            raise RemoraTypeError("col2im expects a rank-2 columns array", expr.loc)
+        if typed_columns.type.element != FLOAT:
+            raise RemoraTypeError("col2im expects Float columns", expr.loc)
+
+        if not isinstance(expr.image_shape, ArrayLit):
+            raise RemoraTypeError("col2im image_shape must be a literal array", expr.loc)
+        h = int(expr.image_shape.elements[0].value)
+        w = int(expr.image_shape.elements[1].value)
+
+        result_type = ArrayType(FLOAT, (StaticDim(h), StaticDim(w)))
+        return TypedCol2im(expr, typed_columns, result_type)
 
     def _infer_pair(self, expr: PairExpr, env: TypeEnv) -> TypedExpr:
         typed_left = self.infer(expr.left, env)

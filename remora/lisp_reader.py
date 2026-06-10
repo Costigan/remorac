@@ -82,6 +82,8 @@ from remora.ast_nodes import (
     RightSectionExpr,
     RotateExpr,
     ScatterAddExpr,
+    Im2colExpr,
+    Col2imExpr,
     ScanExpr,
     SelectExpr,
     SecondExpr,
@@ -136,8 +138,10 @@ array_lit: "[" sexpr* "]"
            | subarray_form
            | indices_of_form
             | with_shape_form
-            | scatter_add_form
-            | pair_form
+             | scatter_add_form
+             | im2col_form
+             | col2im_form
+             | pair_form
             | first_form
             | second_form
             | box_form
@@ -224,6 +228,8 @@ subarray_form: "subarray" sexpr sexpr sexpr -> subarray_expr
 indices_of_form: "indices-of" sexpr -> indices_of_expr
 with_shape_form: "with-shape" sexpr sexpr -> with_shape_expr
 scatter_add_form: "scatter-add" sexpr sexpr sexpr -> scatter_add_expr
+im2col_form: "im2col" sexpr sexpr sexpr -> im2col_expr
+col2im_form: "col2im" sexpr sexpr sexpr sexpr -> col2im_expr
 pair_form: "pair" sexpr sexpr -> pair_expr
 first_form: "first" sexpr -> first_expr
 second_form: "second" sexpr -> second_expr
@@ -538,6 +544,12 @@ class LispASTBuilder(Transformer):
 
     def scatter_add_expr(self, items: list[Any]) -> ScatterAddExpr:
         return ScatterAddExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def im2col_expr(self, items: list[Any]) -> Im2colExpr:
+        return Im2colExpr(items[0], items[1], items[2], self._loc_from(items))
+
+    def col2im_expr(self, items: list[Any]) -> Col2imExpr:
+        return Col2imExpr(items[0], items[1], items[2], items[3], self._loc_from(items))
 
     def pair_expr(self, items: list[Any]) -> PairExpr:
         return PairExpr(items[0], items[1], self._loc_from(items))
