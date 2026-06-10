@@ -84,7 +84,9 @@ from remora.typechecker import (
     TypedOperatorFunc,
     TypedProgram,
     TypedRank,
+    TypedRavel,
     TypedReplicate,
+    TypedReshape,
     TypedRightSection,
     TypedRotate,
     TypedReverse,
@@ -991,6 +993,18 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
 
     if isinstance(expr, TypedMap):
         arrays = [_eval_expr(array, env) for array in expr.arrays]
+        if isinstance(expr.func, TypedOperatorFunc):
+            return _coerce_runtime_value(
+                _apply_op(expr.func.expr.op, *arrays), expr.type
+            )
+        if (
+            isinstance(expr.func, TypedExprNode)
+            and isinstance(expr.func.expr, VarExpr)
+            and expr.func.expr.name in {"exp", "log"}
+        ):
+            return _coerce_runtime_value(
+                _apply_op(expr.func.expr.name, *arrays), expr.type
+            )
         callable_value = _eval_callable(expr.func, env)
         return _map_value(callable_value, arrays, expr.cell_shape, expr.type)
 
@@ -1038,6 +1052,19 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         if not isinstance(array, np.ndarray):
             raise EvaluationError("transpose expects an array value")
         return np.swapaxes(array, 0, 1)
+
+    if isinstance(expr, TypedRavel):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("ravel expects an array value")
+        return np.ravel(array)
+
+    if isinstance(expr, TypedReshape):
+        array = _eval_expr(expr.array, env)
+        if not isinstance(array, np.ndarray):
+            raise EvaluationError("reshape expects an array value")
+        shape = tuple(dim.value for dim in expr.type.shape)
+        return np.reshape(array, shape)
 
     if isinstance(expr, TypedApp):
         if isinstance(expr.func, TypedExprNode) and isinstance(expr.func.expr, VarExpr):
@@ -1469,12 +1496,20 @@ def _binary_map_value(
     right: Value,
     result_type: RemoraType,
 ) -> Value:
+    if isinstance(left, np.ndarray) and left.ndim == 0:
+        left = left.item()
+    if isinstance(right, np.ndarray) and right.ndim == 0:
+        right = right.item()
     if not isinstance(left, np.ndarray) and not isinstance(right, np.ndarray):
         return _coerce_runtime_value(callable_value(left, right), result_type)
-    if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
-        raise EvaluationError("binary map currently expects both operands to be arrays or scalars")
+    if not isinstance(left, np.ndarray):
+        left = np.full(right.shape, left)
+    if not isinstance(right, np.ndarray):
+        right = np.full(left.shape, right)
     if left.shape != right.shape:
-        raise EvaluationError("binary map expects matching array shapes")
+        raise EvaluationError(
+            f"binary map expects matching array shapes, got {left.shape} and {right.shape}"
+        )
     values = [
         callable_value(left[index].item(), right[index].item())
         for index in np.ndindex(left.shape)
