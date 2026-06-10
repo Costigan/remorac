@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any
 
 from remora.hir import (
@@ -27,6 +27,7 @@ from remora.hir import (
     HIRIndicesOf,
     HIRIota,
     HIRLet,
+    HIRLambda,
     HIRLit,
     HIRMap,
     HIRPrimCallable,
@@ -1158,14 +1159,38 @@ def _lower_descriptor_internal_function(
                 "descriptor-exported functions require scalar or array parameters"
             )
 
+    function_body, hoisted_folds = _hoist_closed_scalar_folds(function.body)
+    hoisted_blocks: list[str] = []
+    for ordinal, (hoisted_name, fold_expr) in enumerate(hoisted_folds):
+        fold_code, fold_value, fold_type = _lower_scalar_fold_result(
+            fold_expr,
+            {},
+            tensor_env,
+            scalar_env=scalar_env,
+        )
+        result_name = f"%descriptor_scalar_{ordinal}"
+        indented_code = fold_code.replace("\n", "\n  ")
+        hoisted_blocks.append(
+            f"    {result_name} = scf.execute_region -> {fold_type} {{\n"
+            f"  {indented_code}\n"
+            f"      scf.yield {fold_value} : {fold_type}\n"
+            "    }"
+        )
+        operand = _Operand(result_name, [], fold_type)
+        scalar_env[hoisted_name] = operand
+        tensor_env[hoisted_name] = _TensorValue(
+            result_name, fold_type, fold_type
+        )
+
     result_type = type_to_mlir(function.return_type)
     if isinstance(function.return_type, ArrayType):
         code, result_value, lowered_result_type, _element_type = (
             _lower_tensor_input(
-                function.body,
+                function_body,
                 "result",
                 {},
                 tensor_env,
+                scalar_env,
             )
         )
         if lowered_result_type != result_type:
@@ -1176,7 +1201,7 @@ def _lower_descriptor_internal_function(
     elif isinstance(function.return_type, ScalarType):
         body, result_value = (
             _lower_descriptor_scalar_result_body(
-                function.body,
+                function_body,
                 result_type,
                 scalar_env,
                 tensor_env,
@@ -1187,10 +1212,90 @@ def _lower_descriptor_internal_function(
             "descriptor-exported functions require scalar or array results"
         )
 
+    hoisted_body = "\n".join(hoisted_blocks)
+    body_parts = "\n".join(part for part in (hoisted_body, body) if part)
     return f"""  func.func private @{name}({", ".join(arg_decls)}) -> {result_type} {{
-{body}
+{body_parts}
     return {result_value} : {result_type}
     }}"""
+
+
+def _hoist_closed_scalar_folds(
+    expr: HIRExpr,
+) -> tuple[HIRExpr, list[tuple[str, HIRFold | HIRReduce]]]:
+    """Hoist scalar folds that do not depend on an enclosing local binding."""
+    hoisted: list[tuple[str, HIRFold | HIRReduce]] = []
+    names_by_repr: dict[str, str] = {}
+
+    def free_var_names(
+        value: object, bound: frozenset[str] = frozenset()
+    ) -> set[str]:
+        if isinstance(value, HIRVar):
+            return set() if value.name in bound else {value.name}
+        if isinstance(value, HIRLambda):
+            lambda_bound = bound | frozenset(
+                param.name for param in value.params
+            )
+            return free_var_names(value.body, lambda_bound)
+        if isinstance(value, HIRLet):
+            return free_var_names(value.value, bound) | free_var_names(
+                value.body, bound | {value.name}
+            )
+        if not is_dataclass(value):
+            return set()
+        result: set[str] = set()
+        for field in fields(value):
+            child = getattr(value, field.name)
+            if isinstance(child, (list, tuple)):
+                for item in child:
+                    result.update(free_var_names(item, bound))
+            else:
+                result.update(free_var_names(child, bound))
+        return result
+
+    def rewrite(value: object, local_names: frozenset[str]) -> object:
+        if isinstance(value, (HIRFold, HIRReduce)) and isinstance(
+            value.result_type, ScalarType
+        ):
+            rewritten = rewrite_dataclass(value, local_names)
+            if not (free_var_names(rewritten) & local_names):
+                key = repr(rewritten)
+                name = names_by_repr.get(key)
+                if name is None:
+                    name = f"__descriptor_scalar_{len(hoisted)}"
+                    names_by_repr[key] = name
+                    hoisted.append((name, rewritten))
+                return HIRVar(name, value.result_type)
+            return rewritten
+        if isinstance(value, HIRLambda):
+            lambda_locals = local_names | frozenset(
+                param.name for param in value.params
+            )
+            return replace(value, body=rewrite(value.body, lambda_locals))
+        if isinstance(value, HIRLet):
+            return replace(
+                value,
+                value=rewrite(value.value, local_names),
+                body=rewrite(value.body, local_names | {value.name}),
+            )
+        if is_dataclass(value):
+            return rewrite_dataclass(value, local_names)
+        if isinstance(value, list):
+            return [rewrite(item, local_names) for item in value]
+        if isinstance(value, tuple):
+            return tuple(rewrite(item, local_names) for item in value)
+        return value
+
+    def rewrite_dataclass(value: object, local_names: frozenset[str]) -> object:
+        updates = {
+            field.name: rewrite(getattr(value, field.name), local_names)
+            for field in fields(value)
+        }
+        return replace(value, **updates)
+
+    rewritten = rewrite(expr, frozenset())
+    assert isinstance(rewritten, HIRExpr)
+    return rewritten, hoisted
 
 
 def _lower_descriptor_scalar_result_body(
@@ -1206,6 +1311,7 @@ def _lower_descriptor_scalar_result_body(
                 expr.array,
                 {},
                 tensor_env=tensor_env,
+                scalar_env=scalar_env,
             )
         )
         init_code, init_value = _lower_scalar_value_for_fold_init(
@@ -1223,6 +1329,7 @@ def _lower_descriptor_scalar_result_body(
             acc_name="%acc",
             acc_type=result_type,
             result_type=result_type,
+            scalar_env=scalar_env,
         )
         body = f"""{input_code}
 {init_code}

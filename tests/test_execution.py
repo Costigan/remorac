@@ -413,6 +413,25 @@ def test_cpu_function_executor_runs_descriptor_input_vector_map():
     np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6, 8], dtype=np.float32))
 
 
+def test_cpu_function_executor_runs_map_with_scalar_parameter_capture():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def add_bias xs bias = map (\\x -> x + bias) xs",
+        "add_bias",
+        (ArrayType(FLOAT, (StaticDim(5),)), FLOAT),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.arange(5, dtype=np.float32),
+            np.asarray(1.5, dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value, np.arange(5, dtype=np.float32) + 1.5
+    )
+
+
 def test_cpu_function_executor_runs_rank0_descriptor_input():
     artifact = CPUFunctionExecutor.compile_source(
         "def bump x = x + 1.0",

@@ -799,6 +799,18 @@ def test_lowers_descriptor_input_function_export():
     assert "call @__remora_entry" in artifact.mlir_text
 
 
+def test_lowers_descriptor_function_map_with_scalar_parameter_capture():
+    artifact = compile_function_source(
+        "def add_bias xs bias = map (\\x -> x + bias) xs",
+        "add_bias",
+        (ArrayType(FLOAT, (StaticDim(4),)), FLOAT),
+        verify=False,
+    )
+
+    assert artifact.mlir_text
+    assert "arith.addf %in, %arg1 : f32" in artifact.mlir_text
+
+
 def test_builder_region_emitter_produces_correct_text():
     """Stream E2: verify _BuilderRegionEmitter produces equivalent text to
     _RegionEmitter for basic scalar expressions."""

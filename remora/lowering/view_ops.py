@@ -18,6 +18,7 @@ from remora.hir import (
     HIRTranspose,
 )
 from remora.types import ArrayType, StaticDim
+from remora.lowering.scalar import _Operand
 
 from remora.lowering.types import (
     RemoraLoweringError,
@@ -38,11 +39,12 @@ def _lower_view_module(
     | HIRDrop,
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
     code, result_value, result_type = _lower_view_result(
-        node, functions, tensor_env
+        node, functions, tensor_env, scalar_env=scalar_env
     )
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(code)
@@ -63,11 +65,14 @@ def _lower_view_result(
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
     prefix: str = "view",
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str]:
     if isinstance(node, HIRIndex):
         from remora.lowering.indexing import _lower_index_result
 
-        return _lower_index_result(node, functions, tensor_env, prefix)
+        return _lower_index_result(
+            node, functions, tensor_env, prefix, scalar_env=scalar_env
+        )
 
     from remora.lowering.tensor_ops import _lower_tensor_input
 
@@ -77,6 +82,7 @@ def _lower_view_result(
             _join_prefix(prefix, "in"),
             functions,
             tensor_env,
+            scalar_env,
         )
     )
     result_type = type_to_mlir(node.result_type)
@@ -261,12 +267,14 @@ def _lower_view_input(
     functions: dict[str, Any],
     prefix: str,
     tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str, str]:
     code, result_value, result_type = _lower_view_result(
         node,
         functions,
         tensor_env,
         prefix,
+        scalar_env,
     )
     element_type = type_to_mlir(node.result_type.element)
     return code, result_value, result_type, element_type
@@ -276,11 +284,12 @@ def _lower_transpose_module(
     node: HIRTranspose,
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
     code, result_value, result_type = _lower_transpose_result(
-        node, functions, tensor_env
+        node, functions, tensor_env, scalar_env=scalar_env
     )
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(code)
@@ -291,6 +300,8 @@ def _lower_transpose_result(
     node: HIRTranspose,
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
+    *,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str]:
     from remora.lowering.tensor_ops import _lower_tensor_input
 
@@ -300,6 +311,7 @@ def _lower_transpose_result(
             "trans_in",
             functions,
             tensor_env,
+            scalar_env,
         )
     )
     result_type = type_to_mlir(node.result_type)
