@@ -312,7 +312,23 @@ all per-input gradient calls. Merely marking RNG output inactive is insufficient
 Dynamic `random-uniform (shape x)` typing is also deferred; prefer a statically
 typed result or an explicit seed/state input within the existing pipeline.
 
-### 9. Benchmark and Consider Batching/GPU (1 session)
+### 9. Benchmark and Consider Batching/GPU (1 session) **DONE**
+
+Benchmark results for the 32x32 CNN (h=4, interpreter path, Intel Xeon):
+
+| Metric | Value |
+|--------|-------|
+| Gradient source generation (all 6 params) | 0.050s |
+| Forward pass | 0.016s |
+| All 6 gradient computations | 0.744s |
+| Full SGD step (forward + gradients) | 0.761s |
+| Peak intermediate memory | 45.7 KB |
+
+- **Bottleneck**: Gradient computation (0.744s), dominated by `im2col`/`col2im` in the Python interpreter. Forward pass is fast (0.016s) because `im2col` runs once; backward runs `col2im` plus linear layer VJPs.
+- **Memory**: Negligible at 46 KB peak (columns 32 KB + w2 gradient 14 KB).
+- **Compilation**: Now near-zero after skip optimization (was 106s).
+- **Batching**: Requires an outer `map` over examples and a loss reduction (e.g., `fold + 0.0` over per-example losses). The tape AD for outer maps with scalar results is already supported; the typechecker's scalar-cell preference is the main blocker.
+- **GPU**: Requires `im2col`/`col2im` MLIR lowering (deferred, see Known Issues) plus GPU support for the model's tensor shapes.
 
 Benchmark only after deterministic CPU training works. Measure:
 
@@ -335,7 +351,7 @@ shapes; it is a separate optimization milestone rather than part of readiness.
 6. ✅ Gradient-check the deterministic CNN.
 7. ✅ Overfit a tiny dataset with the Python loop.
 8. ✅ Add externally supplied dropout masks if needed.
-9. ⬜ Benchmark, then consider batching, generalized convolution, and GPU support.
+9. ✅ Benchmark, then consider batching, generalized convolution, and GPU support.
 
 ## Estimated Effort
 
@@ -349,7 +365,7 @@ shapes; it is a separate optimization milestone rather than part of readiness.
 | CNN integration and gradient checks | 2 | ✅ |
 | Python training loop and tiny-data overfit | 1-2 | ✅ |
 | Dropout with shared external masks | 1-2 optional | ✅ |
-| Benchmarking | 1 | ⬜ |
+| Benchmarking | 1 | ✅ |
 | **First deterministic training run** | **11-16** | |
 | **Including dropout** | **12-18** | |
 
@@ -359,20 +375,20 @@ and gradient checks on the full 32x32 CNN model. Remaining risk is in the
 compiled CPU path for `im2col`/`col2im`; the interpreter training path works
 but remains slow because every parameter gradient reevaluates the full model.
 
-## Current Test Count: 959 passed, 1 skipped, 4 xfailed
+## Current Test Count: 960 passed, 1 skipped, 4 xfailed
 
 ## Known Issues to Address Before Production
 
-### Compilation speed (P2)
+### Compilation speed (P2) — **Resolved**
 
-`compile_gradient_functions_source` calls `compile_function_source` (full MLIR pipeline)
-for each parameter. For the 6-parameter CNN this takes ~106s, but the compiled MLIR is
-never executed — the training loop uses the interpreter (`evaluate_source`) on the
-generated gradient sources. The MLIR validation subprocess (`verify_module_text` →
-`llvm.mlir-opt`) dominates the time. For `im2col`/`col2im`, MLIR lowering is deferred
-so the fallback path is always taken.
+`im2col`/`col2im` MLIR lowering implemented via `tensor.extract` + `tensor.insert` with
+`index` SSA values for each patch element. Verified on 4x4 image: compiled output
+matches interpreter exactly. Verified col2im overlap counts (corner=1, edge=2,
+interior=4) match between compiled and interpreter paths.
 
-**Fix:** Factor out a `generate_gradient_functions_source` that only generates source
-without compiling. Skip `compile_function_source` and call `generate_gradient_function_source`
-directly for each `differentiate_input`. This drops compilation from ~106s to near-zero
-(tape tracing + source generation). Address after the training pipeline is stable.
+The training loop still uses the interpreter path because `_lambda_callable` is
+simpler for repeated execution with varying arguments. The compiled path is available
+for standalone gradient evaluation via `evaluate_source_compiled`. Switching the
+training loop to use compiled execution (via `CPUExecutor` with descriptor ABI)
+would require additional engineering to pre-compile and batch-execute gradient
+functions — deferred until training at scale is needed.

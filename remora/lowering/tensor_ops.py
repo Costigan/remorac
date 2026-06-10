@@ -2712,3 +2712,158 @@ def _lower_rank2_c_unary(node, functions, c_base_name):
     builder.add_extern(f"  func.func private @{rt}(memref<{C}x{input_elem}>, memref<{C}x{result_elem}>)")
     builder.add_block(body)
     return builder.render("%result")
+
+
+def _lower_im2col_module(node, functions: dict[str, HIRFunction]) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    image_code, image_name, image_type, image_elem = _lower_tensor_input(
+        node.image, "image", functions
+    )
+    result_type = type_to_mlir(node.result_type)
+    kh, kw = node.kernel_shape
+    stride = node.stride
+    n_patches = int(node.result_type.shape[0].value)
+    patch_size = int(node.result_type.shape[1].value)
+
+    image_remora_type = _expr_result_type(node.image)
+    h = int(image_remora_type.shape[0].value)
+    w = int(image_remora_type.shape[1].value)
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+
+    lines: list[str] = []
+    lines.append(image_code)
+    lines.append(
+        f"    %empty = tensor.empty() : {result_type}"
+    )
+
+    # Index constants
+    index_vars: dict[int, str] = {}
+    for idx_val in range(max(out_h * stride + kh, out_w * stride + kw, patch_size)):
+        name = f"%c{idx_val}"
+        index_vars[idx_val] = name
+        lines.append(
+            f"    {name} = arith.constant {idx_val} : index"
+        )
+
+    # Build result via chained tensor.insert for each patch pixel
+    prev_name = "%empty"
+    for i in range(out_h):
+        for j in range(out_w):
+            for ki in range(kh):
+                for kj in range(kw):
+                    row = i * stride + ki
+                    col = j * stride + kj
+                    patch_idx = i * out_w + j
+                    pixel_idx = ki * kw + kj
+                    pixel_name = f"%px_{i}_{j}_{ki}_{kj}"
+                    row_idx = index_vars[row]
+                    col_idx = index_vars[col]
+                    lines.append(
+                        f"    {pixel_name} = tensor.extract {image_name}"
+                        f"[{row_idx}, {col_idx}] : {image_type}"
+                    )
+                    next_name = f"%r_{i}_{j}_{ki}_{kj}"
+                    p_idx = index_vars[patch_idx]
+                    pi_idx = index_vars[pixel_idx]
+                    lines.append(
+                        f"    {next_name} = tensor.insert {pixel_name}"
+                        f" into {prev_name}[{p_idx}, {pi_idx}]"
+                        f" : {result_type}"
+                    )
+                    prev_name = next_name
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block("\n".join(lines))
+    return builder.render(prev_name)
+
+
+def _lower_col2im_module(node, functions: dict[str, HIRFunction]) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    columns_code, columns_name, columns_type, columns_elem = _lower_tensor_input(
+        node.columns, "columns", functions
+    )
+    result_type = type_to_mlir(node.result_type)
+    h, w = node.image_shape
+    kh, kw = node.kernel_shape
+    stride = node.stride
+    n_patches = int(node.result_type.shape[0].value if hasattr(node.result_type.shape[0], 'value') else 0)
+    patch_size = kh * kw
+
+    # Compute output dimensions
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+
+    # Compute the actual number of patches and patch size
+    columns_remora = _expr_result_type(node.columns)
+    if isinstance(columns_remora, ArrayType):
+        n_patches = int(columns_remora.shape[0].value)
+        patch_size = int(columns_remora.shape[1].value)
+        out_h = (h - kh) // stride + 1
+        out_w = (w - kw) // stride + 1
+
+    lines: list[str] = []
+    lines.append(columns_code)
+    lines.append(
+        f"    %zero = arith.constant 0.0 : {columns_elem}"
+    )
+    lines.append(
+        f"    %empty = tensor.empty() : {result_type}"
+    )
+    lines.append(
+        f"    %init = linalg.fill ins(%zero : {columns_elem})"
+        f" outs(%empty : {result_type}) -> {result_type}"
+    )
+
+    # Index constants
+    index_vars: dict[int, str] = {}
+    for idx_val in range(max(h, w, n_patches if n_patches else 0, patch_size)):
+        name = f"%c{idx_val}"
+        index_vars[idx_val] = name
+        lines.append(
+            f"    {name} = arith.constant {idx_val} : index"
+        )
+
+    # Scatter-add via chained extract-add-insert for each patch pixel
+    prev_name = "%init"
+    for i in range(out_h):
+        for j in range(out_w):
+            for ki in range(kh):
+                for kj in range(kw):
+                    row = i * stride + ki
+                    col = j * stride + kj
+                    patch_idx = i * out_w + j
+                    pixel_idx = ki * kw + kj
+
+                    col_pixel_name = f"%cp_{i}_{j}_{ki}_{kj}"
+                    p_idx = index_vars[patch_idx]
+                    pi_idx = index_vars[pixel_idx]
+                    lines.append(
+                        f"    {col_pixel_name} = tensor.extract {columns_name}"
+                        f"[{p_idx}, {pi_idx}] : {columns_type}"
+                    )
+                    img_pixel_name = f"%ip_{i}_{j}_{ki}_{kj}"
+                    row_idx = index_vars[row]
+                    col_idx = index_vars[col]
+                    lines.append(
+                        f"    {img_pixel_name} = tensor.extract {prev_name}"
+                        f"[{row_idx}, {col_idx}] : {result_type}"
+                    )
+                    added_name = f"%add_{i}_{j}_{ki}_{kj}"
+                    lines.append(
+                        f"    {added_name} = arith.addf {col_pixel_name},"
+                        f" {img_pixel_name} : {columns_elem}"
+                    )
+                    next_name = f"%r_{i}_{j}_{ki}_{kj}"
+                    lines.append(
+                        f"    {next_name} = tensor.insert {added_name}"
+                        f" into {prev_name}[{row_idx}, {col_idx}]"
+                        f" : {result_type}"
+                    )
+                    prev_name = next_name
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block("\n".join(lines))
+    return builder.render(prev_name)
