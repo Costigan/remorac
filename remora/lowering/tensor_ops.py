@@ -37,6 +37,8 @@ from remora.hir import (
     HIRSort,
     HIRSubarray,
     HIRScatterAdd,
+    HIRIm2col,
+    HIRCol2im,
     HIRTake,
     HIRTranspose,
     HIRVar,
@@ -404,6 +406,12 @@ def _lower_tensor_input(
         raise RemoraLoweringError(
             "only scalar-literal or array-source with-shape lowers as tensor input so far"
         )
+
+    if isinstance(node, HIRIm2col):
+        return _lower_im2col_tensor_input(node, functions, prefix, tensor_env)
+
+    if isinstance(node, HIRCol2im):
+        return _lower_col2im_tensor_input(node, functions, prefix, tensor_env)
 
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
@@ -2867,3 +2875,125 @@ def _lower_col2im_module(node, functions: dict[str, HIRFunction]) -> str:
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block("\n".join(lines))
     return builder.render(prev_name)
+
+
+def _lower_im2col_tensor_input(
+    node, functions, prefix="", tensor_env=None,
+):
+    image_code, image_name, image_type, image_elem = _lower_tensor_input(
+        node.image, _join_prefix(prefix, "image"), functions, tensor_env
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    kh, kw = node.kernel_shape
+    stride = node.stride
+
+    image_remora_type = _expr_result_type(node.image)
+    h = int(image_remora_type.shape[0].value)
+    w = int(image_remora_type.shape[1].value)
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+
+    lines: list[str] = []
+    lines.append(image_code)
+    empty_name = f"%{_join_prefix(prefix, 'empty')}"
+    lines.append(f"    {empty_name} = tensor.empty() : {result_type}")
+
+    max_idx = max(out_h * stride + kh, out_w * stride + kw, kh * kw)
+    index_vars: dict[int, str] = {}
+    for idx_val in range(max_idx):
+        name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
+        index_vars[idx_val] = name
+        lines.append(f"    {name} = arith.constant {idx_val} : index")
+
+    prev_name = empty_name
+    for i in range(out_h):
+        for j in range(out_w):
+            for ki in range(kh):
+                for kj in range(kw):
+                    row = i * stride + ki
+                    col = j * stride + kj
+                    patch_idx = i * out_w + j
+                    pixel_idx = ki * kw + kj
+                    pixel_name = f"%{_join_prefix(prefix, f'px_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {pixel_name} = tensor.extract {image_name}"
+                        f"[{index_vars[row]}, {index_vars[col]}] : {image_type}"
+                    )
+                    next_name = f"%{_join_prefix(prefix, f'r_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {next_name} = tensor.insert {pixel_name}"
+                        f" into {prev_name}[{index_vars[patch_idx]}, {index_vars[pixel_idx]}]"
+                        f" : {result_type}"
+                    )
+                    prev_name = next_name
+
+    return "\n".join(lines), prev_name, result_type, result_elem
+
+
+def _lower_col2im_tensor_input(
+    node, functions, prefix="", tensor_env=None,
+):
+    columns_code, columns_name, columns_type, columns_elem = _lower_tensor_input(
+        node.columns, _join_prefix(prefix, "columns"), functions, tensor_env
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    h, w = node.image_shape
+    kh, kw = node.kernel_shape
+    stride = node.stride
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+
+    lines: list[str] = []
+    lines.append(columns_code)
+    zero_name = f"%{_join_prefix(prefix, 'zero')}"
+    empty_name = f"%{_join_prefix(prefix, 'empty')}"
+    init_name = f"%{_join_prefix(prefix, 'init')}"
+    lines.append(f"    {zero_name} = arith.constant 0.0 : {columns_elem}")
+    lines.append(f"    {empty_name} = tensor.empty() : {result_type}")
+    lines.append(
+        f"    {init_name} = linalg.fill ins({zero_name} : {columns_elem})"
+        f" outs({empty_name} : {result_type}) -> {result_type}"
+    )
+
+    max_idx = max(h, w, out_h * out_w, kh * kw)
+    index_vars: dict[int, str] = {}
+    for idx_val in range(max_idx):
+        name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
+        index_vars[idx_val] = name
+        lines.append(f"    {name} = arith.constant {idx_val} : index")
+
+    prev_name = init_name
+    for i in range(out_h):
+        for j in range(out_w):
+            for ki in range(kh):
+                for kj in range(kw):
+                    row = i * stride + ki
+                    col = j * stride + kj
+                    patch_idx = i * out_w + j
+                    pixel_idx = ki * kw + kj
+                    col_pixel_name = f"%{_join_prefix(prefix, f'cp_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {col_pixel_name} = tensor.extract {columns_name}"
+                        f"[{index_vars[patch_idx]}, {index_vars[pixel_idx]}] : {columns_type}"
+                    )
+                    img_pixel_name = f"%{_join_prefix(prefix, f'ip_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {img_pixel_name} = tensor.extract {prev_name}"
+                        f"[{index_vars[row]}, {index_vars[col]}] : {result_type}"
+                    )
+                    added_name = f"%{_join_prefix(prefix, f'add_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {added_name} = arith.addf {col_pixel_name},"
+                        f" {img_pixel_name} : {columns_elem}"
+                    )
+                    next_name = f"%{_join_prefix(prefix, f'r_{i}_{j}_{ki}_{kj}')}"
+                    lines.append(
+                        f"    {next_name} = tensor.insert {added_name}"
+                        f" into {prev_name}[{index_vars[row]}, {index_vars[col]}]"
+                        f" : {result_type}"
+                    )
+                    prev_name = next_name
+
+    return "\n".join(lines), prev_name, result_type, result_elem

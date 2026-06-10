@@ -704,6 +704,7 @@ class CPUFunctionExecutor:
         param_types: tuple[RemoraType, ...],
         *,
         include_prelude: bool = True,
+        syntax: str = "ml",
         toolchain: PipelineToolchain | None = None,
         cpu_threads: int | None = None,
         cpu_vectorize: bool = False,
@@ -715,6 +716,7 @@ class CPUFunctionExecutor:
             param_types,
             verify=False,
             include_prelude=include_prelude,
+            syntax=syntax,
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
