@@ -15,6 +15,7 @@ from remora.hir import (
     HIRDrop,
     HIRExpr,
     HIRFold,
+    HIRIf,
     HIRIota,
     HIRIndex,
     HIRLet,
@@ -139,6 +140,8 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, (HIRIm2col, HIRCol2im)):
         return expr.result_type
     if isinstance(expr, HIRWithShape):
+        return expr.result_type
+    if isinstance(expr, HIRIf):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 
