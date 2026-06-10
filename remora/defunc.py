@@ -39,6 +39,8 @@ from remora.hir import (
     HIRReverse,
     HIRRotate,
     HIRScatterAdd,
+    HIRIm2col,
+    HIRCol2im,
     HIRPair,
     HIRFirst,
     HIRSecond,
@@ -183,6 +185,19 @@ class _Defunctionalizer:
                 self._rewrite_expr(e.target, scalar_env),
                 self._rewrite_expr(e.index, scalar_env),
                 self._rewrite_expr(e.update, scalar_env),
+                e.result_type,
+            ),
+            HIRIm2col: lambda e: HIRIm2col(
+                self._rewrite_expr(e.image, scalar_env),
+                e.kernel_shape,
+                e.stride,
+                e.result_type,
+            ),
+            HIRCol2im: lambda e: HIRCol2im(
+                self._rewrite_expr(e.columns, scalar_env),
+                e.image_shape,
+                e.kernel_shape,
+                e.stride,
                 e.result_type,
             ),
             HIRPair: lambda e: HIRPair(

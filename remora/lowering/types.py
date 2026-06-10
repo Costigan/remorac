@@ -27,6 +27,8 @@ from remora.hir import (
     HIRReverse,
     HIRRotate,
     HIRScatterAdd,
+    HIRIm2col,
+    HIRCol2im,
     HIRSubarray,
     HIRTake,
     HIRTranspose,
@@ -133,6 +135,8 @@ def _expr_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, HIRRotate):
         return expr.result_type
     if isinstance(expr, HIRScatterAdd):
+        return expr.result_type
+    if isinstance(expr, (HIRIm2col, HIRCol2im)):
         return expr.result_type
     if isinstance(expr, HIRWithShape):
         return expr.result_type

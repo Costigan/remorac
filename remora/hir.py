@@ -57,6 +57,8 @@ from remora.typechecker import (
     TypedUnbox,
     TypedWithShape,
     TypedScatterAdd,
+    TypedIm2col,
+    TypedCol2im,
     TypedPair,
     TypedFirst,
     TypedSecond,
@@ -296,6 +298,23 @@ class HIRScatterAdd:
 
 
 @dataclass(frozen=True)
+class HIRIm2col:
+    image: HIRExpr
+    kernel_shape: tuple[int, int]
+    stride: int
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRCol2im:
+    columns: HIRExpr
+    image_shape: tuple[int, int]
+    kernel_shape: tuple[int, int]
+    stride: int
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
 class HIRPair:
     left: HIRExpr
     right: HIRExpr
@@ -425,6 +444,8 @@ HIRExpr: TypeAlias = (
     | HIRIndicesOf
     | HIRWithShape
     | HIRScatterAdd
+    | HIRIm2col
+    | HIRCol2im
     | HIRPair
     | HIRFirst
     | HIRSecond
@@ -578,6 +599,33 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             lower_expr(expr.array),
             lower_expr(expr.index),
             lower_expr(expr.update),
+            expr.type,
+        )
+
+    if isinstance(expr, TypedIm2col):
+        ast = expr.expr
+        kh = int(ast.kernel_shape.elements[0].value)
+        kw = int(ast.kernel_shape.elements[1].value)
+        stride = int(ast.stride.value)
+        return HIRIm2col(
+            lower_expr(expr.image),
+            (kh, kw),
+            stride,
+            expr.type,
+        )
+
+    if isinstance(expr, TypedCol2im):
+        ast = expr.expr
+        h = int(ast.image_shape.elements[0].value)
+        w = int(ast.image_shape.elements[1].value)
+        kh = int(ast.kernel_shape.elements[0].value)
+        kw = int(ast.kernel_shape.elements[1].value)
+        stride = int(ast.stride.value)
+        return HIRCol2im(
+            lower_expr(expr.columns),
+            (h, w),
+            (kh, kw),
+            stride,
             expr.type,
         )
 

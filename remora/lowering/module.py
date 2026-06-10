@@ -39,6 +39,8 @@ from remora.hir import (
     HIRReverse,
     HIRRotate,
     HIRScatterAdd,
+    HIRIm2col,
+    HIRCol2im,
     HIRScan,
     HIRSlice,
     HIRSort,
@@ -541,6 +543,10 @@ def _lower_main_module(
         return _lower_with_shape_module(node, functions)
     if isinstance(node, HIRScatterAdd):
         return _lower_scatter_add_module(node, functions)
+    if isinstance(node, (HIRIm2col, HIRCol2im)):
+        raise RemoraLoweringError(
+            f"{type(node).__name__} CPU lowering is deferred"
+        )
     if isinstance(node, HIRFirst):
         inner = node.pair
         while isinstance(inner, HIRLet):

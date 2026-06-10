@@ -33,6 +33,7 @@ from remora.typechecker import (
     TypedTake,
     TypedDrop,
     TypedTranspose,
+    TypedIm2col,
 )
 from remora.types import FLOAT
 
@@ -150,6 +151,21 @@ class EvalTape:
                 index_vals = e.saved[1]
                 result = np.zeros(input_shape, dtype=np.float64)
                 result[index_vals] = adj
+                _accum(adjs, e.inputs[0], result)
+            elif e.kind == "im2col":
+                image_shape = tuple(int(d) for d in e.saved[0])
+                kh = int(e.saved[1])
+                kw = int(e.saved[2])
+                stride = int(e.saved[3])
+                adj_arr = np.asarray(adj, dtype=np.float64)
+                h, w = image_shape
+                out_h = (h - kh) // stride + 1
+                out_w = (w - kw) // stride + 1
+                result = np.zeros(image_shape, dtype=np.float64)
+                for i in range(out_h):
+                    for j in range(out_w):
+                        patch = adj_arr[i * out_w + j, :].reshape(kh, kw)
+                        result[i * stride : i * stride + kh, j * stride : j * stride + kw] += patch
                 _accum(adjs, e.inputs[0], result)
             elif e.kind == "select":
                 cond_val = self.values[e.inputs[0]]
@@ -281,6 +297,8 @@ def trace_expr(
         return _trace_rotate(expr, env, tape)
     if isinstance(expr, TypedIndex):
         return _trace_index(expr, env, tape)
+    if isinstance(expr, TypedIm2col):
+        return _trace_im2col(expr, env, tape)
     raise NotImplementedError(f"trace: {type(expr).__name__}")
 
 
@@ -561,6 +579,27 @@ def _trace_index(expr: TypedIndex, env: dict[str, int], tape: EvalTape) -> int:
     result = np.asarray(array)[tuple(index_vals)]
     return tape.push(
         TapeEntry("index", (array_idx,), (array.shape, tuple(index_vals))),
+        result,
+    )
+
+
+def _trace_im2col(expr, env: dict[str, int], tape: EvalTape) -> int:
+    image_idx = trace_expr(expr.image, env, tape)
+    image = _value(tape, image_idx)
+    ast = expr.expr
+    kh = int(ast.kernel_shape.elements[0].value)
+    kw = int(ast.kernel_shape.elements[1].value)
+    stride = int(ast.stride.value)
+    h, w = image.shape
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+    result = np.zeros((out_h * out_w, kh * kw), dtype=np.float64)
+    for i in range(out_h):
+        for j in range(out_w):
+            patch = image[i * stride : i * stride + kh, j * stride : j * stride + kw]
+            result[i * out_w + j, :] = patch.ravel()
+    return tape.push(
+        TapeEntry("im2col", (image_idx,), (image.shape, kh, kw, stride)),
         result,
     )
 

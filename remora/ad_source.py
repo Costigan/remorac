@@ -109,6 +109,26 @@ class _ScatterAdd:
 
 
 @dataclass(frozen=True)
+class _Im2col:
+    image: "_Expr"
+    image_shape: Shape
+    kh: int
+    kw: int
+    stride: int
+    shape: Shape
+
+
+@dataclass(frozen=True)
+class _Col2im:
+    value: "_Expr"
+    image_shape: Shape
+    kh: int
+    kw: int
+    stride: int
+    shape: Shape
+
+
+@dataclass(frozen=True)
 class _If:
     condition: "_Expr"
     then_expr: "_Expr"
@@ -123,7 +143,7 @@ class _Pair:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fold | _FoldBroadcast | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _If | _Pair
+_Expr: TypeAlias = _Atom | _Op | _Fold | _FoldBroadcast | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _Im2col | _Col2im | _If | _Pair
 
 
 @dataclass(frozen=True)
@@ -252,6 +272,16 @@ def generate_gradient_source(
             operand = primals[entry.inputs[0]]
             index_vals = tuple(int(v) for v in entry.saved[1])
             _accumulate(adjs, entry.inputs[0], _pad_index(operand, adj, index_vals))
+        elif entry.kind == "im2col":
+            image_shape = tuple(int(d) for d in entry.saved[0])
+            kh = int(entry.saved[1])
+            kw = int(entry.saved[2])
+            stride = int(entry.saved[3])
+            _accumulate(
+                adjs,
+                entry.inputs[0],
+                _Col2im(adj, image_shape, kh, kw, stride, image_shape),
+            )
         elif entry.kind == "select":
             cond = primals[entry.inputs[0]]
             _accumulate(adjs, entry.inputs[1], _If(cond, adj, _fill(_constant(0.0), primals[entry.inputs[1]]), adj.shape))
@@ -337,6 +367,12 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
         elif entry.kind == "index":
             i = int(entry.saved[1][0])
             expr = _index(primals[entry.inputs[0]], i)
+        elif entry.kind == "im2col":
+            image_shape = tuple(int(d) for d in entry.saved[0])
+            kh = int(entry.saved[1])
+            kw = int(entry.saved[2])
+            stride = int(entry.saved[3])
+            expr = _Im2col(primals[entry.inputs[0]], image_shape, kh, kw, stride, shape)
         elif entry.kind == "select":
             expr = _If(primals[entry.inputs[0]], primals[entry.inputs[1]], primals[entry.inputs[2]], shape)
         elif entry.kind == "inactive":
@@ -955,6 +991,13 @@ def _emit(expr: _Expr) -> str:
         if isinstance(expr.index, int):
             return f"(scatter-add {_emit(expr.target)} {expr.index} {_emit(expr.update)})"
         return f"(scatter-add {_emit(expr.target)} {_emit(expr.index)} {_emit(expr.update)})"
+    if isinstance(expr, _Im2col):
+        ks = " ".join(str(k) for k in (expr.kh, expr.kw))
+        return f"(im2col {_emit(expr.image)} [{ks}] {expr.stride})"
+    if isinstance(expr, _Col2im):
+        dims = " ".join(str(d) for d in expr.image_shape)
+        ks = " ".join(str(k) for k in (expr.kh, expr.kw))
+        return f"(col2im {_emit(expr.value)} [{dims}] [{ks}] {expr.stride})"
     if isinstance(expr, _If):
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
     if isinstance(expr, _Pair):
