@@ -143,6 +143,7 @@ def _lower_scalar_value_for_fold_init(
 def _lower_scalar_module(
     node: HIRLit | HIRCast | HIRPrimOp | HIRLet | HIRCall | HIRIf,
     functions: dict[str, Any] | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
@@ -160,7 +161,7 @@ def _lower_scalar_module(
     else:
         result_type = type_to_mlir(node.type)
     emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
-    value = emitter.emit_expr(node, {})
+    value = emitter.emit_expr(node, scalar_env or {})
     lines = [
         *emitter.lines,
         *_cast_if_needed(value.value, value.type, result_type, "%result_cast"),

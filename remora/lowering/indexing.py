@@ -42,6 +42,8 @@ def _lower_index_result(
     functions: dict[str, Any],
     tensor_env: TensorEnv | None = None,
     prefix: str = "idx",
+    *,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str]:
     from remora.lowering.tensor_ops import _lower_tensor_input
 
@@ -55,6 +57,7 @@ def _lower_index_result(
             _join_prefix(prefix, "in"),
             functions,
             tensor_env,
+            scalar_env,
         )
     )
 
@@ -76,7 +79,7 @@ def _lower_index_result(
                 )
             else:
                 index_code, index_value_name = _lower_scalar_index_expr(
-                    index, name, functions
+                    index, name, functions, scalar_env
                 )
                 index_lines.append(index_code)
                 index_names[-1] = index_value_name
@@ -113,7 +116,7 @@ def _lower_index_result(
         else:
             idx_name = f"%{prefix}_idx{position}"
             code, val_name = _lower_scalar_index_expr(
-                index, idx_name, functions
+                index, idx_name, functions, scalar_env
             )
             extra_lines.append(code)
             offsets.append(val_name)
