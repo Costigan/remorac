@@ -60,6 +60,14 @@ def test_cpu_evaluates_binary_map():
     np.testing.assert_array_equal(lambda_result.value, np.array([4, 6], dtype=np.int32))
 
 
+def test_cpu_evaluates_binary_map_with_scalar_replication():
+    result = evaluate_source("[1.0, 2.0, 3.0] + 0.5")
+
+    np.testing.assert_array_equal(
+        result.value, np.array([1.5, 2.5, 3.5], dtype=np.float32)
+    )
+
+
 def test_cpu_evaluates_static_shape_and_rank():
     shape = evaluate_source("shape [[1, 2], [3, 4]]")
     rank = evaluate_source("rank [[1, 2], [3, 4]]")
@@ -88,6 +96,22 @@ def test_cpu_evaluates_reverse():
 
     np.testing.assert_array_equal(result.value, np.array([3, 2, 1], dtype=np.int32))
     np.testing.assert_array_equal(matrix.value, np.array([[3, 4], [1, 2]], dtype=np.int32))
+
+
+def test_cpu_evaluates_ravel():
+    result = evaluate_source("ravel [[1.0, 2.0], [3.0, 4.0]]")
+
+    np.testing.assert_array_equal(
+        result.value, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    )
+
+
+def test_cpu_evaluates_reshape():
+    result = evaluate_source("reshape [2, 2] [1.0, 2.0, 3.0, 4.0]")
+
+    np.testing.assert_array_equal(
+        result.value, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    )
 
 
 def test_cpu_evaluates_row_reduction_map():

@@ -98,7 +98,8 @@ class EvalTape:
                 _bcast_acc(adjs, e.inputs[0], adj / rv, self.values[e.inputs[0]])
                 _bcast_acc(adjs, e.inputs[1], -adj * lv / (rv * rv), self.values[e.inputs[1]])
             elif e.kind == "exp":
-                _bcast_acc(adjs, e.inputs[0], adj * self.values[i], self.values[e.inputs[0]])
+                exp_val = e.saved[0] if e.saved else self.values[i]
+                _bcast_acc(adjs, e.inputs[0], adj * exp_val, self.values[e.inputs[0]])
             elif e.kind == "log":
                 _bcast_acc(adjs, e.inputs[0], adj / self.values[e.inputs[0]], self.values[e.inputs[0]])
             elif e.kind == "fold":
@@ -236,7 +237,7 @@ def _record_unary_primitive(tape, op, input_idx, input_val) -> int:
         result = np.log(input_val)
     else:
         raise NotImplementedError(f"no unary VJP registered for {op!r}")
-    return tape.push(TapeEntry(op, (input_idx,), ()), result)
+    return tape.push(TapeEntry(op, (input_idx,), (result,)), result)
 
 
 def _apply_bin_op(op, lv, rv):

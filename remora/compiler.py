@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     import numpy as np
@@ -396,11 +396,13 @@ def compile_gradient_functions_source(
     include_prelude: bool = True,
     syntax: str = "ml",
     verify: bool = True,
+    differentiate_inputs: Iterable[int] | None = None,
 ) -> MultiGradientCompilerArtifact:
     """Generate and compile one gradient function per active input.
 
-    For a function f: (A, B) → Float, returns two compiled gradients:
-    df/dA and df/dB, each as a separate GradientCompilerArtifact.
+    For a function f: (A, B) → Float, returns two compiled gradients by
+    default: df/dA and df/dB. Pass *differentiate_inputs* to compile only a
+    selected ordered subset.
     """
     from remora.ad_source import generate_gradient_function_source
 
@@ -410,7 +412,15 @@ def compile_gradient_functions_source(
     base_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
     gradients: list[GradientCompilerArtifact] = []
 
-    for i in range(len(param_types)):
+    input_indices = (
+        tuple(range(len(param_types)))
+        if differentiate_inputs is None
+        else tuple(differentiate_inputs)
+    )
+    if any(i < 0 or i >= len(param_types) for i in input_indices):
+        raise ValueError("differentiate_inputs contains an out-of-range input index")
+
+    for i in input_indices:
         grad_name = f"{base_name}_{i}"
         gradient = generate_gradient_function_source(
             source,
