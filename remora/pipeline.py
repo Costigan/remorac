@@ -22,22 +22,22 @@ from remora.errors import RemoraError
 VALIDATION_PIPELINE = "builtin.module(canonicalize,cse)"
 FUSION_PIPELINE = "builtin.module(linalg-fuse-elementwise-ops,canonicalize,cse)"
 
-CPU_PIPELINE = "builtin.module(" + ",".join(
-    [
-        "linalg-fuse-elementwise-ops",
-        "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
-        "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
-        "convert-linalg-to-loops",
-        "convert-scf-to-cf",
-        "expand-strided-metadata",
-        "lower-affine",
-        "finalize-memref-to-llvm",
-        "convert-arith-to-llvm",
-        "convert-index-to-llvm",
-        "convert-to-llvm",
-        "reconcile-unrealized-casts",
-    ]
-) + ")"
+CPU_PIPELINE_PASSES = (
+    "linalg-fuse-elementwise-ops",
+    "one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops}",
+    "func.func(buffer-hoisting,buffer-loop-hoisting,buffer-deallocation)",
+    "convert-linalg-to-loops",
+    "convert-scf-to-cf",
+    "expand-strided-metadata",
+    "lower-affine",
+    "finalize-memref-to-llvm",
+    "convert-arith-to-llvm",
+    "convert-index-to-llvm",
+    "convert-to-llvm",
+    "reconcile-unrealized-casts",
+)
+
+CPU_PIPELINE = "builtin.module(" + ",".join(CPU_PIPELINE_PASSES) + ")"
 
 CPU_VECTORIZED_PIPELINE = "builtin.module(" + ",".join(
     [

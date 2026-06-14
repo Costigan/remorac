@@ -115,3 +115,53 @@ remora> scale 2.0 xs
 remora> :type shape [[1, 2], [3, 4]]
 shape [[1, 2], [3, 4]] : int[2]
 ```
+## CNN Gradient Compilation Scalability Benchmark
+
+The crater CNN gradient benchmark is opt-in because descriptor lowering and
+the external MLIR CPU pipeline can take several minutes. It writes partial JSON
+results even when the CPU MLIR phase reaches its timeout.
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run python -m remora.benchmark \
+  --case crater-cnn-gradient-k \
+  --phase-timeout 600 \
+  --descriptor-mlir /tmp/crater-cnn-gradient-k.mlir \
+  --json /tmp/crater-cnn-gradient-k.json
+```
+
+The output records gradient source generation time, function preparation time,
+descriptor compilation time, HIR/MLIR size metrics, CPU MLIR pipeline time,
+LLVM translation time, `llc` time, linker time, artifact sizes, per-tool peak
+RSS when GNU `time` is available, and the name of any timed-out phase. See
+`docs/CNN_GRADIENT_NATIVE_COMPILE_SCALABILITY.md` for the implementation plan.
+The `--descriptor-mlir` option is diagnostic-only; the generated file is large
+and should not be committed.
+
+To run the production CPU passes one at a time and record per-stage time, size,
+and peak RSS, add `--diagnose-cpu-stages`:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run python -m remora.benchmark \
+  --case crater-cnn-gradient-k \
+  --phase-timeout 60 \
+  --diagnose-cpu-stages \
+  --mlir-pass-timing \
+  --json /tmp/crater-cnn-gradient-k-stages.json
+```
+
+Pass `--skip-cpu-stage linalg-fuse-elementwise-ops` to compare bufferization
+without the production fusion pass. This option is diagnostic-only.
+Pass `--pre-cpu-stage canonicalize --pre-cpu-stage cse` to measure whether
+canonicalization and common-subexpression elimination reduce the module before
+bufferization.
+
+After persisting MLIR once, rerun pass experiments without regenerating the
+gradient or HIR:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run python -m remora.benchmark \
+  --diagnose-mlir /tmp/crater-cnn-gradient-k.mlir \
+  --phase-timeout 60 \
+  --skip-cpu-stage linalg-fuse-elementwise-ops \
+  --json /tmp/crater-cnn-gradient-k-no-fusion.json
+```

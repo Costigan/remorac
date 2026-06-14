@@ -5,7 +5,10 @@ import pytest
 
 from remora.ad import EvalTape, TapeEntry, grad_via_tape, trace_via_tape
 from remora.ad_testing import finite_difference_grad
-from remora.ad_source import generate_gradient_source
+from remora.ad_source import (
+    generate_gradient_function_source,
+    generate_gradient_source,
+)
 from remora.compiler import (
     compile_gradient_functions_source,
     compile_gradient_function_source,
@@ -20,6 +23,7 @@ from remora.executor import RemoraExecutor
 from remora.lisp_reader import parse_lisp
 from remora.pipeline import PipelineUnavailable
 from remora.runtime import (
+    CPUFunctionExecutor,
     CUDAError,
     cuda_available,
     evaluate_source,
@@ -238,6 +242,52 @@ def test_generated_gradient_compiles_for_cpu_and_gpu_artifacts():
     assert gpu_artifact.kernels
     np.testing.assert_allclose(grad_via_tape(body, "x", x), 2.0 * x)
 
+
+def test_array_gradient_with_captured_scalar_map_and_fold_compiles_and_executes():
+    source = """
+(define/pi ()
+  (scaled-sum [xs (Array Float 4) bias Float] Float)
+  (fold + 0.0 (map (lambda (x) (* x bias)) xs)))
+"""
+    param_types = (ArrayType(FLOAT, (StaticDim(4),)), FLOAT)
+    gradient = generate_gradient_function_source(
+        source,
+        "scaled-sum",
+        param_types,
+        differentiate_input=0,
+        include_prelude=False,
+        syntax="lisp",
+    )
+
+    compiler_artifact = compile_function_source(
+        gradient.source,
+        gradient.function_name,
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+        verify=False,
+    )
+    assert compiler_artifact.mlir_text
+
+    artifact = CPUFunctionExecutor.compile_source(
+        gradient.source,
+        gradient.function_name,
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float32),
+            np.asarray(2.5, dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.full(4, 2.5, dtype=np.float32),
+    )
 
 def test_named_function_gradient_compiler_workflow():
     n = 6

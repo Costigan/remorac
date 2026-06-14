@@ -2853,156 +2853,25 @@ def _lower_rank2_c_unary(node, functions, c_base_name):
 def _lower_im2col_module(node, functions: dict[str, HIRFunction]) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
-    image_code, image_name, image_type, image_elem = _lower_tensor_input(
-        node.image, "image", functions
+    body, result_name, result_type, _ = _lower_im2col_tensor_input(
+        node, functions, prefix="im2col"
     )
-    result_type = type_to_mlir(node.result_type)
-    kh, kw = node.kernel_shape
-    stride = node.stride
-    n_patches = int(node.result_type.shape[0].value)
-    patch_size = int(node.result_type.shape[1].value)
-
-    image_remora_type = _expr_result_type(node.image)
-    h = int(image_remora_type.shape[0].value)
-    w = int(image_remora_type.shape[1].value)
-    out_h = (h - kh) // stride + 1
-    out_w = (w - kw) // stride + 1
-
-    lines: list[str] = []
-    lines.append(image_code)
-    lines.append(
-        f"    %empty = tensor.empty() : {result_type}"
-    )
-
-    # Index constants
-    index_vars: dict[int, str] = {}
-    for idx_val in range(max(out_h * stride + kh, out_w * stride + kw, patch_size) + 1):
-        name = f"%c{idx_val}"
-        index_vars[idx_val] = name
-        lines.append(
-            f"    {name} = arith.constant {idx_val} : index"
-        )
-
-    # Build result via chained tensor.insert for each patch pixel
-    prev_name = "%empty"
-    for i in range(out_h):
-        for j in range(out_w):
-            for ki in range(kh):
-                for kj in range(kw):
-                    row = i * stride + ki
-                    col = j * stride + kj
-                    patch_idx = i * out_w + j
-                    pixel_idx = ki * kw + kj
-                    pixel_name = f"%px_{i}_{j}_{ki}_{kj}"
-                    row_idx = index_vars[row]
-                    col_idx = index_vars[col]
-                    lines.append(
-                        f"    {pixel_name} = tensor.extract {image_name}"
-                        f"[{row_idx}, {col_idx}] : {image_type}"
-                    )
-                    next_name = f"%r_{i}_{j}_{ki}_{kj}"
-                    p_idx = index_vars[patch_idx]
-                    pi_idx = index_vars[pixel_idx]
-                    lines.append(
-                        f"    {next_name} = tensor.insert {pixel_name}"
-                        f" into {prev_name}[{p_idx}, {pi_idx}]"
-                        f" : {result_type}"
-                    )
-                    prev_name = next_name
 
     builder = _MLIRMainModuleBuilder(result_type)
-    builder.add_block("\n".join(lines))
-    return builder.render(prev_name)
+    builder.add_block(body)
+    return builder.render(result_name)
 
 
 def _lower_col2im_module(node, functions: dict[str, HIRFunction]) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
-    columns_code, columns_name, columns_type, columns_elem = _lower_tensor_input(
-        node.columns, "columns", functions
+    body, result_name, result_type, _ = _lower_col2im_tensor_input(
+        node, functions, prefix="col2im"
     )
-    result_type = type_to_mlir(node.result_type)
-    h, w = node.image_shape
-    kh, kw = node.kernel_shape
-    stride = node.stride
-    n_patches = int(node.result_type.shape[0].value if hasattr(node.result_type.shape[0], 'value') else 0)
-    patch_size = kh * kw
-
-    # Compute output dimensions
-    out_h = (h - kh) // stride + 1
-    out_w = (w - kw) // stride + 1
-
-    # Compute the actual number of patches and patch size
-    columns_remora = _expr_result_type(node.columns)
-    if isinstance(columns_remora, ArrayType):
-        n_patches = int(columns_remora.shape[0].value)
-        patch_size = int(columns_remora.shape[1].value)
-        out_h = (h - kh) // stride + 1
-        out_w = (w - kw) // stride + 1
-
-    lines: list[str] = []
-    lines.append(columns_code)
-    lines.append(
-        f"    %zero = arith.constant 0.0 : {columns_elem}"
-    )
-    lines.append(
-        f"    %empty = tensor.empty() : {result_type}"
-    )
-    lines.append(
-        f"    %init = linalg.fill ins(%zero : {columns_elem})"
-        f" outs(%empty : {result_type}) -> {result_type}"
-    )
-
-    # Index constants
-    index_vars: dict[int, str] = {}
-    for idx_val in range(max(h, w, n_patches if n_patches else 0, patch_size) + 1):
-        name = f"%c{idx_val}"
-        index_vars[idx_val] = name
-        lines.append(
-            f"    {name} = arith.constant {idx_val} : index"
-        )
-
-    # Scatter-add via chained extract-add-insert for each patch pixel
-    prev_name = "%init"
-    for i in range(out_h):
-        for j in range(out_w):
-            for ki in range(kh):
-                for kj in range(kw):
-                    row = i * stride + ki
-                    col = j * stride + kj
-                    patch_idx = i * out_w + j
-                    pixel_idx = ki * kw + kj
-
-                    col_pixel_name = f"%cp_{i}_{j}_{ki}_{kj}"
-                    p_idx = index_vars[patch_idx]
-                    pi_idx = index_vars[pixel_idx]
-                    lines.append(
-                        f"    {col_pixel_name} = tensor.extract {columns_name}"
-                        f"[{p_idx}, {pi_idx}] : {columns_type}"
-                    )
-                    img_pixel_name = f"%ip_{i}_{j}_{ki}_{kj}"
-                    row_idx = index_vars[row]
-                    col_idx = index_vars[col]
-                    lines.append(
-                        f"    {img_pixel_name} = tensor.extract {prev_name}"
-                        f"[{row_idx}, {col_idx}] : {result_type}"
-                    )
-                    added_name = f"%add_{i}_{j}_{ki}_{kj}"
-                    lines.append(
-                        f"    {added_name} = arith.addf {col_pixel_name},"
-                        f" {img_pixel_name} : {columns_elem}"
-                    )
-                    next_name = f"%r_{i}_{j}_{ki}_{kj}"
-                    lines.append(
-                        f"    {next_name} = tensor.insert {added_name}"
-                        f" into {prev_name}[{row_idx}, {col_idx}]"
-                        f" : {result_type}"
-                    )
-                    prev_name = next_name
 
     builder = _MLIRMainModuleBuilder(result_type)
-    builder.add_block("\n".join(lines))
-    return builder.render(prev_name)
+    builder.add_block(body)
+    return builder.render(result_name)
 
 
 def _lower_im2col_tensor_input(
@@ -3019,48 +2888,50 @@ def _lower_im2col_tensor_input(
     result_elem = type_to_mlir(node.result_type.element)
     kh, kw = node.kernel_shape
     stride = node.stride
-
+    n_patches = int(node.result_type.shape[0].value)
+    patch_size = int(node.result_type.shape[1].value)
     image_remora_type = _expr_result_type(node.image)
-    h = int(image_remora_type.shape[0].value)
     w = int(image_remora_type.shape[1].value)
-    out_h = (h - kh) // stride + 1
     out_w = (w - kw) // stride + 1
 
     lines: list[str] = []
     lines.append(image_code)
-    empty_name = f"%{_join_prefix(prefix, 'empty')}"
-    lines.append(f"    {empty_name} = tensor.empty() : {result_type}")
+    names = {
+        key: f"%{_join_prefix(prefix, key)}"
+        for key in (
+            "c0", "c1", "c_n_patches", "c_patch_size", "c_out_w", "c_kw",
+            "c_stride", "buffer", "patch_row", "patch_col", "kernel_row",
+            "kernel_col", "image_row_base", "image_col_base", "image_row",
+            "image_col", "pixel", "result",
+        )
+    }
+    lines.extend([
+        f"    {names['c0']} = arith.constant 0 : index",
+        f"    {names['c1']} = arith.constant 1 : index",
+        f"    {names['c_n_patches']} = arith.constant {n_patches} : index",
+        f"    {names['c_patch_size']} = arith.constant {patch_size} : index",
+        f"    {names['c_out_w']} = arith.constant {out_w} : index",
+        f"    {names['c_kw']} = arith.constant {kw} : index",
+        f"    {names['c_stride']} = arith.constant {stride} : index",
+        f"    {names['buffer']} = memref.alloc() : memref<{n_patches}x{patch_size}x{result_elem}>",
+        f"    scf.for %patch = {names['c0']} to {names['c_n_patches']} step {names['c1']} {{",
+        f"      {names['patch_row']} = arith.divui %patch, {names['c_out_w']} : index",
+        f"      {names['patch_col']} = arith.remui %patch, {names['c_out_w']} : index",
+        f"      scf.for %pixel_index = {names['c0']} to {names['c_patch_size']} step {names['c1']} {{",
+        f"        {names['kernel_row']} = arith.divui %pixel_index, {names['c_kw']} : index",
+        f"        {names['kernel_col']} = arith.remui %pixel_index, {names['c_kw']} : index",
+        f"        {names['image_row_base']} = arith.muli {names['patch_row']}, {names['c_stride']} : index",
+        f"        {names['image_col_base']} = arith.muli {names['patch_col']}, {names['c_stride']} : index",
+        f"        {names['image_row']} = arith.addi {names['image_row_base']}, {names['kernel_row']} : index",
+        f"        {names['image_col']} = arith.addi {names['image_col_base']}, {names['kernel_col']} : index",
+        f"        {names['pixel']} = tensor.extract {image_name}[{names['image_row']}, {names['image_col']}] : {image_type}",
+        f"        memref.store {names['pixel']}, {names['buffer']}[%patch, %pixel_index] : memref<{n_patches}x{patch_size}x{result_elem}>",
+        "      }",
+        "    }",
+        f"    {names['result']} = bufferization.to_tensor {names['buffer']} restrict writable : memref<{n_patches}x{patch_size}x{result_elem}>",
+    ])
 
-    max_idx = max(h, w, out_h * out_w, kh * kw)
-    index_vars: dict[int, str] = {}
-    for idx_val in range(max_idx + 1):
-        name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
-        index_vars[idx_val] = name
-        lines.append(f"    {name} = arith.constant {idx_val} : index")
-
-    prev_name = empty_name
-    for i in range(out_h):
-        for j in range(out_w):
-            for ki in range(kh):
-                for kj in range(kw):
-                    row = i * stride + ki
-                    col = j * stride + kj
-                    patch_idx = i * out_w + j
-                    pixel_idx = ki * kw + kj
-                    pixel_name = f"%{_join_prefix(prefix, f'px_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {pixel_name} = tensor.extract {image_name}"
-                        f"[{index_vars[row]}, {index_vars[col]}] : {image_type}"
-                    )
-                    next_name = f"%{_join_prefix(prefix, f'r_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {next_name} = tensor.insert {pixel_name}"
-                        f" into {prev_name}[{index_vars[patch_idx]}, {index_vars[pixel_idx]}]"
-                        f" : {result_type}"
-                    )
-                    prev_name = next_name
-
-    return "\n".join(lines), prev_name, result_type, result_elem
+    return "\n".join(lines), names["result"], result_type, result_elem
 
 
 def _lower_col2im_tensor_input(
@@ -3078,58 +2949,57 @@ def _lower_col2im_tensor_input(
     h, w = node.image_shape
     kh, kw = node.kernel_shape
     stride = node.stride
-    out_h = (h - kh) // stride + 1
     out_w = (w - kw) // stride + 1
+    columns_remora = _expr_result_type(node.columns)
+    n_patches = int(columns_remora.shape[0].value)
+    patch_size = int(columns_remora.shape[1].value)
 
     lines: list[str] = []
     lines.append(columns_code)
-    zero_name = f"%{_join_prefix(prefix, 'zero')}"
-    empty_name = f"%{_join_prefix(prefix, 'empty')}"
-    init_name = f"%{_join_prefix(prefix, 'init')}"
-    lines.append(f"    {zero_name} = arith.constant 0.0 : {columns_elem}")
-    lines.append(f"    {empty_name} = tensor.empty() : {result_type}")
-    lines.append(
-        f"    {init_name} = linalg.fill ins({zero_name} : {columns_elem})"
-        f" outs({empty_name} : {result_type}) -> {result_type}"
-    )
+    names = {
+        key: f"%{_join_prefix(prefix, key)}"
+        for key in (
+            "c0", "c1", "c_h", "c_w", "c_n_patches", "c_patch_size",
+            "c_out_w", "c_kw", "c_stride", "zero", "buffer", "patch_row",
+            "patch_col", "kernel_row", "kernel_col", "image_row_base",
+            "image_col_base", "image_row", "image_col", "column_pixel",
+            "image_pixel", "added", "result",
+        )
+    }
+    lines.extend([
+        f"    {names['c0']} = arith.constant 0 : index",
+        f"    {names['c1']} = arith.constant 1 : index",
+        f"    {names['c_h']} = arith.constant {h} : index",
+        f"    {names['c_w']} = arith.constant {w} : index",
+        f"    {names['c_n_patches']} = arith.constant {n_patches} : index",
+        f"    {names['c_patch_size']} = arith.constant {patch_size} : index",
+        f"    {names['c_out_w']} = arith.constant {out_w} : index",
+        f"    {names['c_kw']} = arith.constant {kw} : index",
+        f"    {names['c_stride']} = arith.constant {stride} : index",
+        f"    {names['zero']} = arith.constant 0.0 : {columns_elem}",
+        f"    {names['buffer']} = memref.alloc() : memref<{h}x{w}x{result_elem}>",
+        f"    scf.for %image_row_init = {names['c0']} to {names['c_h']} step {names['c1']} {{",
+        f"      scf.for %image_col_init = {names['c0']} to {names['c_w']} step {names['c1']} {{",
+        f"        memref.store {names['zero']}, {names['buffer']}[%image_row_init, %image_col_init] : memref<{h}x{w}x{result_elem}>",
+        "      }",
+        "    }",
+        f"    scf.for %patch = {names['c0']} to {names['c_n_patches']} step {names['c1']} {{",
+        f"      {names['patch_row']} = arith.divui %patch, {names['c_out_w']} : index",
+        f"      {names['patch_col']} = arith.remui %patch, {names['c_out_w']} : index",
+        f"      scf.for %pixel_index = {names['c0']} to {names['c_patch_size']} step {names['c1']} {{",
+        f"        {names['kernel_row']} = arith.divui %pixel_index, {names['c_kw']} : index",
+        f"        {names['kernel_col']} = arith.remui %pixel_index, {names['c_kw']} : index",
+        f"        {names['image_row_base']} = arith.muli {names['patch_row']}, {names['c_stride']} : index",
+        f"        {names['image_col_base']} = arith.muli {names['patch_col']}, {names['c_stride']} : index",
+        f"        {names['image_row']} = arith.addi {names['image_row_base']}, {names['kernel_row']} : index",
+        f"        {names['image_col']} = arith.addi {names['image_col_base']}, {names['kernel_col']} : index",
+        f"        {names['column_pixel']} = tensor.extract {columns_name}[%patch, %pixel_index] : {columns_type}",
+        f"        {names['image_pixel']} = memref.load {names['buffer']}[{names['image_row']}, {names['image_col']}] : memref<{h}x{w}x{result_elem}>",
+        f"        {names['added']} = arith.addf {names['column_pixel']}, {names['image_pixel']} : {columns_elem}",
+        f"        memref.store {names['added']}, {names['buffer']}[{names['image_row']}, {names['image_col']}] : memref<{h}x{w}x{result_elem}>",
+        "      }",
+        "    }",
+        f"    {names['result']} = bufferization.to_tensor {names['buffer']} restrict writable : memref<{h}x{w}x{result_elem}>",
+    ])
 
-    max_idx = max(h, w, out_h * out_w, kh * kw)
-    index_vars: dict[int, str] = {}
-    for idx_val in range(max_idx + 1):
-        name = f"%{_join_prefix(prefix, f'c{idx_val}')}"
-        index_vars[idx_val] = name
-        lines.append(f"    {name} = arith.constant {idx_val} : index")
-
-    prev_name = init_name
-    for i in range(out_h):
-        for j in range(out_w):
-            for ki in range(kh):
-                for kj in range(kw):
-                    row = i * stride + ki
-                    col = j * stride + kj
-                    patch_idx = i * out_w + j
-                    pixel_idx = ki * kw + kj
-                    col_pixel_name = f"%{_join_prefix(prefix, f'cp_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {col_pixel_name} = tensor.extract {columns_name}"
-                        f"[{index_vars[patch_idx]}, {index_vars[pixel_idx]}] : {columns_type}"
-                    )
-                    img_pixel_name = f"%{_join_prefix(prefix, f'ip_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {img_pixel_name} = tensor.extract {prev_name}"
-                        f"[{index_vars[row]}, {index_vars[col]}] : {result_type}"
-                    )
-                    added_name = f"%{_join_prefix(prefix, f'add_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {added_name} = arith.addf {col_pixel_name},"
-                        f" {img_pixel_name} : {columns_elem}"
-                    )
-                    next_name = f"%{_join_prefix(prefix, f'r_{i}_{j}_{ki}_{kj}')}"
-                    lines.append(
-                        f"    {next_name} = tensor.insert {added_name}"
-                        f" into {prev_name}[{index_vars[row]}, {index_vars[col]}]"
-                        f" : {result_type}"
-                    )
-                    prev_name = next_name
-
-    return "\n".join(lines), prev_name, result_type, result_elem
+    return "\n".join(lines), names["result"], result_type, result_elem

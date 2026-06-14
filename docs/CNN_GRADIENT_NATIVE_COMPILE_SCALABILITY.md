@@ -341,39 +341,645 @@ Cache generated gradient HIR, lowered MLIR, LLVM IR, and shared libraries by:
 Caching does not reduce first-compilation latency, but it prevents the same
 large compile from being repeated for every training process or test run.
 
-## Suggested Implementation Order
+## Progress Checklist
 
-### Immediate diagnostics
+This section is the implementation plan. Complete phases in order unless a
+phase explicitly says it may run in parallel. Do not mark a parent checkbox as
+complete until all of its child tasks and exit criteria are complete.
 
-1. Persist the 47.5 MB MLIR reproducer outside normal tests.
-2. Collect per-pass wall time and peak RSS from `mlir-opt-18`.
-3. Count HIR nodes, MLIR operations, repeated subexpressions, and occurrences of
-   major forward intermediates.
-4. Record compile-time budgets in a benchmark rather than a correctness test.
+### How to execute this plan
 
-### Near-term reductions
+Use this procedure for every unchecked task:
 
-1. Emit loop-based `im2col` and `col2im` instead of statically unrolled tensor
-   extraction/insertion operations.
-2. Add typed-HIR common-subexpression elimination and `let` introduction.
-3. Add array-valued memoization in descriptor lowering as a temporary guard.
-4. Simplify generated gradients before MLIR lowering.
-5. Test the CPU pipeline without generic elementwise fusion.
+1. Read the entire phase containing the task.
+2. Inspect the named primary files and existing tests before editing code.
+3. Select one checkbox or one tightly coupled group of checkboxes.
+4. Add or update a focused test that fails for the missing behavior.
+5. Implement the smallest change that satisfies that focused test.
+6. Run the focused test.
+7. Run tests for the affected subsystem.
+8. Run `uv run pytest tests/ --ignore=tests/test_crater_train.py` before
+   declaring a phase complete.
+9. Rerun the Phase 1 benchmark when the task can affect IR size or compilation
+   time.
+10. Record new measurements in this document, including date, command,
+    machine/toolchain context, and result.
+11. Mark a checkbox `[x]` only after its verification command passes.
+12. If blocked, leave the checkbox unchecked and add a note describing the
+    exact error, attempted commands, and next investigation.
 
-### Medium-term AD redesign
+Required safety rules:
 
-1. Generate one multi-result value-and-grad program.
-2. Add an explicit tape or saved-value representation.
-3. Move AD from source trees to typed HIR/SSA.
-4. Add high-level VJPs for convolution, linear algebra, reduction, broadcast,
-   and view operations.
+- Do not solve a compile-time problem by only increasing a timeout.
+- Do not commit generated multi-megabyte MLIR, LLVM IR, object files, or shared
+  libraries.
+- Do not delete the old AD path until the replacement passes numerical parity
+  tests.
+- Do not combine an IR redesign, ABI redesign, and backend rewrite in one
+  change. Complete and measure one phase at a time.
+- Preserve static shape and element-type checks when changing lowering.
+- Treat TensorFlow and PyTorch as architectural references, not as dependencies
+  that must be introduced into Remora.
 
-### Long-term backend work
+Phase dependency map:
 
-1. Lower convolution and matrix operations to optimized CPU/GPU kernels.
-2. Add cost-based fusion and recomputation decisions.
-3. Add memory planning and buffer reuse across forward and backward passes.
-4. Cache shape-specialized native artifacts.
+```text
+Phase 0 correctness baseline
+  -> Phase 1 benchmark harness
+      -> Phase 2 pass diagnosis
+      -> Phase 3 compact im2col/col2im
+          -> Phase 4 HIR sharing/CSE
+              -> Phase 5 AD simplification
+                  -> Phase 6 one value-and-grad function
+                      -> Phase 7 explicit saved-value tape
+                          -> Phase 8 high-level kernels
+                              -> Phase 9 artifact cache
+
+Phase 10 in-process MLIR is optional and starts only after Phases 3-5 reduce IR.
+```
+
+Status conventions:
+
+- `[x]` means the task is implemented and verified.
+- `[ ]` means the task has not been completed.
+- Add a short dated note below a checkbox when a result changes a later step.
+- Record measured values rather than writing only "faster" or "smaller."
+- Keep generated 47.5 MB artifacts out of Git. Commit scripts, summaries, and
+  small fixture programs instead.
+
+### Phase 0: Preserve the working correctness baseline
+
+Goal: ensure optimization work does not reopen the descriptor-export bug.
+
+- [x] Thread `scalar_env` through descriptor tensor, map, fold, view, indexing,
+  and scalar lowering.
+- [x] Confirm the differentiated CNN produces non-empty descriptor MLIR.
+- [x] Add focused compile and execution coverage for a descriptor scalar
+  parameter captured inside a map lambda.
+- [x] Run the non-training test suite after the descriptor fix.
+  - Recorded result: `964 passed, 1 skipped`.
+- [x] Add a small, permanent regression test for a gradient that combines all
+  of the following without using the full CNN:
+  - a scalar descriptor parameter;
+  - an array descriptor parameter;
+  - a map lambda that captures the scalar;
+  - a fold;
+  - an array-valued return.
+- [x] Verify the new small regression with both
+  `compile_function_source(..., verify=False)` and `CPUFunctionExecutor`.
+
+Phase 0 exit criteria:
+
+- [x] All focused descriptor tests pass.
+- [x] `uv run pytest tests/ --ignore=tests/test_crater_train.py` passes.
+  - 2026-06-14 latest result: `968 passed, 1 skipped in 51.57s`.
+
+### Phase 1: Add a repeatable compile-size benchmark
+
+Goal: produce reliable measurements without manually editing one-off Python
+snippets.
+
+Primary files:
+
+- `remora/benchmark.py`
+- `tests/test_performance_smoke.py`
+- `examples/crater_train.py`
+- optionally a new script under `tools/` or `scripts/`
+
+Tasks:
+
+- [x] Add a benchmark entry point that accepts a function source, function
+  name, parameter types, and timeout.
+- [x] Make the benchmark report these phases separately:
+  - gradient source generation;
+  - parse/typecheck/HIR construction;
+  - descriptor MLIR generation;
+  - external CPU MLIR pipeline;
+  - MLIR-to-LLVM translation;
+  - `llc` object generation;
+  - shared-library linking.
+- [x] Report these size/count metrics:
+  - generated source bytes;
+  - HIR node count;
+  - descriptor MLIR bytes;
+  - count of `linalg.generic` operations;
+  - count of `tensor.extract` operations;
+  - count of `tensor.insert` and `tensor.insert_slice` operations;
+  - lowered MLIR bytes, if the CPU pipeline finishes;
+  - LLVM IR bytes, if translation finishes.
+- [x] Report peak resident memory for external tools where the platform allows
+  it. On Linux, `/usr/bin/time -v` is acceptable.
+- [x] Add a command that reproduces the current CNN gradient-0 measurement.
+  The command must use `_CNN_FULL_LISP_SRC` and `_parameter_types()` from
+  `examples/crater_train.py` rather than duplicating the model source.
+- [x] Add a timeout for each external phase and identify the timed-out phase in
+  the result.
+- [x] Write benchmark results as JSON so results from later phases can be
+  compared mechanically.
+- [x] Add unit tests for metric collection using a small function. Do not put
+  the full CNN compile in the normal pytest suite.
+- [x] Document the command in this file and in `docs/HOW_TO_RUN.md`.
+
+2026-06-14 implementation note:
+
+- Added `prepare_function_source` and `compile_prepared_function` so function
+  preparation and descriptor MLIR generation can be timed independently.
+- Added `benchmark_function_compilation` with HIR/MLIR size metrics, a bounded
+  CPU MLIR subprocess, partial results, and JSON serialization.
+- Added bounded LLVM translation, `llc`, and linker stages with artifact byte
+  sizes and per-tool peak RSS through `/usr/bin/time` when available.
+- Added the opt-in `crater-cnn-gradient-k` CLI case.
+- Recorded a fresh full CNN gradient-0 baseline with a 30-second external phase
+  timeout. The result is intentionally documented here rather than added to the
+  normal correctness or performance smoke suite.
+
+2026-06-14 measured baseline:
+
+| Metric | Value |
+|---|---:|
+| Gradient source generation | 0.0094 seconds |
+| Generated source | 29,531 bytes |
+| Function preparation/typecheck/HIR | 110.70 seconds |
+| HIR nodes | 3,790 |
+| Descriptor MLIR generation | 7.81 seconds |
+| Descriptor MLIR | 47,552,499 bytes |
+| `linalg.generic` operations | 265 |
+| `tensor.extract` occurrences | 218,702 |
+| `tensor.insert`/`tensor.insert_slice` occurrences | 218,700 |
+| CPU MLIR pipeline | Timed out after 30.07 seconds |
+
+This split corrects the earlier assumption that descriptor MLIR emission itself
+consumed approximately 108 seconds. Most pre-`mlir-opt` time is currently in
+function preparation, which includes parsing, typechecking, specialization, and
+HIR construction. Phase 2 still targets the unfinished CPU MLIR pass pipeline,
+while Phases 3-5 must also reduce preparation cost and operation expansion.
+
+Suggested command shape:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run python -m remora.benchmark \
+  --case crater-cnn-gradient-k \
+  --phase-timeout 600 \
+  --json /tmp/crater-cnn-gradient-k.json
+```
+
+Phase 1 exit criteria:
+
+- [x] One command records all available timings and sizes.
+- [x] A timeout produces a valid JSON result naming the unfinished phase.
+- [x] The baseline result records approximately 29.5 KB of generated source,
+  approximately 47.5 MB of descriptor MLIR, and a timeout in the CPU MLIR
+  pipeline.
+
+### Phase 2: Identify the expensive MLIR pass
+
+Goal: replace the current suspicion about fusion/bufferization with measured
+evidence.
+
+Primary file: `remora/pipeline.py`.
+
+Tasks:
+
+- [x] Add a diagnostic-only way to persist descriptor MLIR to a user-selected
+  path. Do not enable this by default.
+- [x] Run `mlir-opt-18` with pass timing enabled on the persisted module.
+- [ ] Record wall time and peak RSS for the complete current `CPU_PIPELINE`.
+- [x] Split `CPU_PIPELINE` into individually invokable stages for diagnostics.
+  Preserve the production pipeline string until equivalence is tested.
+- [ ] Run and record each stage independently:
+  - `linalg-fuse-elementwise-ops`;
+  - `one-shot-bufferize`;
+  - buffer hoisting/deallocation;
+  - `convert-linalg-to-loops`;
+  - `convert-scf-to-cf` and affine lowering;
+  - conversion to the LLVM dialect.
+- [x] Record the input and output MLIR size for every completed stage.
+- [x] Run a comparison pipeline with
+  `linalg-fuse-elementwise-ops` disabled.
+- [x] Run a comparison pipeline with only canonicalization and CSE before
+  bufferization.
+- [x] Determine whether any pass shows superlinear behavior by running the
+  same measurements on at least three smaller CNN/image sizes.
+- [x] Add the timing table and conclusion to the Measurements section of this
+  document.
+
+2026-06-14 initial per-stage result with a 30-second stage timeout:
+
+| Stage | Time | Input | Output | Peak RSS | Result |
+|---|---:|---:|---:|---:|---|
+| `linalg-fuse-elementwise-ops` | 2.37 s | 47,552,499 B | 40,661,969 B | 395,724 KB | completed |
+| `one-shot-bufferize` | 30.10 s | 40,661,969 B | unavailable | unavailable | timed out |
+
+This result identifies one-shot bufferization, not elementwise fusion, as the
+first observed CPU-pipeline bottleneck. The no-fusion comparison is still
+required before deciding whether fusion helps or hurts bufferization.
+
+2026-06-14 no-fusion comparison with the same 30-second limit:
+
+| Stage | Time | Input | Result |
+|---|---:|---:|---|
+| `one-shot-bufferize` without prior fusion | 30.10 s | 47,552,499 B | timed out |
+
+The comparison confirms fusion is not required to reproduce the bufferization
+timeout. It does not yet establish whether fusion reduces total bufferization
+time because neither bufferization run completed within 30 seconds.
+
+2026-06-14 canonicalize/CSE comparison without fusion:
+
+| Stage | Time | Input | Output | Peak RSS | Result |
+|---|---:|---:|---:|---:|---|
+| `canonicalize` | 2.38 s | 47,552,499 B | 40,425,861 B | 417,456 KB | completed |
+| `cse` | 1.02 s | 40,425,861 B | 955,214 B | 309,132 KB | completed |
+| `one-shot-bufferize` | 120.10 s | 955,214 B | unavailable | unavailable | timed out |
+
+CSE removes approximately 98% of the textual MLIR, proving that repeated
+subgraphs are a major source of module growth. Bufferization still timing out
+on the 955 KB result shows raw text size is not the only problem. The reduced
+IR likely still contains aliasing/control-flow structure that causes expensive
+one-shot bufferization analysis.
+
+2026-06-14 image-gradient size curve:
+
+| Image | Descriptor MLIR | Extracts | Inserts | Fusion | Bufferization |
+|---|---:|---:|---:|---:|---:|
+| 4x4 | 19,373 B | 109 | 72 | 0.015 s | 0.020 s |
+| 8x8 | 162,478 B | 973 | 648 | 0.018 s | 3.439 s |
+| 16x16 | 920,165 B | 5,293 | 3,528 | 0.047 s | >30 s |
+
+The bufferization curve is clearly superlinear relative to both image size and
+operation count. From 4x4 to 8x8, inserts increase 9x while bufferization time
+increases approximately 170x. At 16x16, bufferization exceeds 30 seconds.
+
+Fusion comparison on completed small cases:
+
+| Image | With fusion | Without fusion |
+|---|---:|---:|
+| 4x4 | 0.020 s | 0.022 s |
+| 8x8 | 3.439 s | 3.321 s |
+
+Fusion has only a small effect on bufferization time at these sizes. It reduces
+the input passed to bufferization, but it neither creates nor removes the
+superlinear behavior. The bottleneck remains one-shot bufferization over the
+unrolled image-update structure.
+
+Do not proceed based only on a pass name appearing early in the pipeline. A
+pass is the bottleneck only when timing data shows it consumes most of the
+time or memory.
+
+Phase 2 exit criteria:
+
+- [x] The dominant pass or stage is identified with measured evidence.
+- [x] At least one smaller input-size curve is recorded.
+- [x] It is known whether disabling generic elementwise fusion helps, hurts, or
+  merely moves the cost to another pass.
+
+### Phase 3: Stop unrolling `im2col` and `col2im`
+
+Goal: make image-operation IR size depend on loop-nest complexity rather than
+the number of image pixels and patch elements.
+
+Primary implementation points:
+
+- `remora/lowering/tensor_ops.py::_lower_im2col_tensor_input`
+- `remora/lowering/tensor_ops.py::_lower_col2im_tensor_input`
+- related module-level im2col/col2im lowering functions in the same file
+- `tests/test_im2col.py`
+
+Tasks:
+
+- [x] Add a focused test that records the number of extraction/insertion
+  operations currently emitted for 4x4 and 32x32 inputs.
+- [x] Design loop-based indexing equations for:
+  - output patch row and column;
+  - kernel row and column;
+  - flattened patch index;
+  - source image index;
+  - overlapping `col2im` accumulation.
+- [x] Choose one compact representation:
+  - nested `scf.for` loops;
+  - affine loops; or
+  - a structured `linalg.generic` operation.
+- [x] Document why the chosen representation supports both forward copy and
+  overlapping backward accumulation.
+- [x] Replace static per-element extraction/insertion emission for `im2col`.
+- [x] Replace static per-element extraction/insertion emission for `col2im`.
+- [x] Preserve stride handling and all existing static shape validation.
+- [x] Verify 4x4, 5x5 stride-2, and 32x32 cases against `_ref_im2col` and
+  `_ref_col2im` in `tests/test_im2col.py`.
+- [x] Verify the im2col VJP still accumulates overlapping pixels correctly.
+- [x] Run all im2col and AD tests.
+- [x] Rerun the Phase 1 benchmark and record MLIR size and lowering time.
+
+Implementation completed on 2026-06-14:
+
+- Both operations now use compact nested `scf.for` loops and memref-backed
+  output storage. The result is converted to a tensor at the descriptor
+  boundary with `bufferization.to_tensor`.
+- For flattened patch index `p`, patch coordinates are
+  `patch_row = p / out_width` and `patch_col = p % out_width`.
+- For flattened kernel index `q`, kernel coordinates are
+  `kernel_row = q / kernel_width` and `kernel_col = q % kernel_width`.
+- Source coordinates are `patch_row * stride + kernel_row` and
+  `patch_col * stride + kernel_col`.
+- `im2col` stores the source value at `[p, q]`. `col2im` initializes the image
+  buffer to zero and scatter-adds each `[p, q]` value at the corresponding
+  source coordinate. Repeated coordinates therefore preserve overlapping
+  gradient accumulation.
+
+Full CNN gradient benchmark after the change:
+
+| Metric | Unrolled baseline | Compact loops |
+|---|---:|---:|
+| Descriptor preparation/typecheck/HIR | 110.70 s | 110.65 s |
+| Descriptor MLIR generation | 7.81 s | 0.068 s |
+| Descriptor MLIR | 47,552,499 B | 127,294 B |
+| `tensor.extract` occurrences | 218,702 | 29 |
+| `tensor.insert` occurrences | 218,700 | 0 |
+| CPU pipeline | >30 s timeout | 0.057 s |
+| CPU pipeline peak RSS | unavailable | 77,496 KB |
+| LLVM translation | unavailable | 0.027 s |
+| `llc` | unavailable | 0.077 s |
+| Link | unavailable | 0.011 s |
+
+The complete native compilation now succeeds and produces a 32,016-byte
+shared library. The remaining dominant compile cost is the approximately
+111-second function preparation/typechecking/HIR stage, which is outside the
+image lowering fixed in this phase.
+
+Phase 3 exit criteria:
+
+- [x] Emitted im2col/col2im operation count is independent of concrete image
+  element count, apart from loop bounds/constants.
+- [x] `uv run pytest tests/test_im2col.py` passes.
+- [x] The full non-training suite passes (`986 passed, 1 skipped` on
+  2026-06-14).
+- [x] CNN descriptor MLIR is materially smaller than the 47.5 MB baseline.
+
+### Phase 4: Add sharing before descriptor MLIR generation
+
+Goal: ensure repeated pure array expressions are lowered once and referenced by
+SSA value instead of being recursively emitted on every occurrence.
+
+Preferred implementation layer: typed HIR before descriptor lowering.
+
+Relevant files:
+
+- `remora/hir.py`
+- `remora/compiler.py`
+- a new optimization module such as `remora/hir_opt.py`
+- `remora/lowering/module.py`
+- `remora/lowering/tensor_ops.py`
+
+Tasks:
+
+- [ ] Define which HIR nodes are pure and eligible for common-subexpression
+  elimination. Initially exclude calls or nodes with uncertain effects.
+- [ ] Define a stable expression key that includes:
+  - node kind;
+  - operation attributes;
+  - child value identities;
+  - Remora result type and static shape;
+  - lexical binding identity, not only variable spelling.
+- [ ] Add a HIR node-count and duplicate-subtree analysis utility.
+- [ ] Add small tests proving that identical pure maps/folds/views are detected.
+- [ ] Add tests proving that shadowed variables are not incorrectly merged.
+- [ ] Add tests proving that expressions with different types/shapes are not
+  merged.
+- [ ] Implement let introduction or an SSA-like binding form for repeated HIR
+  expressions.
+- [ ] Run dead-code elimination after introducing shared bindings.
+- [ ] Ensure `_inline_lets` does not immediately destroy the newly introduced
+  sharing on the descriptor path. If necessary, add a descriptor-specific
+  lowering path that consumes lets as SSA bindings instead of inlining them.
+- [ ] Extend descriptor lowering so array-valued bindings are entered into
+  `tensor_env` exactly once.
+- [ ] Preserve scalar bindings in `scalar_env` and lexical shadowing rules.
+- [ ] Add a test where one expensive array expression is referenced twice and
+  assert its MLIR is emitted once.
+- [ ] Add a generated-gradient test that confirms repeated forward
+  intermediates are shared.
+- [ ] Rerun the Phase 1 benchmark.
+
+Fallback if typed-HIR CSE is blocked:
+
+- [ ] Implement descriptor-lowering memoization for pure HIR nodes as a
+  temporary measure.
+- [ ] Mark the fallback clearly as temporary and add tests for scope, purity,
+  and type correctness.
+- [ ] Do not use `repr(node)` as the final cache key; it is too expensive and
+  does not model lexical identity safely.
+
+Phase 4 exit criteria:
+
+- [ ] A repeated array-valued subgraph produces one SSA definition.
+- [ ] Lexical-shadowing tests pass.
+- [ ] CNN descriptor MLIR is below 10 MB, or the remaining sources of growth
+  are counted and documented.
+- [ ] The full non-training suite passes.
+
+### Phase 5: Simplify AD expressions before lowering
+
+Goal: remove mathematically trivial derivative structure while the program is
+still compact.
+
+Primary files:
+
+- `remora/ad_source.py`
+- preferably a new typed optimization module rather than more string rewriting
+- `tests/test_ad_source.py`
+
+Tasks:
+
+- [ ] Add unit tests for simplification identities with correct type/shape
+  behavior:
+  - `x + 0 -> x` and `0 + x -> x`;
+  - `x * 1 -> x` and `1 * x -> x`;
+  - `x * 0 -> zero_like(x)`;
+  - nested reshape cancellation where shapes permit it;
+  - transpose of transpose cancellation;
+  - broadcast/fill canonicalization;
+  - dead branch removal for constant conditions.
+- [ ] Ensure zero simplification preserves array shape and element type.
+- [ ] Add constant folding for scalar arithmetic generated by derivative rules.
+- [ ] Add dead-code elimination for unused generated bindings.
+- [ ] Add map-map fusion when both callables are pure and scalar.
+- [ ] Add map followed by fold recognition for common reductions.
+- [ ] Apply simplification before `_emit` converts `_Expr` objects to source
+  text, or replace source emission with direct HIR construction.
+- [ ] Compare source size, HIR node count, and MLIR size before and after each
+  optimization family.
+- [ ] Validate gradients against interpreter results and finite differences.
+- [ ] Rerun the Phase 1 benchmark.
+
+Phase 5 exit criteria:
+
+- [ ] All simplification rules have focused tests.
+- [ ] No simplification changes gradient numerical results beyond existing
+  tolerances.
+- [ ] The benchmark records a further reduction in HIR nodes or MLIR size.
+
+### Phase 6: Generate one multi-parameter value-and-grad function
+
+Goal: compute the forward pass once and return every trainable gradient from a
+single compiled function.
+
+Primary files:
+
+- `remora/ad_source.py`
+- `remora/compiler.py`
+- `remora/runtime.py`
+- type and ABI support in `remora/types.py` and descriptor lowering as needed
+- `examples/crater_train.py`
+- `tests/test_ad_source.py`
+
+Tasks:
+
+- [ ] Specify the public API for requesting gradients for multiple parameter
+  indices in one call.
+- [ ] Specify the return representation. Prefer a typed tuple/product that can
+  contain scalar and array results without flattening type information.
+- [ ] Add typechecker and HIR coverage for the chosen multi-result form.
+- [ ] Extend descriptor output ABI support for the chosen result form, or define
+  multiple explicit output descriptors.
+- [ ] Generate one forward graph shared by all requested gradients.
+- [ ] Generate all reverse accumulations in one backward graph.
+- [ ] Return loss plus `dk`, `db1`, `dw2`, `db2`, `dw3`, and `db3` for the CNN.
+- [ ] Add a small two-parameter function test proving the primal executes once.
+- [ ] Add numerical tests comparing every returned gradient with existing
+  per-input gradients.
+- [ ] Update `examples/crater_train.py` to compile one training function rather
+  than six independent gradient functions.
+- [ ] Rerun the Phase 1 benchmark for both one gradient and all gradients.
+
+Phase 6 exit criteria:
+
+- [ ] One compiled call produces all requested gradients.
+- [ ] Forward intermediates are represented once in HIR.
+- [ ] Results match the existing interpreter/per-input implementation.
+- [ ] Compiling all gradients is cheaper than compiling six separate gradient
+  functions.
+
+### Phase 7: Introduce an explicit saved-value tape
+
+Goal: make forward-value reuse explicit and allow controlled choices between
+storage and recomputation.
+
+Primary files:
+
+- `remora/ad.py`
+- `remora/ad_source.py` or its replacement
+- a new AD IR module if needed
+- `remora/compiler.py`
+
+Tasks:
+
+- [ ] Define an AD IR with explicit primal values, cotangent values, and saved
+  values.
+- [ ] Define `forward(inputs) -> (loss, tape)` at the IR level.
+- [ ] Define `backward(tape, dloss) -> gradients` at the IR level.
+- [ ] Initially save every array-valued intermediate required by a VJP.
+- [ ] Add liveness analysis so saved values are released after their last use.
+- [ ] Add a cost model interface for later save-versus-recompute decisions.
+- [ ] Add tests proving an expensive forward expression is not recomputed in
+  the backward graph.
+- [ ] Add tests for branches so the tape records the executed path safely.
+- [ ] Add tests for views and aliases so saved buffers remain valid.
+- [ ] Lower the AD IR directly to typed HIR or MLIR without round-tripping
+  through generated source text.
+- [ ] Keep the old source generator available until numerical parity is proven.
+
+Phase 7 exit criteria:
+
+- [ ] The CNN backward graph consumes saved forward values.
+- [ ] No expensive CNN forward operator is duplicated solely to compute a VJP.
+- [ ] Old and new AD paths agree numerically on the AD test suite.
+
+### Phase 8: Preserve high-level neural-network operations
+
+Goal: avoid asking generic MLIR passes to recover convolution and linear
+algebra structure from expanded element operations.
+
+Tasks:
+
+- [ ] Define or retain high-level HIR operations for convolution, matrix
+  multiplication, matrix-vector multiplication, reduction, broadcast, and
+  activation.
+- [ ] Add typed VJP rules for each high-level operation.
+- [ ] Add shape checks for every VJP result.
+- [ ] Lower matrix operations to structured `linalg` operations or BLAS calls.
+- [ ] Evaluate CPU convolution lowering options:
+  - direct structured convolution;
+  - compact im2col plus GEMM;
+  - an external optimized convolution library.
+- [ ] Choose one CPU convolution path and document its dependency and ABI
+  implications.
+- [ ] Keep a fallback implementation for environments without the optimized
+  library, if an external library is chosen.
+- [ ] Add correctness tests against NumPy references.
+- [ ] Add performance comparisons with the loop-based Phase 3 implementation.
+- [ ] Rerun the Phase 1 benchmark.
+
+Phase 8 exit criteria:
+
+- [ ] CNN HIR contains recognizable convolution and linear algebra operations.
+- [ ] Low-level IR no longer consists primarily of scalarized patch copies.
+- [ ] Native compilation meets the provisional time budget below.
+
+### Phase 9: Add native artifact caching
+
+Goal: avoid repeating compilation for an unchanged specialized training
+function.
+
+Primary files: `remora/runtime.py`, `remora/compiler.py`, and a new cache module.
+
+Tasks:
+
+- [ ] Define a deterministic cache key containing:
+  - source or optimized-IR hash;
+  - function name;
+  - differentiated parameter set;
+  - concrete parameter types and shapes;
+  - CPU target features;
+  - vectorization/threading options;
+  - Remora compiler version;
+  - MLIR/LLVM toolchain version;
+  - pipeline version.
+- [ ] Store metadata beside the shared library.
+- [ ] Write artifacts atomically to avoid corrupt cache entries.
+- [ ] Add cache invalidation tests for every key component.
+- [ ] Add a cache-hit test that does not invoke `mlir-opt` or `llc`.
+- [ ] Add a user-visible way to disable and clear the cache.
+- [ ] Document cache location and lifecycle.
+
+Phase 9 exit criteria:
+
+- [ ] A second identical compile loads the existing shared library.
+- [ ] Changed shapes, source, compiler options, or toolchain versions miss the
+  cache.
+- [ ] Training reuses one artifact across all steps.
+
+### Phase 10: Optional in-process MLIR work
+
+Goal: remove textual parse/print and subprocess overhead after graph-size
+problems are fixed.
+
+Do not begin this phase while descriptor MLIR remains tens of megabytes. It is
+an optimization of representation overhead, not a solution to duplicated
+computation.
+
+- [ ] Measure parse and print time separately from pass execution.
+- [ ] Determine whether the installed MLIR Python bindings expose every pass
+  required by the CPU pipeline.
+- [ ] Prototype in-process parsing and pass execution on a small module.
+- [ ] Compare output equivalence with the external `mlir-opt` path.
+- [ ] Compare wall time and peak RSS on the reduced CNN module.
+- [ ] Adopt the in-process path only if it has a measurable benefit and does
+  not reduce diagnostics or toolchain portability.
+
+Phase 10 exit criteria:
+
+- [ ] A measured decision to adopt or reject in-process compilation is
+  recorded.
 
 ## Proposed Acceptance Targets
 
@@ -382,16 +988,18 @@ compile-time regressions.
 
 Initial targets for the crater CNN gradient:
 
-- Generated optimized HIR should contain shared forward intermediates.
-- Descriptor MLIR should be less than 5 MB of text.
-- Descriptor lowering should complete in less than 10 seconds on the reference
+- [ ] Generated optimized HIR contains shared forward intermediates.
+- [ ] Descriptor MLIR is less than 5 MB of text.
+- [ ] Descriptor lowering completes in less than 10 seconds on the reference
   development machine.
-- The CPU MLIR pipeline should complete in less than 60 seconds.
-- End-to-end native compilation should complete in less than 90 seconds.
-- One compiled function should produce all six trainable gradients.
-- Compiled gradients should match the interpreter and finite differences within
+- [ ] The CPU MLIR pipeline completes in less than 60 seconds.
+- [ ] End-to-end native compilation completes in less than 90 seconds.
+- [ ] One compiled function produces all six trainable gradients.
+- [ ] Compiled gradients match the interpreter and finite differences within
   the existing numerical tolerance.
-- Repeated training steps should reuse the same compiled artifact.
+- [ ] Repeated training steps reuse the same compiled artifact.
+- [ ] Peak compilation memory is measured and has an explicit budget.
+- [ ] The full non-training test suite passes after the final implementation.
 
 These are provisional engineering budgets, not claims that Remora should yet
 match TensorFlow or PyTorch compilation and execution performance. They are

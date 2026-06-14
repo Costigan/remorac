@@ -6,8 +6,8 @@ import pytest
 from remora.ad import EvalTape, grad_via_tape, trace_expr, trace_via_tape_multi
 from remora.ad_source import generate_gradient_function_source
 from remora.ad_testing import finite_difference_grad, grad_check
-from remora.compiler import compile_gradient_functions_source
-from remora.runtime import evaluate_source
+from remora.compiler import compile_function_source, compile_gradient_functions_source
+from remora.runtime import CPUFunctionExecutor, evaluate_source
 from remora.types import ArrayType, FLOAT, FuncType, StaticDim
 
 
@@ -36,6 +36,82 @@ def _ref_col2im(cols, image_shape, kh, kw, stride):
             patch = cols[i * out_w + j, :].reshape(kh, kw)
             result[i * stride : i * stride + kh, j * stride : j * stride + kw] += patch
     return result
+
+
+def _im2col_source(size):
+    patches = (size - 3 + 1) ** 2
+    return f"""\
+(define/pi ()
+  (patches [image (Array Float {size} {size})] (Array Float {patches} 9))
+  (im2col image [3 3] 1))
+"""
+
+
+def test_im2col_lowering_size_does_not_scale_with_image_area():
+    artifacts = [
+        compile_function_source(
+            _im2col_source(size),
+            "patches",
+            (ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),),
+            include_prelude=False,
+            syntax="lisp",
+            verify=False,
+        )
+        for size in (4, 32)
+    ]
+
+    small, large = (artifact.mlir_text for artifact in artifacts)
+    assert len(large) < len(small) * 1.5
+    assert small.count("tensor.extract") == large.count("tensor.extract")
+    assert large.count("tensor.extract") <= 2
+    assert "tensor.insert" not in small
+    assert "tensor.insert" not in large
+    assert small.count("scf.for") == large.count("scf.for")
+    assert large.count("scf.for") <= 4
+
+
+@pytest.mark.parametrize(
+    ("size", "kernel_size", "stride"),
+    [(4, 3, 1), (5, 2, 2), (32, 3, 1)],
+)
+def test_compiled_im2col_and_col2im_preserve_overlap_counts(
+    size, kernel_size, stride
+):
+    patches_per_axis = (size - kernel_size) // stride + 1
+    patch_count = patches_per_axis ** 2
+    patch_size = kernel_size ** 2
+    source = f"""\
+(define/pi ()
+  (overlap-counts [image (Array Float {size} {size})] (Array Float {size} {size}))
+  (col2im
+    (im2col image [{kernel_size} {kernel_size}] {stride})
+    [{size} {size}]
+    [{kernel_size} {kernel_size}]
+    {stride}))
+"""
+    param_types = (ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),)
+    artifact = CPUFunctionExecutor.compile_source(
+        source,
+        "overlap-counts",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.ones((size, size), dtype=np.float32)
+        )
+    finally:
+        artifact.close()
+
+    expected = _ref_col2im(
+        np.ones((patch_count, patch_size), dtype=np.float32),
+        (size, size),
+        kernel_size,
+        kernel_size,
+        stride,
+    )
+    np.testing.assert_array_equal(result.value, expected.astype(np.float32))
 
 
 # ── Build typed expressions ─────────────────────────────────────────────────

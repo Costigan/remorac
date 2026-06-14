@@ -77,6 +77,16 @@ class FunctionCompilerArtifact:
 
 
 @dataclass(frozen=True)
+class PreparedFunctionArtifact:
+    source: str
+    function_name: str
+    function_type: FuncType
+    hir_function: HIRFunction
+    specialization_name: str | None = None
+    index_args: tuple[DimExpr | ShapeExpr, ...] = ()
+
+
+@dataclass(frozen=True)
 class PTXArtifact:
     compiler: CompilerArtifact
     ptx_text: str
@@ -283,6 +293,29 @@ def compile_function_source(
     syntax: str = "ml",
 ) -> FunctionCompilerArtifact:
     """Compile one top-level function with explicit static parameter types."""
+    prepared = prepare_function_source(
+        source,
+        function_name,
+        param_types,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    return compile_prepared_function(
+        prepared,
+        verify=verify,
+        export_name=export_name,
+    )
+
+
+def prepare_function_source(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    *,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+) -> PreparedFunctionArtifact:
+    """Parse, specialize, and lower one function to HIR without emitting MLIR."""
     _maybe_include_prelude = include_prelude and syntax == "ml"
     program_source = with_prelude(source) if _maybe_include_prelude else source
     program = _parse_source(program_source, syntax)
@@ -319,9 +352,26 @@ def compile_function_source(
         lower_expr(typed_function.body),
         function_type.result,
     )
+    return PreparedFunctionArtifact(
+        source=source,
+        function_name=function_name,
+        function_type=function_type,
+        hir_function=hir_function,
+        specialization_name=typed_function.specialization_name,
+        index_args=typed_function.index_args,
+    )
+
+
+def compile_prepared_function(
+    prepared: PreparedFunctionArtifact,
+    *,
+    verify: bool = True,
+    export_name: str = "remora_call",
+) -> FunctionCompilerArtifact:
+    """Emit descriptor MLIR for a function prepared by `prepare_function_source`."""
     try:
         lowered = MLIRLowering().lower_function_descriptor_export(
-            hir_function,
+            prepared.hir_function,
             export_name=export_name,
         )
         if verify:
@@ -333,14 +383,14 @@ def compile_function_source(
         mlir_module = None
         mlir_text = ""
     return FunctionCompilerArtifact(
-        source=source,
-        function_name=function_name,
-        function_type=function_type,
-        hir_function=hir_function,
+        source=prepared.source,
+        function_name=prepared.function_name,
+        function_type=prepared.function_type,
+        hir_function=prepared.hir_function,
         mlir_module=mlir_module,
         mlir_text=mlir_text,
-        specialization_name=typed_function.specialization_name,
-        index_args=typed_function.index_args,
+        specialization_name=prepared.specialization_name,
+        index_args=prepared.index_args,
     )
 
 
