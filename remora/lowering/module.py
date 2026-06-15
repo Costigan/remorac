@@ -53,7 +53,7 @@ from remora.hir import (
     HIRWithShape,
 )
 from remora.hir_opt import hir_cse
-from remora.types import ArrayType, FuncType, RemoraType, ScalarType, SigmaType
+from remora.types import ArrayType, FuncType, PairType, RemoraType, ScalarType, SigmaType
 
 from remora.lowering.indexing import (
     _lower_index_module,
@@ -1045,6 +1045,11 @@ def _output_memref_type(return_type: RemoraType) -> str:
     if isinstance(return_type, SigmaType):
         elem = type_to_mlir(return_type.body.element if isinstance(return_type.body, ArrayType) else return_type.body)
         return f"memref<?x{elem}>"
+    if isinstance(return_type, PairType):
+        raise RemoraLoweringError(
+            "cannot create a single output memref for PairType; "
+            "use _lower_pair_export_wrapper for multi-output lowering"
+        )
     if isinstance(return_type, ArrayType):
         dim_parts: list[str] = []
         for dim in return_type.shape:
@@ -1072,35 +1077,42 @@ def _output_descriptor_store_lines(
     return_type: ArrayType,
     result_type: str,
     memref_type: str,
+    *,
+    result_name: str = "%result",
+    out_name: str = "%out",
+    const_prefix: str = "",
 ) -> list[str]:
     if return_type.rank == 0:
         return [
-            f"    %value = tensor.extract %result[] : {result_type}",
-            f"    memref.store %value, %out[] : {memref_type}",
+            f"    %value = tensor.extract {result_name}[] : {result_type}",
+            f"    memref.store %value, {out_name}[] : {memref_type}",
         ]
 
+    pfx = const_prefix
+    c0 = f"%c0{pfx}"
+    c1 = f"%c1{pfx}"
     lines = [
-        "    %c0 = arith.constant 0 : index",
-        "    %c1 = arith.constant 1 : index",
+        f"    {c0} = arith.constant 0 : index",
+        f"    {c1} = arith.constant 1 : index",
     ]
     for axis, dim in enumerate(return_type.shape):
         lines.append(
-            f"    %c{axis}_ub = arith.constant {dim.value} : index"
+            f"    %c{axis}_ub{pfx} = arith.constant {dim.value} : index"
         )
     for axis in range(return_type.rank):
         indent = "    " + "  " * axis
         lines.append(
-            f"{indent}scf.for %i{axis} = %c0 to %c{axis}_ub step %c1 {{"
+            f"{indent}scf.for %i{axis}{pfx} = {c0} to %c{axis}_ub{pfx} step {c1} {{"
         )
 
     indices = ", ".join(
-        f"%i{axis}" for axis in range(return_type.rank)
+        f"%i{axis}{pfx}" for axis in range(return_type.rank)
     )
     body_indent = "    " + "  " * return_type.rank
     lines.extend(
         [
-            f"{body_indent}%value = tensor.extract %result[{indices}] : {result_type}",
-            f"{body_indent}memref.store %value, %out[{indices}] : {memref_type}",
+            f"{body_indent}%value = tensor.extract {result_name}[{indices}] : {result_type}",
+            f"{body_indent}memref.store %value, {out_name}[{indices}] : {memref_type}",
         ]
     )
     for axis in reversed(range(return_type.rank)):
@@ -1129,6 +1141,84 @@ def _lower_function_descriptor_module(
 
 {wrapper}
 }}"""
+
+
+def _flatten_pair_type(pair_type: RemoraType) -> list[RemoraType]:
+    """Return component types from a (possibly nested) PairType, left-to-right."""
+    result: list[RemoraType] = []
+    current: RemoraType = pair_type
+    while isinstance(current, PairType):
+        result.append(current.left)
+        current = current.right
+    result.append(current)
+    return result
+
+
+def _decompose_pair_body(expr: HIRExpr) -> list[HIRExpr]:
+    """Decompose a HIRPair chain into leaf expressions, left-to-right."""
+    from remora.hir import HIRPair
+    result: list[HIRExpr] = []
+    current: HIRExpr = expr
+    while isinstance(current, HIRPair):
+        result.append(current.left)
+        current = current.right
+    result.append(current)
+    return result
+
+
+def _lower_pair_result(
+    cse_body: HIRExpr,
+    pair_type: PairType,
+    tensor_env: Any,
+    scalar_env: Any,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Lower a Pair-returning body into MLIR with multiple result values.
+
+    Returns ``(body_code, [(result_value, mlir_type), ...])``.
+    """
+    component_types = _flatten_pair_type(pair_type)
+    components = _decompose_pair_body(cse_body)
+
+    if len(components) != len(component_types):
+        raise RemoraLoweringError(
+            f"pair body has {len(components)} components but type has {len(component_types)}"
+        )
+
+    blocks: list[str] = []
+    result_parts: list[tuple[str, str]] = []
+
+    for i, (comp_expr, comp_type) in enumerate(zip(components, component_types)):
+        comp_mlir_type = type_to_mlir(comp_type)
+        if isinstance(comp_type, ArrayType):
+            code, val, lowered_type, _elem = _lower_tensor_input(
+                comp_expr,
+                f"pair_{i}",
+                {},
+                tensor_env,
+                scalar_env,
+            )
+            if lowered_type != comp_mlir_type:
+                raise RemoraLoweringError(
+                    f"pair component {i} lowering type mismatch: "
+                    f"{lowered_type} != {comp_mlir_type}"
+                )
+        elif isinstance(comp_type, ScalarType):
+            sc_body, val = _lower_descriptor_scalar_result_body(
+                comp_expr,
+                comp_mlir_type,
+                scalar_env,
+                tensor_env,
+            )
+            code = sc_body
+        else:
+            raise RemoraLoweringError(
+                f"pair components must be scalar or array, got {comp_type}"
+            )
+        blocks.append(code)
+        result_parts.append((val, comp_mlir_type))
+
+    body = "\n".join(blocks)
+    return body, result_parts
 
 
 def _lower_descriptor_internal_function(
@@ -1218,8 +1308,10 @@ def _lower_descriptor_internal_function(
             )
         cse_ordinal += 1
 
-    result_type = type_to_mlir(function.return_type)
-    if isinstance(function.return_type, ArrayType):
+    if isinstance(function.return_type, PairType):
+        body, result_parts = _lower_pair_result(cse_body, function.return_type, tensor_env, scalar_env)
+    elif isinstance(function.return_type, ArrayType):
+        result_type = type_to_mlir(function.return_type)
         code, result_value, lowered_result_type, _element_type = (
             _lower_tensor_input(
                 cse_body,
@@ -1234,7 +1326,9 @@ def _lower_descriptor_internal_function(
                 "lowered function result type mismatch"
             )
         body = code
+        result_parts = [(result_value, result_type)]
     elif isinstance(function.return_type, ScalarType):
+        result_type = type_to_mlir(function.return_type)
         body, result_value = (
             _lower_descriptor_scalar_result_body(
                 cse_body,
@@ -1243,16 +1337,22 @@ def _lower_descriptor_internal_function(
                 tensor_env,
             )
         )
+        result_parts = [(result_value, result_type)]
     else:
         raise RemoraLoweringError(
-            "descriptor-exported functions require scalar or array results"
+            "descriptor-exported functions require scalar, array, or pair results"
         )
+
+    result_types = ", ".join(rt for _, rt in result_parts)
+    result_values = ", ".join(rv for rv, _ in result_parts)
+    result_type_str = result_types if len(result_parts) == 1 else f"({result_types})"
 
     hoisted_body = "\n".join(hoisted_blocks)
     body_parts = "\n".join(part for part in (hoisted_body, body) if part)
-    return f"""  func.func private @{name}({", ".join(arg_decls)}) -> {result_type} {{
+    return_values = f"    return {result_values} : {result_types}"
+    return f"""  func.func private @{name}({", ".join(arg_decls)}) -> {result_type_str} {{
 {body_parts}
-    return {result_value} : {result_type}
+{return_values}
     }}"""
 
 
@@ -1403,6 +1503,12 @@ def _lower_descriptor_export_wrapper(
         _output_memref_type(param.type)
         for param in function.params
     ]
+
+    if isinstance(function.return_type, PairType):
+        return _lower_pair_export_wrapper(
+            function, internal_name, export_name, input_memrefs
+        )
+
     output_memref = _output_memref_type(function.return_type)
     args = [
         *(
@@ -1454,7 +1560,97 @@ def _lower_descriptor_export_wrapper(
         )
     else:
         raise RemoraLoweringError(
-            "descriptor-exported functions require scalar or array results"
+            "descriptor-exported functions require scalar, array, or pair results"
         )
+    lines.extend(["    return", "  }"])
+    return "\n".join(lines)
+
+
+def _lower_pair_export_wrapper(
+    function: HIRFunction,
+    internal_name: str,
+    export_name: str,
+    input_memrefs: list[str],
+) -> str:
+    """Build a descriptor export wrapper for a Pair-returning function.
+
+    The wrapper takes one output memref per Pair component and stores each
+    result component into the corresponding output buffer.
+    """
+    component_types = _flatten_pair_type(function.return_type)
+    output_memrefs = [_output_memref_type(ct) for ct in component_types]
+
+    args = [
+        *(
+            f"%arg{index}: {memref}"
+            for index, memref in enumerate(input_memrefs)
+        ),
+        *(
+            f"%out{index}: {memref}"
+            for index, memref in enumerate(output_memrefs)
+        ),
+    ]
+    lines = [
+        f"  func.func @{export_name}({', '.join(args)}) attributes {{ llvm.emit_c_interface }} {{",
+    ]
+
+    call_args: list[str] = []
+    call_types: list[str] = []
+    for index, param in enumerate(function.params):
+        param_type = type_to_mlir(param.type)
+        memref_type = input_memrefs[index]
+        value_name = f"%in{index}"
+        if isinstance(param.type, ScalarType):
+            lines.append(
+                f"    {value_name} = memref.load %arg{index}[] : {memref_type}"
+            )
+        elif isinstance(param.type, ArrayType):
+            lines.append(
+                f"    {value_name} = bufferization.to_tensor %arg{index} restrict : {memref_type}"
+            )
+        else:
+            raise RemoraLoweringError(
+                "descriptor-exported functions require scalar or array parameters"
+            )
+        call_args.append(value_name)
+        call_types.append(param_type)
+
+    result_types = ", ".join(type_to_mlir(ct) for ct in component_types)
+    result_type_str = result_types if len(component_types) == 1 else f"({result_types})"
+    call_sig = f"({', '.join(call_types)}) -> {result_type_str}"
+    num_results = len(component_types)
+    if num_results > 1:
+        lines.append(
+            f"    %result:{num_results} = call @{internal_name}({', '.join(call_args)}) : {call_sig}"
+        )
+    else:
+        lines.append(
+            f"    %result = call @{internal_name}({', '.join(call_args)}) : {call_sig}"
+        )
+
+    for i, comp_type in enumerate(component_types):
+        comp_mlir_type = type_to_mlir(comp_type)
+        result_val = f"%result#{i}" if len(component_types) > 1 else "%result"
+        out_name = f"%out{i}"
+        if isinstance(comp_type, ScalarType):
+            lines.append(
+                f"    memref.store {result_val}, {out_name}[] : {output_memrefs[i]}"
+            )
+        elif isinstance(comp_type, ArrayType):
+            lines.extend(
+                _output_descriptor_store_lines(
+                    comp_type,
+                    comp_mlir_type,
+                    output_memrefs[i],
+                    result_name=result_val,
+                    out_name=out_name,
+                    const_prefix=f"_{i}",
+                )
+            )
+        else:
+            raise RemoraLoweringError(
+                f"pair component {i} must be scalar or array, got {comp_type}"
+            )
+
     lines.extend(["    return", "  }"])
     return "\n".join(lines)

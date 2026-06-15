@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Iterable, TypeAlias
 
 import numpy as np
 
@@ -587,6 +587,117 @@ def generate_gradient_function_source(
         differentiate_input=differentiate_input,
         function_name=generated_name,
     )
+    return GradientSourceArtifact(
+        generated_source,
+        generated_name,
+        param_types,
+        tape,
+        tape.input_indices[0] if tape.input_indices else 0,
+    )
+
+
+def generate_value_and_grad_function_source(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray | None = None,
+    *,
+    gradient_name: str | None = None,
+    differentiate_inputs: Iterable[int] | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+) -> GradientSourceArtifact:
+    """Specialize, trace, and generate source for a multi-parameter gradient.
+
+    Returns a single function that returns all requested gradients as a
+    nested ``(Pair ...)`` chain.  The forward computation is traced once
+    and shared across all backward paths.
+
+    *differentiate_inputs* selects which parameters to differentiate.
+    Defaults to all parameters.
+    """
+    from remora.lisp_reader import parse_lisp
+    from remora.parser import parse_program
+    from remora.prelude import with_prelude
+    from remora.typechecker import TypeChecker, TypeEnv
+
+    if len(param_types) < 2:
+        raise ValueError("multi-gradient source requires at least two parameter types")
+
+    trace_inputs = (
+        [_placeholder_input(pt) for pt in param_types]
+        if example_input is None
+        else [np.asarray(example_input, dtype=np.float64)]
+        if isinstance(example_input, np.ndarray) and len(param_types) == 1
+        else [_placeholder_input(pt) for pt in param_types]
+    )
+
+    for pt, ti in zip(param_types, trace_inputs):
+        _validate_example_input(pt, ti)
+
+    program_source = (
+        with_prelude(source) if include_prelude and syntax == "ml" else source
+    )
+    program = (
+        parse_lisp(program_source)
+        if syntax == "lisp"
+        else parse_program(program_source)
+    )
+    checker = TypeChecker()
+    env = TypeEnv()
+    function: FuncDef | None = None
+    for definition in program.definitions:
+        _, env = checker.check_definition(definition, env)
+        if isinstance(definition, FuncDef) and definition.name == function_name:
+            function = definition
+    if function is None:
+        raise ValueError(f"function {function_name!r} is not defined")
+
+    specialized = checker.specialize_top_level_function(function, param_types, env)
+    if specialized.type.result != FLOAT:
+        raise ValueError("gradient source requires a function with Float result")
+    param_specs = [(name, tuple(ti.shape)) for (name, _pt), ti in zip(specialized.params, trace_inputs)]
+    tape, _input_indices = _trace_function_body_multi(
+        specialized.body, trace_inputs, [name for name, _pt in specialized.params]
+    )
+
+    input_indices = (
+        tuple(range(len(param_specs)))
+        if differentiate_inputs is None
+        else tuple(differentiate_inputs)
+    )
+
+    if len(input_indices) > 1:
+        # Multi-output: return all requested gradients as a Pair chain.
+        # Filter param_specs and tape input_indices to only the requested ones.
+        filtered_specs = [param_specs[i] for i in input_indices]
+        filtered_indices = [tape.input_indices[i] for i in input_indices]
+
+        # Build a temporary tape with re-indexed inputs
+        filtered_tape = EvalTape(
+            entries=tape.entries,
+            values=tape.values,
+            input_indices=list(filtered_indices),
+            has_data_dependent_control_flow=tape.has_data_dependent_control_flow,
+        )
+        generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
+        generated_source = generate_gradient_source(
+            filtered_tape,
+            filtered_specs,
+            differentiate_input=0,
+            multi_output=True,
+            function_name=generated_name,
+        )
+    else:
+        # Single gradient: fall back to the existing path.
+        generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
+        generated_source = generate_gradient_source(
+            tape,
+            param_specs,
+            differentiate_input=input_indices[0],
+            function_name=generated_name,
+        )
+
     return GradientSourceArtifact(
         generated_source,
         generated_name,

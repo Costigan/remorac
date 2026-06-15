@@ -499,6 +499,61 @@ def compile_gradient_functions_source(
     )
 
 
+def compile_value_and_grad_function(
+    source: str,
+    function_name: str,
+    param_types: tuple[RemoraType, ...],
+    example_input: np.ndarray | None = None,
+    *,
+    gradient_name: str | None = None,
+    differentiate_inputs: Iterable[int] | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+    verify: bool = True,
+) -> GradientCompilerArtifact:
+    """Generate and compile a single function returning all requested gradients.
+
+    Generates one function whose return type is a nested ``(Pair ...)``
+    chain containing every requested gradient.  The forward computation is
+    traced once and shared across all backward paths.
+
+    Returns a single ``GradientCompilerArtifact`` (the compiler holds the
+    HIR function with the Pair return type).
+    """
+    from remora.ad_source import generate_value_and_grad_function_source
+
+    if len(param_types) < 2:
+        raise ValueError("value-and-grad requires at least 2 parameter types")
+
+    input_indices = (
+        tuple(range(len(param_types)))
+        if differentiate_inputs is None
+        else tuple(differentiate_inputs)
+    )
+    if any(i < 0 or i >= len(param_types) for i in input_indices):
+        raise ValueError("differentiate_inputs contains an out-of-range input index")
+
+    gradient = generate_value_and_grad_function_source(
+        source,
+        function_name,
+        param_types,
+        example_input,
+        gradient_name=gradient_name,
+        differentiate_inputs=input_indices,
+        include_prelude=include_prelude,
+        syntax=syntax,
+    )
+    compiler = compile_function_source(
+        gradient.source,
+        gradient.function_name,
+        gradient.param_types,
+        verify=verify,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    return GradientCompilerArtifact(gradient, compiler)
+
+
 def compile_gradient_function_source_to_supported_gpu_artifacts(
     source: str,
     function_name: str,

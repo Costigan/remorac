@@ -104,7 +104,7 @@ from remora.typechecker import (
     TypedIm2col,
     TypedCol2im,
 )
-from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType, SigmaType, StaticDim
+from remora.types import ArrayType, BOOL, FLOAT, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim
 
 
 class RuntimeUnavailable(RemoraError):
@@ -756,9 +756,11 @@ class CPUFunctionExecutor:
         self.execute_into(output, *inputs)
         if isinstance(self._artifact.return_type, ScalarType):
             return EvaluationResult(output.item(), self._artifact.return_type)
+        if isinstance(self._artifact.return_type, PairType):
+            return EvaluationResult(tuple(output), self._artifact.return_type)
         return EvaluationResult(output, self._artifact.return_type)
 
-    def execute_into(self, output: np.ndarray, *inputs: np.ndarray) -> None:
+    def execute_into(self, output: object, *inputs: np.ndarray) -> None:
         if len(inputs) != len(self._artifact.param_types):
             raise EvaluationError(
                 f"compiled CPU function expects {len(self._artifact.param_types)} inputs, got {len(inputs)}"
@@ -769,6 +771,32 @@ class CPUFunctionExecutor:
                 input_type,
                 f"compiled CPU function input {index}",
             )
+
+        if isinstance(self._artifact.return_type, PairType):
+            component_types = _flatten_pair_output(self._artifact.return_type)
+            if not isinstance(output, list) or len(output) != len(component_types):
+                raise EvaluationError(
+                    f"Pair output must be a list of {len(component_types)} numpy arrays"
+                )
+            for i, (out_arr, comp_type) in enumerate(zip(output, component_types)):
+                _validate_numpy_value(out_arr, comp_type, f"compiled CPU function output[{i}]")
+
+            descriptors = [make_numpy_memref_descriptor(np.asarray(input_value)) for input_value in inputs]
+            out_descriptors = [make_numpy_memref_descriptor(o) for o in output]  # type: ignore[arg-type]
+            function = getattr(self._library, f"_mlir_ciface_{self._artifact.export_name}")
+            descriptor_types = [type(descriptor) for descriptor in descriptors]
+            function.argtypes = [
+                *(ctypes.POINTER(descriptor_type) for descriptor_type in descriptor_types),
+                *(ctypes.POINTER(type(out_d)) for out_d in out_descriptors),
+            ]
+            function.restype = None
+            with _temporary_omp_threads(self._artifact.cpu_threads):
+                function(
+                    *(ctypes.byref(descriptor) for descriptor in descriptors),
+                    *(ctypes.byref(out_d) for out_d in out_descriptors),
+                )
+            return
+
         _validate_numpy_value(
             output,
             self._artifact.return_type,
@@ -776,7 +804,7 @@ class CPUFunctionExecutor:
         )
 
         descriptors = [make_numpy_memref_descriptor(np.asarray(input_value)) for input_value in inputs]
-        output_descriptor = make_numpy_memref_descriptor(output)
+        output_descriptor = make_numpy_memref_descriptor(output)  # type: ignore[arg-type]
         function = getattr(self._library, f"_mlir_ciface_{self._artifact.export_name}")
         descriptor_types = [type(descriptor) for descriptor in descriptors]
         function.argtypes = [
@@ -897,16 +925,25 @@ def _temporary_omp_threads(cpu_threads: int | None):
             os.environ["OMP_NUM_THREADS"] = previous
 
 
-def _empty_output_value(value_type: RemoraType, *, arena: Arena | None = None) -> np.ndarray:
+def _flatten_pair_output(value_type: RemoraType) -> list[RemoraType]:
+    """Return component types from a (possibly nested) PairType, left-to-right."""
+    result: list[RemoraType] = []
+    current: RemoraType = value_type
+    while isinstance(current, PairType):
+        result.append(current.left)
+        current = current.right
+    result.append(current)
+    return result
+
+
+def _empty_output_value(value_type: RemoraType, *, arena: Arena | None = None):
+    if isinstance(value_type, PairType):
+        return [_empty_output_value(t, arena=arena) for t in _flatten_pair_output(value_type)]
     shape = _result_shape(value_type)
     dtype = _result_dtype(value_type)
     if arena is not None:
         nbytes = int(np.prod(shape)) * dtype.itemsize
         ptr = arena.alloc(nbytes)
-        # For CPU, arena._buffer is available if no runtime.
-        # For GPU, we can't easily return a numpy view of device memory here
-        # that behaves like a normal array. 
-        # But this function is used by CPUExecutor.
         if arena._runtime is None:
             return np.frombuffer(arena._buffer, dtype=dtype, count=int(np.prod(shape)), offset=ptr - arena._host_ptr).reshape(shape)
         else:
