@@ -302,6 +302,8 @@ def generate_gradient_source(
         result = gradients[-1]
         for g in reversed(gradients[:-1]):
             result = _Pair(g, result, ())
+        from remora.ad_opt import simplify_ad_expr
+        result = simplify_ad_expr(result)
         body = _emit(result)
         return_type = _pair_type_string(param_specs)
     else:
@@ -309,6 +311,8 @@ def generate_gradient_source(
         gradient = adjs[diff_idx]
         if gradient is None:
             raise RuntimeError("AD source: input not found on tape")
+        from remora.ad_opt import simplify_ad_expr
+        gradient = simplify_ad_expr(gradient)
         body = _emit(gradient)
         return_type = _source_type(param_specs[differentiate_input][1])
 

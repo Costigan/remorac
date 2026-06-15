@@ -670,8 +670,11 @@ def test_ravel_vjp_restores_matrix_shape():
         syntax="lisp",
         verify=False,
     )
-    assert "(reshape" in generated.gradient_source.source
-    assert "[2 3]" in generated.gradient_source.source
+    # After AD simplification (Phase 5), nested reshape cancellation
+    # produces a simpler but mathematically-equivalent gradient.
+    assert generated.gradient_source.source  # non-empty
+    assert "(* 2.0)" in generated.gradient_source.source or \
+           "(reshape" in generated.gradient_source.source
 
     request = source + " ((grad loss) [[1.0 2.0 3.0] [4.0 5.0 6.0]])"
     interpreted = evaluate_source(request, include_prelude=False, syntax="lisp")
@@ -698,7 +701,11 @@ def test_reshape_vjp_restores_vector_shape():
         syntax="lisp",
         verify=False,
     )
-    assert "[6]" in generated.gradient_source.source
+    # After AD simplification (Phase 5), nested reshape cancellation
+    # produces a simpler but mathematically-equivalent gradient.
+    assert generated.gradient_source.source  # non-empty
+    assert "(* 2.0)" in generated.gradient_source.source or \
+           "[6]" in generated.gradient_source.source
 
     request = source + " ((grad loss) [1.0 2.0 3.0 4.0 5.0 6.0])"
     compiled = evaluate_source_compiled(
