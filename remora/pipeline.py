@@ -326,6 +326,101 @@ def run_cpu_pipeline_text(
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 10: In-process MLIR pass execution (optional)
+# ---------------------------------------------------------------------------
+
+def run_cpu_pipeline_in_process(
+    mlir_text: str,
+    *,
+    threaded: bool = False,
+    vectorize: bool = False,
+) -> str:
+    """Run the CPU pipeline using IREE Python bindings (no subprocess).
+
+    Returns the lowered MLIR text, or raises PipelineUnavailable if the
+    Python pass manager is not available or a pass fails.
+    """
+    if threaded or vectorize:
+        raise PipelineUnavailable(
+            "in-process CPU pipeline only supports the basic (non-threaded, "
+            "non-vectorised) path"
+        )
+    return _run_pass_pipeline_in_process(mlir_text, CPU_PIPELINE)
+
+
+def _run_pass_pipeline_in_process(mlir_text: str, pipeline_text: str) -> str:
+    """Parse *mlir_text*, run *pipeline_text* passes, return result text."""
+    passmanager = _load_iree_passmanager()
+
+    try:
+        ctx = _load_iree_ir().Context()
+        ctx.allow_unregistered_dialects = True
+        module = _load_iree_ir().Module.parse(mlir_text, ctx)
+        pm = passmanager.PassManager.parse(pipeline_text, ctx)
+        pm.run(module)
+        return str(module)
+    except Exception as exc:
+        raise PipelineUnavailable(
+            f"in-process pass pipeline failed: {exc}"
+        ) from exc
+
+
+def compare_cpu_pipeline_paths(
+    mlir_text: str,
+    *,
+    external_path_results: bool = True,
+) -> dict[str, object]:
+    """Compare external vs in-process CPU pipeline execution.
+
+    Returns a dict with timing, output sizes, and equivalence information.
+
+    Only call this on a module small enough to be processed quickly
+    (the 47.5 MB baseline module was the reason this comparison
+    was deferred).
+    """
+    import time
+
+    toolchain = detect_toolchain()
+    result: dict[str, object] = {
+        "input_bytes": len(mlir_text),
+        "passmanager_available": toolchain.iree_passmanager,
+        "mlir_opt_available": toolchain.mlir_opt is not None,
+    }
+
+    # External path
+    if external_path_results and toolchain.mlir_opt:
+        t0 = time.perf_counter()
+        ext_result = run_external_pipeline_text(mlir_text, CPU_PIPELINE, toolchain=toolchain)
+        ext_time = time.perf_counter() - t0
+        result["external_time_s"] = ext_time
+        result["external_output_bytes"] = len(ext_result)
+    else:
+        result["external_skipped"] = True
+        ext_result = None
+
+    # In-process path
+    if toolchain.iree_passmanager:
+        t0 = time.perf_counter()
+        try:
+            in_result = run_cpu_pipeline_in_process(mlir_text)
+            in_time = time.perf_counter() - t0
+            result["in_process_time_s"] = in_time
+            result["in_process_output_bytes"] = len(in_result)
+            # Compare outputs
+            if ext_result is not None and ext_result.strip() == in_result.strip():
+                result["outputs_equivalent"] = True
+            else:
+                result["outputs_equivalent"] = False
+        except PipelineUnavailable as exc:
+            result["in_process_error"] = str(exc)
+            result["in_process_time_s"] = time.perf_counter() - t0
+    else:
+        result["in_process_skipped"] = True
+
+    return result
+
+
 def _strip_trivial_memref_alloca_scopes(mlir_text: str) -> str:
     """Remove no-allocation ``memref.alloca_scope`` wrappers from MLIR text.
 
@@ -576,6 +671,15 @@ def _load_iree_passmanager() -> Any:
     except ModuleNotFoundError as exc:
         raise PipelineUnavailable(
             "IREE compiler pass manager bindings are required for MLIR pipelines"
+        ) from exc
+
+
+def _load_iree_ir() -> Any:
+    try:
+        return import_module("iree.compiler.ir")
+    except ModuleNotFoundError as exc:
+        raise PipelineUnavailable(
+            "IREE compiler IR bindings are required for MLIR pipelines"
         ) from exc
 
 
