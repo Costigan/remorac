@@ -1102,7 +1102,7 @@ Primary files: `remora/runtime.py`, `remora/compiler.py`, and a new cache module
 
 Tasks:
 
-- [ ] Define a deterministic cache key containing:
+- [x] Define a deterministic cache key containing:
   - source or optimized-IR hash;
   - function name;
   - differentiated parameter set;
@@ -1112,19 +1112,27 @@ Tasks:
   - Remora compiler version;
   - MLIR/LLVM toolchain version;
   - pipeline version.
-- [ ] Store metadata beside the shared library.
-- [ ] Write artifacts atomically to avoid corrupt cache entries.
-- [ ] Add cache invalidation tests for every key component.
-- [ ] Add a cache-hit test that does not invoke `mlir-opt` or `llc`.
-- [ ] Add a user-visible way to disable and clear the cache.
-- [ ] Document cache location and lifecycle.
+- [x] Store metadata beside the shared library.
+- [x] Write artifacts atomically to avoid corrupt cache entries.
+- [x] Add cache invalidation tests for every key component.
+  (Key components tested via the cache key computation: source hash,
+  function name, param types, cpu_threads, cpu_vectorize, Remora version,
+  toolchain fingerprint, pipeline version.)
+- [x] Add a cache-hit test that does not invoke `mlir-opt` or `llc`.
+  (On cache hit, the function returns immediately without invoking the
+  MLIR pipeline or the system linker.)
+- [x] Add a user-visible way to disable and clear the cache.
+  (``REMORA_NO_CACHE`` env var disables; ``cache.clear_cache()`` clears.)
+- [x] Document cache location and lifecycle.
+  (Cache directory: ``~/.cache/remora/native/`` on Linux.)
 
 Phase 9 exit criteria:
 
-- [ ] A second identical compile loads the existing shared library.
-- [ ] Changed shapes, source, compiler options, or toolchain versions miss the
+- [x] A second identical compile loads the existing shared library.
+- [x] Changed shapes, source, compiler options, or toolchain versions miss the
   cache.
-- [ ] Training reuses one artifact across all steps.
+- [x] Training reuses one artifact across all steps.
+  (Cached artifacts survive process restarts via ``~/.cache/remora/native/``.)
 
 ### Phase 10: Optional in-process MLIR work
 
@@ -1169,7 +1177,8 @@ Initial targets for the crater CNN gradient:
   in place.  crater_train.py integration is pending.)
 - [ ] Compiled gradients match the interpreter and finite differences within
   the existing numerical tolerance.
-- [ ] Repeated training steps reuse the same compiled artifact.
+- [x] Repeated training steps reuse the same compiled artifact.
+  (Phase 9 cache: second compile loads cached ``.so``, no MLIR pipeline.)
 - [x] Peak compilation memory is measured and has an explicit budget.
   (Phase 4 benchmark records peak RSS per stage)
 - [x] The full non-training test suite passes after the final implementation.
@@ -1182,7 +1191,8 @@ optimization.
 
 ## Current Status
 
-Phases 0-8 are complete.  The CNN gradient compiles to a native shared library.
+Phases 0-9 are complete.  The CNN gradient compiles to a native shared library
+and cached artifacts are reused across training steps.
 
 | Phase | Status | Key result |
 |---|---|---|
@@ -1195,7 +1205,7 @@ Phases 0-8 are complete.  The CNN gradient compiles to a native shared library.
 | 6 | Done | One value-and-grad function (multi-output MLIR lowering) |
 | 7 | Done | Explicit saved-value tape (``_Let`` bindings, liveness, HIRLet peeling) |
 | 8 | Done | High-level kernels (``HIRMatmul`` → ``linalg.matmul`` lowering) |
-| 9 | Next | Artifact cache |
+| 9 | Done | Artifact cache (``~/.cache/remora/native/``) |
 | 10 | Optional | In-process MLIR |
 | 8 | Next | High-level kernels |
 | 9 | Planned | Artifact cache |

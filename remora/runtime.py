@@ -189,7 +189,7 @@ class CompiledCPUArtifact:
 @dataclass(frozen=True)
 class CompiledCPUFunctionArtifact:
     library_path: Path
-    temp_dir: tempfile.TemporaryDirectory[str]
+    temp_dir: tempfile.TemporaryDirectory[str] | None
     function_name: str
     param_types: tuple[RemoraType, ...]
     return_type: RemoraType
@@ -198,7 +198,8 @@ class CompiledCPUFunctionArtifact:
     cpu_vectorize: bool = False
 
     def close(self) -> None:
-        self.temp_dir.cleanup()
+        if self.temp_dir is not None:
+            self.temp_dir.cleanup()
 
 
 Value = object
@@ -709,6 +710,8 @@ class CPUFunctionExecutor:
         cpu_threads: int | None = None,
         cpu_vectorize: bool = False,
     ) -> CompiledCPUFunctionArtifact:
+        import remora.cache as cache_module
+
         resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_function_source(
             source,
@@ -719,6 +722,21 @@ class CPUFunctionExecutor:
             syntax=syntax,
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
+
+        # Check cache — covers the expensive MLIR→llc→linker pipeline.
+        if not cache_module.cache_disabled():
+            key = cache_module.compute_cache_key(
+                source, function_name, param_types,
+                cpu_threads=resolved_cpu_threads, cpu_vectorize=cpu_vectorize,
+            )
+            cached = cache_module.load_from_cache(key)
+            if cached is not None:
+                return CompiledCPUFunctionArtifact(
+                    cached.so_path, None, function_name, param_types,
+                    compiler_artifact.return_type,
+                    "remora_call", resolved_cpu_threads, cpu_vectorize,
+                )
+
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
         if threaded and not has_openmp_runtime():
             raise PipelineUnavailable(
@@ -740,6 +758,26 @@ class CPUFunctionExecutor:
             raise
         llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
         temp_dir = _compile_llvm_ir_to_shared_library(llvm_ir, toolchain, threaded=threaded)
+
+        # Store in cache
+        if not cache_module.cache_disabled():
+            key = cache_module.compute_cache_key(
+                source, function_name, param_types,
+                cpu_threads=resolved_cpu_threads, cpu_vectorize=cpu_vectorize,
+            )
+            try:
+                cache_module.store_in_cache(
+                    key,
+                    so_path=temp_dir[1],
+                    function_name=function_name,
+                    param_types=param_types,
+                    return_type_str=str(compiler_artifact.return_type),
+                    cpu_threads=resolved_cpu_threads,
+                    cpu_vectorize=cpu_vectorize,
+                )
+            except Exception:
+                pass  # Cache store failure is non-fatal
+
         return CompiledCPUFunctionArtifact(
             temp_dir[1],
             temp_dir[0],
