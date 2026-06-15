@@ -30,6 +30,7 @@ from remora.ad_source import (
     _Col2im,
     _If,
     _Pair,
+    _Let,
     _constant,
     _fill,
     _is_zero,
@@ -299,6 +300,8 @@ def _simplify_children(expr: _Expr) -> _Expr:
         return _If(new_cond, new_then, new_else, expr.shape)
     if isinstance(expr, _Pair):
         return _Pair(simplify_ad_expr(expr.left), simplify_ad_expr(expr.right), expr.shape)
+    if isinstance(expr, _Let):
+        return _Let(expr.name, simplify_ad_expr(expr.value), simplify_ad_expr(expr.body), expr.shape)
     return expr
 
 
@@ -346,4 +349,6 @@ def ad_expr_node_count(expr: _Expr) -> int:
         return count + ad_expr_node_count(expr.condition) + ad_expr_node_count(expr.then_expr) + ad_expr_node_count(expr.else_expr)
     if isinstance(expr, _Pair):
         return count + ad_expr_node_count(expr.left) + ad_expr_node_count(expr.right)
+    if isinstance(expr, _Let):
+        return count + ad_expr_node_count(expr.value) + ad_expr_node_count(expr.body)
     return count

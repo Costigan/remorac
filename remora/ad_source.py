@@ -143,7 +143,15 @@ class _Pair:
     shape: Shape
 
 
-_Expr: TypeAlias = _Atom | _Op | _Fold | _FoldBroadcast | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _Im2col | _Col2im | _If | _Pair
+@dataclass(frozen=True)
+class _Let:
+    name: str
+    value: "_Expr"
+    body: "_Expr"
+    shape: Shape
+
+
+_Expr: TypeAlias = _Atom | _Op | _Fold | _FoldBroadcast | _Fill | _Reshape | _Transpose | _View | _Append | _SubarrayView | _Rotate | _Index | _ScatterAdd | _Im2col | _Col2im | _If | _Pair | _Let
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,7 @@ def generate_gradient_source(
     differentiate_input: int = 0,
     multi_output: bool = False,
     function_name: str = "grad-f",
+    use_saved_values: bool = False,
 ) -> str:
     """Return a gradient function for the traced tape graph with one or more params.
 
@@ -196,6 +205,24 @@ def generate_gradient_source(
             )
 
     primals = _reconstruct_primals_multi(tape, {idx: name for name, _, idx in _enumerate_params(param_specs, tape)})
+
+    # Phase 7: saved-value analysis (opt-in).
+    saved_lets: list[tuple[int, str, _Expr]] = []
+    if use_saved_values:
+        ref_counts = [0] * len(tape.entries)
+        for entry in tape.entries:
+            for inp in entry.inputs:
+                if inp < len(ref_counts):
+                    ref_counts[inp] += 1
+
+        counter = 0
+        for i in range(len(primals)):
+            if ref_counts[i] > 0 and primals[i].shape and not isinstance(primals[i], _Atom):
+                name = f"_sv_{counter}"
+                saved_lets.append((i, name, primals[i]))
+                primals[i] = _Atom(name, primals[i].shape)
+                counter += 1
+
     adjs: list[_Expr | None] = [None] * len(tape.entries)
     output_shape = _shape_of(tape.values[-1])
     adjs[-1] = _constant(1.0, output_shape)
@@ -304,6 +331,9 @@ def generate_gradient_source(
             result = _Pair(g, result, ())
         from remora.ad_opt import simplify_ad_expr
         result = simplify_ad_expr(result)
+        # Wrap in saved-value let-bindings (topological order)
+        for _i, name, value in saved_lets:
+            result = _Let(name, value, result, result.shape)
         body = _emit(result)
         return_type = _pair_type_string(param_specs)
     else:
@@ -313,6 +343,9 @@ def generate_gradient_source(
             raise RuntimeError("AD source: input not found on tape")
         from remora.ad_opt import simplify_ad_expr
         gradient = simplify_ad_expr(gradient)
+        # Wrap in saved-value let-bindings (topological order)
+        for _i, name, value in saved_lets:
+            gradient = _Let(name, value, gradient, gradient.shape)
         body = _emit(gradient)
         return_type = _source_type(param_specs[differentiate_input][1])
 
@@ -1140,6 +1173,8 @@ def _emit(expr: _Expr) -> str:
         return f"(col2im {_emit(expr.value)} [{dims}] [{ks}] {expr.stride})"
     if isinstance(expr, _If):
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
+    if isinstance(expr, _Let):
+        return f"(:: {expr.name} {_emit(expr.value)} {_emit(expr.body)})"
     if isinstance(expr, _Pair):
         return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "neg":

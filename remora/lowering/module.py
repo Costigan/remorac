@@ -1221,6 +1221,48 @@ def _lower_pair_result(
     return body, result_parts
 
 
+def _lower_top_level_lets(
+    cse_body: HIRExpr,
+    tensor_env: Any,
+    scalar_env: Any,
+    hoisted_blocks: list[str],
+) -> HIRExpr:
+    """Peel off top-level HIRLet bindings and lower them into envs.
+
+    Returns the innermost body after all lets have been peeled.
+    """
+    from remora.hir import HIRLet
+
+    body = cse_body
+    while isinstance(body, HIRLet) and isinstance(body.value_type, ArrayType):
+        code, val, mlir_type, elem_type = _lower_tensor_input(
+            body.value,
+            f"__let_{body.name}",
+            {},
+            tensor_env,
+            scalar_env,
+        )
+        hoisted_blocks.append(code)
+        tensor_env[body.name] = _TensorValue(val, mlir_type, elem_type)
+        body = body.body
+    while isinstance(body, HIRLet):
+        emitter = _RegionEmitter(input_name="", input_type="")
+        value = emitter.emit_expr(body.value, scalar_env)
+        stype = type_to_mlir(body.value_type)
+        result_name = f"%let_scalar_{body.name}"
+        indented_code = "\n".join(emitter.lines).replace("\n", "\n  ")
+        hoisted_blocks.append(
+            f"    {result_name} = scf.execute_region -> {stype} {{\n"
+            f"  {indented_code}\n"
+            f"      scf.yield {value.value} : {stype}\n"
+            "    }"
+        )
+        scalar_env[body.name] = _Operand(result_name, [], stype)
+        tensor_env[body.name] = _TensorValue(result_name, stype, stype)
+        body = body.body
+    return body
+
+
 def _lower_descriptor_internal_function(
     function: HIRFunction, name: str
 ) -> str:
@@ -1307,6 +1349,10 @@ def _lower_descriptor_internal_function(
                 result_name, scalar_type, scalar_type
             )
         cse_ordinal += 1
+
+    # Peel off top-level HIRLet bindings (from Phase 7 saved-value tape) and
+    # lower their values into tensor_env before lowering the result body.
+    cse_body = _lower_top_level_lets(cse_body, tensor_env, scalar_env, hoisted_blocks)
 
     if isinstance(function.return_type, PairType):
         body, result_parts = _lower_pair_result(cse_body, function.return_type, tensor_env, scalar_env)
