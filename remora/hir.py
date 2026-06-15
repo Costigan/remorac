@@ -432,6 +432,21 @@ class HIRLit:
     type: ScalarType
 
 
+@dataclass(frozen=True)
+class HIRMatmul:
+    """Matrix multiplication: ``result = left @ right`` (or equivalent)."""
+    left: HIRExpr
+    right: HIRExpr
+    result_type: ArrayType
+
+
+@dataclass(frozen=True)
+class HIRRelu:
+    """ReLU activation: ``max(0, array)`` element-wise."""
+    array: HIRExpr
+    result_type: ArrayType
+
+
 HIRExpr: TypeAlias = (
     HIRMap
     | HIRApply
@@ -474,6 +489,8 @@ HIRExpr: TypeAlias = (
     | HIRArrayLit
     | HIRVar
     | HIRLit
+    | HIRMatmul
+    | HIRRelu
 )
 
 HIRCallable: TypeAlias = HIRLambda | HIRPrimCallable | HIRVar
@@ -878,6 +895,8 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
     if isinstance(expr, (HIRFilter, HIRReplicate)):
         return expr.result_type
     if isinstance(expr, (HIRSort, HIRGrade)):
+        return expr.result_type
+    if isinstance(expr, (HIRMatmul, HIRRelu)):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 

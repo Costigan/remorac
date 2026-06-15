@@ -24,6 +24,7 @@ from remora.hir import (
     HIRLet,
     HIRLit,
     HIRMap,
+    HIRMatmul,
     HIRPrimCallable,
     HIRPrimOp,
     HIRRavel,
@@ -204,6 +205,41 @@ def _lower_array_literal_module(node: HIRArrayLit) -> str:
 # ---------------------------------------------------------------------------
 # Tensor input lowering (entry point for turning HIR exprs into SSA values)
 # ---------------------------------------------------------------------------
+
+
+def _lower_matmul_tensor_input(
+    node,
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    """Lower ``HIRMatmul`` to ``linalg.matmul``."""
+    left = node.left
+    right = node.right
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+
+    # Lower left and right operands
+    left_code, left_name, left_type, left_elem = _lower_tensor_input(
+        left, f"{prefix}_left", functions, tensor_env, scalar_env
+    )
+    right_code, right_name, right_type, right_elem = _lower_tensor_input(
+        right, f"{prefix}_right", functions, tensor_env, scalar_env
+    )
+
+    # Create an empty output tensor for linalg.matmul
+    empty_name = f"%{prefix}_empty"
+    result_name = f"%{prefix}"
+
+    code = f"""{left_code}
+{right_code}
+    {empty_name} = tensor.empty() : {result_type}
+    {result_name} = linalg.matmul
+      ins({left_name}, {right_name} : {left_type}, {right_type})
+      outs({empty_name} : {result_type}) -> {result_type}"""
+
+    return code, result_name, result_type, result_elem
 
 
 def _lower_tensor_input(
@@ -428,6 +464,9 @@ def _lower_tensor_input(
         return _lower_if_tensor_input(
             node, functions, prefix, tensor_env, scalar_env
         )
+
+    if isinstance(node, HIRMatmul):
+        return _lower_matmul_tensor_input(node, prefix, functions, tensor_env, scalar_env)
 
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"

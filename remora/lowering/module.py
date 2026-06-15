@@ -53,6 +53,7 @@ from remora.hir import (
     HIRWithShape,
 )
 from remora.hir_opt import hir_cse
+from remora.hir_opt import hir_recognize_matmul
 from remora.types import ArrayType, FuncType, PairType, RemoraType, ScalarType, SigmaType
 
 from remora.lowering.indexing import (
@@ -1296,6 +1297,9 @@ def _lower_descriptor_internal_function(
 
     # Phase 4: CSE for repeated pure array-valued subexpressions.
     cse_body, cse_bindings = hir_cse(function_body)
+
+    # Phase 8: recognize high-level kernels (matmul, etc.)
+    cse_body = hir_recognize_matmul(cse_body)
 
     hoisted_blocks: list[str] = []
     for ordinal, (hoisted_name, fold_expr) in enumerate(hoisted_folds):

@@ -30,6 +30,8 @@ from remora.hir import (
     HIRIndex,
     HIRIndicesOf,
     HIRIota,
+    HIRMatmul,
+    HIRRelu,
     HIRFirst,
     HIRSecond,
     HIRPair,
@@ -752,3 +754,132 @@ def hir_optimize(expr: HIRExpr) -> HIRExpr:
     """
     rewritten, _bindings = hir_cse(expr)
     return hir_dce(rewritten)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: High-level kernel recognition
+# ---------------------------------------------------------------------------
+
+def hir_recognize_matmul(expr: HIRExpr) -> HIRExpr:
+    """Recognize ``fold(+, 0, map(*, a, b))`` as ``HIRMatmul(a, b)``.
+
+    Also recognizes the pattern inside cell-maps and nested expressions.
+    Returns an equivalent expression with recognized matmuls.
+    """
+    return _recognize_matmul_pass(expr)  # type: ignore[return-value]
+
+
+def _recognize_matmul_pass(node: object) -> object:
+    """Bottom-up pass replacing fold-map patterns with HIRMatmul."""
+    from remora.hir import (
+        HIRFold, HIRReduce, HIRMap, HIRApply, HIRPrimCallable,
+        HIRLit, HIRMatmul, HIRLet, HIRLambda, HIRUnbox, HIRIf,
+        HIRPrimOp, HIRCast, HIRIndex, HIRSlice,
+        HIRTranspose, HIRReshape, HIRRavel, HIRReverse, HIRTake, HIRDrop,
+        HIRArrayLit, HIRWithShape, HIRScatterAdd, HIRAppend,
+        HIRPair, HIRFirst, HIRSecond, HIRRotate, HIRSubarray,
+        HIRScan, HIRCall, HIRIota,
+    )
+    from remora.types import ArrayType
+    from dataclasses import is_dataclass, fields, replace
+
+    if isinstance(node, (str, int, float, bool, type(None), HIRLit, HIRSlice)):
+        return node
+    if isinstance(node, (HIRVar, HIRLambda, HIRUnbox)):
+        return node
+
+    # Scoping: descend into HIRLet
+    if isinstance(node, HIRLet):
+        new_val = _recognize_matmul_pass(node.value)
+        new_body = _recognize_matmul_pass(node.body)
+        return HIRLet(node.name, node.value_type, new_val, new_body, node.result_type)  # type: ignore[arg-type]
+
+    # Pattern: fold(+.f, 0.0, map(*.f, a, b)) → HIRMatmul(a, b)
+    if isinstance(node, (HIRFold, HIRReduce)):
+        func = node.func
+        init = node.init
+        array = node.array
+        if (isinstance(func, HIRPrimCallable) and func.op == "+"
+                and isinstance(init, HIRLit) and init.value == 0.0
+                and isinstance(array, (HIRMap, HIRApply))):
+            map_func = array.func
+            if (isinstance(map_func, HIRPrimCallable) and map_func.op == "*"
+                    and len(array.arrays) == 2
+                    and isinstance(node.result_type, ArrayType)):
+                left = _recognize_matmul_pass(array.arrays[0])
+                right = _recognize_matmul_pass(array.arrays[1])
+                return HIRMatmul(left, right, node.result_type)  # type: ignore[arg-type]
+
+    # Default: recursively rewrite children for all compound nodes
+    if isinstance(node, HIRExpr):
+        return _rewrite_children_hir(node, _recognize_matmul_pass)
+    return node
+
+
+def _rewrite_children_hir(node, rewrite_fn):
+    """Rewrite all children of a HIRExpr node using *rewrite_fn*."""
+    from remora.hir import (
+        HIRMap, HIRApply, HIRFold, HIRReduce, HIRFoldRight, HIRScan,
+        HIRPrimOp, HIRIf, HIRCast, HIRIndex, HIRArrayLit,
+        HIRTranspose, HIRReshape, HIRRavel, HIRReverse, HIRTake, HIRDrop,
+        HIRWithShape, HIRScatterAdd, HIRIm2col, HIRCol2im, HIRAppend,
+        HIRPair, HIRFirst, HIRSecond, HIRRotate, HIRSubarray, HIRCall,
+    )
+    if isinstance(node, (HIRMap, HIRApply)):
+        return type(node)(node.frame_shape, node.cell_shape,
+                         rewrite_fn(node.func),
+                         [rewrite_fn(a) for a in node.arrays],
+                         node.result_type)
+    if isinstance(node, (HIRFold, HIRReduce)):
+        return type(node)(node.reduction_dim, rewrite_fn(node.func),
+                         rewrite_fn(node.init), rewrite_fn(node.array),
+                         node.result_type)
+    if isinstance(node, HIRFoldRight):
+        return HIRFoldRight(node.reduction_dim, rewrite_fn(node.func),
+                           rewrite_fn(node.init), rewrite_fn(node.array),
+                           node.result_type)
+    if isinstance(node, HIRScan):
+        return HIRScan(node.reduction_dim, rewrite_fn(node.func),
+                      rewrite_fn(node.init), rewrite_fn(node.array),
+                      node.exclusive, node.right, node.result_type)
+    if isinstance(node, HIRPrimOp):
+        return HIRPrimOp(node.op, [rewrite_fn(a) for a in node.args], node.result_type)
+    if isinstance(node, HIRIf):
+        return HIRIf(rewrite_fn(node.condition), rewrite_fn(node.then_branch),
+                    rewrite_fn(node.else_branch), node.result_type)
+    if isinstance(node, HIRCast):
+        return HIRCast(rewrite_fn(node.value), node.from_type, node.to_type, node.result_type)
+    if isinstance(node, HIRIndex):
+        return HIRIndex(rewrite_fn(node.array),
+                       [i if isinstance(i, slice) else rewrite_fn(i) for i in node.indices],
+                       node.result_type)
+    if isinstance(node, HIRArrayLit):
+        return HIRArrayLit([rewrite_fn(e) for e in node.elements], node.result_type)
+    if isinstance(node, (HIRTranspose, HIRReshape, HIRRavel, HIRReverse)):
+        return type(node)(rewrite_fn(node.array), node.result_type)
+    if isinstance(node, (HIRTake, HIRDrop)):
+        return type(node)(node.count, rewrite_fn(node.array), node.result_type)
+    if isinstance(node, HIRWithShape):
+        return HIRWithShape(rewrite_fn(node.source), node.result_type)
+    if isinstance(node, HIRScatterAdd):
+        return HIRScatterAdd(rewrite_fn(node.target),
+                            rewrite_fn(node.index) if hasattr(node.index, 'shape') else node.index,  # type: ignore[arg-type]
+                            rewrite_fn(node.update), node.result_type)
+    if isinstance(node, (HIRIm2col, HIRCol2im)):
+        if isinstance(node, HIRIm2col):
+            return HIRIm2col(rewrite_fn(node.image), node.kernel_shape, node.stride, node.result_type)  # type: ignore[arg-type]
+        else:
+            return HIRCol2im(rewrite_fn(node.columns), node.image_shape, node.kernel_shape, node.stride, node.result_type)  # type: ignore[arg-type]
+    if isinstance(node, HIRAppend):
+        return HIRAppend(rewrite_fn(node.left), rewrite_fn(node.right), node.result_type)
+    if isinstance(node, HIRPair):
+        return HIRPair(rewrite_fn(node.left), rewrite_fn(node.right), node.result_type)
+    if isinstance(node, (HIRFirst, HIRSecond)):
+        return type(node)(rewrite_fn(node.pair), node.result_type)
+    if isinstance(node, HIRRotate):
+        return HIRRotate(rewrite_fn(node.array), node.shift, node.result_type)
+    if isinstance(node, HIRSubarray):
+        return HIRSubarray(rewrite_fn(node.array), node.offsets, node.sizes, node.result_type)
+    if isinstance(node, HIRCall):
+        return HIRCall(node.func_name, [rewrite_fn(a) for a in node.args], node.result_type)
+    return node
