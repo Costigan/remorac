@@ -1,0 +1,11 @@
+crater_train.py is updated. Here's what changed:
+
+CompiledTrainingFunctions — New class that generates a single value-and-grad function (6 trainable gradients as a nested Pair), compiles it via CPUFunctionExecutor, and provides forward() and gradients() methods. The gradient function accepts all 9 parameters but returns only the 6 trainable gradients.
+
+train_tiny_dataset — Tries compiled execution first (_try_compiled()), falls back to the interpreter. The training loop calls grad_fn(*step_args) once per step instead of 6 separate gradient(*step_args) calls. TrainingResult now includes a compiled flag.
+
+_try_compiled — Returns CompiledTrainingFunctions on success, None if native compilation is unavailable.
+
+AD fix — generate_gradient_source now accepts trainable_indices to filter which gradients appear in the Pair return. The function signature keeps all parameters for forward reconstruction.
+
+The compiled path loads in ~112s first time (cached subsequently via Phase 9), produces 150 KB MLIR with 298 linalg.generic ops, and returns all 6 gradients in a single call. 994 tests pass.

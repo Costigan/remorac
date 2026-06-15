@@ -173,6 +173,7 @@ def generate_gradient_source(
     multi_output: bool = False,
     function_name: str = "grad-f",
     use_saved_values: bool = False,
+    trainable_indices: tuple[int, ...] | None = None,
 ) -> str:
     """Return a gradient function for the traced tape graph with one or more params.
 
@@ -319,10 +320,17 @@ def generate_gradient_source(
             raise NotImplementedError(f"gradient source VJP: {entry.kind}")
 
     if multi_output and len(param_specs) > 1:
+        # Only include trainable (differentiated) gradients.
+        if trainable_indices is not None:
+            active_specs = [param_specs[i] for i in trainable_indices]
+        else:
+            active_specs = param_specs
         gradients: list[_Expr] = []
-        for i, (name, shape) in enumerate(param_specs):
-            idx = tape.input_indices[i]
-            g = adjs[idx]
+        for i, (name, shape) in enumerate(active_specs):
+            # Map filtered index back to tape input index
+            orig_idx = trainable_indices[i] if trainable_indices is not None else i
+            tape_idx = tape.input_indices[orig_idx] if trainable_indices is not None else tape.input_indices[i]
+            g = adjs[tape_idx]
             if g is None:
                 raise RuntimeError(f"AD source: gradient for {name!r} not found")
             gradients.append(g)
@@ -331,11 +339,10 @@ def generate_gradient_source(
             result = _Pair(g, result, ())
         from remora.ad_opt import simplify_ad_expr
         result = simplify_ad_expr(result)
-        # Wrap in saved-value let-bindings (topological order)
         for _i, name, value in saved_lets:
             result = _Let(name, value, result, result.shape)
         body = _emit(result)
-        return_type = _pair_type_string(param_specs)
+        return_type = _pair_type_string(active_specs)
     else:
         diff_idx = tape.input_indices[differentiate_input]
         gradient = adjs[diff_idx]
@@ -702,27 +709,16 @@ def generate_value_and_grad_function_source(
 
     if len(input_indices) > 1:
         # Multi-output: return all requested gradients as a Pair chain.
-        # Filter param_specs and tape input_indices to only the requested ones.
-        filtered_specs = [param_specs[i] for i in input_indices]
-        filtered_indices = [tape.input_indices[i] for i in input_indices]
-
-        # Build a temporary tape with re-indexed inputs
-        filtered_tape = EvalTape(
-            entries=tape.entries,
-            values=tape.values,
-            input_indices=list(filtered_indices),
-            has_data_dependent_control_flow=tape.has_data_dependent_control_flow,
-        )
         generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
         generated_source = generate_gradient_source(
-            filtered_tape,
-            filtered_specs,
+            tape,
+            param_specs,
             differentiate_input=0,
             multi_output=True,
+            trainable_indices=input_indices,
             function_name=generated_name,
         )
     else:
-        # Single gradient: fall back to the existing path.
         generated_name = gradient_name or f"grad_{function_name.replace('-', '_')}"
         generated_source = generate_gradient_source(
             tape,

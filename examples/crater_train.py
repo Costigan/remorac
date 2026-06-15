@@ -1,7 +1,11 @@
 """Train the Section 7 crater CNN on a tiny deterministic dataset.
 
-Images are float32 and normalized to approximately [-1, 1]. Labels are
+Images are float32 and normalized to approximately [-1, 1].  Labels are
 float32 scalars: 1.0 means crater and 0.0 means no crater.
+
+Uses a single compiled value-and-grad function (Phase 6) that returns
+all six trainable gradients at once.  Falls back to the interpreter
+when native compilation is unavailable.
 """
 
 from __future__ import annotations
@@ -14,9 +18,9 @@ from typing import Callable
 
 import numpy as np
 
-from remora.ad_source import generate_gradient_function_source
+from remora.ad_source import generate_gradient_function_source, generate_value_and_grad_function_source
 from remora.lisp_reader import parse_lisp
-from remora.runtime import _lambda_callable
+from remora.runtime import CPUFunctionExecutor, RuntimeUnavailable, _lambda_callable
 from remora.typechecker import TypeChecker
 from remora.types import ArrayType, FLOAT, FuncType, RemoraType, StaticDim
 
@@ -66,6 +70,7 @@ class TrainingResult:
     compile_seconds: float
     mean_step_seconds: float
     checkpoints: dict[int, tuple[np.ndarray, ...]]
+    compiled: bool
 
 
 def make_dropout_mask(
@@ -74,7 +79,6 @@ def make_dropout_mask(
     keep_prob: float = 0.5,
     seed: int | None = None,
 ) -> np.ndarray:
-    """Return a flat dropout mask in {0.0, 1/keep_prob} for inverted dropout."""
     if not 0.0 < keep_prob <= 1.0:
         raise ValueError("keep_prob must be in (0, 1]")
     rng = np.random.RandomState(seed) if seed is not None else np.random
@@ -83,14 +87,12 @@ def make_dropout_mask(
 
 
 def make_inference_mask(size: int = DROPOUT_SIZE) -> np.ndarray:
-    """Return an all-ones mask with no scaling (no dropout at inference)."""
     return np.ones(size, dtype=np.float32)
 
 
 def make_tiny_dataset(
     count: int = 8, *, seed: int = DATA_SEED
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return balanced noisy images with or without a fixed crater-like ring."""
     if count < 2 or count % 2:
         raise ValueError("dataset count must be an even integer of at least 2")
 
@@ -116,7 +118,6 @@ def make_tiny_dataset(
 def initialize_parameters(
     *, hidden_size: int = 4, seed: int = PARAMETER_SEED
 ) -> tuple[np.ndarray, ...]:
-    """Initialize the six trainable tensors with deterministic float32 values."""
     if hidden_size != 4:
         raise ValueError("the current specialized CNN source requires hidden_size=4")
     rng = np.random.RandomState(seed)
@@ -152,7 +153,6 @@ def _prepare_interpreted_function(
     param_types: tuple[RemoraType, ...],
     result_type: RemoraType,
 ) -> Callable[..., object]:
-    """Parse once and return the interpreter callable bound by the definition."""
     checker = TypeChecker()
     checker.check_program(parse_lisp(source))
     function = checker._functions.get(function_name)
@@ -166,8 +166,58 @@ def _prepare_interpreted_function(
     return _lambda_callable(specialized, {})
 
 
+# ---------------------------------------------------------------------------
+# Compiled value-and-grad (Phase 6, single function returning all gradients)
+# ---------------------------------------------------------------------------
+
+
+class CompiledTrainingFunctions:
+    """Compiled forward and value-and-grad function for native CPU execution."""
+
+    def __init__(self) -> None:
+        param_types = _parameter_types()
+
+        # Single multi-output gradient generator.
+        gradient_source = generate_value_and_grad_function_source(
+            _CNN_FULL_LISP_SRC,
+            "cnn-loss",
+            param_types,
+            differentiate_inputs=tuple(range(len(TRAINABLE_NAMES))),
+            include_prelude=False,
+            syntax="lisp",
+        )
+
+        self._grad_executor = CPUFunctionExecutor(
+            CPUFunctionExecutor.compile_source(
+                gradient_source.source,
+                gradient_source.function_name,
+                gradient_source.param_types,
+                include_prelude=False,
+                syntax="lisp",
+            )
+        )
+        self._forward = _prepare_interpreted_function(
+            _CNN_FULL_LISP_SRC, "cnn-loss", param_types, FLOAT
+        )
+
+    def forward(self, *args: object) -> float:
+        return float(self._forward(*args))
+
+    def gradients(self, *args: object) -> tuple[np.ndarray, ...]:
+        """Return all 6 trainable gradients as a tuple of numpy arrays."""
+        result = self._grad_executor.execute(
+            *(np.asarray(a, dtype=np.float32) for a in args)
+        )
+        return tuple(np.asarray(g, dtype=np.float32) for g in result.value)
+
+
+# ---------------------------------------------------------------------------
+# Interpreted fallback (original per-input gradient compilation)
+# ---------------------------------------------------------------------------
+
+
 @lru_cache(maxsize=1)
-def _compile_training_functions() -> tuple[
+def _compile_interpreted_functions() -> tuple[
     Callable[..., object], list[Callable[..., object]]
 ]:
     param_types = _parameter_types()
@@ -198,6 +248,19 @@ def _compile_training_functions() -> tuple[
     return forward, gradients
 
 
+def _try_compiled() -> CompiledTrainingFunctions | None:
+    """Try to compile the value-and-grad function; return None on failure."""
+    try:
+        return CompiledTrainingFunctions()
+    except (RuntimeUnavailable, Exception):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+
 def train_tiny_dataset(
     *,
     epochs: int = 60,
@@ -209,13 +272,30 @@ def train_tiny_dataset(
     dropout_keep_prob: float = 0.5,
     dropout_seed: int = 42,
     verbose: bool = True,
+    use_compiled: bool | None = None,
 ) -> TrainingResult:
-    """Run one-example SGD and return losses, timings, and parameter checkpoints."""
     images, labels = make_tiny_dataset(example_count, seed=data_seed)
     parameters = list(initialize_parameters(seed=parameter_seed))
 
     compile_start = perf_counter()
-    forward, gradient_functions = _compile_training_functions()
+
+    compiled = None if use_compiled is False else _try_compiled()
+    if compiled is not None:
+        compiled_mode = True
+        forward_fn = compiled.forward
+        grad_fn = compiled.gradients
+        if verbose:
+            print("Using compiled native execution (single value-and-grad function)")
+    else:
+        compiled_mode = False
+        interp_forward, interp_grads = _compile_interpreted_functions()
+        forward_fn = lambda *a: float(interp_forward(*a))  # type: ignore[assignment]
+        grad_fn = lambda *a: tuple(  # type: ignore[assignment]
+            np.asarray(g(*a), dtype=np.float32) for g in interp_grads
+        )
+        if verbose:
+            print("Using interpreted execution (6 separate gradient functions)")
+
     compile_seconds = perf_counter() - compile_start
 
     mask_rng = np.random.RandomState(dropout_seed)
@@ -227,7 +307,12 @@ def train_tiny_dataset(
     def mean_loss() -> float:
         inference_mask = make_inference_mask()
         losses = [
-            float(forward(*(*parameters, inference_mask, image, np.asarray(label, dtype=np.float32))))
+            float(forward_fn(
+                *(np.asarray(p, dtype=np.float32) for p in parameters),
+                inference_mask,
+                image,
+                np.asarray(label, dtype=np.float32),
+            ))
             for image, label in zip(images, labels)
         ]
         return float(np.mean(losses))
@@ -240,11 +325,8 @@ def train_tiny_dataset(
         for image, label in zip(images, labels):
             step_start = perf_counter()
             step_args = arguments_with_dropout(image, label)
-            gradients = [
-                np.asarray(gradient(*step_args), dtype=np.float32)
-                for gradient in gradient_functions
-            ]
-            if not all(np.all(np.isfinite(gradient)) for gradient in gradients):
+            gradients = list(grad_fn(*step_args))
+            if not all(np.all(np.isfinite(g)) for g in gradients):
                 raise FloatingPointError(f"non-finite gradient at epoch {epoch}")
             updated_parameters = []
             for parameter, gradient in zip(parameters, gradients):
@@ -255,7 +337,7 @@ def train_tiny_dataset(
                     updated = np.ascontiguousarray(updated)
                 updated_parameters.append(updated)
             parameters = updated_parameters
-            if not all(np.all(np.isfinite(parameter)) for parameter in parameters):
+            if not all(np.all(np.isfinite(p)) for p in parameters):
                 raise FloatingPointError(f"non-finite parameter at epoch {epoch}")
             step_seconds.append(perf_counter() - step_start)
 
@@ -278,35 +360,42 @@ def train_tiny_dataset(
         compile_seconds=compile_seconds,
         mean_step_seconds=mean_step_seconds,
         checkpoints=checkpoints,
+        compiled=compiled_mode,
     )
+
+
+# ---------------------------------------------------------------------------
+# Benchmark
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class BenchmarkResult:
-    gradient_gen_seconds: list[float]
+    gradient_gen_seconds: float
     forward_seconds: float
     gradient_step_seconds: float
     full_step_seconds: float
     peak_memory_kb: float
+    compiled: bool
 
 
 def run_benchmark() -> BenchmarkResult:
-    """Profile the training pipeline and return timing / memory breakdown."""
-    gradient_gen_times: list[float] = []
     param_types = _parameter_types()
-    for i in range(len(TRAINABLE_NAMES)):
-        t0 = perf_counter()
-        generate_gradient_function_source(
-            _CNN_FULL_LISP_SRC,
-            "cnn-loss",
-            param_types,
-            differentiate_input=i,
-            include_prelude=False,
-            syntax="lisp",
-        )
-        gradient_gen_times.append(perf_counter() - t0)
 
-    forward, gradient_functions = _compile_training_functions()
+    # Time gradient source generation (single multi-output call)
+    t0 = perf_counter()
+    generate_value_and_grad_function_source(
+        _CNN_FULL_LISP_SRC,
+        "cnn-loss",
+        param_types,
+        differentiate_inputs=tuple(range(len(TRAINABLE_NAMES))),
+        include_prelude=False,
+        syntax="lisp",
+    )
+    gradient_gen_seconds = perf_counter() - t0
+
+    # Use interpreted path for benchmark consistency (compiled takes ~112s)
+    forward, gradient_functions = _compile_interpreted_functions()
 
     rng = np.random.RandomState(42)
     image = np.asarray(rng.randn(32, 32).astype(np.float32))
@@ -346,11 +435,12 @@ def run_benchmark() -> BenchmarkResult:
     peak_memory_kb = (column_bytes + w2_grad_bytes) / 1024.0
 
     return BenchmarkResult(
-        gradient_gen_seconds=gradient_gen_times,
+        gradient_gen_seconds=gradient_gen_seconds,
         forward_seconds=forward_seconds,
         gradient_step_seconds=gradient_step_seconds,
         full_step_seconds=full_step_seconds,
         peak_memory_kb=peak_memory_kb,
+        compiled=False,
     )
 
 
@@ -361,16 +451,13 @@ def main() -> None:
     parser.add_argument("--examples", type=int, default=8)
     parser.add_argument("--dropout-keep", type=float, default=0.5)
     parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--compiled", action="store_true", help="Use compiled native execution")
     args = parser.parse_args()
 
     if args.benchmark:
         result = run_benchmark()
         print("=== Benchmark ===")
-        print("Gradient source generation (1 function, not cached):")
-        for i, t in enumerate(result.gradient_gen_seconds):
-            print(f"  param {TRAINABLE_NAMES[i]:>3s}: {t:.4f}s")
-        total_gen = sum(result.gradient_gen_seconds)
-        print(f"  total: {total_gen:.4f}s")
+        print(f"Gradient source generation (single multi-output call): {result.gradient_gen_seconds:.4f}s")
         print(f"Forward pass (avg 10):    {result.forward_seconds:.6f}s")
         print(f"All 6 gradients (avg 10): {result.gradient_step_seconds:.6f}s")
         print(f"Full step (avg 10):       {result.full_step_seconds:.6f}s")

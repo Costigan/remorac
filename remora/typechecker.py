@@ -676,6 +676,34 @@ class TypeEnv:
             raise RemoraTypeError(f"unbound variable '{name}'") from exc
 
 
+class _Profiler:
+    """Lightweight cumulative timer for type-checking passes."""
+
+    def __init__(self) -> None:
+        self._total: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+
+    def add(self, label: str, dt: float) -> None:
+        self._total[label] = self._total.get(label, 0.0) + dt
+        self._counts[label] = self._counts.get(label, 0) + 1
+
+    def report(self) -> str:
+        if not self._total:
+            return "(no profiling data)"
+        lines = ["Typechecker profile:"]
+        lines.append(f"  {'Pass':<42} {'calls':>8} {'time_s':>10}  {'pct':>6}")
+        grand = sum(self._total.values())
+        for label, t in sorted(self._total.items(), key=lambda x: -x[1]):
+            pct = (t / grand * 100) if grand > 0 else 0.0
+            lines.append(
+                f"  {label:<42} {self._counts[label]:>8} {t:>10.3f}  {pct:>5.1f}%"
+            )
+        lines.append(
+            f"  {'TOTAL':<42} {sum(self._counts.values()):>8} {grand:>10.3f}  100.0%"
+        )
+        return "\n".join(lines)
+
+
 class TypeChecker:
     """Dense Core type checker that infers types for expressions and programs."""
 
@@ -686,9 +714,30 @@ class TypeChecker:
         self._specializations: dict[
             tuple[str, tuple[DimExpr, ...]], TypedLambda
         ] = {}
+        self._timer = _Profiler()
+        self._infer_cache: dict[tuple[int, int], tuple[int, TypedExpr]] = {}
+        self._infer_generation: int = 0
+        self._caching_enabled: bool = True
+
+    def _clear_infer_cache(self) -> None:
+        self._infer_generation += 1
+        # Old entries are ignored via generation check on lookup.
+        # Periodically prune to bound memory.
+        if self._infer_generation % 128 == 0:
+            gen = self._infer_generation
+            self._infer_cache = {
+                k: v for k, v in self._infer_cache.items()
+                if v[0] == gen
+            }
+
+    def _push_caching(self, enabled: bool) -> bool:
+        prev = self._caching_enabled
+        self._caching_enabled = enabled
+        return prev
 
     def check_program(self, program: Program) -> TypedProgram:
         """Type-check an entire program and return a typed program."""
+        self._clear_infer_cache()
         env = self._build_prelude_env()
         typed_definitions: list[TypedDefinition] = []
         self._functions = {
@@ -711,8 +760,27 @@ class TypeChecker:
 
     def infer(self, expr: Expr, env: TypeEnv | None = None) -> TypedExpr:
         """Infer the type of an expression and return a typed expression."""
-        env = env or self._build_prelude_env()
+        import time
+        t0 = time.perf_counter()
+        try:
+            env = env or self._build_prelude_env()
+            # Phase B memoisation: cache non-VarExpr results by
+            # (AST identity, env identity).  The env only changes at
+            # let/lambda boundaries (via extend), so the same AST node
+            # can appear in different contexts.
+            if not isinstance(expr, VarExpr):
+                cache_key = (id(expr), id(env))
+                cached = self._infer_cache.get(cache_key)
+                if cached is not None and cached[0] == self._infer_generation:
+                    return cached[1]
+                result = self._infer_impl(expr, env)
+                self._infer_cache[cache_key] = (self._infer_generation, result)
+                return result
+            return self._infer_impl(expr, env)
+        finally:
+            self._timer.add(type(expr).__name__, time.perf_counter() - t0)
 
+    def _infer_impl(self, expr: Expr, env: TypeEnv) -> TypedExpr:
         if isinstance(expr, IntLit):
             return TypedExprNode(expr, INT)
         if isinstance(expr, FloatLit):
@@ -909,6 +977,16 @@ class TypeChecker:
         self, expr: Expr, expected_type: FuncType, env: TypeEnv
     ) -> TypedExpr:
         """Type-check a callable expression against an expected function type."""
+        prev = self._caching_enabled
+        self._caching_enabled = False
+        try:
+            return self._check_callable_impl(expr, expected_type, env)
+        finally:
+            self._caching_enabled = prev
+
+    def _check_callable_impl(
+        self, expr: Expr, expected_type: FuncType, env: TypeEnv
+    ) -> TypedExpr:
         if isinstance(expr, LambdaExpr):
             if len(expr.params) != len(expected_type.params):
                 raise RemoraTypeError("lambda arity does not match expected type", expr.loc)
@@ -1119,29 +1197,31 @@ class TypeChecker:
             return None
 
         candidates = self._cell_type_candidates(typed_array.type)
-        for cell_type in candidates:
-            try:
-                func_type = self._infer_callable_type_for_map(
-                    expr.func, cell_type, env
-                )
-                typed_func = self.check_callable(expr.func, func_type, env)
-                frame_shape, result_type = frame_infer_lifting(func_type, typed_array.type)
-                cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
-                # If frame_shape is empty and cell_shape matches the full array,
-                # this is a direct application – no implicit map needed.
-                if not frame_shape and cell_shape == typed_array.type.shape:
-                    return None
-                return TypedMap(
-                    expr,
-                    typed_func,
-                    typed_args,
-                    frame_shape,
-                    cell_shape,
-                    result_type,
-                )
-            except RemoraTypeError:
-                continue
-        return None
+        prev = self._push_caching(False)
+        try:
+            for cell_type in candidates:
+                try:
+                    func_type = self._infer_callable_type_for_map(
+                        expr.func, cell_type, env
+                    )
+                    typed_func = self.check_callable(expr.func, func_type, env)
+                    frame_shape, result_type = frame_infer_lifting(func_type, typed_array.type)
+                    cell_shape = cell_type.shape if isinstance(cell_type, ArrayType) else ()
+                    if not frame_shape and cell_shape == typed_array.type.shape:
+                        return None
+                    return TypedMap(
+                        expr,
+                        typed_func,
+                        typed_args,
+                        frame_shape,
+                        cell_shape,
+                        result_type,
+                    )
+                except RemoraTypeError:
+                    continue
+            return None
+        finally:
+            self._caching_enabled = prev
 
     def _try_implicit_binary_map(
         self, expr: AppExpr, typed_args: list[TypedExpr], env: TypeEnv
@@ -2705,6 +2785,7 @@ class TypeChecker:
             inner_env = env
             for name, param_type in zip(function.params, func_type.params):
                 inner_env = inner_env.extend(name, param_type)
+            self._clear_infer_cache()
             typed_body = self.infer(function.body, inner_env)
             if infer_result:
                 result_type = typed_body.type
