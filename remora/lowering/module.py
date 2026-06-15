@@ -52,6 +52,7 @@ from remora.hir import (
     HIRVar,
     HIRWithShape,
 )
+from remora.hir_opt import hir_cse
 from remora.types import ArrayType, FuncType, RemoraType, ScalarType, SigmaType
 
 from remora.lowering.indexing import (
@@ -1160,6 +1161,10 @@ def _lower_descriptor_internal_function(
             )
 
     function_body, hoisted_folds = _hoist_closed_scalar_folds(function.body)
+
+    # Phase 4: CSE for repeated pure array-valued subexpressions.
+    cse_body, cse_bindings = hir_cse(function_body)
+
     hoisted_blocks: list[str] = []
     for ordinal, (hoisted_name, fold_expr) in enumerate(hoisted_folds):
         fold_code, fold_value, fold_type = _lower_scalar_fold_result(
@@ -1182,11 +1187,42 @@ def _lower_descriptor_internal_function(
             result_name, fold_type, fold_type
         )
 
+    # Lower CSE bindings (shared array and scalar subexpressions).
+    cse_ordinal = 0
+    for cse_name, cse_expr in cse_bindings:
+        if isinstance(cse_expr.result_type, ArrayType):  # type: ignore[union-attr]
+            _code, _val, _mlir_type, _elem_type = _lower_tensor_input(
+                cse_expr,
+                f"__cse_value_{cse_ordinal}",
+                {},
+                tensor_env,
+                scalar_env,
+            )
+            hoisted_blocks.append(_code)
+            tensor_env[cse_name] = _TensorValue(_val, _mlir_type, _elem_type)
+        else:
+            emitter = _RegionEmitter(input_name="", input_type="")
+            value = emitter.emit_expr(cse_expr, scalar_env)
+            result_name = f"%cse_scalar_{cse_ordinal}"
+            indented_code = "\n".join(emitter.lines).replace("\n", "\n  ")
+            scalar_type = type_to_mlir(cse_expr.result_type)  # type: ignore[union-attr]
+            hoisted_blocks.append(
+                f"    {result_name} = scf.execute_region -> {scalar_type} {{\n"
+                f"  {indented_code}\n"
+                f"      scf.yield {value.value} : {scalar_type}\n"
+                "    }"
+            )
+            scalar_env[cse_name] = _Operand(result_name, [], scalar_type)
+            tensor_env[cse_name] = _TensorValue(
+                result_name, scalar_type, scalar_type
+            )
+        cse_ordinal += 1
+
     result_type = type_to_mlir(function.return_type)
     if isinstance(function.return_type, ArrayType):
         code, result_value, lowered_result_type, _element_type = (
             _lower_tensor_input(
-                function_body,
+                cse_body,
                 "result",
                 {},
                 tensor_env,
@@ -1201,7 +1237,7 @@ def _lower_descriptor_internal_function(
     elif isinstance(function.return_type, ScalarType):
         body, result_value = (
             _lower_descriptor_scalar_result_body(
-                function_body,
+                cse_body,
                 result_type,
                 scalar_env,
                 tensor_env,

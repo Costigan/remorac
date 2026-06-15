@@ -715,6 +715,32 @@ Phase 3 exit criteria:
   2026-06-14).
 - [x] CNN descriptor MLIR is materially smaller than the 47.5 MB baseline.
 
+2026-06-14 Phase 4 benchmark results (after adding HIR CSE):
+
+| Metric | Phase 3 compact loops | Phase 4 HIR CSE |
+|---|---:|---:|
+| Descriptor preparation/typecheck/HIR | 110.65 s | 111.87 s |
+| Descriptor MLIR generation | 0.068 s | 0.061 s |
+| Descriptor MLIR | 127,294 B | 60,410 B |
+| `tensor.extract` occurrences | 29 | 12 |
+| `tensor.insert` occurrences | 0 | 0 |
+| `linalg.generic` operations | 124 | 124 |
+| CPU pipeline | 0.057 s | 0.036 s |
+| CPU pipeline peak RSS | 77,496 KB | 76,124 KB |
+| LLVM translation | 0.027 s | 0.016 s |
+| LLVM IR | not recorded | 113,956 B |
+| `llc` | 0.077 s | 0.042 s |
+| Link | 0.011 s | 0.011 s |
+| Shared library | 32,016 B | 23,872 B |
+
+Descriptor MLIR shrank from 127,294 bytes to 60,410 bytes (52% reduction).
+CSE identified 35 duplicated subtree shapes out of 60 unique shapes, with a
+maximum duplication factor of 153.  The 38 array-valued shared bindings are
+each lowered once and referenced via tensor environment lookups.
+
+The dominant remaining cost is still the ~112-second function preparation /
+typechecking / HIR construction stage, which is unchanged by this phase.
+
 ### Phase 4: Add sharing before descriptor MLIR generation
 
 Goal: ensure repeated pure array expressions are lowered once and referenced by
@@ -732,33 +758,33 @@ Relevant files:
 
 Tasks:
 
-- [ ] Define which HIR nodes are pure and eligible for common-subexpression
+- [x] Define which HIR nodes are pure and eligible for common-subexpression
   elimination. Initially exclude calls or nodes with uncertain effects.
-- [ ] Define a stable expression key that includes:
+- [x] Define a stable expression key that includes:
   - node kind;
   - operation attributes;
   - child value identities;
   - Remora result type and static shape;
   - lexical binding identity, not only variable spelling.
-- [ ] Add a HIR node-count and duplicate-subtree analysis utility.
-- [ ] Add small tests proving that identical pure maps/folds/views are detected.
-- [ ] Add tests proving that shadowed variables are not incorrectly merged.
-- [ ] Add tests proving that expressions with different types/shapes are not
+- [x] Add a HIR node-count and duplicate-subtree analysis utility.
+- [x] Add small tests proving that identical pure maps/folds/views are detected.
+- [x] Add tests proving that shadowed variables are not incorrectly merged.
+- [x] Add tests proving that expressions with different types/shapes are not
   merged.
-- [ ] Implement let introduction or an SSA-like binding form for repeated HIR
+- [x] Implement let introduction or an SSA-like binding form for repeated HIR
   expressions.
-- [ ] Run dead-code elimination after introducing shared bindings.
-- [ ] Ensure `_inline_lets` does not immediately destroy the newly introduced
+- [x] Run dead-code elimination after introducing shared bindings.
+- [x] Ensure `_inline_lets` does not immediately destroy the newly introduced
   sharing on the descriptor path. If necessary, add a descriptor-specific
   lowering path that consumes lets as SSA bindings instead of inlining them.
-- [ ] Extend descriptor lowering so array-valued bindings are entered into
+- [x] Extend descriptor lowering so array-valued bindings are entered into
   `tensor_env` exactly once.
-- [ ] Preserve scalar bindings in `scalar_env` and lexical shadowing rules.
-- [ ] Add a test where one expensive array expression is referenced twice and
+- [x] Preserve scalar bindings in `scalar_env` and lexical shadowing rules.
+- [x] Add a test where one expensive array expression is referenced twice and
   assert its MLIR is emitted once.
-- [ ] Add a generated-gradient test that confirms repeated forward
+- [x] Add a generated-gradient test that confirms repeated forward
   intermediates are shared.
-- [ ] Rerun the Phase 1 benchmark.
+- [x] Rerun the Phase 1 benchmark.
 
 Fallback if typed-HIR CSE is blocked:
 
@@ -771,11 +797,11 @@ Fallback if typed-HIR CSE is blocked:
 
 Phase 4 exit criteria:
 
-- [ ] A repeated array-valued subgraph produces one SSA definition.
-- [ ] Lexical-shadowing tests pass.
-- [ ] CNN descriptor MLIR is below 10 MB, or the remaining sources of growth
+- [x] A repeated array-valued subgraph produces one SSA definition.
+- [x] Lexical-shadowing tests pass.
+- [x] CNN descriptor MLIR is below 10 MB, or the remaining sources of growth
   are counted and documented.
-- [ ] The full non-training suite passes.
+- [x] The full non-training suite passes.
 
 ### Phase 5: Simplify AD expressions before lowering
 
@@ -988,12 +1014,14 @@ compile-time regressions.
 
 Initial targets for the crater CNN gradient:
 
-- [ ] Generated optimized HIR contains shared forward intermediates.
-- [ ] Descriptor MLIR is less than 5 MB of text.
-- [ ] Descriptor lowering completes in less than 10 seconds on the reference
-  development machine.
-- [ ] The CPU MLIR pipeline completes in less than 60 seconds.
+- [x] Generated optimized HIR contains shared forward intermediates.
+- [x] Descriptor MLIR is less than 5 MB of text. (currently 60 KB)
+- [x] Descriptor lowering completes in less than 10 seconds on the reference
+  development machine. (currently 0.06 s)
+- [x] The CPU MLIR pipeline completes in less than 60 seconds. (currently 0.04 s)
 - [ ] End-to-end native compilation completes in less than 90 seconds.
+  (currently ~112 s; ~112 s is function preparation / typechecking / HIR
+  construction, the remaining stages total < 1 s)
 - [ ] One compiled function produces all six trainable gradients.
 - [ ] Compiled gradients match the interpreter and finite differences within
   the existing numerical tolerance.
@@ -1008,16 +1036,23 @@ optimization.
 
 ## Current Status
 
-The descriptor export correctness gap is resolved: scalar descriptor
-parameters can be captured through tensor, map, fold, view, and scalar lowering,
-and the generated CNN gradient produces non-empty MLIR.
+Phases 0-4 are complete.  The CNN gradient now compiles successfully to a
+native shared library.
 
-The remaining blocker for compiled CNN training is scalability:
+| Phase | Status | Key result |
+|---|---|---|
+| 0 | Done | Descriptor export correctness baseline |
+| 1 | Done | Repeatable compile-size benchmark harness |
+| 2 | Done | Identified one-shot bufferization as MLIR pipeline bottleneck |
+| 3 | Done | Compact im2col/col2im (47.5 MB → 127 KB) |
+| 4 | Done | HIR CSE before descriptor lowering (127 KB → 60 KB) |
+| 5 | Next | AD expression simplification |
+| 6 | Planned | One value-and-grad function |
+| 7 | Planned | Explicit saved-value tape |
+| 8 | Planned | High-level kernels |
+| 9 | Planned | Artifact cache |
+| 10 | Optional | In-process MLIR |
 
-- lowering takes approximately 108 seconds;
-- the result is approximately 47.5 MB of MLIR;
-- the generic CPU MLIR pipeline does not finish within the tested time budget;
-- therefore no native shared library is produced and execution cannot begin.
-
-The next work should focus on reducing and preserving the computation graph,
-not on increasing the timeout.
+The remaining dominant compile cost (~112 seconds) is function preparation /
+typechecking / HIR construction, which is outside the MLIR lowering pipeline
+and will be addressed in Phases 5-7.
