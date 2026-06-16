@@ -20,7 +20,7 @@ import numpy as np
 
 from remora.ad_source import generate_gradient_function_source, generate_value_and_grad_function_source
 from remora.lisp_reader import parse_lisp
-from remora.runtime import CPUFunctionExecutor, RuntimeUnavailable, _lambda_callable
+from remora.runtime import CPUFunctionExecutor, _lambda_callable
 from remora.typechecker import TypeChecker
 from remora.types import ArrayType, FLOAT, FuncType, RemoraType, StaticDim
 
@@ -248,12 +248,12 @@ def _compile_interpreted_functions() -> tuple[
     return forward, gradients
 
 
-def _try_compiled() -> CompiledTrainingFunctions | None:
-    """Try to compile the value-and-grad function; return None on failure."""
+def _try_compiled() -> tuple[CompiledTrainingFunctions | None, str | None]:
+    """Try to compile the value-and-grad function."""
     try:
-        return CompiledTrainingFunctions()
-    except (RuntimeUnavailable, Exception):
-        return None
+        return CompiledTrainingFunctions(), None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,13 @@ def train_tiny_dataset(
 
     compile_start = perf_counter()
 
-    compiled = None if use_compiled is False else _try_compiled()
+    compiled_failure: str | None = None
+    if use_compiled is False:
+        compiled = None
+    elif use_compiled is True:
+        compiled = CompiledTrainingFunctions()
+    else:
+        compiled, compiled_failure = _try_compiled()
     if compiled is not None:
         compiled_mode = True
         forward_fn = compiled.forward
@@ -295,6 +301,8 @@ def train_tiny_dataset(
         )
         if verbose:
             print("Using interpreted execution (6 separate gradient functions)")
+            if compiled_failure is not None:
+                print(f"Compiled execution unavailable: {compiled_failure}")
 
     compile_seconds = perf_counter() - compile_start
 
@@ -469,6 +477,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         example_count=args.examples,
         dropout_keep_prob=args.dropout_keep,
+        use_compiled=True if args.compiled else None,
     )
 
 

@@ -768,7 +768,7 @@ class TypeChecker:
             # (AST identity, env identity).  The env only changes at
             # let/lambda boundaries (via extend), so the same AST node
             # can appear in different contexts.
-            if not isinstance(expr, VarExpr):
+            if self._caching_enabled and not isinstance(expr, VarExpr):
                 cache_key = (id(expr), id(env))
                 cached = self._infer_cache.get(cache_key)
                 if cached is not None and cached[0] == self._infer_generation:

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -65,7 +66,7 @@ def compute_cache_key(
         f"remora_version:{_remora_version()}",
         # Include toolchain info (mlir-opt, llc versions)
         f"toolchain:{_toolchain_fingerprint()}",
-        f"pipeline_version:1",
+        f"pipeline_version:2",
     ]
     canonical = "\n".join(parts)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -103,10 +104,35 @@ def _toolchain_fingerprint() -> str:
         parts: list[str] = []
         for attr in ("mlir_opt", "mlir_translate", "llc"):
             val = getattr(tc, attr, None)
-            parts.append(f"{attr}:{val}")
+            parts.append(f"{attr}:{_tool_fingerprint_part(val)}")
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
     except Exception:
         return "unknown"
+
+
+def _tool_fingerprint_part(path: str | None) -> str:
+    """Return a stable fingerprint component for one external tool."""
+    if path is None:
+        return "missing"
+    tool_path = Path(path)
+    try:
+        stat = tool_path.stat()
+        stat_part = f"size={stat.st_size};mtime_ns={stat.st_mtime_ns}"
+    except OSError as exc:
+        stat_part = f"stat_error={type(exc).__name__}:{exc}"
+    try:
+        result = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+        version = (result.stdout + result.stderr).strip()
+        version_part = f"rc={result.returncode};version={version}"
+    except Exception as exc:
+        version_part = f"version_error={type(exc).__name__}:{exc}"
+    return f"path={path};{stat_part};{version_part}"
 
 
 # ---------------------------------------------------------------------------

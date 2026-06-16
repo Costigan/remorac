@@ -42,6 +42,40 @@ def test_scalar_literal_typing():
     assert infer("true").type == BOOL
 
 
+def test_infer_cache_is_bypassed_when_disabled(monkeypatch):
+    checker = TypeChecker()
+    expr = parse_expr("1")
+    env = checker._build_prelude_env()
+
+    checker.infer(expr, env)
+    calls = 0
+    original = checker._infer_impl
+
+    def counted(expr_arg, env_arg):
+        nonlocal calls
+        calls += 1
+        return original(expr_arg, env_arg)
+
+    monkeypatch.setattr(checker, "_infer_impl", counted)
+    checker.infer(expr, env)
+    assert calls == 0
+
+    checker._caching_enabled = False
+    checker.infer(expr, env)
+    assert calls == 1
+
+
+def test_disabled_infer_cache_does_not_write_entries():
+    checker = TypeChecker()
+    expr = parse_expr("1")
+    env = checker._build_prelude_env()
+
+    checker._caching_enabled = False
+    checker.infer(expr, env)
+
+    assert (id(expr), id(env)) not in checker._infer_cache
+
+
 def test_unary_float_primitives_typecheck_and_lift_over_arrays():
     assert infer("exp 1.0").type == FLOAT
     assert infer("log 2").type == FLOAT

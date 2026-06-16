@@ -1,16 +1,20 @@
 import numpy as np
 import pytest
 
+import examples.crater_train as crater_train
 from examples.crater_train import (
     CompiledTrainingFunctions,
-    _CNN_FULL_LISP_SRC,
     _compile_interpreted_functions,
-    _parameter_types,
     initialize_parameters,
     make_inference_mask,
     run_benchmark,
     train_tiny_dataset,
 )
+
+
+def _is_known_compiled_runtime_blocker(exc: Exception) -> bool:
+    message = str(exc)
+    return "undefined symbol: memrefCopy" in message
 
 
 def test_tiny_crater_training_decreases_loss():
@@ -44,6 +48,21 @@ def test_benchmark_produces_reasonable_numbers():
     assert result.peak_memory_kb < 1024.0
 
 
+def test_strict_compiled_mode_raises_on_compile_failure(monkeypatch):
+    def fail_compile():
+        raise RuntimeError("compiled path unavailable")
+
+    monkeypatch.setattr(crater_train, "CompiledTrainingFunctions", fail_compile)
+
+    with pytest.raises(RuntimeError, match="compiled path unavailable"):
+        train_tiny_dataset(
+            epochs=1,
+            example_count=2,
+            verbose=False,
+            use_compiled=True,
+        )
+
+
 def test_compiled_gradients_match_interpreter():
     """Compiled value-and-grad function produces same gradients as interpreter."""
     from remora.pipeline import detect_toolchain
@@ -70,7 +89,9 @@ def test_compiled_gradients_match_interpreter():
         compiled_obj = CompiledTrainingFunctions()
         compiled_grads = compiled_obj.gradients(*params, mask, image, label)
     except Exception as exc:
-        pytest.skip(f"compilation failed: {exc}")
+        if _is_known_compiled_runtime_blocker(exc):
+            pytest.skip(f"compiled runtime support unavailable: {exc}")
+        raise
 
     assert len(compiled_grads) == len(interpreted)
     for i, (cg, ig) in enumerate(zip(compiled_grads, interpreted)):

@@ -1,11 +1,14 @@
 # CNN Gradient Native Compilation Scalability
 
-## Implementation Status (2026-06-14)
+## Implementation Status (updated 2026-06-16)
 
-The plan is complete.  The original problem — the generated CNN gradient
+The descriptor-MLIR scalability plan is complete.  The original problem — the generated CNN gradient
 produced 47.5 MB of descriptor MLIR that timed out the CPU pipeline — is
-solved.  All non-optional phases (0-9) are implemented; Phase 10 is
-explicitly rejected with a measured decision.
+solved.  All non-optional scalability phases (0-9) are implemented; Phase 10 is
+explicitly rejected with a measured decision.  Native crater training is wired
+through an auto mode with interpreter fallback, but it is not end-to-end
+validated in environments where the compiled shared library cannot load because
+the MLIR runtime symbol `memrefCopy` is missing.
 
 ### What was delivered
 
@@ -17,7 +20,7 @@ explicitly rejected with a measured decision.
 | 3 | Compact `im2col`/`col2im` (loops, not unrolled elements) | **47.5 MB → 127 KB** |
 | 4 | HIR common-subexpression elimination | **127 KB → 60 KB** |
 | 5 | AD expression simplification pass | Cauchy; `_binary` rules already caught most |
-| 6 | One value-and-grad function | Single function returns all 6 gradients |
+| 6 | One value-and-grad function | Single function returns all 6 gradients; strict compiled mode now raises when runtime support is missing |
 | 7 | Opt-in saved-value tape (`use_saved_values=True`) | `_Let` bindings, HIRLet peeling |
 | 8 | `HIRMatmul` → `linalg.matmul` lowering | Pattern-match pass in `hir_opt.py` |
 | 9 | Artifact cache (`~/.cache/remora/native/`) | Skip pipeline on cache hit |
@@ -38,11 +41,12 @@ explicitly rejected with a measured decision.
 
 The ~112 s end-to-end time is dominated by function preparation
 (typechecking + HIR construction, ~111 s), not by MLIR lowering
-(< 1 s total).  Three items are intentionally left open:
+(< 1 s total).  The crater performance follow-up added typechecker
+memoization and strict compiled-mode handling, so the remaining open items are:
 
-- **Phase 6**: `examples/crater_train.py` has not been updated to use the
-  single value-and-grad function — a mechanical change requiring a full
-  training integration test.
+- **Native runtime linkage**: compiled crater execution requires `memrefCopy`
+  from an MLIR runtime library.  Until that symbol is linked, auto mode falls
+  back to the interpreter and strict compiled mode raises.
 - **Phase 7**: The saved-value tape is opt-in (default off) pending GPU
   path HIRLet support.
 - **Phase 8**: Convolution is still lowered via compact `im2col` loops
@@ -1112,7 +1116,8 @@ Tasks:
 - [x] Define or retain high-level HIR operations for convolution, matrix
   multiplication, matrix-vector multiplication, reduction, broadcast, and
   activation.
-  (Added ``HIRMatmul`` and ``HIRRelu`` to ``hir.py``.)
+  (Added ``HIRMatmul`` to ``hir.py``.  A previously unused ``HIRRelu`` stub was
+  removed in the follow-up cleanup because no pass emitted or lowered it.)
 - [x] Add typed VJP rules for each high-level operation.
   (VJP rules are unchanged — the AD pipeline still emits ``fold + map *``
   patterns.  The HIR optimization pass recognizes and replaces them.)

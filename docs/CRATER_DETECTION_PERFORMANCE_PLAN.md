@@ -1,8 +1,13 @@
 # Remora Crater Detection Performance Plan
 
-**Status: COMPLETE (2026-06-14)** — all non-rejected phases implemented.  The
-CNN gradient now compiles in ~0.2 s (was 112 s) and scales to 256×256 images
-with constant IR size.  994 tests pass.
+**Status: IMPLEMENTED WITH NATIVE-RUNTIME CAVEAT (updated 2026-06-16)** — all
+non-rejected compiler phases are implemented.  The CNN gradient descriptor
+lowering now compiles in ~0.2 s after function preparation and scales to
+256×256 images with constant IR size.  The crater training script has an auto
+compiled mode with interpreter fallback and a strict compiled mode.  Strict
+native execution is not considered end-to-end validated until the missing
+`memrefCopy` runtime linkage is fixed and compiled/interpreted gradient parity
+passes without a skip.
 
 ## Summary of improvements
 
@@ -62,8 +67,9 @@ operates on static types and shapes — changing a dimension from 32 to
 ### Remaining limitations
 
 - Compiled execution requires `memrefCopy` from a MLIR runtime library
-  not currently linked.  The compiled path is wired as the default but
-  may fall back to the interpreter.
+  not currently linked in this environment.  Auto mode tries compiled
+  execution first and falls back to the interpreter; strict compiled mode
+  raises the runtime/linkage error.
 - Cell-map matmul recognition (Phase 8) does not trigger for the CNN
   linear layer because the `fold+map*` pattern is inside a
   defunctionalized function body.
@@ -223,7 +229,7 @@ MLIR size and operation count are independent of image size, confirming
 Phase 3 compact ``im2col`` loops work correctly.  Typechecking time is
 constant due to Phase B memoisation.  Exit criteria met.
 
-### Phase E: Enable production training loop [DONE]
+### Phase E: Enable production training loop [IMPLEMENTED; NATIVE VALIDATION BLOCKED]
 
 **Goal:** `crater_train.py` trains with compiled native execution by default.
 
@@ -242,17 +248,22 @@ constant due to Phase B memoisation.  Exit criteria met.
 5. Extend `HIRMatmul` recognition to trigger for cell-map dot products
    (the `linear` layer pattern: `map(lambda row: fold(+, 0, map(*, row, x)), w)`).
 
-**Exit criteria:** `uv run examples/crater_train.py` completes in native
-compiled mode with loss decreasing across epochs, and total wall time
-dominated by training steps, not compilation.
+**Exit criteria:** `uv run examples/crater_train.py --compiled` completes in
+native compiled mode with loss decreasing across epochs, and total wall time
+dominated by training steps, not compilation.  This is blocked until the
+compiled shared library can load the required `memrefCopy` runtime symbol.
 
 2026-06-14 status:
 
-- [x] Compiled execution wired as default path (``use_compiled=None``
-  tries compiled first, falls back to interpreter).
-- [x] Numerical parity test written (``test_compiled_gradients_match_interpreter``,
-  currently skipped because the compiled ``.so`` requires ``memrefCopy``
-  from a missing MLIR runtime library — a pre-existing build issue).
+- [x] Compiled execution wired as default auto path (``use_compiled=None``
+  tries compiled first, reports the fallback reason when verbose, then falls
+  back to interpreter).
+- [x] Strict compiled mode added (``use_compiled=True`` and CLI ``--compiled``)
+  so validation raises instead of silently falling back.
+- [-] Numerical parity test written (``test_compiled_gradients_match_interpreter``)
+  and now skips only for the known missing ``memrefCopy`` runtime symbol.
+  It must pass without skip before native crater training is considered
+  end-to-end validated.
 - [x] Batch dimension deferred — requires descriptor ABI changes.
 - [x] Saved-value tape deferred — requires GPU path testing.
 - [x] Cell-map matmul recognition deferred — the ``fold+map*`` pattern
@@ -306,11 +317,12 @@ Phases A, B, D, and E complete.  Phase C rejected.  Phase F deferred.
 - [x] 256×256 CNN gradient compiles successfully.
 - [x] 256×256 CNN gradient compilation time proportional to 32×32 baseline.
   (0.004 s prep, ~13 KB MLIR at all sizes.)
-- [x] `crater_train.py` trains with compiled native execution by default.
-  (Compiled path wired as default with interpreter fallback; numerical
-  parity test written but gated on ``memrefCopy`` runtime symbol.)
+- [x] `crater_train.py` auto mode tries compiled native execution by default.
+  (Falls back to interpreter when ``memrefCopy`` is unavailable; ``--compiled``
+  now requires native execution and raises on failure.)
 - [-] Compiled and interpreted gradients agree within 1e-4 relative tolerance.
-  (Test written, passes framework, skipped due to missing runtime symbol.)
+  (Test written and narrowed to skip only for known missing ``memrefCopy``
+  runtime support.)
 - [x] Full non-training test suite passes after final implementation.
   (994 passed, 1 skipped.)
 - [-] GPU-accelerated training step faster than CPU for ≥ 128×128.

@@ -440,13 +440,6 @@ class HIRMatmul:
     result_type: ArrayType
 
 
-@dataclass(frozen=True)
-class HIRRelu:
-    """ReLU activation: ``max(0, array)`` element-wise."""
-    array: HIRExpr
-    result_type: ArrayType
-
-
 HIRExpr: TypeAlias = (
     HIRMap
     | HIRApply
@@ -490,7 +483,6 @@ HIRExpr: TypeAlias = (
     | HIRVar
     | HIRLit
     | HIRMatmul
-    | HIRRelu
 )
 
 HIRCallable: TypeAlias = HIRLambda | HIRPrimCallable | HIRVar
@@ -896,7 +888,7 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
         return expr.result_type
     if isinstance(expr, (HIRSort, HIRGrade)):
         return expr.result_type
-    if isinstance(expr, (HIRMatmul, HIRRelu)):
+    if isinstance(expr, HIRMatmul):
         return expr.result_type
     raise AssertionError(f"unknown HIR expression {type(expr).__name__}")
 

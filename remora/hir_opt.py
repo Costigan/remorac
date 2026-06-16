@@ -31,7 +31,6 @@ from remora.hir import (
     HIRIndicesOf,
     HIRIota,
     HIRMatmul,
-    HIRRelu,
     HIRFirst,
     HIRSecond,
     HIRPair,

@@ -4,8 +4,14 @@ CompiledTrainingFunctions — New class that generates a single value-and-grad f
 
 train_tiny_dataset — Tries compiled execution first (_try_compiled()), falls back to the interpreter. The training loop calls grad_fn(*step_args) once per step instead of 6 separate gradient(*step_args) calls. TrainingResult now includes a compiled flag.
 
-_try_compiled — Returns CompiledTrainingFunctions on success, None if native compilation is unavailable.
+_try_compiled — Attempts CompiledTrainingFunctions and returns either the
+compiled object or the failure reason.  Auto mode reports the reason when
+verbose and falls back to the interpreter.  Strict mode (`use_compiled=True` or
+CLI `--compiled`) raises instead of falling back.
 
 AD fix — generate_gradient_source now accepts trainable_indices to filter which gradients appear in the Pair return. The function signature keeps all parameters for forward reconstruction.
 
-The compiled path loads in ~112s first time (cached subsequently via Phase 9), produces 150 KB MLIR with 298 linalg.generic ops, and returns all 6 gradients in a single call. 994 tests pass.
+The compiled path may produce a shared library, but native crater execution is
+not end-to-end validated in environments where loading the library fails with
+missing `memrefCopy`.  Until that runtime linkage is fixed, auto mode falls
+back to the interpreter and strict compiled mode raises.
