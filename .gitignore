@@ -132,6 +132,7 @@ ipython_config.py
 # virtualenv
 .env
 .venv
+.lunar_venv
 env/
 venv/
 ENV/
