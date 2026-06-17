@@ -896,3 +896,217 @@ def test_map_fold_over_im2col_value_and_grad_compiles():
     assert scalars, "expected the bias gradient among the outputs"
     # 36 patches, d(loss)/d(bias) = 36.
     assert scalars[-1] == pytest.approx(36.0, abs=1e-4)
+
+
+# ── dot-product cell-fold (fold + 0.0 (map * p k)) and the detector forward ──
+#
+# These exercise the cell-map fold whose per-element value is a producer map
+# (the ``dot-patch`` pattern used by conv2d and the crater detector), the
+# HIRLet inlining for named helpers, rank-polymorphic ``+``/``*`` with scalar
+# variables, and the runtime's handling of multiple scalar (Float) parameters.
+
+
+def _ref_dot_patch(image, kernel, stride=1):
+    kh, kw = kernel.shape
+    h, w = image.shape
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+    out = np.empty(out_h * out_w, dtype=np.float64)
+    idx = 0
+    for i in range(out_h):
+        for j in range(out_w):
+            patch = image[i * stride : i * stride + kh, j * stride : j * stride + kw]
+            out[idx] = (patch * kernel).sum()
+            idx += 1
+    return out
+
+
+@pytest.mark.parametrize("size", [8, 16])
+def test_dot_product_cell_fold_over_im2col_compiles_and_matches(size):
+    source = f"""\
+(define/pi ()
+  (f [image (Array Float {size} {size}) k (Array Float 3 3)] (Array Float {((size - 3) // 1 + 1) ** 2}))
+  (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) (im2col image [3 3] 1)))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),
+        ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
+    )
+    artifact = compile_function_source(
+        source, "f", param_types, verify=True,
+        include_prelude=False, syntax="lisp",
+    )
+    assert len(artifact.mlir_text.strip()) > 0
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "f", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(0)
+        image = rng.standard_normal((size, size)).astype(np.float32)
+        kernel = rng.standard_normal((3, 3)).astype(np.float32)
+        out = np.asarray(
+            CPUFunctionExecutor(compiled).execute(image, kernel).value,
+            dtype=np.float32,
+        )
+    finally:
+        compiled.close()
+    expected = _ref_dot_patch(image, kernel).astype(np.float32)
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_classifier_conv2d_pattern_compiles_and_matches():
+    """The classifier's exact conv2d source (named dot-patch + bias) must
+    compile natively and match the reference.  This was always interpreted
+    before the cell-fold / HIRLet / scalar-splat fixes."""
+    source = """\
+(define/pi ()
+  (dot-patch [patch (Array Float 9) flat-k (Array Float 9)] Float)
+  (fold + 0.0 (map * patch flat-k)))
+(define/pi ()
+  (conv2d [image (Array Float 8 8) kernel (Array Float 3 3) bias Float] (Array Float 36))
+  (+ (map (lambda (p) (dot-patch p (ravel kernel))) (im2col image [3 3] 1)) bias))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+        ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
+        FLOAT,
+    )
+    artifact = compile_function_source(
+        source, "conv2d", param_types, verify=True,
+        include_prelude=False, syntax="lisp",
+    )
+    assert len(artifact.mlir_text.strip()) > 0
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "conv2d", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(1)
+        image = rng.standard_normal((8, 8)).astype(np.float32)
+        kernel = rng.standard_normal((3, 3)).astype(np.float32)
+        bias = np.float32(0.3)
+        out = np.asarray(
+            CPUFunctionExecutor(compiled).execute(image, kernel, bias).value,
+            dtype=np.float32,
+        )
+    finally:
+        compiled.close()
+    expected = (_ref_dot_patch(image, kernel) + bias).astype(np.float32)
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_multiple_scalar_parameters_do_not_alias():
+    """Regression for a runtime bug: with 2+ scalar (Float) parameters, the
+    descriptor for each scalar captured a raw pointer to a temporary 0-d numpy
+    array; the temporaries were GC'd and their addresses reused, so every
+    scalar received the last one's value."""
+    source = """\
+(define/pi ()
+  (f [arr (Array Float 4) w Float b Float] (Array Float 4))
+  (+ (* w arr) b))
+"""
+    param_types = (ArrayType(FLOAT, (StaticDim(4),)), FLOAT, FLOAT)
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "f", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(2)
+        arr = rng.standard_normal((4,)).astype(np.float32)
+        w = np.float32(2.0)
+        b = np.float32(0.5)
+        out = np.asarray(
+            CPUFunctionExecutor(compiled).execute(arr, w, b).value,
+            dtype=np.float32,
+        )
+    finally:
+        compiled.close()
+    np.testing.assert_allclose(out, (w * arr + b).astype(np.float32), rtol=1e-6, atol=1e-6)
+
+
+def test_detector_forward_compiles_and_matches_reference():
+    """The Phase 2 detector forward (conv + relu + scalar head) compiles
+    natively and matches the reference."""
+    source = """\
+(define/pi ()
+  (relu [v Float] Float)
+  (select (> v 0.0) v 0.0))
+(define/pi ()
+  (detect [k (Array Float 3 3) b1 Float w2 Float b2 Float image (Array Float 8 8)] (Array Float 36))
+  (+ (* w2 (map relu (+ (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) (im2col image [3 3] 1)) b1))) b2))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
+        FLOAT, FLOAT, FLOAT,
+        ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+    )
+    artifact = compile_function_source(
+        source, "detect", param_types, verify=True,
+        include_prelude=False, syntax="lisp",
+    )
+    assert len(artifact.mlir_text.strip()) > 0
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "detect", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(3)
+        kernel = rng.standard_normal((3, 3)).astype(np.float32)
+        b1 = np.float32(0.1)
+        w2 = np.float32(2.0)
+        b2 = np.float32(0.5)
+        image = rng.standard_normal((8, 8)).astype(np.float32)
+        out = np.asarray(
+            CPUFunctionExecutor(compiled).execute(kernel, b1, w2, b2, image).value,
+            dtype=np.float32,
+        )
+    finally:
+        compiled.close()
+    dots = _ref_dot_patch(image, kernel)
+    expected = (w2 * np.maximum(dots + b1, 0.0) + b2).astype(np.float32)
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_inlined_detector_loss_forward_compiles_and_matches():
+    """The scalar detector loss (sum of squared logits) with the detect body
+    inlined compiles natively and matches the NumPy reference.  Exercises the
+    full chain: cell-fold dot-product over im2col, scalar splat for +b1, named
+    relu map, scalar splat for *w2 and +b2, fold+map reduction to a scalar."""
+    source = """\
+(define/pi ()
+  (relu [v Float] Float)
+  (select (> v 0.0) v 0.0))
+(define/pi ()
+  (detect-loss [k (Array Float 3 3) b1 Float w2 Float b2 Float image (Array Float 8 8)] Float)
+  (fold + 0.0 (map (lambda (l) (* l l)) (+ (* w2 (map relu (+ (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) (im2col image [3 3] 1)) b1))) b2))))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
+        FLOAT, FLOAT, FLOAT,
+        ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+    )
+    artifact = compile_function_source(
+        source, "detect-loss", param_types, verify=True,
+        include_prelude=False, syntax="lisp",
+    )
+    assert len(artifact.mlir_text.strip()) > 0
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "detect-loss", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(4)
+        kernel = rng.standard_normal((3, 3)).astype(np.float32)
+        b1 = np.float32(0.1)
+        w2 = np.float32(2.0)
+        b2 = np.float32(0.5)
+        image = rng.standard_normal((8, 8)).astype(np.float32)
+        loss = float(np.asarray(
+            CPUFunctionExecutor(compiled).execute(kernel, b1, w2, b2, image).value
+        ))
+    finally:
+        compiled.close()
+    dots = _ref_dot_patch(image, kernel)
+    logits = (w2 * np.maximum(dots + b1, 0.0) + b2).astype(np.float32)
+    expected = float((logits * logits).sum())
+    assert loss == pytest.approx(expected, rel=1e-5, abs=1e-5)

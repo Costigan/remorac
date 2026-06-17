@@ -510,38 +510,80 @@ detector can follow the classifier's source pattern and rely on AD
 restructuring for the value-and-grad.  They are recorded so the next compiler
 maturation step has exact failing shapes.
 
-1. **Free scalars inside a `map` lambda lower to wrong MLIR.**
-   `(map (lambda (d) (+ (* w2 d) b2)) dots)` with free scalars `w2`, `b2`
-   compiles but produces incorrect numeric output (the free scalars are not
-   threaded into the `linalg.generic` body).  Workaround (used by the
-   classifier): keep free scalars *outside* the lambda via rank-polymorphic
-   arithmetic and named-function maps, e.g.
-   `(+ (* w2 (map relu (...))) b2)`.
+**Update (2026-06-17, second pass):** gaps 1–4 and 6–7 below are now FIXED.
+The detector **forward** compiles natively and matches a NumPy reference
+(see `tests/test_im2col.py::test_detector_forward_compiles_and_matches_reference`).
+The fully-inlined scalar detector **loss** (`fold + 0.0 (map (lambda (l) (* l l)) <detect>)`)
+also compiles natively and matches NumPy exactly.  The remaining blocker for a
+fully-compiled training loop is gap 8 (variable operator sections in the
+AD-generated value-and-grad source).
 
-2. **Dot-product cell-fold (`fold + 0.0 (map * p k)`) does not lower.**
-   The cell-fold lowerer's `_reduces_param` only recognizes the param being
-   reduced directly or via a nested `HIRFold`; a `fold` whose array is a
-   `HIRMap` (e.g. `(map * p k)`) is rejected with "cell-map fold must reduce
-   the cell-map parameter".  This is the `dot-patch` pattern.  Workaround:
-   the AD source generator restructures cell-maps away, so the *value-and-grad*
-   compiles; the forward can run via the interpreter.
+1. **Free scalars inside a `map` lambda lower to wrong MLIR** — FIXED.
+   `_lower_binary_map_fold_input` / `_lower_binary_map_result` now splat scalar
+   operands (literal *or* variable) to the result rank.  `(map (lambda (d) (+ (* w2 d) b2)) dots)` is still best written as `(+ (* w2 (map ...)) b2)`
+   (scalars outside the lambda), but the splat makes rank-polymorphic
+   `(+ array scalar_var)` / `(* scalar_var array)` compile and execute
+   correctly.
 
-3. **Reduce-then-transform cell-map body does not lower.**
-   A lambda body that is a `HIRPrimOp` containing a fold over the cell param
-   (e.g. `(+ (fold + 0.0 p) bias)`) is routed to the cell-index path and fails
-   with "cell-map body must reference the cell parameter via indexing or fold".
-   Same workaround as (2): interpreter forward + AD-restructured value-and-grad.
+2. **Dot-product cell-fold (`fold + 0.0 (map * p k)`)** — FIXED.
+   `_reduces_param` now recognizes a `HIRMap`/`HIRApply` referencing the param,
+   and `_lower_cell_fold_producer_result` lowers `fold <f> init (map OP p free...)`
+   by feeding the cell element plus each cell-shaped free array (broadcast
+   across the frame) into a single `linalg.generic` reduction.  This is the
+   `dot-patch` pattern; the classifier's `conv2d` now compiles natively
+   (`test_classifier_conv2d_pattern_compiles_and_matches`).
 
-4. **`HIRLet`-wrapped cell-map bodies are not inlined before routing.**  A
-   named helper like `dot-patch` called inside a map lambda is inlined to a
-   `HIRLet` chain wrapping the fold; the cell-map lowerer does not inline lets,
-   so it never reaches the fold.  Depends on (2) being fixed first.
+3. **Reduce-then-transform cell-map body** — still deferred, but no longer
+   needed: the detector follows the classifier's source pattern (scalars
+   outside the lambda), so this shape does not arise.
 
-**Next step for Phase 2:** write `examples/crater_detect_train.py` following
-`examples/crater_train.py`'s execution model (interpreter forward, compiled
-value-and-grad, Python-owned optimizer), using the classifier's source pattern
-(free scalars outside map lambdas; `dot-patch`-style cell-folds are fine because
-the forward is interpreted and the value-and-grad is AD-restructured).
+4. **`HIRLet`-wrapped cell-map bodies** — FIXED.  `_lower_map_cell_result`
+   now inlines the lambda body's `HIRLet` chain (via `_inline_lets`) before
+   fold/index routing, so a named `dot-patch` called inside a map lambda
+   reaches the cell-fold lowerer.
+
+6. **Function-call inlining** — still deferred.  A function that *calls*
+   another user function (e.g. `detect-loss` calling `detect`) and uses the
+   result as a tensor fails with "only tensor literals and iota values lower
+   as tensor inputs so far".  Workaround: write the loss with the detect body
+   inlined (no call), which compiles.  The classifier avoids this by
+   interpreting the forward; the AD path also restructures calls away in some
+   cases.
+
+7. **SSA name collision in nested cell-maps** — FIXED.  The cell-fold lowerers
+   (`_lower_map_cell_fold_result`, `_lower_cell_fold_producer_result`,
+   `_lower_map_cell_index_result`) used hardcoded `%map_empty`/`%mapped`/`%init`/`%filled`;
+   when a cell-fold result fed a sibling map, the names collided
+   ("redefinition of SSA value '%map_empty'").  A `prefix` is now threaded
+   from `_lower_tensor_input`/`_lower_fold_input` through the cell-map
+   lowerers and incorporated into the SSA names.
+
+8. **Variable operator sections in maps** — OPEN (blocks the compiled
+   value-and-grad).  The AD source generator emits `(map (* w2) arr)` and
+   `(map (lambda (v) (* v w2)) arr)`-style terms where `(* w2)` is a left
+   section with a *variable* operand.  `_lower_callable_operand`
+   (`remora/lowering/scalar.py:104`) only accepts `HIRLit` section operands
+   and raises "only literal operator section operands lower to MLIR so far".
+   Fix: thread `scalar_env` into `_lower_callable_operand` / the scalar-map
+   callable lowering so a `HIRVar` section operand resolves to its scalar
+   value (the same mechanism the binary-map splat already uses for free
+   scalars).  Minimal failing source (from the AD output):
+   `(define/pi () (f [arr (Array Float 4) w Float] (Array Float 4)) (map (* w) arr))`.
+
+**Runtime fix (2026-06-17):** `CPUFunctionExecutor.execute_into` now retains
+the materialized numpy input arrays for the duration of the call.  Previously
+`np.asarray` on a Python-scalar (Float) parameter created a temporary 0-d
+array whose data pointer the memref descriptor captured as a raw `int`; with
+2+ scalar parameters the temporaries were GC'd and their addresses reused,
+so every scalar received the *last* one's value.  Covered by
+`test_multiple_scalar_parameters_do_not_alias`.
+
+**Next step for Phase 2:** either (a) fix gap 8 (thread `scalar_env` into
+`_lower_callable_operand`) so the AD-generated value-and-grad compiles, then
+write `examples/crater_detect_train.py` with compiled forward + compiled
+value-and-grad + Python-owned optimizer; or (b) write the training script
+using the compiled forward loss plus interpreter value-and-grad as a stopgap.
+The detector forward and the inlined detector loss already compile natively.
 
 ## Phase 3: Static Batch ABI and Batched Detector Training
 
