@@ -14,6 +14,87 @@ static inline void* _mr_data(void* aligned, int64_t offset) {
     return (char*)aligned + offset;
 }
 
+/* MLIR runtime helper emitted by bufferization for memref copies.
+
+   Signature matches MLIR's runner utility:
+     memrefCopy(element_size_bytes, unranked_src, unranked_dst)
+
+   Unranked memref descriptor:
+     { int64_t rank; void *ranked_descriptor; }
+
+   Ranked descriptor layout:
+     allocated_ptr, aligned_ptr, offset, sizes[rank], strides[rank]
+*/
+
+typedef struct {
+    int64_t rank;
+    void* descriptor;
+} _remora_unranked_memref_t;
+
+typedef struct {
+    void* allocated;
+    void* aligned;
+    int64_t offset;
+    int64_t sizes_and_strides[];
+} _remora_ranked_memref_t;
+
+static void _remora_memref_copy_rec(
+    int64_t elem_size,
+    char* src_base,
+    char* dst_base,
+    const int64_t* sizes,
+    const int64_t* src_strides,
+    const int64_t* dst_strides,
+    int64_t rank,
+    int64_t dim
+) {
+    if (dim == rank) {
+        memcpy(dst_base, src_base, (size_t)elem_size);
+        return;
+    }
+    for (int64_t i = 0; i < sizes[dim]; i++) {
+        _remora_memref_copy_rec(
+            elem_size,
+            src_base + i * src_strides[dim] * elem_size,
+            dst_base + i * dst_strides[dim] * elem_size,
+            sizes,
+            src_strides,
+            dst_strides,
+            rank,
+            dim + 1
+        );
+    }
+}
+
+void memrefCopy(int64_t elem_size, void* src_unranked, void* dst_unranked) {
+    _remora_unranked_memref_t* src_ur = (_remora_unranked_memref_t*)src_unranked;
+    _remora_unranked_memref_t* dst_ur = (_remora_unranked_memref_t*)dst_unranked;
+    int64_t rank = src_ur->rank;
+    _remora_ranked_memref_t* src = (_remora_ranked_memref_t*)src_ur->descriptor;
+    _remora_ranked_memref_t* dst = (_remora_ranked_memref_t*)dst_ur->descriptor;
+
+    char* src_base = (char*)src->aligned + src->offset * elem_size;
+    char* dst_base = (char*)dst->aligned + dst->offset * elem_size;
+    int64_t* sizes = src->sizes_and_strides;
+    int64_t* src_strides = src->sizes_and_strides + rank;
+    int64_t* dst_strides = dst->sizes_and_strides + rank;
+
+    if (rank == 0) {
+        memcpy(dst_base, src_base, (size_t)elem_size);
+        return;
+    }
+    _remora_memref_copy_rec(
+        elem_size,
+        src_base,
+        dst_base,
+        sizes,
+        src_strides,
+        dst_strides,
+        rank,
+        0
+    );
+}
+
 /* ── Comparison helpers for qsort ──────────────────────────────────────── */
 
 static int _cmp_i32_asc(const void* a, const void* b) {

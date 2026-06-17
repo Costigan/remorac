@@ -66,7 +66,7 @@ def compute_cache_key(
         f"remora_version:{_remora_version()}",
         # Include toolchain info (mlir-opt, llc versions)
         f"toolchain:{_toolchain_fingerprint()}",
-        f"pipeline_version:2",
+        f"pipeline_version:3",
     ]
     canonical = "\n".join(parts)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -6,9 +6,9 @@ The descriptor-MLIR scalability plan is complete.  The original problem — the 
 produced 47.5 MB of descriptor MLIR that timed out the CPU pipeline — is
 solved.  All non-optional scalability phases (0-9) are implemented; Phase 10 is
 explicitly rejected with a measured decision.  Native crater training is wired
-through an auto mode with interpreter fallback, but it is not end-to-end
-validated in environments where the compiled shared library cannot load because
-the MLIR runtime symbol `memrefCopy` is missing.
+through an auto mode with interpreter fallback and a strict compiled mode.  The
+compiled function path now links Remora runtime support, including the MLIR
+bufferization `memrefCopy` helper.
 
 ### What was delivered
 
@@ -20,7 +20,7 @@ the MLIR runtime symbol `memrefCopy` is missing.
 | 3 | Compact `im2col`/`col2im` (loops, not unrolled elements) | **47.5 MB → 127 KB** |
 | 4 | HIR common-subexpression elimination | **127 KB → 60 KB** |
 | 5 | AD expression simplification pass | Cauchy; `_binary` rules already caught most |
-| 6 | One value-and-grad function | Single function returns all 6 gradients; strict compiled mode now raises when runtime support is missing |
+| 6 | One value-and-grad function | Single function returns all 6 gradients; strict compiled mode validated on the tiny crater run |
 | 7 | Opt-in saved-value tape (`use_saved_values=True`) | `_Let` bindings, HIRLet peeling |
 | 8 | `HIRMatmul` → `linalg.matmul` lowering | Pattern-match pass in `hir_opt.py` |
 | 9 | Artifact cache (`~/.cache/remora/native/`) | Skip pipeline on cache hit |
@@ -42,11 +42,9 @@ the MLIR runtime symbol `memrefCopy` is missing.
 The ~112 s end-to-end time is dominated by function preparation
 (typechecking + HIR construction, ~111 s), not by MLIR lowering
 (< 1 s total).  The crater performance follow-up added typechecker
-memoization and strict compiled-mode handling, so the remaining open items are:
+memoization, strict compiled-mode handling, and Remora runtime support for
+MLIR `memrefCopy`, so the remaining open items are:
 
-- **Native runtime linkage**: compiled crater execution requires `memrefCopy`
-  from an MLIR runtime library.  Until that symbol is linked, auto mode falls
-  back to the interpreter and strict compiled mode raises.
 - **Phase 7**: The saved-value tape is opt-in (default off) pending GPU
   path HIRLet support.
 - **Phase 8**: Convolution is still lowered via compact `im2col` loops

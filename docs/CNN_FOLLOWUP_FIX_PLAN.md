@@ -17,12 +17,45 @@ Implemented follow-up changes:
 - `examples/crater_train.py --compiled` now requires compiled native execution.
 - Auto training mode reports the compiled fallback reason when verbose.
 - The compiled crater parity test skips only for the known `memrefCopy`
-  runtime blocker.
+  runtime blocker on environments that still lack the runtime helper.
 - Native cache keys include tool version/stat fingerprint data and the cache
   pipeline version was bumped.
 - Unused `HIRRelu` HIR surface was removed.
 - Status documents now distinguish descriptor-compiler completion from native
   crater execution validation.
+
+## Linker Follow-up (2026-06-16) [COMPLETE]
+
+DeepSeek and Codex agreed that the remaining `memrefCopy` failure is a native
+link/runtime bug, not just a documentation caveat.  The repo had two divergent
+compiled CPU link paths:
+
+- `CPUExecutor.compile_source()` linked `remora_rt.o` inline.
+- `CPUFunctionExecutor.compile_source()` used `_compile_llvm_ir_to_shared_library()`,
+  whose linker command omitted Remora runtime support.
+
+The fix plan is:
+
+1. Make Remora's C runtime provide the MLIR bufferization helper `memrefCopy`
+   used by the lowered LLVM IR.
+2. Make `_compile_llvm_ir_to_shared_library()` link `remora_rt.o` consistently.
+3. Route `CPUExecutor.compile_source()` through the same shared helper.
+4. Bump the native artifact cache pipeline version so older `.so` files with
+   unresolved runtime symbols are not reused.
+5. Add tests that check the shared linker includes the runtime object and that
+   a compiled function needing `memrefCopy` can load and execute.
+
+Implemented:
+
+- `remora/remora_rt.c` now defines a generic strided `memrefCopy` helper.
+- `_compile_llvm_ir_to_shared_library()` links `remora_rt.o`.
+- `CPUExecutor.compile_source()` now uses the shared link helper instead of a
+  separate inline linker command.
+- Native artifact cache `pipeline_version` was bumped to avoid reusing old
+  `.so` files with unresolved runtime symbols.
+- `tests/test_runtime_linking.py` verifies the runtime object is linked.
+- `tests/test_execution.py::test_cpu_function_executor_links_memref_copy_runtime_support`
+  verifies the compiled function path loads and executes with runtime support.
 
 ## Scope
 
@@ -40,7 +73,6 @@ In scope:
 
 Out of scope:
 
-- Implementing the missing MLIR runtime `memrefCopy` linkage.
 - Adding batch dimensions to the descriptor ABI.
 - Making GPU crater training work.
 - Adding typed-HIR disk caching.  Phase C remains rejected.
@@ -79,7 +111,7 @@ non-`VarExpr` nodes.
 ## Phase 2: Make Compiled Training Mode Explicit
 
 **Goal:** keep auto fallback for ergonomics, but provide a strict compiled mode
-that fails when native execution is unavailable.
+that raises when native execution is unavailable.
 
 ### Problem
 
@@ -103,9 +135,10 @@ the interpreter.  This is acceptable for default usage, but the current CLI
 ### Acceptance
 
 - `train_tiny_dataset(use_compiled=False)` uses interpreter mode.
-- `train_tiny_dataset(use_compiled=None)` falls back cleanly when `memrefCopy`
-  is missing.
-- `train_tiny_dataset(use_compiled=True)` raises when `memrefCopy` is missing.
+- `train_tiny_dataset(use_compiled=None)` falls back cleanly when compiled
+  execution is unavailable.
+- `train_tiny_dataset(use_compiled=True)` raises when compiled execution is
+  unavailable.
 - `python examples/crater_train.py --compiled` requires compiled mode instead
   of silently falling back.
 
@@ -133,8 +166,8 @@ still failing on unrelated compiler/lowering regressions.
 
 ### Acceptance
 
-- In the current environment, the compiled parity test skips specifically
-  because of `memrefCopy`.
+- In environments without the runtime helper, the compiled parity test skips
+  specifically because of `memrefCopy`.
 - If a lowering/typechecking/codegen error occurs before the known runtime
   blocker, the test fails.
 - The test message clearly states the skipped dependency.
@@ -206,10 +239,10 @@ real scalability work.
 
 ### Problem
 
-The current plans use "COMPLETE" language that can be read as native crater
-training being validated end-to-end.  The code currently validates
-implementation pieces and an interpreter fallback, while native execution is
-blocked by `memrefCopy` in this environment.
+The original follow-up used caveat language while native execution was blocked
+by `memrefCopy`.  The linker follow-up fixed that runtime support in this
+environment, so the docs should now distinguish retained fallback behavior from
+validated strict native execution.
 
 ### Implementation
 
@@ -223,12 +256,9 @@ Recommended wording:
 
 - Descriptor MLIR scalability phases are complete.
 - Crater training auto mode is implemented with interpreter fallback.
-- Strict compiled mode exists and raises when native runtime support is
-  missing.
-- Compiled parity is skipped only for the known missing `memrefCopy` runtime
-  dependency.
-- Native crater training is not considered end-to-end validated until the
-  runtime linkage is fixed and parity passes.
+- Strict compiled mode exists and raises when native execution is unavailable.
+- `memrefCopy` runtime linkage is provided by `remora_rt.c`.
+- Strict native crater training has been validated on the tiny one-epoch run.
 
 ### Acceptance
 
@@ -269,11 +299,12 @@ env UV_CACHE_DIR=/tmp/uv-cache uv run python examples/crater_train.py --epochs 1
 env UV_CACHE_DIR=/tmp/uv-cache uv run python examples/crater_train.py --compiled --epochs 1 --examples 2
 ```
 
-Expected current behavior until `memrefCopy` is fixed:
+Expected behavior after the linker follow-up:
 
-- Default command runs via interpreter fallback.
-- `--compiled` raises with the native runtime/linkage error instead of falling
-  back.
+- Default command should prefer compiled execution when native support is
+  available.
+- `--compiled` should run compiled execution and raise only on real
+  toolchain/runtime failures.
 
 2026-06-16 verification:
 
@@ -287,7 +318,25 @@ Manual checks:
   interpreter mode, reported the `memrefCopy` load failure, and completed one
   epoch.
 - `uv run python examples/crater_train.py --compiled --epochs 1 --examples 2`
-  failed fast with `undefined symbol: memrefCopy`.
+  previously raised with `undefined symbol: memrefCopy`.
+
+2026-06-16 linker follow-up verification:
+
+```text
+tests/test_runtime_linking.py
+tests/test_execution.py::test_cpu_function_executor_links_memref_copy_runtime_support
+2 passed in 0.40s
+```
+
+Manual strict compiled crater check:
+
+```text
+Using compiled native execution (single value-and-grad function)
+epoch   1 loss 0.694780
+compile_seconds=364.285
+mean_step_seconds=0.001202
+loss: 0.696294 -> 0.694780
+```
 
 ## Completion Criteria
 

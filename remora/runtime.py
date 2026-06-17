@@ -604,46 +604,10 @@ class CPUExecutor:
             raise
         llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
 
-        temp_dir = tempfile.TemporaryDirectory(prefix="remora-cpu-")
-        root = Path(temp_dir.name)
-        ll_path = root / "module.ll"
-        obj_path = root / "module.o"
-        so_path = root / "module.so"
-        ll_path.write_text(llvm_ir, encoding="utf-8")
-
-        llc = toolchain.llc
-        if llc is None:
-            temp_dir.cleanup()
-            raise PipelineUnavailable("llc is required for compiled CPU execution")
-        linker = which("gcc") or which("cc")
-        if linker is None:
-            temp_dir.cleanup()
-            raise PipelineUnavailable("gcc or cc is required for compiled CPU execution")
-
-        _run_checked(
-            [
-                llc,
-                "-filetype=obj",
-                "-relocation-model=pic",
-                str(ll_path),
-                "-o",
-                str(obj_path),
-            ],
-            "llc failed during compiled CPU execution",
-            temp_dir,
-        )
-        _run_checked(
-            [
-                linker,
-                "-shared",
-                str(obj_path),
-                str(Path(_get_remora_rt_o())),
-                "-o",
-                str(so_path),
-                *_openmp_link_args(threaded),
-            ],
-            "system linker failed during compiled CPU execution",
-            temp_dir,
+        temp_dir, so_path = _compile_llvm_ir_to_shared_library(
+            llvm_ir,
+            toolchain,
+            threaded=threaded,
         )
         return CompiledCPUArtifact(
             so_path,
@@ -908,6 +872,7 @@ def _compile_llvm_ir_to_shared_library(
             linker,
             "-shared",
             str(obj_path),
+            str(Path(_get_remora_rt_o())),
             "-o",
             str(so_path),
             *_openmp_link_args(threaded),

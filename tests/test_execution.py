@@ -413,6 +413,25 @@ def test_cpu_function_executor_runs_descriptor_input_vector_map():
     np.testing.assert_array_equal(result.value, np.array([0, 2, 4, 6, 8], dtype=np.float32))
 
 
+def test_cpu_function_executor_links_memref_copy_runtime_support():
+    artifact = CPUFunctionExecutor.compile_source(
+        "def copyish xs = ravel (reshape [2, 2] xs)",
+        "copyish",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.array([1, 2, 3, 4], dtype=np.float32)
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_array_equal(
+        result.value,
+        np.array([1, 2, 3, 4], dtype=np.float32),
+    )
+
+
 def test_cpu_function_executor_runs_map_with_scalar_parameter_capture():
     artifact = CPUFunctionExecutor.compile_source(
         "def add_bias xs bias = map (\\x -> x + bias) xs",

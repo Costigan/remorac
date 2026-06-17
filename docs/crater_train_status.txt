@@ -11,7 +11,7 @@ CLI `--compiled`) raises instead of falling back.
 
 AD fix — generate_gradient_source now accepts trainable_indices to filter which gradients appear in the Pair return. The function signature keeps all parameters for forward reconstruction.
 
-The compiled path may produce a shared library, but native crater execution is
-not end-to-end validated in environments where loading the library fails with
-missing `memrefCopy`.  Until that runtime linkage is fixed, auto mode falls
-back to the interpreter and strict compiled mode raises.
+The compiled path now links Remora runtime support, including the MLIR
+bufferization `memrefCopy` helper.  Strict compiled mode completes the tiny
+one-epoch crater training run in this environment; auto mode still keeps the
+interpreter fallback for toolchain/runtime failures.
