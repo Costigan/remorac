@@ -717,6 +717,7 @@ class TypeChecker:
         self._timer = _Profiler()
         self._infer_cache: dict[tuple[int, int], tuple[int, TypedExpr]] = {}
         self._infer_generation: int = 0
+        self._current_index_bindings: dict[str, AnyIndexExpr] = {}
         self._caching_enabled: bool = True
 
     def _clear_infer_cache(self) -> None:
@@ -1129,6 +1130,13 @@ class TypeChecker:
         ]
         return TypedApp(expr, typed_func, typed_args, typed_func.type.result)
 
+    @staticmethod
+    def _is_dim_bound_in_env(name: str, env: TypeEnv) -> bool:
+        try:
+            return env.lookup_index(name) == IndexSort.DIM
+        except RemoraTypeError:
+            return False
+
     def _infer_index_app(self, expr: IndexAppExpr, env: TypeEnv) -> TypedIndexApp:
         if not isinstance(expr.func, VarExpr) or expr.func.name not in self._functions:
             raise RemoraTypeError(
@@ -1142,27 +1150,39 @@ class TypeChecker:
                 f"function {function.name!r} does not have a Pi type",
                 expr.loc,
             )
-        # Validate each arg: Dim→concrete, Shape→ShapeLit
+        # Validate each arg: Dim→concrete or bound symbolic, Shape→ShapeLit
+        # Also resolve symbolic DimVars to concrete values when specialization
+        # bindings are available (set by _infer_top_level_function_type).
+        resolved_args: list[DimExpr | IndexShapeExpr] = []
         for arg in expr.args:
             if isinstance(arg, DimExpr):
                 if _static_dim_value(arg) is None:
+                    if isinstance(arg, DimVar) and (
+                        self._is_dim_bound_in_env(arg.name, env)
+                        or arg.name in self._current_index_bindings
+                    ):
+                        resolved = self._current_index_bindings.get(arg.name, arg)
+                        resolved_args.append(resolved)
+                        continue
                     raise RemoraTypeError(
                         f"explicit index argument {arg} must be concrete",
                         expr.loc,
                     )
+                resolved_args.append(arg)
             elif isinstance(arg, IndexShapeExpr):
                 if not isinstance(arg, ShapeLit):
                     raise RemoraTypeError(
                         f"explicit shape argument {arg} must be a concrete shape literal",
                         expr.loc,
                     )
+                resolved_args.append(arg)
             else:
                 raise RemoraTypeError(
                     f"unexpected index argument type {type(arg).__name__}",
                     expr.loc,
                 )
         try:
-            instantiated = instantiate_pi_type(declared_type, expr.args)
+            instantiated = instantiate_pi_type(declared_type, tuple(resolved_args))
         except ValueError as exc:
             raise RemoraTypeError(str(exc), expr.loc) from exc
         if not isinstance(instantiated, FuncType):
@@ -1174,7 +1194,7 @@ class TypeChecker:
             function,
             instantiated,
             env,
-            index_args=expr.args,
+            index_args=tuple(resolved_args),
         )
         return TypedIndexApp(expr, typed_function, expr.args, instantiated)
 
@@ -2460,15 +2480,20 @@ class TypeChecker:
                 declared_result, shape_binder_names
             )
             specialized_result = substitute_type(declared_result, bindings)
-            typed_func = self._typed_top_level_function(
-                function,
-                FuncType(specialized_params, specialized_result),
-                env,
-                index_args=tuple(
-                    bindings[binder.name]
-                    for binder in self._index_binders(function)
-                ),
-            )
+            saved_bindings = self._current_index_bindings
+            self._current_index_bindings = bindings
+            try:
+                typed_func = self._typed_top_level_function(
+                    function,
+                    FuncType(specialized_params, specialized_result),
+                    env,
+                    index_args=tuple(
+                        bindings[binder.name]
+                        for binder in self._index_binders(function)
+                    ),
+                )
+            finally:
+                self._current_index_bindings = saved_bindings
             return typed_func.type
         typed_func = self._typed_top_level_function(
             function,
