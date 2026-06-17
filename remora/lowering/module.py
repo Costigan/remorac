@@ -1209,6 +1209,7 @@ def _lower_pair_result(
                 comp_mlir_type,
                 scalar_env,
                 tensor_env,
+                prefix=f"pair_{i}",
             )
             code = sc_body
         else:
@@ -1489,6 +1490,7 @@ def _lower_descriptor_scalar_result_body(
     result_type: str,
     scalar_env: dict[str, _Operand],
     tensor_env: TensorEnv,
+    prefix: str = "",
 ) -> tuple[str, str]:
     expr = _inline_lets(expr)
     if isinstance(expr, (HIRFold, HIRReduce)):
@@ -1496,6 +1498,7 @@ def _lower_descriptor_scalar_result_body(
             _lower_fold_input(
                 expr.array,
                 {},
+                prefix=_join_prefix(prefix, "input"),
                 tensor_env=tensor_env,
                 scalar_env=scalar_env,
             )
@@ -1505,7 +1508,7 @@ def _lower_descriptor_scalar_result_body(
             result_type,
             functions={},
             env=scalar_env,
-            result_prefix="init_scalar",
+            result_prefix=_join_prefix(prefix, "init_scalar"),
         )
         fold_body = _lower_fold_callable_body(
             expr.func,
@@ -1517,30 +1520,32 @@ def _lower_descriptor_scalar_result_body(
             result_type=result_type,
             scalar_env=scalar_env,
         )
+        init_name = f"%{_join_prefix(prefix, 'init')}"
+        folded_name = f"%{_join_prefix(prefix, 'folded')}"
+        extracted_name = f"%{_join_prefix(prefix, 'extracted')}"
         body = f"""{input_code}
 {init_code}
-    %init = tensor.from_elements {init_value} : tensor<{result_type}>
-    %folded = linalg.generic {{
+    {init_name} = tensor.from_elements {init_value} : tensor<{result_type}>
+    {folded_name} = linalg.generic {{
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
       iterator_types = [\"reduction\"]
-    }} ins({input_name} : {input_type}) outs(%init : tensor<{result_type}>) {{
+    }} ins({input_name} : {input_type}) outs({init_name} : tensor<{result_type}>) {{
     ^bb0(%in: {input_element_type}, %acc: {result_type}):
 {fold_body}
     }} -> tensor<{result_type}>
-    %extracted = tensor.extract %folded[] : tensor<{result_type}>"""
-        return body, "%extracted"
+    {extracted_name} = tensor.extract {folded_name}[] : tensor<{result_type}>"""
+        return body, extracted_name
 
-    emitter = _RegionEmitter(input_name="", input_type="")
+    emitter = _RegionEmitter(input_name="", input_type="", prefix=prefix)
     value = emitter.emit_expr(expr, scalar_env)
+    cast_name = f"%{_join_prefix(prefix, 'result_cast')}"
     lines = [
         *emitter.lines,
         *_cast_if_needed(
-            value.value, value.type, result_type, "%result_cast"
+            value.value, value.type, result_type, cast_name
         ),
     ]
-    result_value = (
-        "%result_cast" if value.type != result_type else value.value
-    )
+    result_value = cast_name if value.type != result_type else value.value
     return "\n".join(lines), result_value
 
 

@@ -1156,3 +1156,93 @@ def test_variable_operator_section_in_map_compiles(section_src, ref_fn):
         compiled.close()
     expected = (ref_fn(arr, scalar) if uses_w else ref_fn(arr, scalar, None)).astype(np.float32)
     np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_detector_value_and_grad_matches_finite_differences():
+    """Phase 2 milestone: the compiled detector value-and-grad (multi-output
+    Pair of 5 gradients) matches finite differences of the compiled forward
+    loss.  Regression for two bugs that together made the compiled value-and-grad
+    silently wrong: (a) the runtime multi-output path released scalar-input
+    temporaries before the call, aliasing inputs; (b) the Pair scalar-component
+    lowering used non-unique SSA names."""
+    from remora.ad_source import generate_value_and_grad_function_source
+
+    source = """\
+(define/pi ()
+  (relu [v Float] Float)
+  (select (> v 0.0) v 0.0))
+(define/pi ()
+  (detect-loss [k (Array Float 3 3) b1 Float w2 Float b2 Float image (Array Float 8 8)] Float)
+  (fold + 0.0 (map (lambda (l) (* l l)) (+ (* w2 (map relu (+ (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) (im2col image [3 3] 1)) b1))) b2))))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
+        FLOAT, FLOAT, FLOAT,
+        ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+    )
+    grad_artifact = generate_value_and_grad_function_source(
+        source, "detect-loss", param_types,
+        include_prelude=False, syntax="lisp",
+    )
+    grad_exe = CPUFunctionExecutor.compile_source(
+        grad_artifact.source, grad_artifact.function_name, param_types,
+        include_prelude=False, syntax="lisp",
+    )
+    fwd_exe = CPUFunctionExecutor.compile_source(
+        source, "detect-loss", param_types, include_prelude=False, syntax="lisp",
+    )
+    try:
+        rng = np.random.default_rng(7)
+        kernel = rng.standard_normal((3, 3)).astype(np.float32)
+        b1 = np.float32(0.1)
+        w2 = np.float32(2.0)
+        b2 = np.float32(0.5)
+        image = rng.standard_normal((8, 8)).astype(np.float32)
+
+        def loss(k, b1v, w2v, b2v, img):
+            return float(np.asarray(
+                CPUFunctionExecutor(fwd_exe).execute(
+                    k, np.float32(b1v), np.float32(w2v), np.float32(b2v), img
+                ).value
+            ))
+
+        result = CPUFunctionExecutor(grad_exe).execute(kernel, b1, w2, b2, image)
+
+        def flatten(v):
+            out = []
+            if isinstance(v, (list, tuple)):
+                for x in v:
+                    out.extend(flatten(x))
+                return out
+            return [v]
+
+        flat = flatten(result.value)
+        g_k = np.asarray(flat[0], dtype=np.float32)
+        scalars = [float(np.asarray(x)) for x in flat if np.asarray(x).ndim == 0]
+        g_image = np.asarray(flat[-1], dtype=np.float32)
+        g_b1, g_w2, g_b2 = scalars  # pair order: g_k, g_b1, g_w2, g_b2, g_image
+
+        eps = 1e-3
+        fd_b1 = (loss(kernel, float(b1) + eps, w2, b2, image)
+                 - loss(kernel, float(b1) - eps, w2, b2, image)) / (2 * eps)
+        fd_w2 = (loss(kernel, b1, float(w2) + eps, b2, image)
+                 - loss(kernel, b1, float(w2) - eps, b2, image)) / (2 * eps)
+        fd_b2 = (loss(kernel, b1, w2, float(b2) + eps, image)
+                 - loss(kernel, b1, w2, float(b2) - eps, image)) / (2 * eps)
+        assert g_b1 == pytest.approx(fd_b1, rel=1e-3, abs=1e-2)
+        assert g_w2 == pytest.approx(fd_w2, rel=1e-3, abs=1e-2)
+        assert g_b2 == pytest.approx(fd_b2, rel=1e-3, abs=1e-2)
+
+        # Spot-check g_k and g_image via finite differences.
+        for (y, x) in [(0, 0), (1, 2), (2, 1)]:
+            kp = kernel.copy(); kp[y, x] += eps
+            km = kernel.copy(); km[y, x] -= eps
+            fd = (loss(kp, b1, w2, b2, image) - loss(km, b1, w2, b2, image)) / (2 * eps)
+            assert g_k[y, x] == pytest.approx(fd, rel=1e-3, abs=1e-2)
+        ip = image.copy(); ip[3, 4] += eps
+        im = image.copy(); im[3, 4] -= eps
+        fd_img = (loss(kernel, b1, w2, b2, ip) - loss(kernel, b1, w2, b2, im)) / (2 * eps)
+        assert g_image[3, 4] == pytest.approx(fd_img, rel=1e-3, abs=1e-2)
+    finally:
+        grad_exe.close()
+        fwd_exe.close()

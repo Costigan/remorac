@@ -206,12 +206,14 @@ class _RegionEmitter:
         input_type: str,
         next_temp: int = 0,
         functions: dict[str, Any] | None = None,
+        prefix: str = "",
     ) -> None:
         self.lines: list[str] = []
         self._next_temp = next_temp
         self._input_name = input_name
         self._input_type = input_type
         self._functions = functions or {}
+        self._prefix = prefix
 
     def emit_expr(self, expr: HIRExpr, env: dict[str, _Operand]) -> _Operand:
         if isinstance(expr, HIRVar):
@@ -356,9 +358,9 @@ class _RegionEmitter:
         )
 
     def temp(self) -> str:
-        value = f"%v{self._next_temp}"
+        base = f"v{self._next_temp}"
         self._next_temp += 1
-        return value
+        return f"%{self._prefix}_{base}" if self._prefix else f"%{base}"
 
     @property
     def next_temp(self) -> int:

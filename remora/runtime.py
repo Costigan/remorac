@@ -783,7 +783,8 @@ class CPUFunctionExecutor:
             for i, (out_arr, comp_type) in enumerate(zip(output, component_types)):
                 _validate_numpy_value(out_arr, comp_type, f"compiled CPU function output[{i}]")
 
-            descriptors = [make_numpy_memref_descriptor(np.asarray(input_value)) for input_value in inputs]
+            input_arrays = [np.asarray(input_value) for input_value in inputs]
+            descriptors = [make_numpy_memref_descriptor(arr) for arr in input_arrays]
             out_descriptors = [make_numpy_memref_descriptor(o) for o in output]  # type: ignore[arg-type]
             function = getattr(self._library, f"_mlir_ciface_{self._artifact.export_name}")
             descriptor_types = [type(descriptor) for descriptor in descriptors]
@@ -792,12 +793,11 @@ class CPUFunctionExecutor:
                 *(ctypes.POINTER(type(out_d)) for out_d in out_descriptors),
             ]
             function.restype = None
-            # Keep input/output numpy arrays alive for the duration of the call:
-            # ``np.asarray`` on a Python scalar (Float param) materializes a
-            # temporary 0-d array whose data pointer the descriptor captures as
-            # a raw int.  Without retaining it, multiple scalar inputs can be
-            # GC'd and their addresses reused, aliasing the scalars together.
-            keepalive = [np.asarray(v) for v in inputs] + list(output)
+            # ``input_arrays`` keeps scalar (0-d) input temporaries alive for the
+            # call: the descriptor captures each array's data pointer as a raw
+            # int, so the arrays must be the SAME objects the descriptors were
+            # built from (not freshly materialized copies).
+            keepalive = input_arrays + list(output)
             with _temporary_omp_threads(self._artifact.cpu_threads):
                 function(
                     *(ctypes.byref(descriptor) for descriptor in descriptors),

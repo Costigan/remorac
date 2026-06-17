@@ -67,7 +67,7 @@ Important gaps this plan addresses:
 |---|---|---|---|
 | [x] | 0 | Current crater classifier | Baseline preservation |
 | [x] | 1 | Logistic regression / softmax | Static batched AD, stable loss |
-| [◐] | 2 | Synthetic crater grid detector | Dense detector loss and value-and-grad (lowering gap fixed; detector train script still TODO) |
+| [◐] | 2 | Synthetic crater grid detector | Dense detector loss and value-and-grad compile natively; detector train script still TODO |
 | [ ] | 3 | Batched crater detector | Static batch ABI and gradient accumulation |
 | [ ] | 4 | Image filters / PDE stencil | Dense non-AD kernels and CPU/GPU parity |
 | [ ] | 5 | Real crater tile pipeline | Python orchestration and detector validation |
@@ -558,24 +558,41 @@ AD-generated value-and-grad source).
    from `_lower_tensor_input`/`_lower_fold_input` through the cell-map
    lowerers and incorporated into the SSA names.
 
-8. **Variable operator sections in maps** — PARTIALLY FIXED (compiles;
-   remaining lowering-correctness bug in the full AD source).
+8. **Variable operator sections in maps** — FIXED.
    `_lower_callable_operand` (`remora/lowering/scalar.py:97`) now resolves a
    `HIRVar` section operand via `scalar_env` (threaded through
    `_lower_primitive_callable_result`/`_lower_map_callable_result`), so
    `(map (* w) arr)`, `(map (+ b) arr)`, `(map (- w) arr)` compile and match
-   NumPy (`test_variable_operator_section_in_map_compiles`).  This unblocks
-   *compilation* of the AD-generated detector value-and-grad.  **However**,
-   the compiled value-and-grad for the full detector loss returns *incorrect*
-   gradients (e.g. g_b2≈14.8 vs the correct 188.1), while the *interpreter*
-   on the same generated source returns the correct gradients (matching
-   finite differences).  So the AD source is correct; the remaining bug is in
-   *lowering* the complex AD term, which mixes variable sections with
-   `(if (map ...) ...)`, `(with-shape ...)`, `(reshape ...)`, and
-   `(transpose ...)` — operations not exercised by the (correct) compiled
-   forward.  Isolating which of those lowered incorrectly is the next step.
-   Minimal forward section source (now correct):
-   `(define/pi () (f [arr (Array Float 4) w Float] (Array Float 4)) (map (* w) arr))`.
+   NumPy (`test_variable_operator_section_in_map_compiles`).
+
+**Two more bugs found and fixed while closing gap 8 (the compiled multi-output
+value-and-grad was silently wrong):**
+
+9. **Runtime multi-output (Pair) scalar-input aliasing** — FIXED.  The Pair
+   path of `CPUFunctionExecutor.execute_into` built input memref descriptors
+   from `np.asarray(input)` *temporaries* but only retained a *different* set
+   of `np.asarray` copies as keepalive, so scalar-input temporaries were GC'd
+   and their addresses reused — every scalar input aliased to the last one.
+   Symptom: the compiled value-and-grad returned the wrong gradient for every
+   output after the first (e.g. g_b2≈14.8 vs correct 188.1).  The non-Pair
+   path was already fixed earlier; the Pair path now materializes input arrays
+   once and reuses them for both the descriptors and the keepalive.
+   (`test_detector_value_and_grad_matches_finite_differences`.)
+
+10. **Non-unique SSA names in Pair scalar-component lowering** — FIXED.
+    `_lower_descriptor_scalar_result_body` and `_RegionEmitter` used fixed
+    names (`%init`, `%folded`, `%extracted`, `%v0`, `%result_cast`) that
+    collided across pair components (parse error for simple losses, scoped but
+    fragile for hoisted folds).  A `prefix` is now threaded from
+    `_lower_pair_result` (`pair_{i}`) through
+    `_lower_descriptor_scalar_result_body` and `_RegionEmitter.temp`.
+
+**Phase 2 compiler unblock — COMPLETE.**  The detector forward, the inlined
+detector loss forward, AND the multi-output detector value-and-grad (5
+gradients: g_k, g_b1, g_w2, g_b2, g_image) all compile natively (`verify=True`)
+and match NumPy / finite differences
+(`test_detector_value_and_grad_matches_finite_differences`).  The interpreter
+and compiled paths are now equivalent for the detector.
 
 **Runtime fix (2026-06-17):** `CPUFunctionExecutor.execute_into` now retains
 the materialized numpy input arrays for the duration of the call.  Previously
@@ -585,17 +602,14 @@ array whose data pointer the memref descriptor captured as a raw `int`; with
 so every scalar received the *last* one's value.  Covered by
 `test_multiple_scalar_parameters_do_not_alias`.
 
-**Next step for Phase 2:** isolate the lowering-correctness bug in the
-compiled detector value-and-grad (gap 8): the AD source is correct
-(interpreter matches finite differences) but the compiled MLIR is wrong, so
-one of `if`/`with-shape`/`reshape`/`transpose` (mixed with variable sections
-in the AD term) lowers incorrectly.  Once that is fixed, write
-`examples/crater_detect_train.py` with compiled forward + compiled
-value-and-grad + Python-owned optimizer.  As a stopgap, the training script
-can already use the compiled forward loss (correct) with the *interpreter*
-value-and-grad (correct, slow) — the interpreter-forward objection does not
-apply to interpreter gradients.  The detector forward and the inlined
-detector loss already compile natively and match NumPy.
+**Next step for Phase 2:** write `examples/crater_detect_train.py` with
+compiled forward + compiled value-and-grad + Python-owned optimizer (SGD).
+All required compiler pieces are now in place and verified: the detector
+forward, the inlined detector loss, and the multi-output value-and-grad all
+compile natively and match NumPy / finite differences.  The training script
+should follow `examples/crater_train.py`'s structure (per-example loss loop in
+Python, optimizer state in Python) but use the *compiled* forward and
+value-and-grad directly — no interpreter fallback needed.
 
 ## Phase 3: Static Batch ABI and Batched Detector Training
 
