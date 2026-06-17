@@ -809,15 +809,22 @@ def _lower_map_cell_result(
         raise RemoraLoweringError(
             "only scalar-result cell maps lower to MLIR so far"
         )
-    if not isinstance(node.func, HIRVar):
-        raise RemoraLoweringError(
-            "only lifted lambda cell maps lower to MLIR so far"
+    if isinstance(node.func, HIRVar):
+        function = functions.get(node.func.name)
+        if function is None:
+            raise RemoraLoweringError(
+                f"unknown cell-map function {node.func.name}"
+            )
+    elif isinstance(node.func, HIRLambda):
+        function = HIRFunction(
+            name="__cell_lambda",
+            params=list(node.func.params),
+            body=node.func.body,
+            return_type=node.func.result_type.result,
         )
-
-    function = functions.get(node.func.name)
-    if function is None:
+    else:
         raise RemoraLoweringError(
-            f"unknown cell-map function {node.func.name}"
+            "only lifted lambda or inline lambda cell maps lower to MLIR so far"
         )
     if len(function.params) != 1:
         raise RemoraLoweringError(

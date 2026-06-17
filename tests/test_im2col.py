@@ -759,3 +759,140 @@ def test_conv2d_32x32_gradient():
         interpreted[1], finite_difference_grad(loss_kernel, kernel),
         rtol=1e-3, atol=1e-5,
     )
+
+
+# ── map + fold over im2col (cell-map lowering for inline lambdas) ────────────
+#
+# Regression for a lowering gap that previously produced empty MLIR (and thus a
+# .so with no `_mlir_ciface_remora_call` entry point) whenever a `map` lambda
+# containing a `fold` was applied to `im2col` output.  The cell-map lowerer only
+# accepted lifted (named) functions; inline lambdas were rejected with
+# "only lifted lambda cell maps lower to MLIR so far" and the error was
+# swallowed by `compile_prepared_function`.
+
+
+def _ref_patch_sums(image, kh, kw, stride):
+    h, w = image.shape
+    out_h = (h - kh) // stride + 1
+    out_w = (w - kw) // stride + 1
+    out = np.empty(out_h * out_w, dtype=np.float64)
+    idx = 0
+    for i in range(out_h):
+        for j in range(out_w):
+            out[idx] = image[
+                i * stride : i * stride + kh, j * stride : j * stride + kw
+            ].sum()
+            idx += 1
+    return out
+
+
+@pytest.mark.parametrize(
+    ("size", "kernel_size", "stride"),
+    [(8, 3, 1), (32, 3, 1), (8, 3, 2), (7, 2, 2)],
+)
+def test_map_fold_over_im2col_lowers_and_matches_reference(
+    size, kernel_size, stride
+):
+    patches_per_axis = (size - kernel_size) // stride + 1
+    patch_count = patches_per_axis ** 2
+    source = f"""\
+(define/pi ()
+  (f [image (Array Float {size} {size})] (Array Float {patch_count}))
+  (map (lambda (p) (fold + 0.0 p)) (im2col image [{kernel_size} {kernel_size}] {stride})))
+"""
+    param_types = (ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),)
+    artifact = compile_function_source(
+        source,
+        "f",
+        param_types,
+        verify=True,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    # The lowering gap produced 0-byte MLIR; guard against regression.
+    assert len(artifact.mlir_text.strip()) > 0
+    assert artifact.mlir_module is not None
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "f", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(0)
+        image = rng.standard_normal((size, size)).astype(np.float32)
+        result = CPUFunctionExecutor(compiled).execute(image)
+        out = np.asarray(result.value, dtype=np.float32)
+    finally:
+        compiled.close()
+
+    expected = _ref_patch_sums(image, kernel_size, kernel_size, stride).astype(
+        np.float32
+    )
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_map_fold_over_im2col_value_and_grad_compiles():
+    """The value-and-grad path for a scalar loss built from a map+fold over
+    im2col must generate and compile (this was the Phase 2 detector blocker)."""
+    from remora.ad_source import generate_value_and_grad_function_source
+
+    # loss = sum over patches of (patch_sum + bias).  Two params, Float result.
+    # The map lambda contains a fold over the cell plus a free scalar; AD
+    # restructures the cell-map away so the value-and-grad lowers cleanly.
+    source = """\
+(define/pi ()
+  (loss [image (Array Float 8 8) bias Float] Float)
+  (fold + 0.0 (map (lambda (p) (+ (fold + 0.0 p) bias)) (im2col image [3 3] 1))))
+"""
+    param_types = (
+        ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+        FLOAT,
+    )
+    grad_artifact = generate_value_and_grad_function_source(
+        source,
+        "loss",
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    compiled = compile_function_source(
+        grad_artifact.source,
+        grad_artifact.function_name,
+        param_types,
+        verify=True,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    assert len(compiled.mlir_text.strip()) > 0
+    assert compiled.mlir_module is not None
+
+    # Execute and sanity-check the bias gradient (analytically = patch count).
+    executable = CPUFunctionExecutor.compile_source(
+        grad_artifact.source,
+        grad_artifact.function_name,
+        param_types,
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        rng = np.random.default_rng(1)
+        image = rng.standard_normal((8, 8)).astype(np.float32)
+        bias = np.float32(0.7)
+        result = CPUFunctionExecutor(executable).execute(image, bias)
+    finally:
+        executable.close()
+
+    def _flatten(value):
+        if isinstance(value, (list, tuple)):
+            flat = []
+            for part in value:
+                flat.extend(_flatten(part))
+            return flat
+        return [value]
+
+    outputs = _flatten(result.value)
+    grads = [np.asarray(o) for o in outputs if np.asarray(o).ndim > 0]
+    scalars = [float(np.asarray(o)) for o in outputs if np.asarray(o).ndim == 0]
+    assert len(grads) == 1 and grads[0].shape == (8, 8)
+    assert scalars, "expected the bias gradient among the outputs"
+    # 36 patches, d(loss)/d(bias) = 36.
+    assert scalars[-1] == pytest.approx(36.0, abs=1e-4)

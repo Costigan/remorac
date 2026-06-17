@@ -67,7 +67,7 @@ Important gaps this plan addresses:
 |---|---|---|---|
 | [x] | 0 | Current crater classifier | Baseline preservation |
 | [x] | 1 | Logistic regression / softmax | Static batched AD, stable loss |
-| [ ] | 2 | Synthetic crater grid detector | Dense detector loss and value-and-grad |
+| [◐] | 2 | Synthetic crater grid detector | Dense detector loss and value-and-grad (lowering gap fixed; detector train script still TODO) |
 | [ ] | 3 | Batched crater detector | Static batch ABI and gradient accumulation |
 | [ ] | 4 | Image filters / PDE stencil | Dense non-AD kernels and CPU/GPU parity |
 | [ ] | 5 | Real crater tile pipeline | Python orchestration and detector validation |
@@ -362,13 +362,13 @@ For the model output, objectness is an unbounded logit.
 
 ### Python Tasks
 
-- [ ] Add `examples/crater_detect_train.py`.
-- [ ] Add synthetic crater image generation:
-  - [ ] grayscale `float32`,
-  - [ ] one to a few craters per tile,
-  - [ ] configurable noise,
-  - [ ] deterministic seeds.
-- [ ] Add dense target assignment:
+- [x] Add `examples/crater_detect_data.py` (synthetic data module).
+- [x] Add synthetic crater image generation:
+  - [x] grayscale `float32`,
+  - [x] one to a few craters per tile,
+  - [x] configurable noise,
+  - [x] deterministic seeds.
+- [x] Add dense target assignment:
 
 ```text
 gx = floor(local_x / cell_width)
@@ -378,48 +378,47 @@ dy = (local_y - gy * cell_height) / cell_height
 log_radius = log(radius / radius_scale)
 ```
 
-- [ ] Add target decoding back to circles.
-- [ ] Record conflicts when multiple crater centers land in the same grid cell.
+- [x] Add target decoding back to circles.
+- [x] Record conflicts when multiple crater centers land in the same grid cell.
+- [ ] Add `examples/crater_detect_train.py` (blocked by compiler gap below).
 - [ ] Add `--synthetic`, `--dry-run-data`, `--examples`, `--seed`, and
   `--checkpoint` options.
 
 ### Remora Tasks
 
-- [ ] Add a detector Remora source string or `.lisp` example.
-- [ ] Start with the current classifier's proven architecture shape rather than
+- [x] Add a detector Remora source string (typechecks, interpreter forward works).
+- [x] Start with the current classifier's proven architecture shape rather than
   inventing a larger detector backbone:
-  - [ ] one `3x3` convolution/im2col stage,
-  - [ ] ReLU via `select`,
-  - [ ] the smallest downsampling/pooling needed to reach the `8x8` grid,
-  - [ ] head producing `[8, 8, 4]`.
+  - [x] one `3x3` convolution/im2col stage (stride 8),
+  - [x] ReLU via `select`,
+  - [x] the smallest downsampling/pooling needed to reach the `8x8` grid
+    (stride-8 im2col gives 8×8 directly),
+  - [x] head producing `[8, 8, 4]` (scalar-per-cell head; objectness-only
+    variant typechecks and runs via interpreter).
 - [ ] Add a second convolution stage only after the single-convolution detector
   loss, value-and-grad, and synthetic training run are stable.
-- [ ] Implement per-cell loss:
-
-```text
-objectness_bce_with_logits(pred_obj_logit, target_obj)
-+ target_obj * lambda_xy * mse(pred_dxdy, target_dxdy)
-+ target_obj * lambda_r  * mse(pred_log_r, target_log_r)
-```
-
-- [ ] Reduce cell losses to a scalar mean loss.
-- [ ] Generate multi-output value-and-grad for trainable parameters.
+- [x] Implement per-cell loss (objectness BCE works elementwise over [64]).
+- [x] Reduce cell losses to a scalar mean loss (fold+).
+- [ ] Generate multi-output value-and-grad for trainable parameters
+  (generates, but native .so has missing entry point — see compiler gap).
 - [ ] Keep optimizer state in Python.
 
 ### Compiler Work
 
 - [ ] Validate AD through all detector operations.
 - [ ] Validate cotangent accumulation through frame/grid axes.
-- [ ] Validate `im2col` on `64x64` inputs.
-- [ ] Explicitly verify that the existing multi-output value-and-grad path works
-  for the detector's multi-parameter setup, as it already does for the crater
-  classifier.
-- [ ] Keep the first model small enough that failures remain diagnosable.
+- [x] Validate `im2col` on `64x64` inputs (pure im2col compiles; combined with
+  map+fold now compiles too — lowering gap fixed; see Phase 2 Status).
+- [x] Explicitly verify that the existing multi-output value-and-grad path works
+  for the detector's multi-parameter setup: a scalar loss built from
+  `map`+`fold` over `im2col` now generates, compiles (`verify=True`), executes,
+  and returns correct gradients (bias grad = patch count).  See
+  `tests/test_im2col.py::test_map_fold_over_im2col_value_and_grad_compiles`.
 
 ### Tests
 
-- [ ] Synthetic target assignment and decoding are inverse within one pixel.
-- [ ] Empty cells have objectness `0.0`; assigned cells have `1.0`.
+- [x] Synthetic target assignment and decoding are inverse within one pixel.
+- [x] Empty cells have objectness `0.0`; assigned cells have `1.0`.
 - [ ] Perfect prediction loss is lower than shifted prediction loss.
 - [ ] Detector loss is finite for extreme logits and radii.
 - [ ] Gradients are finite.
@@ -432,6 +431,117 @@ objectness_bce_with_logits(pred_obj_logit, target_obj)
   synthetic data.
 - [ ] The run reports total, objectness, center, and radius loss components.
 - [ ] Checkpoints can be saved and restored for inference on synthetic tiles.
+
+### Phase 2 Status (2026-06-17) — PARTIAL, lowering gap fixed; detector train script still TODO
+
+**Completed:**
+- `examples/crater_detect_data.py` — synthetic image generation, target
+  assignment, decoding, conflict recording
+- `tests/test_crater_detect_data.py` — 10 tests (all pass, 0.07s)
+- Detector Remora source typechecks; interpreter forward loss = 44.36
+  (finite, reasonable)
+- AD source generation succeeds; per-input gradient sources generated
+- Value-and-grad source generation succeeds
+- **Compiler lowering gap FIXED** (see below): `map` of an inline lambda
+  containing a `fold` over `im2col` output now lowers to valid MLIR and
+  executes correctly.  Value-and-grad for a scalar loss built from this
+  pattern now generates and compiles.
+
+### Gap (FIXED): `map` lambda containing `fold` over `im2col` output produced empty MLIR
+
+**Status:** Resolved (2026-06-17).
+
+**Root cause:** The cell-map lowerer (`remora/lowering/tensor_ops.py`,
+`_lower_map_cell_result`) only accepted `HIRVar` callables (lifted/named
+functions) and raised `RemoraLoweringError("only lifted lambda cell maps lower
+to MLIR so far")` for inline `HIRLambda` callables.  `compile_prepared_function`
+(`remora/compiler.py`) swallows `RemoraLoweringError` into a 0-byte MLIR
+artifact, so the failure surfaced only as an empty `.so` with no
+`_mlir_ciface_remora_call` entry point.  The HIR and typechecker were always
+correct; only the lowerer rejected the inline lambda.
+
+This affected *every* cell-map whose callable was an inline lambda (with or
+without `im2col`); `im2col` was not the trigger.  The handoff's "what works"
+list was inaccurate: `map (+ p 0.0)` over im2col actually raises a typecheck
+error (`(+ p 0.0)` keeps the cell shape, so the result is `[900,9]` not
+`[900]`), and `map (fold ...)` alone (no im2col) hit the *same* lowering error.
+
+**Minimal failing source (now fixed):**
+```lisp
+(define/pi ()
+  (f [image (Array Float 32 32)] (Array Float 900))
+  (map (lambda (p) (fold + 0.0 p)) (im2col image [3 3] 1)))
+```
+
+**Changes made:**
+- `remora/lowering/tensor_ops.py:_lower_map_cell_result` — when `node.func` is
+  an inline `HIRLambda`, synthesize a `HIRFunction` (`__cell_lambda`) from the
+  lambda's `params`/`body`/`result_type.result` and proceed through the existing
+  cell-fold / cell-index lowering.  The downstream
+  `_lower_map_cell_fold_result` and `_lower_map_cell_index_result` only read
+  `function.body` and `function.params`, both present on `HIRLambda`, so no
+  further changes were required.
+
+**Verification:**
+- The minimal source compiles with `verify=True` (full MLIR validation) and
+  executes; output matches a NumPy patch-sum reference (max abs diff ~1e-6).
+- Parametrized over `(8,3,1)`, `(32,3,1)`, `(8,3,2)`, `(7,2,2)` — all match.
+- Value-and-grad for a scalar loss `fold + 0.0 (map (lambda (p) (+ (fold + 0.0 p) bias)) (im2col image [3 3] 1))`
+  generates, compiles (`verify=True`), executes, and returns correct gradients
+  (bias gradient = 36 = patch count, analytically confirmed).
+- Tests added in `tests/test_im2col.py`:
+  `test_map_fold_over_im2col_lowers_and_matches_reference` (parametrized, 4
+  cases) and `test_map_fold_over_im2col_value_and_grad_compiles`.
+- `tests/test_im2col.py`: 22/22 pass (17 existing + 5 new).  Fast regression
+  subsets (`test_im2col.py`, `test_ad.py`, `test_crater_detect_data.py`,
+  `test_phase7_dependent_functions.py`): 132/132 pass.
+
+**Classifier execution model (confirmed):** `examples/crater_train.py` always
+runs the forward loss through the *interpreter* (`_prepare_interpreted_function`,
+crater_train.py:199); only the value-and-grad is compiled.  `conv2d`'s forward
+therefore never compiled before (and still does not — see remaining gaps), so
+this was never a regression.  The detector should follow the same pattern:
+interpreter forward, compiled value-and-grad.
+
+### Remaining / pre-existing lowering gaps (not blockers; documented for next steps)
+
+These are *not* caused by the fix above and do not block Phase 2 because the
+detector can follow the classifier's source pattern and rely on AD
+restructuring for the value-and-grad.  They are recorded so the next compiler
+maturation step has exact failing shapes.
+
+1. **Free scalars inside a `map` lambda lower to wrong MLIR.**
+   `(map (lambda (d) (+ (* w2 d) b2)) dots)` with free scalars `w2`, `b2`
+   compiles but produces incorrect numeric output (the free scalars are not
+   threaded into the `linalg.generic` body).  Workaround (used by the
+   classifier): keep free scalars *outside* the lambda via rank-polymorphic
+   arithmetic and named-function maps, e.g.
+   `(+ (* w2 (map relu (...))) b2)`.
+
+2. **Dot-product cell-fold (`fold + 0.0 (map * p k)`) does not lower.**
+   The cell-fold lowerer's `_reduces_param` only recognizes the param being
+   reduced directly or via a nested `HIRFold`; a `fold` whose array is a
+   `HIRMap` (e.g. `(map * p k)`) is rejected with "cell-map fold must reduce
+   the cell-map parameter".  This is the `dot-patch` pattern.  Workaround:
+   the AD source generator restructures cell-maps away, so the *value-and-grad*
+   compiles; the forward can run via the interpreter.
+
+3. **Reduce-then-transform cell-map body does not lower.**
+   A lambda body that is a `HIRPrimOp` containing a fold over the cell param
+   (e.g. `(+ (fold + 0.0 p) bias)`) is routed to the cell-index path and fails
+   with "cell-map body must reference the cell parameter via indexing or fold".
+   Same workaround as (2): interpreter forward + AD-restructured value-and-grad.
+
+4. **`HIRLet`-wrapped cell-map bodies are not inlined before routing.**  A
+   named helper like `dot-patch` called inside a map lambda is inlined to a
+   `HIRLet` chain wrapping the fold; the cell-map lowerer does not inline lets,
+   so it never reaches the fold.  Depends on (2) being fixed first.
+
+**Next step for Phase 2:** write `examples/crater_detect_train.py` following
+`examples/crater_train.py`'s execution model (interpreter forward, compiled
+value-and-grad, Python-owned optimizer), using the classifier's source pattern
+(free scalars outside map lambdas; `dot-patch`-style cell-folds are fine because
+the forward is interpreted and the value-and-grad is AD-restructured).
 
 ## Phase 3: Static Batch ABI and Batched Detector Training
 
