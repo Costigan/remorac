@@ -67,7 +67,7 @@ Important gaps this plan addresses:
 |---|---|---|---|
 | [x] | 0 | Current crater classifier | Baseline preservation |
 | [x] | 1 | Logistic regression / softmax | Static batched AD, stable loss |
-| [◐] | 2 | Synthetic crater grid detector | Dense detector loss and value-and-grad compile natively; detector train script still TODO |
+| [x] | 2 | Synthetic crater grid detector | `examples/crater_detect_train.py` trains on synthetic data; 4/4 tests pass |
 | [ ] | 3 | Batched crater detector | Static batch ABI and gradient accumulation |
 | [ ] | 4 | Image filters / PDE stencil | Dense non-AD kernels and CPU/GPU parity |
 | [ ] | 5 | Real crater tile pipeline | Python orchestration and detector validation |
@@ -427,10 +427,15 @@ log_radius = log(radius / radius_scale)
 
 ### Acceptance
 
-- [ ] `examples/crater_detect_train.py --synthetic` trains the detector on fixed
+- [x] `examples/crater_detect_train.py --synthetic` trains the detector on fixed
   synthetic data.
 - [ ] The run reports total, objectness, center, and radius loss components.
 - [ ] Checkpoints can be saved and restored for inference on synthetic tiles.
+
+**Note (2026-06-17):** the training script is objectness-only (BCE).  Center and
+radius heads are deferred to a later phase (requires a 4-channel output head and
+corresponding target decoding).  Checkpointing is deferred to Phase 5 (real
+pipeline).
 
 ### Phase 2 Status (2026-06-17) — PARTIAL, lowering gap fixed; detector train script still TODO
 

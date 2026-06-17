@@ -646,7 +646,7 @@ def _lower_iota_scalar_map_result(
     input_code, input_name, input_type, input_element_type = (
         _lower_tensor_input(
             node.array,
-            "input",
+            _join_prefix(prefix, "input"),
             functions,
             tensor_env,
             scalar_env,
@@ -912,7 +912,7 @@ def _lower_map_cell_fold_result(
     input_code, input_name, input_type, input_element_type = (
         _lower_tensor_input(
             node.array,
-            "input",
+            _join_prefix(prefix, "input"),
             functions,
             tensor_env,
             scalar_env,
@@ -1048,7 +1048,7 @@ def _lower_cell_fold_producer_result(
                 "cell-fold producer element type must match result element type"
             )
         code, name, mtype, etype = _lower_tensor_input(
-            operand, f"free{fi}", functions, tensor_env, scalar_env
+            operand, _join_prefix(prefix, f"free{fi}"), functions, tensor_env, scalar_env
         )
         free_codes.append(code)
         free_inputs.append((name, mtype, etype))
@@ -1210,7 +1210,7 @@ def _lower_map_cell_index_result(
     input_code, input_name, input_type, input_element_type = (
         _lower_tensor_input(
             node.array,
-            "input",
+            _join_prefix(prefix, "input"),
             functions,
             tensor_env,
             scalar_env,
