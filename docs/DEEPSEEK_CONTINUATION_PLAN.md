@@ -558,16 +558,23 @@ AD-generated value-and-grad source).
    from `_lower_tensor_input`/`_lower_fold_input` through the cell-map
    lowerers and incorporated into the SSA names.
 
-8. **Variable operator sections in maps** — OPEN (blocks the compiled
-   value-and-grad).  The AD source generator emits `(map (* w2) arr)` and
-   `(map (lambda (v) (* v w2)) arr)`-style terms where `(* w2)` is a left
-   section with a *variable* operand.  `_lower_callable_operand`
-   (`remora/lowering/scalar.py:104`) only accepts `HIRLit` section operands
-   and raises "only literal operator section operands lower to MLIR so far".
-   Fix: thread `scalar_env` into `_lower_callable_operand` / the scalar-map
-   callable lowering so a `HIRVar` section operand resolves to its scalar
-   value (the same mechanism the binary-map splat already uses for free
-   scalars).  Minimal failing source (from the AD output):
+8. **Variable operator sections in maps** — PARTIALLY FIXED (compiles;
+   remaining lowering-correctness bug in the full AD source).
+   `_lower_callable_operand` (`remora/lowering/scalar.py:97`) now resolves a
+   `HIRVar` section operand via `scalar_env` (threaded through
+   `_lower_primitive_callable_result`/`_lower_map_callable_result`), so
+   `(map (* w) arr)`, `(map (+ b) arr)`, `(map (- w) arr)` compile and match
+   NumPy (`test_variable_operator_section_in_map_compiles`).  This unblocks
+   *compilation* of the AD-generated detector value-and-grad.  **However**,
+   the compiled value-and-grad for the full detector loss returns *incorrect*
+   gradients (e.g. g_b2≈14.8 vs the correct 188.1), while the *interpreter*
+   on the same generated source returns the correct gradients (matching
+   finite differences).  So the AD source is correct; the remaining bug is in
+   *lowering* the complex AD term, which mixes variable sections with
+   `(if (map ...) ...)`, `(with-shape ...)`, `(reshape ...)`, and
+   `(transpose ...)` — operations not exercised by the (correct) compiled
+   forward.  Isolating which of those lowered incorrectly is the next step.
+   Minimal forward section source (now correct):
    `(define/pi () (f [arr (Array Float 4) w Float] (Array Float 4)) (map (* w) arr))`.
 
 **Runtime fix (2026-06-17):** `CPUFunctionExecutor.execute_into` now retains
@@ -578,12 +585,17 @@ array whose data pointer the memref descriptor captured as a raw `int`; with
 so every scalar received the *last* one's value.  Covered by
 `test_multiple_scalar_parameters_do_not_alias`.
 
-**Next step for Phase 2:** either (a) fix gap 8 (thread `scalar_env` into
-`_lower_callable_operand`) so the AD-generated value-and-grad compiles, then
-write `examples/crater_detect_train.py` with compiled forward + compiled
-value-and-grad + Python-owned optimizer; or (b) write the training script
-using the compiled forward loss plus interpreter value-and-grad as a stopgap.
-The detector forward and the inlined detector loss already compile natively.
+**Next step for Phase 2:** isolate the lowering-correctness bug in the
+compiled detector value-and-grad (gap 8): the AD source is correct
+(interpreter matches finite differences) but the compiled MLIR is wrong, so
+one of `if`/`with-shape`/`reshape`/`transpose` (mixed with variable sections
+in the AD term) lowers incorrectly.  Once that is fixed, write
+`examples/crater_detect_train.py` with compiled forward + compiled
+value-and-grad + Python-owned optimizer.  As a stopgap, the training script
+can already use the compiled forward loss (correct) with the *interpreter*
+value-and-grad (correct, slow) — the interpreter-forward objection does not
+apply to interpreter gradients.  The detector forward and the inlined
+detector loss already compile natively and match NumPy.
 
 ## Phase 3: Static Batch ABI and Batched Detector Training
 

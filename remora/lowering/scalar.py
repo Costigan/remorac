@@ -98,12 +98,24 @@ def _lower_callable_operand(
     expr: object,
     name: str,
     result_type: str,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> _Operand:
     if expr is None:
         return _Operand("", [], result_type)
+    if isinstance(expr, HIRVar):
+        operand = (scalar_env or {}).get(expr.name)
+        if operand is None or not operand.value:
+            raise RemoraLoweringError(
+                f"unbound scalar section operand {expr.name}"
+            )
+        cast_lines = _cast_if_needed(
+            operand.value, operand.type, result_type, name
+        )
+        value = name if cast_lines else operand.value
+        return _Operand(value, cast_lines, result_type)
     if not isinstance(expr, HIRLit):
         raise RemoraLoweringError(
-            "only literal operator section operands lower to MLIR so far"
+            "only literal or scalar-variable operator section operands lower to MLIR so far"
         )
 
     if result_type == "f32":

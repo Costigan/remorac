@@ -1110,3 +1110,49 @@ def test_inlined_detector_loss_forward_compiles_and_matches():
     logits = (w2 * np.maximum(dots + b1, 0.0) + b2).astype(np.float32)
     expected = float((logits * logits).sum())
     assert loss == pytest.approx(expected, rel=1e-5, abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("section_src", "ref_fn"),
+    [
+        ("(map (* w) arr)", lambda arr, w: w * arr),
+        ("(map (+ b) arr)", lambda arr, b, w=None: arr + b),
+        ("(map (- w) arr)", lambda arr, w: arr - w),  # right section: x - w
+    ],
+)
+def test_variable_operator_section_in_map_compiles(section_src, ref_fn):
+    """Regression for gap #8: operator sections with a *variable* operand
+    (e.g. ``(map (* w) arr)``) must compile and match the reference.  The
+    AD-generated value-and-grad emits these; previously only literal sections
+    like ``(* 2.0)`` lowered."""
+    uses_w = "w" in section_src
+    if uses_w:
+        source = f"""\
+(define/pi ()
+  (f [arr (Array Float 6) w Float] (Array Float 6))
+  {section_src})
+"""
+        param_types = (ArrayType(FLOAT, (StaticDim(6),)), FLOAT)
+    else:
+        source = f"""\
+(define/pi ()
+  (f [arr (Array Float 6) b Float] (Array Float 6))
+  {section_src})
+"""
+        param_types = (ArrayType(FLOAT, (StaticDim(6),)), FLOAT)
+
+    compiled = CPUFunctionExecutor.compile_source(
+        source, "f", param_types, include_prelude=False, syntax="lisp"
+    )
+    try:
+        rng = np.random.default_rng(0)
+        arr = rng.standard_normal((6,)).astype(np.float32)
+        scalar = np.float32(3.0)
+        out = np.asarray(
+            CPUFunctionExecutor(compiled).execute(arr, scalar).value,
+            dtype=np.float32,
+        )
+    finally:
+        compiled.close()
+    expected = (ref_fn(arr, scalar) if uses_w else ref_fn(arr, scalar, None)).astype(np.float32)
+    np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-6)

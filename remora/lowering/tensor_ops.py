@@ -1773,6 +1773,7 @@ def _lower_map_callable_result(
             input_name=input_name,
             input_type=input_type,
             result_type=result_type,
+            scalar_env=scalar_env,
         )
     if isinstance(callable_, HIRVar):
         function = functions.get(callable_.name)
@@ -1994,12 +1995,14 @@ def _lower_primitive_callable_body(
     input_name: str,
     input_type: str,
     result_type: str,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> str:
     lines, result_value = _lower_primitive_callable_result(
         callable_,
         input_name=input_name,
         input_type=input_type,
         result_type=result_type,
+        scalar_env=scalar_env,
     )
     return "\n".join(
         [*lines, f"      linalg.yield {result_value} : {result_type}"]
@@ -2011,6 +2014,7 @@ def _lower_primitive_callable_result(
     input_name: str,
     input_type: str,
     result_type: str,
+    scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[list[str], str]:
     if callable_.op in {"exp", "log"}:
         input_lines = _cast_if_needed(
@@ -2027,8 +2031,8 @@ def _lower_primitive_callable_result(
     if callable_.op in {"==", "!=", "<", "<="}:
         op_type = input_type
 
-    left = _lower_callable_operand(callable_.left_arg, "%left", op_type)
-    right = _lower_callable_operand(callable_.right_arg, "%right", op_type)
+    left = _lower_callable_operand(callable_.left_arg, "%left", op_type, scalar_env)
+    right = _lower_callable_operand(callable_.right_arg, "%right", op_type, scalar_env)
     if callable_.left_arg is None:
         left.value = input_name
         left.lines = _cast_if_needed(
