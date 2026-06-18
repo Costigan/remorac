@@ -150,17 +150,17 @@ across multiple inputs.
 
 ### Phase C — Remaining gaps and hardening
 
-- [ ] **C.1 — i32 arithmetic support in GpuBinaryOp**: Currently the
+- [x] **C.1 — i32 arithmetic support in GpuBinaryOp**: Currently the
       emitter defaults to `f32` LLVM ops.  Add type-aware emission
       so `i32` operands use `llvm.add`/`llvm.sub`/`llvm.mul`/`llvm.sdiv`.
 
-- [ ] **C.2 — i32/int comparison support**: `GpuCompareOp` currently
+- [x] **C.2 — i32/int comparison support**: `GpuCompareOp` currently
       uses `llvm.fcmp`.  Add `llvm.icmp` path for integer operands.
 
-- [ ] **C.3 — Mixed-type casts**: Support implicit casts when an
+- [x] **C.3 — Mixed-type casts**: Support implicit casts when an
       expression mixes `i32` and `f32` operands (insert `GpuCast`).
 
-- [ ] **C.4 — Array-typed `HIRIf`**: When both branches produce
+- [x] **C.4 — Array-typed `HIRIf`**: When both branches produce
       arrays of the same shape, emit element-wise `GpuSelect` for
       each component.
 
@@ -168,7 +168,7 @@ across multiple inputs.
       array results are supported.  Extend to rank > 1 by recursively
       decomposing into nested component iterations.
 
-- [ ] **C.6 — Non-contiguous stride support**: Test and fix descriptor
+- [x] **C.6 — Non-contiguous stride support**: Test and fix descriptor
       stride handling for non-contiguous layouts (e.g. subarray views
       with stride != 1).  The existing `_linear_index_lines` already
       multiplies by per-dimension strides, so this should mostly work.
@@ -176,26 +176,26 @@ across multiple inputs.
 - [ ] **C.7 — Zero-size shape handling**: Bounds-check before any
       load/store when a dimension is zero.  Currently untested.
 
-- [ ] **C tests** — Targeted tests for each hardening item.
+- [x] **C tests** — Targeted tests for each hardening item.
 
 ### Phase D — Integration and regression
 
-- [ ] **D.1 — Remove redundant specialised kernels**: The
+- [x] **D.1 — Remove redundant specialised kernels**: The
       `build_descriptor_abi_f32_append_gpu_module` and
       `build_descriptor_abi_f32_scan_gpu_module` specialised kernels
       overlap with general-path capabilities after Phase B.  Remove them
       once the general path covers Append and the scan is deferred.
 
-- [ ] **D.2 — Update dispatch chain priority**: After Phase A and B,
+- [x] **D.2 — Update dispatch chain priority**: After Phase A and B,
       the general path handles most programs.  Move the general-path
       dispatch earlier in the chain (or make it the default fallback)
       and keep only truly specialised kernels (im2col, matmul) as
       early-dispatch overrides.
 
-- [ ] **D.3 — Full regression suite**: Run all CPU tests, all GPU
+- [x] **D.3 — Full regression suite**: Run all CPU tests, all GPU
       tests, and all new parity tests.  Zero regressions.
 
-- [ ] **D.4 — Update PROJECT_OVERVIEW.md** to reflect achieved parity.
+- [x] **D.4 — Update PROJECT_OVERVIEW.md** to reflect achieved parity.
 
 ## Out of Scope (this plan)
 

@@ -2202,8 +2202,9 @@ def _gpu_emit_expr(
             left = emit(expr.left, env)
             right = emit(expr.right, env)
             ssa = _fresh_ssa()
-            llvm = llvm_op(expr.op, "f32")
-            lines.append(f"      {ssa} = {llvm} {left}, {right}  : f32")
+            et = getattr(expr, 'element_type', 'f32')
+            llvm = llvm_op(expr.op, et)
+            lines.append(f"      {ssa} = {llvm} {left}, {right}  : {et}")
             return ssa
 
         # GpuCompareOp
@@ -2211,11 +2212,19 @@ def _gpu_emit_expr(
             left = emit(expr.left, env)
             right = emit(expr.right, env)
             ssa = _fresh_ssa()
-            pred = {"<": "olt", "<=": "ole", ">": "ogt",
-                    ">=": "oge", "==": "oeq", "!=": "one"}.get(expr.op, "olt")
-            lines.append(
-                f'      {ssa} = llvm.fcmp "{pred}" {left}, {right} : f32'
-            )
+            et = getattr(expr, 'element_type', 'f32')
+            if et == "i32":
+                from remora.operators import comparison_predicate
+                pred = comparison_predicate(expr.op, "i32")
+                lines.append(
+                    f'      {ssa} = llvm.icmp "{pred}" {left}, {right} : {et}'
+                )
+            else:
+                pred = {"<": "olt", "<=": "ole", ">": "ogt",
+                        ">=": "oge", "==": "oeq", "!=": "one"}.get(expr.op, "olt")
+                lines.append(
+                    f'      {ssa} = llvm.fcmp "{pred}" {left}, {right} : {et}'
+                )
             return ssa
 
         # GpuSelect (branchless)
@@ -2224,8 +2233,13 @@ def _gpu_emit_expr(
             true_v = emit(expr.true_val, env)
             false_v = emit(expr.false_val, env)
             ssa = _fresh_ssa()
+            val_type = "f32"
+            if isinstance(expr.true_val, GpuConstant):
+                val_type = expr.true_val.element_type
+            elif isinstance(expr.true_val, GpuBinaryOp):
+                val_type = getattr(expr.true_val, 'element_type', 'f32')
             lines.append(
-                f"      {ssa} = llvm.select {cond}, {true_v}, {false_v} : i1, f32"
+                f"      {ssa} = llvm.select {cond}, {true_v}, {false_v} : i1, {val_type}"
             )
             return ssa
 

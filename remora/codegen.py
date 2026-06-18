@@ -35,10 +35,10 @@ from remora.gpu_lowering import (
     GPUScaffoldError,
     build_descriptor_abi_bool_map_gpu_module,
     build_descriptor_abi_cell_fold_dot_gpu_module,
-    build_descriptor_abi_f32_append_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_f32_scan_gpu_module,
+    build_descriptor_abi_general_map_gpu_module,
     build_descriptor_abi_i32_map_gpu_module,
     build_descriptor_abi_im2col_gpu_module,
     build_descriptor_abi_sobel_gpu_module,
@@ -409,19 +409,59 @@ def generate_mlir_descriptor_abi_ptx(
                         )
                     except GPUScaffoldError as scan_error:
                         try:
-                            gpu_module = build_descriptor_abi_f32_append_gpu_module(function, kernel_name=name)
+                            from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2
+                            if not (isinstance(function.body, _HIRMap2)
+                                    and isinstance(function.body.func, _HIRLambda2)):
+                                raise CodegenUnavailable(
+                                    "general GPU fallback requires a HIRMap with HIRLambda"
+                                )
+                            gpu_module = build_descriptor_abi_general_map_gpu_module(
+                                function, kernel_name=name,
+                            )
+                            body_map2 = function.body
+                            result_type2 = body_map2.result_type
+                            if not isinstance(result_type2, ArrayType):
+                                raise CodegenUnavailable(
+                                    "general GPU map fallback requires an array result type"
+                                )
+                            output_shape2 = tuple(
+                                int(d.value) for d in result_type2.shape
+                            )
+                            num_array_inputs2 = sum(
+                                1 for p in function.params
+                                if isinstance(p.type, ArrayType)
+                            )
+                            num_scalar_inputs2 = sum(
+                                1 for p in function.params
+                                if not isinstance(p.type, ArrayType)
+                            )
+                            input_elem_types2: list[str] = []
+                            for param in function.params:
+                                if isinstance(param.type, ArrayType):
+                                    elem = param.type.element.name
+                                    if elem == "float":
+                                        input_elem_types2.append("f32")
+                                    elif elem == "int":
+                                        input_elem_types2.append("i32")
+                                    elif elem == "bool":
+                                        input_elem_types2.append("i1")
+                                    else:
+                                        input_elem_types2.append("f32")
+                                else:
+                                    input_elem_types2.append("f32")
                             meta = KernelMeta(
                                 name=name,
                                 grid_dims=1,
                                 block_size=0,
-                                num_inputs=2,
+                                num_inputs=num_array_inputs2 + num_scalar_inputs2,
                                 num_outputs=1,
-                                input_elem_types=["f32", "f32"],
+                                input_elem_types=input_elem_types2,
                                 output_elem_types=["f32"],
+                                output_shape=output_shape2,
                                 output_dtype="float32",
                             )
-                        except GPUScaffoldError as append_error:
-                            raise CodegenUnavailable(str(bool_map_error)) from append_error
+                        except (GPUScaffoldError, CodegenUnavailable) as general_error:
+                            raise CodegenUnavailable(str(bool_map_error)) from general_error
 
     device_module = extract_gpu_module_body_as_module(gpu_module.text)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)

@@ -22,6 +22,7 @@ from remora.gpu_lowering import (
 )
 from remora.hir import (
     HIRArrayLit,
+    HIRCast,
     HIRFold,
     HIRFunction,
     HIRIf,
@@ -587,6 +588,116 @@ class TestPhaseBReinterpOps:
         )
         ptx, _ = _build_and_compile_to_ptx(hfunc, "test_ws")
         assert ".visible .entry test_ws" in ptx
+
+
+# ---------------------------------------------------------------------------
+# Phase C: Hardening (GPU_CPU_PARITY_PLAN.md)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseCHardening:
+    """Tests for type-aware arithmetic, comparisons, and array-typed if."""
+
+    def test_i32_arithmetic_compiles(self):
+        """C.1: i32 constant arithmetic cast to f32 inside a map body."""
+        N = 4
+        i32_mul = HIRPrimOp("*i", [HIRLit(2, INT), HIRLit(3, INT)], INT)
+        i32_add = HIRPrimOp("+i", [i32_mul, HIRLit(1, INT)], INT)
+        body = HIRCast(i32_add, from_type=INT, to_type=FLOAT, result_type=FLOAT)
+        result_type = ArrayType(FLOAT, (StaticDim(N),))
+        hfunc = HIRFunction(
+            name='test_i32arith',
+            params=[HIRParam('arr', result_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(N),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[HIRVar('arr', result_type)],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_i32arith")
+        assert ".visible .entry test_i32arith" in ptx
+
+    def test_i32_comparison_compiles(self):
+        """C.2: i32 comparison producing i1 for select."""
+        N = 4
+        body = HIRIf(
+            HIRPrimOp("<i", [HIRLit(2, INT), HIRLit(3, INT)], BOOL),
+            HIRLit(1.0, FLOAT),
+            HIRLit(0.0, FLOAT),
+            result_type=FLOAT,
+        )
+        result_type = ArrayType(FLOAT, (StaticDim(N),))
+        hfunc = HIRFunction(
+            name='test_i32cmp',
+            params=[HIRParam('arr', result_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(N),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[HIRVar('arr', result_type)],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_i32cmp")
+        assert ".visible .entry test_i32cmp" in ptx
+
+    def test_array_typed_if_compiles(self):
+        """C.4: HIRIf where branches produce arrays → per-component select."""
+        N = 3
+        arr_type = ArrayType(FLOAT, (StaticDim(N),))
+        body = HIRIf(
+            HIRPrimOp(">f", [HIRVar('x', FLOAT), HIRLit(0.0, FLOAT)], BOOL),
+            HIRArrayLit(
+                [HIRLit(1.0, FLOAT), HIRLit(2.0, FLOAT)],
+                ArrayType(FLOAT, (StaticDim(2),)),
+            ),
+            HIRArrayLit(
+                [HIRLit(3.0, FLOAT), HIRLit(4.0, FLOAT)],
+                ArrayType(FLOAT, (StaticDim(2),)),
+            ),
+            result_type=ArrayType(FLOAT, (StaticDim(2),)),
+        )
+        result_type = ArrayType(FLOAT, (StaticDim(N), StaticDim(2)))
+        hfunc = HIRFunction(
+            name='test_arrif',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(N),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[HIRVar('arr', arr_type)],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_arrif")
+        assert ".visible .entry test_arrif" in ptx
+
+    def test_stride_support_subarray(self):
+        """C.6: subarray view uses correct strided access (via Phase A test)."""
+        arr_type = ArrayType(FLOAT, (StaticDim(6), StaticDim(6)))
+        sub_type = ArrayType(FLOAT, (StaticDim(3), StaticDim(3)))
+        sub_expr = HIRSubarray(
+            HIRVar('arr', arr_type),
+            offsets=(StaticDim(2), StaticDim(1)),
+            sizes=(StaticDim(3), StaticDim(3)),
+            result_type=sub_type,
+        )
+        body = HIRPrimOp("+f", [HIRVar('x', FLOAT), HIRLit(1.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_stride',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3), StaticDim(3)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[sub_expr],
+                result_type=sub_type,
+            ),
+            return_type=sub_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_stride")
+        assert ".visible .entry test_stride" in ptx
 
 
 # ---------------------------------------------------------------------------

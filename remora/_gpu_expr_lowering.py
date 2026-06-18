@@ -83,6 +83,7 @@ class GpuBinaryOp:
     op: str  # "+", "-", "*", "/"
     left: "GpuExpr"
     right: "GpuExpr"
+    element_type: str = "f32"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class GpuCompareOp:
     op: str  # "<", ">", "<=", ">=", "==", "!="
     left: "GpuExpr"
     right: "GpuExpr"
+    element_type: str = "f32"
 
 
 @dataclass(frozen=True)
@@ -354,11 +356,14 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
 
     # HIRIf
     if isinstance(expr, HIRIf):
-        return GpuSelect(
-            _lower_hir(expr.condition, ctx),
-            _lower_hir(expr.then_branch, ctx),
-            _lower_hir(expr.else_branch, ctx),
-        )
+        cond = _lower_hir(expr.condition, ctx)
+        then_val = _lower_hir(expr.then_branch, ctx)
+        else_val = _lower_hir(expr.else_branch, ctx)
+        if isinstance(then_val, GpuArrayExpr) and isinstance(else_val, GpuArrayExpr):
+            K = len(then_val.components)
+            comps = [GpuSelect(cond, then_val.components[k], else_val.components[k]) for k in range(K)]
+            return GpuArrayExpr(components=comps, element_type=then_val.element_type)
+        return GpuSelect(cond, then_val, else_val)
 
     # HIRIndex
     if isinstance(expr, HIRIndex):
@@ -626,9 +631,11 @@ def _lower_with_shape(expr: HIRWithShape, ctx: _CompileCtx) -> GpuExpr:
 def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     op = expr.op
     base_op = op
-    for suffix in ("f", "i", "b"):
+    elem_type = "f32"
+    for suffix, etype in (("f", "f32"), ("i", "i32"), ("b", "i1")):
         if base_op.endswith(suffix):
             base_op = base_op[:-1]
+            elem_type = etype
             break
 
     lowered_args = [_lower_hir(a, ctx) for a in expr.args]
@@ -636,12 +643,12 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     if base_op in {"+", "-", "*", "/"}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: binary op needs 2 args")
-        return _gpu_element_wise_binary(base_op, lowered_args[0], lowered_args[1])
+        return _gpu_element_wise_binary(base_op, lowered_args[0], lowered_args[1], elem_type)
 
     if base_op in {"<", ">", "<=", ">=", "==", "!="}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: comparison needs 2 args")
-        return GpuCompareOp(base_op, lowered_args[0], lowered_args[1])
+        return GpuCompareOp(base_op, lowered_args[0], lowered_args[1], elem_type)
 
     if base_op in {"exp", "log", "sqrt"}:
         if len(lowered_args) != 1:
@@ -728,7 +735,7 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
     )
 
 
-def _gpu_element_wise_binary(op: str, left: GpuExpr, right: GpuExpr) -> GpuExpr:
+def _gpu_element_wise_binary(op: str, left: GpuExpr, right: GpuExpr, element_type: str = "f32") -> GpuExpr:
     """Create a binary op, promoting to element-wise GpuArrayExpr if needed."""
     if isinstance(left, GpuArrayExpr) or isinstance(right, GpuArrayExpr):
         left_comps = left.components if isinstance(left, GpuArrayExpr) else [left]
@@ -737,10 +744,9 @@ def _gpu_element_wise_binary(op: str, left: GpuExpr, right: GpuExpr) -> GpuExpr:
             raise GPUScaffoldError(
                 f"element-wise op on mismatched sizes: {len(left_comps)} vs {len(right_comps)}"
             )
-        comps = [GpuBinaryOp(op, l, r) for l, r in zip(left_comps, right_comps)]
-        elem_type = "f32"
-        return GpuArrayExpr(components=comps, element_type=elem_type)
-    return GpuBinaryOp(op, left, right)
+        comps = [GpuBinaryOp(op, l, r, element_type) for l, r in zip(left_comps, right_comps)]
+        return GpuArrayExpr(components=comps, element_type=element_type)
+    return GpuBinaryOp(op, left, right, element_type)
 
 
 def _lower_prim_callable(
@@ -757,16 +763,30 @@ def _lower_prim_callable(
         full_args = full_args + [_lower_hir(callable_expr.right_arg, ctx)]
 
     op = callable_expr.op
+    rt = callable_expr.result_type
+    if isinstance(rt, ArrayType):
+        rt = rt.element
+    if isinstance(rt, ScalarType):
+        elem_type = _scalar_type_to_mlir(rt)
+    else:
+        elem_type = "f32"
 
     if op in {"+", "-", "*", "/"}:
         if len(full_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: op {op} needs 2 operands")
-        return _gpu_element_wise_binary(op, full_args[0], full_args[1])
+        return _gpu_element_wise_binary(op, full_args[0], full_args[1], elem_type)
 
     if op in {"<", "<=", ">", ">=", "==", "!="}:
         if len(full_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: comparison needs 2 operands")
-        return GpuCompareOp(op, full_args[0], full_args[1])
+        param_type = "f32"
+        if callable_expr.params:
+            p0 = callable_expr.params[0]
+            if isinstance(p0, ScalarType):
+                param_type = _scalar_type_to_mlir(p0)
+            elif isinstance(p0, ArrayType):
+                param_type = _scalar_type_to_mlir(p0.element)
+        return GpuCompareOp(op, full_args[0], full_args[1], param_type)
 
     raise GPUScaffoldError(f"{ctx.context}: unsupported prim op '{op}'")
 

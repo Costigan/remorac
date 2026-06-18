@@ -80,20 +80,23 @@ Source (ML or Lisp syntax)
 ### Working
 - **CPU**: General lowering for any valid dense program.  Compound bodies
   (maps containing fold/index/nested-map) lowered via `scf.for` loops.
-- **GPU**: General lowering for compound-body maps via recursive
-  expression compiler (`remora/_gpu_expr_lowering.py`).  Handles folds,
-  index expressions, nested maps, conditionals, casts, let bindings,
-  scalar and array-valued reductions, element-wise operations, and math
-  intrinsics (exp/log/sqrt via NVVM).  N-body runs correctly on GPU
-  through the general path.
+- **GPU**: General lowering via recursive expression compiler
+  (`remora/_gpu_expr_lowering.py`).  Handles folds, index expressions,
+  nested maps, conditionals, casts, let bindings, scalar and array-valued
+  reductions, element-wise operations, math intrinsics (exp/log/sqrt via
+  NVVM), descriptor-level view ops (take/drop/subarray/reverse/rotate/
+  transpose), descriptor reinterpretation (reshape/ravel/append/with-shape),
+  type-aware i32 arithmetic and comparisons, and array-typed conditionals.
+  The general path serves as a universal dispatch fallback for any map
+  program.
 - **Interpreter**: Handles most programs (used for test validation).
 - **AD**: Reverse-mode works for scalar-cost functions.  Tape → source
   compilation.
 
 ### Test Counts
 - CPU tests: ≈340 (all passing)
-- GPU tests: ≈97 (2 pre-existing binary map test failures, all others pass)
-- General GPU lowering tests: 16 (all passing, in `tests/test_gpu_general_lowering.py`)
+- GPU tests: ≈97 (all passing)
+- General GPU lowering tests: 31 (all passing, in `tests/test_gpu_general_lowering.py`)
 - N-body tests: 5 (all passing, including GPU compilation + numeric parity)
 
 ## Conventions
