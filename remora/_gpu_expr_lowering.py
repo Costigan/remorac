@@ -12,6 +12,7 @@ from typing import TypeAlias
 
 from remora.gpu_lowering import GPUScaffoldError
 from remora.hir import (
+    HIRAppend,
     HIRApply,
     HIRArrayLit,
     HIRCast,
@@ -27,7 +28,9 @@ from remora.hir import (
     HIRMap,
     HIRPrimCallable,
     HIRPrimOp,
+    HIRRavel,
     HIRReduce,
+    HIRReshape,
     HIRReverse,
     HIRRotate,
     HIRSlice,
@@ -35,6 +38,7 @@ from remora.hir import (
     HIRTake,
     HIRTranspose,
     HIRVar,
+    HIRWithShape,
 )
 from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, StaticDim
 
@@ -198,6 +202,34 @@ class GpuIntrinsic:
     arg: "GpuExpr"
 
 
+@dataclass(frozen=True)
+class GpuFlatLoad:
+    """Load from an input descriptor using a flat (linear) index.
+
+    Used for reshape/ravel where thread coords correspond to the output
+    shape but the load uses the source descriptor's base pointer + offset.
+    ``output_shape`` is the shape used to compute the flat index from coords.
+    """
+
+    index: int
+    coords: list[str]
+    output_shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class GpuAppendLoad:
+    """Load from one of two input descriptors based on the thread index.
+
+    If the first coordinate < ``left_size``, load from ``left_index`` at
+    coordinate; otherwise load from ``right_index`` at ``coord - left_size``.
+    """
+
+    left_index: int
+    right_index: int
+    left_size: int
+    coords: list[str]
+
+
 GpuExpr: TypeAlias = (
     GpuInputLoad
     | GpuConstant
@@ -212,6 +244,8 @@ GpuExpr: TypeAlias = (
     | GpuArrayExpr
     | GpuExtractComponent
     | GpuIntrinsic
+    | GpuFlatLoad
+    | GpuAppendLoad
     | _GpuLetExpr
 )
 
@@ -230,6 +264,8 @@ class _CompileCtx:
     coord_map: dict[str, str] = field(default_factory=dict)
     context: str = "general GPU lowering"
     input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = field(default_factory=dict)
+    input_flat_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    input_broadcast_skip: dict[str, int] = field(default_factory=dict)
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
@@ -256,6 +292,8 @@ def gpu_expr_from_hir(
     coord_map: dict[str, str] | None = None,
     context: str = "general GPU lowering",
     input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] | None = None,
+    input_flat_shapes: dict[str, tuple[int, ...]] | None = None,
+    input_broadcast_skip: dict[str, int] | None = None,
 ) -> GpuExpr:
     """Compile a HIR expression to a GpuExpr."""
     ctx = _CompileCtx(
@@ -265,6 +303,8 @@ def gpu_expr_from_hir(
         coord_map=dict(coord_map or {}),
         context=context,
         input_adjustments=dict(input_adjustments or {}),
+        input_flat_shapes=dict(input_flat_shapes or {}),
+        input_broadcast_skip=dict(input_broadcast_skip or {}),
     )
     return _lower_hir(expr, ctx)
 
@@ -275,11 +315,17 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
         if expr.name in ctx.let_env:
             return GpuLetBinding(expr.name)
         if expr.name in ctx.input_map:
+            slot = ctx.input_map[expr.name]
+            flat_shape = ctx.input_flat_shapes.get(expr.name)
+            if flat_shape is not None:
+                return GpuFlatLoad(slot, list(ctx.coords), flat_shape)
+            bskip = ctx.input_broadcast_skip.get(expr.name, 0)
+            use_coords = list(ctx.coords)[bskip:] if bskip > 0 else list(ctx.coords)
             adj = ctx.input_adjustments.get(expr.name)
             if adj is not None:
                 offsets, transforms = adj
-                return GpuInputLoad(ctx.input_map[expr.name], list(ctx.coords), offsets, transforms)
-            return GpuInputLoad(ctx.input_map[expr.name], list(ctx.coords))
+                return GpuInputLoad(slot, use_coords, offsets, transforms)
+            return GpuInputLoad(slot, use_coords)
         if expr.name in ctx.coord_map:
             return GpuIndexCoordinate(expr.name)
         if expr.name in ctx.scalar_env:
@@ -372,6 +418,22 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
         components = [_lower_hir(e, ctx) for e in expr.elements]
         elem_type = _scalar_type_to_mlir(expr.result_type.element)
         return GpuArrayExpr(components=components, element_type=elem_type)
+
+    # HIRReshape — flat-index load from contiguous source
+    if isinstance(expr, HIRReshape):
+        return _lower_reshape(expr, ctx)
+
+    # HIRRavel — special case of reshape to rank-1
+    if isinstance(expr, HIRRavel):
+        return _lower_ravel(expr, ctx)
+
+    # HIRAppend — conditional load from left or right
+    if isinstance(expr, HIRAppend):
+        return _lower_append(expr, ctx)
+
+    # HIRWithShape — broadcast: drop leading coordinates
+    if isinstance(expr, HIRWithShape):
+        return _lower_with_shape(expr, ctx)
 
     raise GPUScaffoldError(
         f"{ctx.context}: unsupported HIR node {type(expr).__name__}"
@@ -507,6 +569,60 @@ def _lower_transpose(expr: HIRTranspose, ctx: _CompileCtx) -> GpuExpr:
     )
 
 
+def _lower_reshape(expr: HIRReshape, ctx: _CompileCtx) -> GpuExpr:
+    inner = _lower_hir(expr.array, ctx)
+    if isinstance(inner, GpuInputLoad):
+        output_shape = tuple(int(d.value) for d in expr.result_type.shape)
+        return GpuFlatLoad(inner.index, list(ctx.coords), output_shape)
+    raise GPUScaffoldError(
+        f"{ctx.context}: reshape on non-input-load expression ({type(inner).__name__})"
+    )
+
+
+def _lower_ravel(expr: HIRRavel, ctx: _CompileCtx) -> GpuExpr:
+    inner = _lower_hir(expr.array, ctx)
+    if isinstance(inner, GpuInputLoad):
+        output_shape = tuple(int(d.value) for d in expr.result_type.shape)
+        return GpuFlatLoad(inner.index, list(ctx.coords), output_shape)
+    raise GPUScaffoldError(
+        f"{ctx.context}: ravel on non-input-load expression ({type(inner).__name__})"
+    )
+
+
+def _lower_append(expr: HIRAppend, ctx: _CompileCtx) -> GpuExpr:
+    left = _lower_hir(expr.left, ctx)
+    right = _lower_hir(expr.right, ctx)
+    if isinstance(left, GpuInputLoad) and isinstance(right, GpuInputLoad):
+        left_type = getattr(expr.left, 'type', None)
+        if left_type is None:
+            left_type = getattr(expr.left, 'result_type', None)
+        if not isinstance(left_type, ArrayType):
+            raise GPUScaffoldError(
+                f"{ctx.context}: append left operand has no array type"
+            )
+        left_size = int(left_type.shape[0].value)
+        return GpuAppendLoad(left.index, right.index, left_size, list(ctx.coords))
+    raise GPUScaffoldError(
+        f"{ctx.context}: append on non-input-load expressions"
+    )
+
+
+def _lower_with_shape(expr: HIRWithShape, ctx: _CompileCtx) -> GpuExpr:
+    inner = _lower_hir(expr.source, ctx)
+    if isinstance(inner, GpuInputLoad):
+        source_type = getattr(expr.source, 'type', None)
+        if source_type is None:
+            source_type = getattr(expr.source, 'result_type', None)
+        source_rank = source_type.rank if isinstance(source_type, ArrayType) else 0
+        target_rank = expr.result_type.rank
+        dims_to_skip = target_rank - source_rank
+        trailing_coords = list(ctx.coords)[dims_to_skip:]
+        return GpuInputLoad(inner.index, trailing_coords)
+    raise GPUScaffoldError(
+        f"{ctx.context}: with-shape on non-input-load expression ({type(inner).__name__})"
+    )
+
+
 def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     op = expr.op
     base_op = op
@@ -607,6 +723,8 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
         coord_map=dict(ctx.coord_map),
         context=ctx.context,
         input_adjustments=dict(ctx.input_adjustments),
+        input_flat_shapes=dict(ctx.input_flat_shapes),
+        input_broadcast_skip=dict(ctx.input_broadcast_skip),
     )
 
 

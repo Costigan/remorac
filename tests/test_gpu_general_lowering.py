@@ -35,12 +35,16 @@ from remora.hir import (
     HIRPrimOp,
     HIRReduce,
     HIRVar,
+    HIRAppend,
     HIRDrop,
+    HIRRavel,
+    HIRReshape,
     HIRReverse,
     HIRRotate,
     HIRSubarray,
     HIRTake,
     HIRTranspose,
+    HIRWithShape,
 )
 from remora.pipeline import detect_toolchain, translate_llvmir_to_nvptx_text, translate_mlir_to_llvmir
 from remora.runtime import CUDARuntime, evaluate_source, RuntimeUnavailable
@@ -483,6 +487,106 @@ class TestPhaseAViewOps:
         )
         ptx, _ = _build_and_compile_to_ptx(hfunc, "test_chain_td")
         assert ".visible .entry test_chain_td" in ptx
+
+
+# ---------------------------------------------------------------------------
+# Phase B: Descriptor reinterpretation ops (GPU_CPU_PARITY_PLAN.md)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseBReinterpOps:
+    """Direct HIR → PTX tests for descriptor reinterpretation ops."""
+
+    def test_reshape_compiles(self):
+        """B.1: map (* 2.0) (reshape [2,3] arr) where arr has shape [6]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        reshaped_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+        reshape_expr = HIRReshape(HIRVar('arr', arr_type), reshaped_type)
+        result_type = reshaped_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_reshape',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(2), StaticDim(3)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[reshape_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_reshape")
+        assert ".visible .entry test_reshape" in ptx
+
+    def test_ravel_compiles(self):
+        """B.2: map (* 2.0) (ravel arr) where arr has shape [2,3]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+        raveled_type = ArrayType(FLOAT, (StaticDim(6),))
+        ravel_expr = HIRRavel(HIRVar('arr', arr_type), raveled_type)
+        result_type = raveled_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_ravel',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(6),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[ravel_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_ravel")
+        assert ".visible .entry test_ravel" in ptx
+
+    def test_append_compiles(self):
+        """B.3: map (* 2.0) (append left right) where left=[3], right=[2]."""
+        left_type = ArrayType(FLOAT, (StaticDim(3),))
+        right_type = ArrayType(FLOAT, (StaticDim(2),))
+        result_type = ArrayType(FLOAT, (StaticDim(5),))
+        append_expr = HIRAppend(
+            HIRVar('left', left_type),
+            HIRVar('right', right_type),
+            result_type,
+        )
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_append',
+            params=[
+                HIRParam('left', left_type),
+                HIRParam('right', right_type),
+            ],
+            body=HIRMap(
+                frame_shape=(StaticDim(5),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[append_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_append")
+        assert ".visible .entry test_append" in ptx
+
+    def test_withshape_compiles(self):
+        """B.4: map (* 2.0) (with-shape [3,4] src) where src has shape [4]."""
+        src_type = ArrayType(FLOAT, (StaticDim(4),))
+        target_type = ArrayType(FLOAT, (StaticDim(3), StaticDim(4)))
+        ws_expr = HIRWithShape(HIRVar('src', src_type), target_type)
+        result_type = target_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_ws',
+            params=[HIRParam('src', src_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3), StaticDim(4)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[ws_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_ws")
+        assert ".visible .entry test_ws" in ptx
 
 
 # ---------------------------------------------------------------------------

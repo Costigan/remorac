@@ -115,23 +115,23 @@ coordinates rather than emitting a new kernel.
 These nodes change how a buffer's data is interpreted or accessed
 across multiple inputs.
 
-- [ ] **B.1 — `HIRReshape`**: When reshaping an input descriptor,
+- [x] **B.1 — `HIRReshape`**: When reshaping an input descriptor,
       reinterpret it with new sizes and strides while keeping the same
       base pointer and offset.  The thread coordinate decomposition is
       recomputed for the new shape.  Requires that the total element
       count stays the same (statically guaranteed by the type checker).
 
-- [ ] **B.2 — `HIRRavel`**: Special case of reshape to rank-1 with
+- [x] **B.2 — `HIRRavel`**: Special case of reshape to rank-1 with
       stride 1.  `GpuInputLoad` with a single flat coordinate.
 
-- [ ] **B.3 — `HIRAppend`**: Concatenates `left` and `right` along
+- [x] **B.3 — `HIRAppend`**: Concatenates `left` and `right` along
       dimension 0.  On GPU, emit a conditional: if the thread's
       index `i` is less than `left_size[0]`, load from the left
       descriptor at `i`; otherwise load from the right descriptor at
       `i - left_size[0]`.  This is a per-thread `llvm.select` on the
       coordinate and descriptor base pointer.
 
-- [ ] **B.4 — `HIRWithShape`**: Broadcast a smaller source array
+- [x] **B.4 — `HIRWithShape`**: Broadcast a smaller source array
       to a larger target shape.  On GPU, this means the source has
       fewer dimensions than the target.  `GpuInputLoad` with the
       trailing coordinates only (e.g. for `with-shape [M, N, K] src`
@@ -145,7 +145,7 @@ across multiple inputs.
       or handling as a special node in the expression tree that lowers
       to a store-with-atomic.
 
-- [ ] **B tests** — Compilation + numeric parity tests for reshape,
+- [x] **B tests** — Compilation + numeric parity tests for reshape,
       ravel, append, with-shape, and scatter-add.
 
 ### Phase C — Remaining gaps and hardening

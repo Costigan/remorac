@@ -22,7 +22,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
-from remora.hir import HIRDrop, HIRReverse, HIRRotate, HIRSubarray, HIRTake, HIRTranspose
+from remora.hir import HIRAppend, HIRDrop, HIRRavel, HIRReshape, HIRReverse, HIRRotate, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
 
@@ -1742,6 +1742,15 @@ def _unwrap_view_op(expr):
         if isinstance(expr, HIRTranspose):
             expr = expr.array
             continue
+        if isinstance(expr, HIRReshape):
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRRavel):
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRWithShape):
+            expr = expr.source
+            continue
         return None, (), ()
 
 
@@ -1829,6 +1838,30 @@ def build_descriptor_abi_general_map_gpu_module(
     # the thread coordinate rather than an input descriptor slot.
     coord_map: dict[str, str] = {}
     input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = {}
+    input_flat_shapes: dict[str, tuple[int, ...]] = {}
+    input_desc_ranks: dict[int, int] = {}
+    append_inputs: dict[str, tuple[int, int, int]] = {}
+    input_broadcast_skip: dict[str, int] = {}
+
+    def _detect_reshape(ae):
+        """Check if array_expr is a reshape/ravel wrapping an input."""
+        if isinstance(ae, HIRReshape):
+            return ae, tuple(int(d.value) for d in ae.result_type.shape)
+        if isinstance(ae, HIRRavel):
+            return ae, tuple(int(d.value) for d in ae.result_type.shape)
+        return None, None
+
+    def _detect_append(ae):
+        """Check if array_expr is an append of two inputs."""
+        if isinstance(ae, HIRAppend):
+            return ae
+        return None
+
+    def _detect_withshape(ae):
+        """Check if array_expr is a withshape broadcast."""
+        if isinstance(ae, HIRWithShape):
+            return ae
+        return None
 
     # Bind lambda params to input slots or thread coords.
     for idx, array_expr in enumerate(body_map.arrays):
@@ -1840,16 +1873,81 @@ def build_descriptor_abi_general_map_gpu_module(
                 scalar_params[param_name] = num_scalar_inputs
                 num_scalar_inputs += 1
             else:
-                base_name, view_offsets, view_transforms = _unwrap_view_op(array_expr)
-                if base_name is not None and base_name in input_map:
-                    input_map[param_name] = input_map[base_name]
-                    if view_offsets or view_transforms:
-                        input_adjustments[param_name] = (view_offsets, view_transforms)
+                reshape_node, flat_shape = _detect_reshape(array_expr)
+                append_node = _detect_append(array_expr)
+                withshape_node = _detect_withshape(array_expr)
+
+                if reshape_node is not None and flat_shape is not None:
+                    base_name, _, _ = _unwrap_view_op(reshape_node)
+                    if base_name is not None and base_name in input_map:
+                        slot = input_map[base_name]
+                        input_map[param_name] = slot
+                        input_flat_shapes[param_name] = flat_shape
+                        param_type = None
+                        for p in function.params:
+                            if p.name == base_name:
+                                param_type = p.type
+                                break
+                        if isinstance(param_type, ArrayType):
+                            input_desc_ranks[slot] = param_type.rank
+                    else:
+                        for axis_idx in range(len(body_map.func.params)):
+                            pname = body_map.func.params[axis_idx].name
+                            if axis_idx < len(coords):
+                                coord_map[pname] = coords[axis_idx]
+
+                elif append_node is not None:
+                    left_name, _, _ = _unwrap_view_op(append_node.left)
+                    right_name, _, _ = _unwrap_view_op(append_node.right)
+                    if (left_name is not None and left_name in input_map
+                            and right_name is not None and right_name in input_map):
+                        left_slot = input_map[left_name]
+                        right_slot = input_map[right_name]
+                        left_type = None
+                        for p in function.params:
+                            if p.name == left_name:
+                                left_type = p.type
+                                break
+                        left_size = int(left_type.shape[0].value) if isinstance(left_type, ArrayType) else 0
+                        input_map[param_name] = left_slot
+                        append_inputs[param_name] = (left_slot, right_slot, left_size)
+                    else:
+                        for axis_idx in range(len(body_map.func.params)):
+                            pname = body_map.func.params[axis_idx].name
+                            if axis_idx < len(coords):
+                                coord_map[pname] = coords[axis_idx]
+
+                elif withshape_node is not None:
+                    base_name, view_offsets, view_transforms = _unwrap_view_op(withshape_node)
+                    if base_name is not None and base_name in input_map:
+                        input_map[param_name] = input_map[base_name]
+                        src_type = None
+                        for p in function.params:
+                            if p.name == base_name:
+                                src_type = p.type
+                                break
+                        src_rank = src_type.rank if isinstance(src_type, ArrayType) else 0
+                        target_rank = withshape_node.result_type.rank
+                        dims_to_skip = target_rank - src_rank
+                        input_broadcast_skip[param_name] = dims_to_skip
+                        if isinstance(src_type, ArrayType):
+                            input_desc_ranks[input_map[base_name]] = src_rank
+                    else:
+                        for axis_idx in range(len(body_map.func.params)):
+                            pname = body_map.func.params[axis_idx].name
+                            if axis_idx < len(coords):
+                                coord_map[pname] = coords[axis_idx]
                 else:
-                    for axis_idx in range(len(body_map.func.params)):
-                        pname = body_map.func.params[axis_idx].name
-                        if axis_idx < len(coords):
-                            coord_map[pname] = coords[axis_idx]
+                    base_name, view_offsets, view_transforms = _unwrap_view_op(array_expr)
+                    if base_name is not None and base_name in input_map:
+                        input_map[param_name] = input_map[base_name]
+                        if view_offsets or view_transforms:
+                            input_adjustments[param_name] = (view_offsets, view_transforms)
+                    else:
+                        for axis_idx in range(len(body_map.func.params)):
+                            pname = body_map.func.params[axis_idx].name
+                            if axis_idx < len(coords):
+                                coord_map[pname] = coords[axis_idx]
 
     expr = gpu_expr_from_hir(
         lambda_body,
@@ -1859,18 +1957,21 @@ def build_descriptor_abi_general_map_gpu_module(
         coord_map=coord_map,
         context="general GPU map kernel",
         input_adjustments=input_adjustments,
+        input_flat_shapes=input_flat_shapes,
+        input_broadcast_skip=input_broadcast_skip,
     )
 
     # Emit the kernel body lines
     body_lines: list[str] = []
 
-    # Descriptor load lines
+    # Descriptor load lines — use per-input ranks when available
     prefixes = []
     for idx in range(num_array_inputs):
         prefix = f"in{idx}"
         prefixes.append(prefix)
         desc_name = f"%input{idx}_desc"
-        body_lines.extend(_descriptor_load_lines(prefix, desc_name, rank))
+        desc_rank = input_desc_ranks.get(idx, rank)
+        body_lines.extend(_descriptor_load_lines(prefix, desc_name, desc_rank))
 
     # Output descriptor
     out_prefix = "out"
@@ -2003,12 +2104,14 @@ def _gpu_emit_expr(
         Starting temp counter for unique SSA names.
     """
     from remora._gpu_expr_lowering import (
+        GpuAppendLoad,
         GpuArrayExpr,
         GpuBinaryOp,
         GpuCast,
         GpuCompareOp,
         GpuConstant,
         GpuExtractComponent,
+        GpuFlatLoad,
         GpuIndexCoordinate,
         GpuInputLoad,
         GpuIntrinsic,
@@ -2085,6 +2188,14 @@ def _gpu_emit_expr(
         # GpuInputLoad
         if isinstance(expr, GpuInputLoad):
             return _emit_input_load(expr, env)
+
+        # GpuFlatLoad — compute flat index from coords, load from base+offset+flat
+        if isinstance(expr, GpuFlatLoad):
+            return _emit_flat_load(expr, env)
+
+        # GpuAppendLoad — conditional load from left or right descriptor
+        if isinstance(expr, GpuAppendLoad):
+            return _emit_append_load(expr, env)
 
         # GpuBinaryOp
         if isinstance(expr, GpuBinaryOp):
@@ -2352,6 +2463,91 @@ def _gpu_emit_expr(
             f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
         )
         return load_name
+
+    def _emit_flat_load(expr: "GpuFlatLoad", env: dict[str, str]) -> str:
+        """Emit a flat-index load for reshape/ravel."""
+        prefix = f"in{expr.index}"
+        resolved: list[str] = []
+        for c in expr.coords:
+            resolved.append(env[c] if c in env else c)
+
+        shape = expr.output_shape
+        rank = len(shape)
+        planes: list[int] = []
+        for k in range(rank):
+            p = 1
+            for d in shape[k + 1:]:
+                p *= d
+            planes.append(p)
+
+        flat_ssa = None
+        for k, coord_ssa in enumerate(resolved):
+            if coord_ssa.lstrip("-").isdigit():
+                lit = _fresh_ssa()
+                lines.append(f"      {lit} = llvm.mlir.constant({int(coord_ssa)} : index) : i64")
+                coord_ssa = lit
+            if planes[k] != 1:
+                plane_ssa = _fresh_ssa()
+                lines.append(f"      {plane_ssa} = llvm.mlir.constant({planes[k]} : index) : i64")
+                term = _fresh_ssa()
+                lines.append(f"      {term} = llvm.mul {coord_ssa}, {plane_ssa}  : i64")
+            else:
+                term = coord_ssa
+            if flat_ssa is None:
+                flat_ssa = term
+            else:
+                s = _fresh_ssa()
+                lines.append(f"      {s} = llvm.add {flat_ssa}, {term}  : i64")
+                flat_ssa = s
+
+        if flat_ssa is None:
+            flat_ssa = _fresh_ssa()
+            lines.append(f"      {flat_ssa} = llvm.mlir.constant(0 : index) : i64")
+
+        linear = _fresh_ssa()
+        lines.append(f"      {linear} = llvm.add %{prefix}_offset, {flat_ssa}  : i64")
+        ptr = _fresh_ssa()
+        lines.append(f"      {ptr} = llvm.getelementptr %{prefix}_aligned[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+        load = _fresh_ssa()
+        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> f32")
+        return load
+
+    def _emit_append_load(expr: "GpuAppendLoad", env: dict[str, str]) -> str:
+        """Emit a branchless conditional load for append."""
+        left_pf = f"in{expr.left_index}"
+        right_pf = f"in{expr.right_index}"
+        coord_ssa = resolved = None
+        if expr.coords:
+            c = expr.coords[0]
+            coord_ssa = env[c] if c in env else c
+            if coord_ssa.lstrip("-").isdigit():
+                lit = _fresh_ssa()
+                lines.append(f"      {lit} = llvm.mlir.constant({int(coord_ssa)} : index) : i64")
+                coord_ssa = lit
+        if coord_ssa is None:
+            coord_ssa = "%idx"
+
+        ls = _fresh_ssa()
+        lines.append(f"      {ls} = llvm.mlir.constant({expr.left_size} : index) : i64")
+        is_left = _fresh_ssa()
+        lines.append(f'      {is_left} = llvm.icmp "ult" {coord_ssa}, {ls} : i64')
+        right_idx = _fresh_ssa()
+        lines.append(f"      {right_idx} = llvm.sub {coord_ssa}, {ls}  : i64")
+
+        sel_idx = _fresh_ssa()
+        lines.append(f"      {sel_idx} = llvm.select {is_left}, {coord_ssa}, {right_idx} : i1, i64")
+        sel_base = _fresh_ssa()
+        lines.append(f"      {sel_base} = llvm.select {is_left}, %{left_pf}_aligned, %{right_pf}_aligned : i1, !llvm.ptr")
+        sel_off = _fresh_ssa()
+        lines.append(f"      {sel_off} = llvm.select {is_left}, %{left_pf}_offset, %{right_pf}_offset : i1, i64")
+
+        linear = _fresh_ssa()
+        lines.append(f"      {linear} = llvm.add {sel_off}, {sel_idx}  : i64")
+        ptr = _fresh_ssa()
+        lines.append(f"      {ptr} = llvm.getelementptr {sel_base}[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+        load = _fresh_ssa()
+        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> f32")
+        return load
 
     def _emit_reduce(expr: GpuReduce, env: dict[str, str]) -> str | list[str]:
         """Emit a per-thread scf.for reduction loop (scalar or array-valued)."""
