@@ -14,11 +14,11 @@
 
 (define/pi ()
   (cross-entropy [logits (Array Float 3)] Float)
-  (:: z0 (index-item logits 0)
-  (:: z1 (index-item logits 1)
-  (:: z2 (index-item logits 2)
-    (:: lse (log (+ (exp z0) (+ (exp z1) (exp z2))))
-      (- lse z0))))))
+  (let* ((z0 (index-item logits 0))
+         (z1 (index-item logits 1))
+         (z2 (index-item logits 2))
+         (lse (log (+ (exp z0) (+ (exp z1) (exp z2))))))
+    (- lse z0)))
 
 ; Gradient at uniform logits [0, 0, 0]
 ; Expected: softmax([0,0,0]) - [1,0,0] = [1/3-1, 1/3, 1/3] ≈ [-0.667, 0.333, 0.333]

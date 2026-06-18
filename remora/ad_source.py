@@ -1170,7 +1170,7 @@ def _emit(expr: _Expr) -> str:
     if isinstance(expr, _If):
         return f"(if {_emit(expr.condition)} {_emit(expr.then_expr)} {_emit(expr.else_expr)})"
     if isinstance(expr, _Let):
-        return f"(:: {expr.name} {_emit(expr.value)} {_emit(expr.body)})"
+        return f"(let (({expr.name} {_emit(expr.value)})) {_emit(expr.body)})"
     if isinstance(expr, _Pair):
         return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "neg":

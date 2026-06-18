@@ -97,7 +97,7 @@ def test_parenthesized_single_element():
 # ── Let and If ──────────────────────────────────────────────────────────────
 
 def test_let_expression():
-    p = parse_lisp("(:: x 5 (+ x 1))")
+    p = parse_lisp("(let ((x 5)) (+ x 1))")
     assert isinstance(p.body, LetExpr)
     assert p.body.name == "x"
     assert isinstance(p.body.value, IntLit)
@@ -414,13 +414,13 @@ def test_unicode_lambda():
 # ── Nested expressions ──────────────────────────────────────────────────────
 
 def test_nested_fold_with_let():
-    p = parse_lisp("(fold + (:: x 5 (+ x 1)) (iota 10))")
+    p = parse_lisp("(fold + (let ((x 5)) (+ x 1)) (iota 10))")
     assert isinstance(p.body, FoldExpr)
     assert isinstance(p.body.init, LetExpr)
 
 
 def test_nested_let():
-    p = parse_lisp("(:: x 1 (:: y 2 (+ x y)))")
+    p = parse_lisp("(let* ((x 1) (y 2)) (+ x y))")
     assert isinstance(p.body, LetExpr)
     assert isinstance(p.body.body, LetExpr)
 

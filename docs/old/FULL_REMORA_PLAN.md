@@ -47,7 +47,7 @@ same AST as the existing Lark parser, making this a purely syntactic layer.
 [1 2 3]                   → [1, 2, 3]
 
 ; Let and if
-(:: x 5 (+ x 1))          → let x = 5 in x + 1
+(let ((x 5)) (+ x 1))     → let x = 5 in x + 1
 (if (< 1 2) 10 20)        → if 1 < 2 then 10 else 20
 
 ; Arithmetic / comparison
@@ -428,7 +428,7 @@ Total calendar time (1 engineer):
 ### Phase 1: Lisp syntax reader (explicit-only)
 - [x] `remora/lisp_reader.py` — Lark grammar for s-expressions
 - [x] Desugar `(define (f [x]) body)` → `def f x = body`
-- [x] Desugar `(:: x v body)` → `let x = v in body`
+- [x] Desugar `(let ((x v)) body)` → `let x = v in body`
 - [x] Desugar `(if cond then else)` → `if cond then then else`
 - [x] Desugar `(lambda (x) body)` → `\x -> body`
 - [x] Desugar `(map callable arg)` → `map callable arg`

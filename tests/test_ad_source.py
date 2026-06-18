@@ -1235,9 +1235,9 @@ _MLP2_LISP_SRC = """\
 
 (define/pi ()
   (mlp2-loss [w1 (Array Float 2 3) b1 (Array Float 2) w2 (Array Float 2) b2 Float x (Array Float 3) y Float] Float)
-  (:: hidden (map relu (+ (linear w1 x) b1))
-  (:: logit (+ (fold + 0.0 (* w2 hidden)) b2)
-  (* (- logit y) (- logit y)))))
+  (let* ((hidden (map relu (+ (linear w1 x) b1)))
+         (logit (+ (fold + 0.0 (* w2 hidden)) b2)))
+  (* (- logit y) (- logit y))))
 """
 
 

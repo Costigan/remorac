@@ -75,7 +75,7 @@ remora> (iscan + 0 [2 10 5])
 ### Let and If
 | Lisp | ML |
 |------|-----|
-| `(:: x 5 (+ x 1))` | `let x = 5 in x + 1` |
+| `(let ((x 5)) (+ x 1))` | `let x = 5 in x + 1` |
 | `(if (< 1 2) 10 20)` | `if 1 < 2 then 10 else 20` |
 | `(select #t 10 20)` | `select true 10 20` |
 

@@ -35,7 +35,7 @@ Syntax mapping (Lisp → current ML AST):
     [1 2 3]                               → [1, 2, 3]   (ArrayLit)
 
   Let and if:
-    (:: x 5 (+ x 1))                      → let x = 5 in x + 1
+    (let ((x 5)) (+ x 1))                  → let x = 5 in x + 1
     (if (< 1 2) 10 20)                    → if 1 < 2 then 10 else 20
 
   Arithmetic / comparison:
@@ -112,7 +112,7 @@ Tests to add:
 - Verify that parse_lisp(source) produces identical AST to parse_program
   for semantically equivalent programs
 - Test operator sections: (+ 2), (2 +), (< 5), (&& true)
-- Test nested expressions: (fold + (:: x 5 (+ x 1)) (iota 10))
+- Test nested expressions: (fold + (let ((x 5)) (+ x 1)) (iota 10))
 - Test multi-definition programs: (define ...) (define ...) expr
 - Test error cases: mismatched parens, unknown keywords, invalid syntax
 - Test Unicode lambda: (λ (x) (* x 2))

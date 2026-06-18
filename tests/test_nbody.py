@@ -22,18 +22,18 @@ def _nbody_source(N: int, eps: float = 0.01) -> str:
 
 
 def _nbody_source_compiled(N: int, eps: float = 0.01) -> str:
-    """Compilable source using :: let bindings to hoist complex sub-expressions
-    out of map callable bodies.  The :: syntax creates HIRLet nodes that the
+    """Compilable source using let* bindings to hoist complex sub-expressions
+    out of map callable bodies.  The let/let* syntax creates HIRLet nodes that the
     new scf.for-based lowering path processes step-by-step."""
     return (
         f"(define/pi () (forces [pos (Array Float {N} 3)] (Array Float {N} 3))"
         f" (map (lambda (i)"
         f" (fold + [0.0 0.0 0.0]"
         f" (map (lambda (j)"
-        f" (:: D (- (index pos j) (index pos i))"
-        f" (:: dsq (fold + 0.0 (* D D))"
-        f" (:: sd (exp (* 1.5 (log (+ dsq {eps}))))"
-        f" (map (lambda (v) (/ v sd)) D)))))"
+        f" (let* ((D (- (index pos j) (index pos i)))"
+        f" (dsq (fold + 0.0 (* D D)))"
+        f" (sd (exp (* 1.5 (log (+ dsq {eps}))))))"
+        f" (map (lambda (v) (/ v sd)) D))))"
         f" (iota {N}))))"
         f" (iota {N})))"
     )

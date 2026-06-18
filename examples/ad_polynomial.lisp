@@ -40,14 +40,14 @@
 
 (define/pi ()
   (poly-loss [coeffs (Array Float 3)] Float)
-  (:: c0 (index-item coeffs 0)
-  (:: c1 (index-item coeffs 1)
-  (:: c2 (index-item coeffs 2)
-    (:: r0 (- c0 1.0)
-    (:: r1 (- (+ c0 (+ c1 c2)) 2.0)
-    (:: r2 (- (+ c0 (+ (* c1 2.0) (* c2 4.0))) 5.0)
-    (:: r3 (- (+ c0 (+ (* c1 3.0) (* c2 9.0))) 10.0)
-      (+ (* r0 r0) (+ (* r1 r1) (+ (* r2 r2) (* r3 r3))))))))))))
+  (let* ((c0 (index-item coeffs 0))
+         (c1 (index-item coeffs 1))
+         (c2 (index-item coeffs 2))
+         (r0 (- c0 1.0))
+         (r1 (- (+ c0 (+ c1 c2)) 2.0))
+         (r2 (- (+ c0 (+ (* c1 2.0) (* c2 4.0))) 5.0))
+         (r3 (- (+ c0 (+ (* c1 3.0) (* c2 9.0))) 10.0)))
+    (+ (* r0 r0) (+ (* r1 r1) (+ (* r2 r2) (* r3 r3))))))
 
 ; --- AD happens here: grad traces, reverses, returns the gradient ---
 

@@ -11,14 +11,14 @@
 
 (define/pi ()
   (chain-energy [pos (Array Float 4)] Float)
-  (:: x0 (index-item pos 0)
-  (:: x1 (index-item pos 1)
-  (:: x2 (index-item pos 2)
-  (:: x3 (index-item pos 3)
-    (:: e01 (* (- (- x1 x0) 1.0) (- (- x1 x0) 1.0))
-    (:: e12 (* (- (- x2 x1) 1.0) (- (- x2 x1) 1.0))
-    (:: e23 (* (- (- x3 x2) 1.0) (- (- x3 x2) 1.0))
-      (+ e01 (+ e12 e23))))))))))
+  (let* ((x0 (index-item pos 0))
+         (x1 (index-item pos 1))
+         (x2 (index-item pos 2))
+         (x3 (index-item pos 3))
+         (e01 (* (- (- x1 x0) 1.0) (- (- x1 x0) 1.0)))
+         (e12 (* (- (- x2 x1) 1.0) (- (- x2 x1) 1.0)))
+         (e23 (* (- (- x3 x2) 1.0) (- (- x3 x2) 1.0))))
+    (+ e01 (+ e12 e23))))
 
 ; Gradient at compressed state [0, 0.5, 1, 1.5] — restoring forces
 ((grad chain-energy) [0.0 0.5 1.0 1.5])

@@ -393,7 +393,7 @@ class TestHIRCSE:
         source = (
             "(define/pi ([n Dim])\n"
             "  (sq-dot [x (Array Float n) w (Array Float n)] Float)\n"
-            "  (:: dot (fold + 0.0 (* x w))\n"
+            "  (let ((dot (fold + 0.0 (* x w))))\n"
             "    (* dot dot)))\n"
         )
         gradient = generate_gradient_function_source(

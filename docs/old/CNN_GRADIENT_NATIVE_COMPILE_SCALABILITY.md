@@ -1090,7 +1090,7 @@ Tasks:
   carry shape information for correctness.)
 - [x] Lower the AD IR directly to typed HIR or MLIR without round-tripping
   through generated source text.
-  (The ``_Let`` binding emits ``(:: name value body)`` in Remora Lisp
+  (The ``_Let`` binding emits ``(let ((name value)) body)`` in Remora Lisp
   source; the HIR lowering preserves the binding as ``HIRLet``.  The
   descriptor path peels ``HIRLet`` bindings via ``_lower_top_level_lets``
   and lowers values into ``tensor_env``.)

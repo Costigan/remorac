@@ -4,7 +4,8 @@ Parses Remora's Lisp-style s-expression syntax and produces the same
 AST as the existing ML-like parser in remora/parser.py.
 
 Syntax mapping:
-    (:: x 5 (+ x 1))        → let x = 5 in x + 1
+    (let ((x 5)) (+ x 1))       → let x = 5 in x + 1
+    (let* ((x 5) (y x)) (+ x y)) → let x = 5 in let y = x in x + y
     (if (< 1 2) 10 20)      → if 1 < 2 then 10 else 20
     (+ 1 2)                 → 1 + 2
     (+ 1 2 3)               → (1 + 2) + 3
@@ -207,7 +208,9 @@ dim_ref: INT -> dim_lit
 param_spec: name_token        -> param_simple
           | name_token INT    -> param_ranked
 
-let_form: "::" name_token sexpr sexpr -> let_expr
+let_form: "let" "(" let_binding+ ")" sexpr -> let_expr
+        | "let*" "(" let_binding+ ")" sexpr -> let_expr
+let_binding: "(" name_token sexpr ")"
 if_form: "if" sexpr sexpr sexpr -> if_expr
 select_form: "select" sexpr sexpr sexpr -> select_expr
 lambda_form: ("lambda" | "λ") "(" name_token* ")" sexpr -> lambda_expr
@@ -438,8 +441,16 @@ class LispASTBuilder(Transformer):
 
     # ── let / if / lambda ────────────────────────────────────────────────
 
+    def let_binding(self, items: list[Any]) -> tuple[str, Any]:
+        return (str(items[0]), items[1])
+
     def let_expr(self, items: list[Any]) -> LetExpr:
-        return LetExpr(str(items[0]), items[1], items[2], self._loc_from(items))
+        bindings = items[:-1]
+        body = items[-1]
+        result = body
+        for name, value in reversed(bindings):
+            result = LetExpr(name, value, result, self._loc_from(items))
+        return result
 
     def if_expr(self, items: list[Any]) -> IfExpr:
         return IfExpr(items[0], items[1], items[2], self._loc_from(items))
