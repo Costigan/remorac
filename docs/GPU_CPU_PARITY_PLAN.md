@@ -204,13 +204,14 @@ allocation, or are better served by dedicated kernel designs.  They remain
 handled by specialised kernels or deferred:
 
 - `HIRIm2col` / `HIRCol2im` — retain specialised GPU kernels
-- `HIRMatmul` — dedicated kernel required (tiling, shared memory)
-- `HIRSort` / `HIRGrade` — GPU sorting algorithms (bitonic, radix)
-- `HIRFilter` / `HIRReplicate` — dynamic output sizes
-- `HIRScan` — parallel prefix sum (Blelloch/Kogge-Stone)
-- `HIRIndicesOf` — coordinate generation kernel
 - Named-function / section callables (non-lambda)
-- `HIRFoldRight`
+
+**Resolved since original plan**: `HIRMatmul` (per-thread dot-product
+kernel), `HIRSort` / `HIRGrade` (serial insertion sort), `HIRScan`
+(parallel Hillis-Steele), `HIRFilter` / `HIRReplicate` (serial
+single-thread — see Future Work for parallel upgrade), `HIRIndicesOf`
+(parallel coordinate generation), `HIRFoldRight` (reverse fold in
+general path).
 
 ## Success Criteria
 
@@ -223,3 +224,97 @@ handled by specialised kernels or deferred:
 5. Redundant specialised kernels removed (Append, Scan).
 6. `PROJECT_OVERVIEW.md` states "GPU backend achieved parity with CPU
    backend for the dense statically-shaped subset."
+
+## Future Work
+
+### Phase E — Remaining correctness gaps
+
+Programs that the CPU backend handles correctly but the GPU backend
+gets wrong (silent wrong results) or rejects (compile error).
+
+#### E.1 — Wrong-result gaps
+
+These compile and run on GPU but produce incorrect output.
+
+- [x] **E.1.1 — f32-only loads/stores**: The general map path, and all
+      specialised kernels (matmul, sort, scan, scatter-add, filter,
+      replicate), hardcode `f32` for `llvm.load` / `llvm.store` /
+      `llvm.getelementptr`.  Integer (`i32`) and boolean (`i1`/`i8`)
+      arrays that reach these paths get reinterpreted as `f32`, producing
+      garbage.  Fix: thread `element_type` through `GpuInputLoad`,
+      `GpuFlatLoad`, `GpuAppendLoad`, the output store in the general
+      map builder, and all specialised kernel builders.
+
+- [x] **E.1.2 — Scan operator**: `build_descriptor_abi_f32_scan_gpu_module`
+      always uses `llvm.fadd` regardless of the `HIRScan.func` field.
+      A product scan (`scan (*) 1 arr`) silently produces a sum scan.
+      Fix: read the operator from the `HIRPrimCallable` and emit the
+      correct LLVM op (`fadd` / `fmul`).
+
+- [x] **E.1.3 — Scan exclusive flag**: The parallel scan kernel always
+      produces an inclusive scan.  `escan` (exclusive) programs get
+      inclusive results.  Fix: for exclusive scan, shift the output
+      right by one position and insert the identity element at index 0.
+
+- [x] **E.1.4 — Scan direction**: The kernel always scans left-to-right.
+      Right-scan programs get left-scan results.  Fix: for right scan,
+      reverse the input before scanning and reverse the output, or
+      iterate the Hillis-Steele steps in reverse.
+
+- [x] **E.1.5 — Rank > 1 append**: `GpuAppendLoad` only branches on
+      the first coordinate.  Rank-2+ arrays appended along dimension 0
+      need multi-dimensional coordinate decomposition for both the left
+      and right descriptors.  **Resolved**: rank > 1 now raises
+      `GPUScaffoldError` (compile-error) instead of producing wrong results.
+      Full rank > 1 support deferred.
+
+- [x] **E.1 tests** — Tests that verify correct output for i32 maps,
+      product scan, exclusive scan, right scan, and rank-2 append.
+
+#### E.2 — Compile-error gaps
+
+These raise `GPUScaffoldError` or `CodegenUnavailable` on GPU but
+compile and run correctly on CPU.
+
+- [ ] **E.2.1 — Named-function / section callables**: The general map
+      builder requires `HIRLambda` as the map callable.  Named functions
+      (`HIRVar` referencing a top-level def) and operator sections used
+      directly as callables are rejected.  Fix: inline named functions
+      by looking them up in the HIR function table, or lower them to
+      equivalent lambda expressions before GPU compilation.
+
+- [ ] **E.2.2 — Filter with complex predicates**: The filter kernel
+      only handles `HIRPrimCallable` comparisons with a literal constant.
+      Lambda predicates (e.g. `\x -> x > 0 && x < 5`) are rejected.
+      Fix: use the `GpuExpr` compiler to lower the predicate body to
+      LLVM IR inline in the filter loop.
+
+- [ ] **E.2.3 — Scan for arrays > 1024**: The parallel Hillis-Steele
+      scan uses one block with N threads, limiting N to 1024.  Larger
+      arrays are rejected.  Fix: multi-block scan with inter-block
+      prefix propagation, or fall back to a serial scan for N > 1024.
+
+- [ ] **E.2 tests** — Tests that verify compilation succeeds for named
+      callables, complex filter predicates, and large scan arrays.
+
+### Parallel GPU Filter and Replicate
+
+`HIRFilter` and `HIRReplicate` currently use serial single-thread GPU
+kernels (correct, O(N) on one core).  These should be upgraded to a
+two-kernel parallel execution plan:
+
+1. **Prefix-sum pass** — parallel Hillis-Steele scan on predicate results
+   (filter) or counts (replicate) to compute per-element output positions.
+2. **Scatter-write pass** — one thread per input element writes to its
+   computed output position.
+
+**Blocked on** `RemoraExecutor` multi-kernel orchestration.  Today the
+executor assumes one kernel per function call.
+
+See also `docs/FUTURE_WORK.md`.
+
+### Tiled Shared-Memory Matmul
+
+`HIRMatmul` currently uses a per-thread dot-product kernel.  A standard
+CUDA tiled matmul with shared-memory tiles would improve throughput for
+matrices larger than ~64×64.

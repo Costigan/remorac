@@ -22,7 +22,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
-from remora.hir import HIRAppend, HIRDrop, HIRIndicesOf, HIRMatmul, HIRRavel, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
+from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
 
@@ -543,8 +543,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
 ) -> GPUModuleScaffold:
     """Build a descriptor-ABI GPU module for f32 scan (prefix-sum).
 
-    Uses a parallel Hillis-Steele inclusive scan in shared memory.
+    Uses a parallel Hillis-Steele scan in shared memory.
     One block with N threads for arrays up to 1024 elements.
+    Supports inclusive/exclusive, left/right, and + or * operators.
+
+    A production implementation would use a parallel prefix-sum + scatter
+    with multi-kernel orchestration for arrays > 1024 (see docs/FUTURE_WORK.md).
     """
     if len(function.params) != 1:
         raise GPUScaffoldError("GPU scan supports single-parameter functions only")
@@ -561,12 +565,61 @@ def build_descriptor_abi_f32_scan_gpu_module(
     name = kernel_name or f"remora_{function.name}_f32_scan"
     _validate_scaffold_names(module_name, name)
 
+    from remora.hir import HIRScan as _HIRScan
+    scan_op = "+"
+    is_exclusive = False
+    is_right = False
+    if isinstance(function.body, _HIRScan):
+        if isinstance(function.body.func, HIRPrimCallable):
+            scan_op = function.body.func.op
+        is_exclusive = function.body.exclusive
+        is_right = function.body.right
+
+    if scan_op == "+":
+        llvm_scan_op = "llvm.fadd"
+        identity = "0.000000e+00"
+    elif scan_op == "*":
+        llvm_scan_op = "llvm.fmul"
+        identity = "1.000000e+00"
+    else:
+        raise GPUScaffoldError(f"GPU scan op '{scan_op}' not supported (only + and *)")
+
     import math
     max_d = math.ceil(math.log2(N)) if N > 1 else 0
 
     rank = 1
     desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
+
+    if is_right:
+        load_idx = f"      %sc_load_idx = llvm.sub %sc_Nm1, %sc_tid  : i64"
+        write_idx = f"      %sc_write_idx = llvm.sub %sc_Nm1, %sc_tid  : i64"
+    else:
+        load_idx = "      %sc_load_idx = llvm.add %sc_tid, %sc_c0  : i64"
+        write_idx = "      %sc_write_idx = llvm.add %sc_tid, %sc_c0  : i64"
+
+    if is_exclusive:
+        write_block = f"""    ^sc_write:
+      %sc_is_zero = llvm.icmp "eq" %sc_tid, %sc_c0 : i64
+      %sc_id_val = llvm.mlir.constant({identity} : f32) : f32
+      %sc_prev_idx_raw = llvm.sub %sc_tid, %sc_c1  : i64
+      %sc_prev_idx = llvm.select %sc_is_zero, %sc_c0, %sc_prev_idx_raw : i1, i64
+      %sc_prev_ptr = llvm.getelementptr %sc_shmem_base[0, %sc_prev_idx] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %sc_prev_val = llvm.load %sc_prev_ptr : !llvm.ptr<3> -> f32
+      %sc_final = llvm.select %sc_is_zero, %sc_id_val, %sc_prev_val : i1, f32
+{write_idx}
+      %sc_out_off = llvm.add %out_offset, %sc_write_idx  : i64
+      %sc_out_ptr = llvm.getelementptr %out_aligned[%sc_out_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %sc_final, %sc_out_ptr : f32, !llvm.ptr
+      llvm.br ^sc_done"""
+    else:
+        write_block = f"""    ^sc_write:
+      %sc_final = llvm.load %sc_shmem_me : !llvm.ptr<3> -> f32
+{write_idx}
+      %sc_out_off = llvm.add %out_offset, %sc_write_idx  : i64
+      %sc_out_ptr = llvm.getelementptr %out_aligned[%sc_out_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %sc_final, %sc_out_ptr : f32, !llvm.ptr
+      llvm.br ^sc_done"""
 
     text = f"""module {{
   gpu.module @{module_name} {{
@@ -580,16 +633,18 @@ def build_descriptor_abi_f32_scan_gpu_module(
       llvm.cond_br %sc_in_bounds, ^sc_load, ^sc_done
 
     ^sc_load:
-      %sc_in_off = llvm.add %in_offset, %sc_tid  : i64
+      %sc_c0 = llvm.mlir.constant(0 : index) : i64
+      %sc_c1 = llvm.mlir.constant(1 : index) : i64
+      %sc_c2 = llvm.mlir.constant(2 : index) : i64
+      %sc_Nm1 = llvm.mlir.constant({N - 1} : index) : i64
+{load_idx}
+      %sc_in_off = llvm.add %in_offset, %sc_load_idx  : i64
       %sc_in_ptr = llvm.getelementptr %in_aligned[%sc_in_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
       %sc_elem = llvm.load %sc_in_ptr : !llvm.ptr -> f32
       %sc_shmem_base = llvm.mlir.addressof @scan_shmem : !llvm.ptr<3>
       %sc_shmem_me = llvm.getelementptr %sc_shmem_base[0, %sc_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
       llvm.store %sc_elem, %sc_shmem_me : f32, !llvm.ptr<3>
       nvvm.barrier0
-      %sc_c0 = llvm.mlir.constant(0 : index) : i64
-      %sc_c1 = llvm.mlir.constant(1 : index) : i64
-      %sc_c2 = llvm.mlir.constant(2 : index) : i64
       %sc_max_d = llvm.mlir.constant({max_d} : index) : i64
       llvm.br ^sc_loop(%sc_c0, %sc_c1 : i64, i64)
 
@@ -603,11 +658,11 @@ def build_descriptor_abi_f32_scan_gpu_module(
       %sc_safe_partner = llvm.select %sc_active, %sc_partner_raw, %sc_c0 : i1, i64
       %sc_pptr = llvm.getelementptr %sc_shmem_base[0, %sc_safe_partner] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
       %sc_pval = llvm.load %sc_pptr : !llvm.ptr<3> -> f32
-      %sc_zero_f = llvm.mlir.constant(0.000000e+00 : f32) : f32
-      %sc_temp = llvm.select %sc_active, %sc_pval, %sc_zero_f : i1, f32
+      %sc_id_f = llvm.mlir.constant({identity} : f32) : f32
+      %sc_temp = llvm.select %sc_active, %sc_pval, %sc_id_f : i1, f32
       nvvm.barrier0
       %sc_cur = llvm.load %sc_shmem_me : !llvm.ptr<3> -> f32
-      %sc_new = llvm.fadd %sc_cur, %sc_temp  : f32
+      %sc_new = {llvm_scan_op} %sc_cur, %sc_temp  : f32
       %sc_result = llvm.select %sc_active, %sc_new, %sc_cur : i1, f32
       llvm.store %sc_result, %sc_shmem_me : f32, !llvm.ptr<3>
       nvvm.barrier0
@@ -615,12 +670,7 @@ def build_descriptor_abi_f32_scan_gpu_module(
       %sc_next_stride = llvm.mul %sc_stride, %sc_c2 : i64
       llvm.br ^sc_loop(%sc_next_d, %sc_next_stride : i64, i64)
 
-    ^sc_write:
-      %sc_final = llvm.load %sc_shmem_me : !llvm.ptr<3> -> f32
-      %sc_out_off = llvm.add %out_offset, %sc_tid  : i64
-      %sc_out_ptr = llvm.getelementptr %out_aligned[%sc_out_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      llvm.store %sc_final, %sc_out_ptr : f32, !llvm.ptr
-      llvm.br ^sc_done
+{write_block}
 
     ^sc_done:
       llvm.return
@@ -1007,12 +1057,12 @@ def _descriptor_kernel_body_lines(
                 f"      %_{pf}_tadj_{index} = llvm.mul {radj}, %{pf}_stride0 : i64",
                 f"      %_{pf}_roffadj_{index} = llvm.add %{pf}_offset, %_{pf}_tadj_{index} : i64",
                 f"      {linadj} = llvm.add %_{pf}_roffadj_{index}, {cadj} : i64",
-                f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[{linadj}] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+                f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[{linadj}] : (!llvm.ptr, i64) -> !llvm.ptr, {element_type}",
             ])
         else:
             lines.extend(
                 [
-                    f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[%{pf}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+                    f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[%{pf}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, {element_type}",
                 ]
             )
         lines.append(
@@ -2087,6 +2137,226 @@ def build_descriptor_abi_indices_of_gpu_module(
 
 
 # ---------------------------------------------------------------------------
+# Filter kernel (serial)
+# ---------------------------------------------------------------------------
+
+
+def build_descriptor_abi_filter_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for filter (serial, single-thread).
+
+    Thread 0 iterates the input, evaluates a comparison predicate, and
+    writes matching elements contiguously to the output.  Output is
+    allocated at the input size (upper bound).  Unused trailing positions
+    are zeroed.
+
+    A production implementation would use a parallel prefix-sum + scatter
+    with multi-kernel orchestration (see docs/FUTURE_WORK.md).
+    """
+    if not isinstance(function.body, HIRFilter):
+        raise GPUScaffoldError("GPU filter requires HIRFilter body")
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU filter requires exactly one array parameter")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU filter supports rank-1 f32 only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU filter supports rank-1 only")
+
+    pred = function.body.predicate
+    if not isinstance(pred, HIRPrimCallable):
+        raise GPUScaffoldError("GPU filter requires a primitive comparison predicate")
+    cmp_op = pred.op
+    if cmp_op not in {"<", "<=", ">", ">=", "==", "!="}:
+        raise GPUScaffoldError(f"GPU filter predicate op '{cmp_op}' not supported")
+
+    cmp_const = None
+    cmp_side = "right"
+    if pred.right_arg is not None and isinstance(pred.right_arg, HIRLit):
+        cmp_const = float(pred.right_arg.value)
+        cmp_side = "right"
+    elif pred.left_arg is not None and isinstance(pred.left_arg, HIRLit):
+        cmp_const = float(pred.left_arg.value)
+        cmp_side = "left"
+    if cmp_const is None:
+        raise GPUScaffoldError("GPU filter predicate requires a literal constant")
+
+    N = int(param_type.shape[0].value)
+    name = kernel_name or f"remora_{function.name}_filter"
+    _validate_scaffold_names(module_name, name)
+
+    pred_map = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge", "==": "oeq", "!=": "one"}
+    pred_str = pred_map[cmp_op]
+
+    if cmp_side == "left":
+        cmp_line = f'      %fl_cmp = llvm.fcmp "{pred_str}" %fl_const, %fl_val : f32'
+    else:
+        cmp_line = f'      %fl_cmp = llvm.fcmp "{pred_str}" %fl_val, %fl_const : f32'
+
+    desc_lines = _descriptor_load_lines("in", "%input_desc", 1)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %fl_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %fl_tid = llvm.sext %fl_tid32 : i32 to i64
+      %fl_z = llvm.mlir.constant(0 : index) : i64
+      %fl_is_t0 = llvm.icmp "eq" %fl_tid, %fl_z : i64
+      llvm.cond_br %fl_is_t0, ^fl_work, ^fl_done
+
+    ^fl_work:
+      %fl_N = llvm.mlir.constant({N} : index) : i64
+      %fl_one = llvm.mlir.constant(1 : index) : i64
+      %fl_const = llvm.mlir.constant({cmp_const:.6e} : f32) : f32
+      %fl_zerof = llvm.mlir.constant(0.000000e+00 : f32) : f32
+      llvm.br ^fl_loop(%fl_z, %fl_z : i64, i64)
+
+    ^fl_loop(%fl_i: i64, %fl_wp: i64):
+      %fl_ld = llvm.icmp "uge" %fl_i, %fl_N : i64
+      llvm.cond_br %fl_ld, ^fl_zero(%fl_wp : i64), ^fl_body
+
+    ^fl_body:
+      %fl_si = llvm.add %in_offset, %fl_i  : i64
+      %fl_sp = llvm.getelementptr %in_aligned[%fl_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %fl_val = llvm.load %fl_sp : !llvm.ptr -> f32
+{cmp_line}
+      llvm.cond_br %fl_cmp, ^fl_write, ^fl_skip
+
+    ^fl_write:
+      %fl_di = llvm.add %out_offset, %fl_wp  : i64
+      %fl_dp = llvm.getelementptr %out_aligned[%fl_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %fl_val, %fl_dp : f32, !llvm.ptr
+      %fl_nwp = llvm.add %fl_wp, %fl_one : i64
+      %fl_ni = llvm.add %fl_i, %fl_one : i64
+      llvm.br ^fl_loop(%fl_ni, %fl_nwp : i64, i64)
+
+    ^fl_skip:
+      %fl_ni2 = llvm.add %fl_i, %fl_one : i64
+      llvm.br ^fl_loop(%fl_ni2, %fl_wp : i64, i64)
+
+    ^fl_zero(%fl_wp2: i64):
+      %fl_zd = llvm.icmp "uge" %fl_wp2, %fl_N : i64
+      llvm.cond_br %fl_zd, ^fl_done, ^fl_zbody
+
+    ^fl_zbody:
+      %fl_zi = llvm.add %out_offset, %fl_wp2  : i64
+      %fl_zp = llvm.getelementptr %out_aligned[%fl_zi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %fl_zerof, %fl_zp : f32, !llvm.ptr
+      %fl_znext = llvm.add %fl_wp2, %fl_one : i64
+      llvm.br ^fl_zero(%fl_znext : i64)
+
+    ^fl_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+
+
+# ---------------------------------------------------------------------------
+# Replicate kernel (serial)
+# ---------------------------------------------------------------------------
+
+
+def build_descriptor_abi_replicate_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    output_upper_bound: int | None = None,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for replicate (serial, single-thread).
+
+    Thread 0 iterates the counts array, writing each corresponding value
+    element ``counts[i]`` times contiguously to the output.  The output
+    descriptor must be pre-allocated at an upper-bound size.
+
+    A production implementation would use a parallel prefix-sum + scatter
+    with multi-kernel orchestration (see docs/FUTURE_WORK.md).
+    """
+    if not isinstance(function.body, HIRReplicate):
+        raise GPUScaffoldError("GPU replicate requires HIRReplicate body")
+    if len(function.params) != 2:
+        raise GPUScaffoldError("GPU replicate requires exactly two parameters (counts, values)")
+
+    counts_type = function.params[0].type
+    values_type = function.params[1].type
+    if not isinstance(counts_type, ArrayType) or not isinstance(values_type, ArrayType):
+        raise GPUScaffoldError("GPU replicate requires array parameters")
+    if values_type.element != FLOAT:
+        raise GPUScaffoldError("GPU replicate supports f32 values only")
+    if counts_type.rank != 1 or values_type.rank != 1:
+        raise GPUScaffoldError("GPU replicate supports rank-1 only")
+
+    N = int(values_type.shape[0].value)
+    out_N = output_upper_bound or N * N
+    name = kernel_name or f"remora_{function.name}_replicate"
+    _validate_scaffold_names(module_name, name)
+
+    desc_lines = _descriptor_load_lines("cnt", "%input0_desc", 1)
+    desc_lines.extend(_descriptor_load_lines("val", "%input1_desc", 1))
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input0_desc: !llvm.ptr, %input1_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %rp_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %rp_tid = llvm.sext %rp_tid32 : i32 to i64
+      %rp_z = llvm.mlir.constant(0 : index) : i64
+      %rp_is_t0 = llvm.icmp "eq" %rp_tid, %rp_z : i64
+      llvm.cond_br %rp_is_t0, ^rp_work, ^rp_done
+
+    ^rp_work:
+      %rp_N = llvm.mlir.constant({N} : index) : i64
+      %rp_one = llvm.mlir.constant(1 : index) : i64
+      llvm.br ^rp_outer(%rp_z, %rp_z : i64, i64)
+
+    ^rp_outer(%rp_i: i64, %rp_wp: i64):
+      %rp_od = llvm.icmp "uge" %rp_i, %rp_N : i64
+      llvm.cond_br %rp_od, ^rp_done, ^rp_load
+
+    ^rp_load:
+      %rp_ci = llvm.add %cnt_offset, %rp_i  : i64
+      %rp_cp = llvm.getelementptr %cnt_aligned[%rp_ci] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %rp_count = llvm.load %rp_cp : !llvm.ptr -> i32
+      %rp_count64 = llvm.sext %rp_count : i32 to i64
+      %rp_vi = llvm.add %val_offset, %rp_i  : i64
+      %rp_vp = llvm.getelementptr %val_aligned[%rp_vi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %rp_val = llvm.load %rp_vp : !llvm.ptr -> f32
+      llvm.br ^rp_inner(%rp_z, %rp_wp : i64, i64)
+
+    ^rp_inner(%rp_j: i64, %rp_iwp: i64):
+      %rp_jd = llvm.icmp "uge" %rp_j, %rp_count64 : i64
+      llvm.cond_br %rp_jd, ^rp_next(%rp_iwp : i64), ^rp_store
+
+    ^rp_store:
+      %rp_oi = llvm.add %out_offset, %rp_iwp  : i64
+      %rp_op = llvm.getelementptr %out_aligned[%rp_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %rp_val, %rp_op : f32, !llvm.ptr
+      %rp_nj = llvm.add %rp_j, %rp_one : i64
+      %rp_nwp = llvm.add %rp_iwp, %rp_one : i64
+      llvm.br ^rp_inner(%rp_nj, %rp_nwp : i64, i64)
+
+    ^rp_next(%rp_fwp: i64):
+      %rp_ni = llvm.add %rp_i, %rp_one : i64
+      llvm.br ^rp_outer(%rp_ni, %rp_fwp : i64, i64)
+
+    ^rp_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+
+
+# ---------------------------------------------------------------------------
 # Scatter-add kernel
 # ---------------------------------------------------------------------------
 
@@ -2359,6 +2629,7 @@ def build_descriptor_abi_general_map_gpu_module(
     input_desc_ranks: dict[int, int] = {}
     append_inputs: dict[str, tuple[int, int, int]] = {}
     input_broadcast_skip: dict[str, int] = {}
+    input_element_types: dict[str, str] = {}
 
     def _detect_reshape(ae):
         """Check if array_expr is a reshape/ravel wrapping an input."""
@@ -2426,6 +2697,10 @@ def build_descriptor_abi_general_map_gpu_module(
                                 left_type = p.type
                                 break
                         left_size = int(left_type.shape[0].value) if isinstance(left_type, ArrayType) else 0
+                        if isinstance(left_type, ArrayType) and left_type.rank > 1:
+                            raise GPUScaffoldError(
+                                f"GPU append supports rank-1 arrays only (got rank {left_type.rank})"
+                            )
                         input_map[param_name] = left_slot
                         append_inputs[param_name] = (left_slot, right_slot, left_size)
                     else:
@@ -2466,6 +2741,31 @@ def build_descriptor_abi_general_map_gpu_module(
                             if axis_idx < len(coords):
                                 coord_map[pname] = coords[axis_idx]
 
+    from remora.types import BOOL as _BOOL, INT as _INT
+    _slot_etypes: dict[int, str] = {}
+    for _p in function.params:
+        if isinstance(_p.type, ArrayType):
+            _s = input_map.get(_p.name)
+            if _s is not None:
+                _e = _p.type.element
+                if _e == FLOAT:
+                    _slot_etypes[_s] = "f32"
+                elif _e == _INT:
+                    _slot_etypes[_s] = "i32"
+                elif _e == _BOOL:
+                    _slot_etypes[_s] = "i8"
+    for _n, _s in input_map.items():
+        if _s in _slot_etypes:
+            input_element_types[_n] = _slot_etypes[_s]
+
+    result_elem_type = "f32"
+    if isinstance(result_type, ArrayType):
+        _re = result_type.element
+        if _re == _INT:
+            result_elem_type = "i32"
+        elif _re == _BOOL:
+            result_elem_type = "i8"
+
     expr = gpu_expr_from_hir(
         lambda_body,
         input_map=input_map,
@@ -2476,6 +2776,7 @@ def build_descriptor_abi_general_map_gpu_module(
         input_adjustments=input_adjustments,
         input_flat_shapes=input_flat_shapes,
         input_broadcast_skip=input_broadcast_skip,
+        input_element_types=input_element_types,
     )
 
     # Emit the kernel body lines
@@ -2558,12 +2859,12 @@ def build_descriptor_abi_general_map_gpu_module(
                 k_offset = koff
             ptr = f"%out_elem_ptr{k}" if k > 0 else "%out_elem_ptr"
             # Always emit getelementptr for each component
-            store_lines.append(f"      {ptr} = llvm.getelementptr %out_aligned[{k_offset}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+            store_lines.append(f"      {ptr} = llvm.getelementptr %out_aligned[{k_offset}] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}")
             store_lines.append(f"      llvm.store {result_ssa[k]}, {ptr} : f32, !llvm.ptr")
         body_lines.extend(store_lines)
     else:
         body_lines.extend([
-            f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}",
             f"      llvm.store {result_ssa}, %out_elem_ptr : f32, !llvm.ptr",
         ])
 
@@ -2876,6 +3177,7 @@ def _gpu_emit_expr(
         Transforms are applied first, then offsets, then stride multiply.
         """
         prefix = f"in{expr.index}"
+        et = getattr(expr, 'element_type', 'f32')
         resolved_coords: list[str] = []
         for c in expr.coords:
             if c in env:
@@ -2922,11 +3224,11 @@ def _gpu_emit_expr(
 
                 ptr_name = _fresh_ssa()
                 lines.append(
-                    f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{linear_name}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
+                    f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{linear_name}] : (!llvm.ptr, i64) -> !llvm.ptr, {et}"
                 )
                 load_name = _fresh_ssa()
                 lines.append(
-                    f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
+                    f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> {et}"
                 )
                 return load_name
 
@@ -2987,17 +3289,18 @@ def _gpu_emit_expr(
 
         ptr_name = _fresh_ssa()
         lines.append(
-            f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{current}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
+            f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{current}] : (!llvm.ptr, i64) -> !llvm.ptr, {et}"
         )
         load_name = _fresh_ssa()
         lines.append(
-            f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
+            f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> {et}"
         )
         return load_name
 
     def _emit_flat_load(expr: "GpuFlatLoad", env: dict[str, str]) -> str:
         """Emit a flat-index load for reshape/ravel."""
         prefix = f"in{expr.index}"
+        et = getattr(expr, 'element_type', 'f32')
         resolved: list[str] = []
         for c in expr.coords:
             resolved.append(env[c] if c in env else c)
@@ -3038,15 +3341,16 @@ def _gpu_emit_expr(
         linear = _fresh_ssa()
         lines.append(f"      {linear} = llvm.add %{prefix}_offset, {flat_ssa}  : i64")
         ptr = _fresh_ssa()
-        lines.append(f"      {ptr} = llvm.getelementptr %{prefix}_aligned[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+        lines.append(f"      {ptr} = llvm.getelementptr %{prefix}_aligned[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, {et}")
         load = _fresh_ssa()
-        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> f32")
+        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> {et}")
         return load
 
     def _emit_append_load(expr: "GpuAppendLoad", env: dict[str, str]) -> str:
         """Emit a branchless conditional load for append."""
         left_pf = f"in{expr.left_index}"
         right_pf = f"in{expr.right_index}"
+        et = getattr(expr, 'element_type', 'f32')
         coord_ssa = resolved = None
         if expr.coords:
             c = expr.coords[0]
@@ -3075,9 +3379,9 @@ def _gpu_emit_expr(
         linear = _fresh_ssa()
         lines.append(f"      {linear} = llvm.add {sel_off}, {sel_idx}  : i64")
         ptr = _fresh_ssa()
-        lines.append(f"      {ptr} = llvm.getelementptr {sel_base}[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+        lines.append(f"      {ptr} = llvm.getelementptr {sel_base}[{linear}] : (!llvm.ptr, i64) -> !llvm.ptr, {et}")
         load = _fresh_ssa()
-        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> f32")
+        lines.append(f"      {load} = llvm.load {ptr} : !llvm.ptr -> {et}")
         return load
 
     def _emit_reduce(expr: GpuReduce, env: dict[str, str]) -> str | list[str]:

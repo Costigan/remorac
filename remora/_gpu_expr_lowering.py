@@ -67,6 +67,7 @@ class GpuInputLoad:
     coords: list[str]
     coord_offsets: tuple[int, ...] = ()
     coord_transforms: tuple[str, ...] = ()
+    element_type: str = "f32"
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class GpuFlatLoad:
     index: int
     coords: list[str]
     output_shape: tuple[int, ...]
+    element_type: str = "f32"
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,7 @@ class GpuAppendLoad:
     right_index: int
     left_size: int
     coords: list[str]
+    element_type: str = "f32"
 
 
 GpuExpr: TypeAlias = (
@@ -270,6 +273,7 @@ class _CompileCtx:
     input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = field(default_factory=dict)
     input_flat_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
     input_broadcast_skip: dict[str, int] = field(default_factory=dict)
+    input_element_types: dict[str, str] = field(default_factory=dict)
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
@@ -298,6 +302,7 @@ def gpu_expr_from_hir(
     input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] | None = None,
     input_flat_shapes: dict[str, tuple[int, ...]] | None = None,
     input_broadcast_skip: dict[str, int] | None = None,
+    input_element_types: dict[str, str] | None = None,
 ) -> GpuExpr:
     """Compile a HIR expression to a GpuExpr."""
     ctx = _CompileCtx(
@@ -309,6 +314,7 @@ def gpu_expr_from_hir(
         input_adjustments=dict(input_adjustments or {}),
         input_flat_shapes=dict(input_flat_shapes or {}),
         input_broadcast_skip=dict(input_broadcast_skip or {}),
+        input_element_types=dict(input_element_types or {}),
     )
     return _lower_hir(expr, ctx)
 
@@ -320,16 +326,17 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
             return GpuLetBinding(expr.name)
         if expr.name in ctx.input_map:
             slot = ctx.input_map[expr.name]
+            et = ctx.input_element_types.get(expr.name, "f32")
             flat_shape = ctx.input_flat_shapes.get(expr.name)
             if flat_shape is not None:
-                return GpuFlatLoad(slot, list(ctx.coords), flat_shape)
+                return GpuFlatLoad(slot, list(ctx.coords), flat_shape, et)
             bskip = ctx.input_broadcast_skip.get(expr.name, 0)
             use_coords = list(ctx.coords)[bskip:] if bskip > 0 else list(ctx.coords)
             adj = ctx.input_adjustments.get(expr.name)
             if adj is not None:
                 offsets, transforms = adj
-                return GpuInputLoad(slot, use_coords, offsets, transforms)
-            return GpuInputLoad(slot, use_coords)
+                return GpuInputLoad(slot, use_coords, offsets, transforms, et)
+            return GpuInputLoad(slot, use_coords, element_type=et)
         if expr.name in ctx.coord_map:
             return GpuIndexCoordinate(expr.name)
         if expr.name in ctx.scalar_env:
@@ -607,6 +614,10 @@ def _lower_append(expr: HIRAppend, ctx: _CompileCtx) -> GpuExpr:
             raise GPUScaffoldError(
                 f"{ctx.context}: append left operand has no array type"
             )
+        if left_type.rank > 1:
+            raise GPUScaffoldError(
+                f"{ctx.context}: GPU append supports rank-1 arrays only (got rank {left_type.rank})"
+            )
         left_size = int(left_type.shape[0].value)
         return GpuAppendLoad(left.index, right.index, left_size, list(ctx.coords))
     raise GPUScaffoldError(
@@ -734,6 +745,7 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
         input_adjustments=dict(ctx.input_adjustments),
         input_flat_shapes=dict(ctx.input_flat_shapes),
         input_broadcast_skip=dict(ctx.input_broadcast_skip),
+        input_element_types=dict(ctx.input_element_types),
     )
 
 

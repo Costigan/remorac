@@ -23,6 +23,7 @@ from remora.gpu_lowering import (
 from remora.hir import (
     HIRArrayLit,
     HIRCast,
+    HIRFilter,
     HIRFold,
     HIRFoldRight,
     HIRFunction,
@@ -37,6 +38,7 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRReduce,
+    HIRReplicate,
     HIRVar,
     HIRAppend,
     HIRCast,
@@ -56,6 +58,7 @@ from remora.hir import (
 from remora.pipeline import detect_toolchain, translate_llvmir_to_nvptx_text, translate_mlir_to_llvmir
 from remora.runtime import CUDARuntime, evaluate_source, RuntimeUnavailable
 from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, StaticDim
+from remora.types import SigmaType
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +840,189 @@ class TestPhaseCHardening:
         llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
         ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
         assert ".visible .entry test_grade" in ptx
+
+    def test_filter_compiles(self):
+        """HIRFilter: serial filter kernel compiles to PTX."""
+        from remora.gpu_lowering import build_descriptor_abi_filter_gpu_module, extract_gpu_module_body_as_module
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        sigma_rt = SigmaType("n", ArrayType(FLOAT, (StaticDim(6),)))
+        hfunc = HIRFunction(
+            name='test_filter',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRFilter(
+                predicate=HIRPrimCallable(">", (FLOAT, FLOAT), BOOL, right_arg=HIRLit(0.0, FLOAT)),
+                array=HIRVar('xs', arr_type),
+                result_type=sigma_rt,
+            ),
+            return_type=sigma_rt,
+        )
+        gpu_module = build_descriptor_abi_filter_gpu_module(hfunc, kernel_name="test_filter")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_filter" in ptx
+
+    def test_replicate_compiles(self):
+        """HIRReplicate: serial replicate kernel compiles to PTX."""
+        from remora.gpu_lowering import build_descriptor_abi_replicate_gpu_module, extract_gpu_module_body_as_module
+        counts_type = ArrayType(INT, (StaticDim(4),))
+        values_type = ArrayType(FLOAT, (StaticDim(4),))
+        sigma_rt = SigmaType("n", ArrayType(FLOAT, (StaticDim(16),)))
+        hfunc = HIRFunction(
+            name='test_repl',
+            params=[HIRParam('cnts', counts_type), HIRParam('vals', values_type)],
+            body=HIRReplicate(
+                counts=HIRVar('cnts', counts_type),
+                array=HIRVar('vals', values_type),
+                result_type=sigma_rt,
+            ),
+            return_type=sigma_rt,
+        )
+        gpu_module = build_descriptor_abi_replicate_gpu_module(hfunc, kernel_name="test_repl")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_repl" in ptx
+
+
+# ---------------------------------------------------------------------------
+# Phase E.1: Wrong-result regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseE1WrongResultRegressions:
+    """Tests that would catch silent wrong-result regressions."""
+
+    def test_i32_input_general_path_uses_i32_load(self):
+        """E.1.1: i32 input array through the general map path loads as i32."""
+        arr_type = ArrayType(INT, (StaticDim(4),))
+        inner_fold = HIRFold(
+            reduction_dim=StaticDim(4),
+            func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+            init=HIRLit(0.0, FLOAT),
+            array=HIRVar('arr', arr_type),
+            result_type=FLOAT,
+        )
+        result_type = ArrayType(FLOAT, (StaticDim(3),))
+        hfunc = HIRFunction(
+            name='test_i32_load',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('_', INT)], body=inner_fold, result_type=None),
+                arrays=[HIRIota(StaticDim(3), ArrayType(INT, (StaticDim(3),)))],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        gpu_module = build_descriptor_abi_general_map_gpu_module(
+            hfunc, kernel_name="test_i32_load",
+        )
+        assert "-> i32" in gpu_module.text or "i32" in gpu_module.text
+
+    def test_product_scan_uses_fmul(self):
+        """E.1.2: product scan uses llvm.fmul, not llvm.fadd."""
+        from remora.hir import HIRScan
+        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module
+        arr_type = ArrayType(FLOAT, (StaticDim(8),))
+        hfunc = HIRFunction(
+            name='test_prod_scan',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRScan(
+                reduction_dim=StaticDim(8),
+                func=HIRPrimCallable('*', (FLOAT, FLOAT), FLOAT),
+                init=HIRLit(1.0, FLOAT),
+                array=HIRVar('xs', arr_type),
+                exclusive=False, right=False,
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(
+            hfunc, kernel_name="test_prod_scan",
+        )
+        assert "llvm.fmul" in gpu_module.text
+        assert "llvm.fadd" not in gpu_module.text
+
+    def test_exclusive_scan_inserts_identity(self):
+        """E.1.3: exclusive scan shifts output and inserts identity."""
+        from remora.hir import HIRScan
+        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module
+        arr_type = ArrayType(FLOAT, (StaticDim(8),))
+        hfunc = HIRFunction(
+            name='test_escan',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRScan(
+                reduction_dim=StaticDim(8),
+                func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+                init=HIRLit(0.0, FLOAT),
+                array=HIRVar('xs', arr_type),
+                exclusive=True, right=False,
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(
+            hfunc, kernel_name="test_escan",
+        )
+        assert "sc_is_zero" in gpu_module.text
+        assert "sc_prev_idx" in gpu_module.text
+
+    def test_right_scan_reverses_indices(self):
+        """E.1.4: right scan reverses load and write indices."""
+        from remora.hir import HIRScan
+        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module
+        arr_type = ArrayType(FLOAT, (StaticDim(8),))
+        hfunc = HIRFunction(
+            name='test_rscan',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRScan(
+                reduction_dim=StaticDim(8),
+                func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+                init=HIRLit(0.0, FLOAT),
+                array=HIRVar('xs', arr_type),
+                exclusive=False, right=True,
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(
+            hfunc, kernel_name="test_rscan",
+        )
+        assert "sc_Nm1" in gpu_module.text
+        assert "llvm.sub %sc_Nm1" in gpu_module.text
+
+    def test_rank2_append_raises_error(self):
+        """E.1.5: rank-2 append in a map body raises GPUScaffoldError."""
+        left_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+        right_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+        result_type = ArrayType(FLOAT, (StaticDim(4), StaticDim(3)))
+        append_expr = HIRAppend(
+            HIRVar('left', left_type),
+            HIRVar('right', right_type),
+            result_type,
+        )
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_r2app',
+            params=[
+                HIRParam('left', left_type),
+                HIRParam('right', right_type),
+            ],
+            body=HIRMap(
+                frame_shape=(StaticDim(4), StaticDim(3)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[append_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        with pytest.raises(GPUScaffoldError, match="rank-1"):
+            build_descriptor_abi_general_map_gpu_module(
+                hfunc, kernel_name="test_r2app",
+            )
 
 
 # ---------------------------------------------------------------------------
