@@ -1,5 +1,6 @@
-"""Tests for N-body force computation (interpreter and CPU compiled)."""
+"""Tests for N-body force computation (interpreter, CPU compiled, GPU compiled)."""
 
+import importlib.util
 import numpy as np
 import pytest
 
@@ -96,6 +97,17 @@ def test_nbody_compiles():
     assert artifact.mlir_module is not None, "N-body compilation should succeed"
     assert len(artifact.mlir_text) > 0
 
+    # Actually run it
+    from remora.runtime import CPUFunctionExecutor
+
+    rng = np.random.default_rng(0)
+    pos = rng.standard_normal((N, 3)).astype(np.float32)
+    compiled_artifact = CPUFunctionExecutor.compile_source(src, "forces", pt, syntax="lisp")
+    executor = CPUFunctionExecutor(compiled_artifact)
+    out = np.asarray(executor.execute(pos).value, dtype=np.float32).reshape(N, 3)
+    ref = _ref_forces(pos)
+    np.testing.assert_allclose(out, ref, rtol=1e-3, atol=1e-4)
+
 
 def test_simple_map_fold_compiles():
     """Verify the simpler map+fold pattern also compiles (no :: let needed)."""
@@ -113,3 +125,27 @@ def test_simple_map_fold_compiles():
     pt = (ArrayType(FLOAT, (StaticDim(N), StaticDim(3))),)
     artifact = compile_function_source(src, "f", pt, syntax="lisp")
     assert artifact.mlir_module is not None, "Simple map-fold compilation should succeed"
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("iree") is None,
+    reason="IREE compiler MLIR bindings are not installed",
+)
+def test_nbody_gpu_compiles():
+    """Verify the N-body GPU PTX compilation succeeds."""
+    from remora.compiler import compile_function_source_to_mlir_gpu_ptx
+    from remora.types import ArrayType, FLOAT, StaticDim
+
+    N = 4
+    src = _nbody_source_compiled(N)
+    pt = (ArrayType(FLOAT, (StaticDim(N), StaticDim(3))),)
+    ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+        src, "forces", pt, syntax="lisp"
+    )
+    assert len(ptx) > 0
+    assert len(kernels) == 1
+    assert kernels[0].name == "remora_forces"
+    assert kernels[0].num_inputs == 1
+    assert kernels[0].num_outputs == 1
+    assert kernels[0].output_shape == (N * 3,)
+    assert kernels[0].output_dtype == "float32"

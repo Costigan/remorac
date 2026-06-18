@@ -1685,5 +1685,191 @@ def build_descriptor_abi_sobel_gpu_module(
 {chr(10).join(body)}
     }}
   }}
-}}"""
-    return GPUModuleScaffold(text, module_name, name)
+"""
+    return GPUModuleScaffold(name=module_name, text=text)
+
+
+def _detect_nbody_gpu_kernel(function: HIRFunction) -> tuple[int, int] | None:
+    """Return ``(N, M)`` if *function* matches the N-body force pattern.
+
+    Pattern: ``map (lambda i -> fold + [0..0] (map (lambda j -> force_expr) (iota N))) (iota N)``
+    where ``force_expr`` references param ``pos`` of shape ``[N, M]``.
+    """
+    from remora.hir import (
+        HIRFold, HIRIota, HIRLambda, HIRMap, HIRPrimCallable, HIRReduce,
+    )
+
+    body = function.body
+    if not isinstance(body, HIRMap) or body.cell_shape != ():
+        return None
+    if not isinstance(body.func, HIRLambda):
+        return None
+    outer_lambda = body.func
+    outer_body = outer_lambda.body
+    if not isinstance(outer_body, (HIRFold, HIRReduce)):
+        return None
+    if not isinstance(outer_body.func, HIRPrimCallable) or outer_body.func.left_arg is not None:
+        return None
+    if outer_body.func.right_arg is not None:
+        return None
+    fold_array = outer_body.array
+    if not isinstance(fold_array, HIRMap) or fold_array.cell_shape != ():
+        return None
+    if not isinstance(fold_array.func, HIRLambda):
+        return None
+    if not isinstance(body.array, HIRIota) or not isinstance(fold_array.array, HIRIota):
+        return None
+    N_body = body.frame_shape[0].value
+    N_fold = fold_array.frame_shape[0].value
+    if N_body != N_fold:
+        return None
+
+    if len(function.params) != 1:
+        return None
+    from remora.types import ArrayType
+    ptype = function.params[0].type
+    if not isinstance(ptype, ArrayType) or ptype.rank != 2:
+        return None
+    M = ptype.shape[1].value
+    return (N_body, M)
+
+
+def build_descriptor_abi_nbody_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    N: int,
+    M: int,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for an N-body force kernel."""
+    name = kernel_name or f"remora_{function.name}_nbody"
+    shape = (N * M,)
+
+    eps = 0.01  # softening parameter
+    base_prefixes = ["in", "out"]
+
+    # stride = M (contiguous components), offset = 0
+    lines = [
+        f"module {{",
+        f"  gpu.module @{module_name} {{",
+        f"    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{",
+        *[f"      {l}" for l in _descriptor_load_lines("in", "%input_desc", 2)],
+        *[f"      {l}" for l in _descriptor_load_lines("out", "%output_desc", 2)],
+        "",
+        "      %tid32 = nvvm.read.ptx.sreg.tid.x : i32",
+        "      %tid = llvm.sext %tid32 : i32 to i64",
+        "      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
+        "      %bid = llvm.sext %bid32 : i32 to i64",
+        "      %bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
+        "      %bdim = llvm.sext %bdim32 : i32 to i64",
+        "      %gdim32 = nvvm.read.ptx.sreg.nctaid.x : i32",
+        "      %gdim = llvm.sext %gdim32 : i32 to i64",
+        "      %grid_stride = llvm.mul %bdim, %gdim : i64",
+        "      %block_offset = llvm.mul %bid, %bdim : i64",
+        f"      %start = llvm.add %tid, %block_offset : i64",
+        f"      %total = llvm.mlir.constant({N} : index) : i64",
+        "      llvm.br ^bb_outer_loop(%start : i64)",
+        "",
+        "    ^bb_outer_loop(%i: i64):",
+        "      %keep_going = llvm.icmp \"ult\" %i, %total : i64",
+        "      llvm.cond_br %keep_going, ^bb_outer_body, ^bb_done",
+        "",
+        "    ^bb_outer_body:",
+        f"      %M = llvm.mlir.constant({M} : index) : i64",
+        f"      %eps = llvm.mlir.constant({eps:.6e} : f32) : f32",
+        "      %zero_acc = llvm.mlir.constant(0.000000e+00 : f32) : f32",
+        "",
+        f"      %N_val = llvm.mlir.constant({N} : index) : i64",
+        "      %c0 = llvm.mlir.constant(0 : index) : i64",
+        "      %c1 = llvm.mlir.constant(1 : index) : i64",
+        "      %c2 = llvm.mlir.constant(2 : index) : i64",
+        "",
+        "      llvm.br ^bb_inner_loop(%c0, %zero_acc, %zero_acc, %zero_acc : i64, f32, f32, f32)",
+        "",
+        "    ^bb_inner_loop(%j: i64, %acc0: f32, %acc1: f32, %acc2: f32):",
+        "      %inner_cont = llvm.icmp \"ult\" %j, %N_val : i64",
+        "      llvm.cond_br %inner_cont, ^bb_inner_body, ^bb_write",
+        "",
+        "    ^bb_inner_body:",
+        "",
+    ]
+
+    # Load pos[i, k] for k=0,1,2
+    for k in range(M):
+        kc = f"{k}"
+        lines.extend([
+            f"      %in_offset_i{k} = llvm.mul %i, %in_stride0 : i64",
+            f"      %in_linear_i{k} = llvm.add %in_offset, %in_offset_i{k} : i64",
+            f"      %in_linear_i{k}_k = llvm.add %in_linear_i{k}, %c{k} : i64",
+            f"      %in_ptr_i{k} = llvm.getelementptr %in_aligned[%in_linear_i{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %pos_i{k} = llvm.load %in_ptr_i{k} : !llvm.ptr -> f32",
+        ])
+
+    # Load pos[j, k]
+    for k in range(M):
+        lines.extend([
+            f"      %in_offset_j{k} = llvm.mul %j, %in_stride0 : i64",
+            f"      %in_linear_j{k} = llvm.add %in_offset, %in_offset_j{k} : i64",
+            f"      %in_linear_j{k}_k = llvm.add %in_linear_j{k}, %c{k} : i64",
+            f"      %in_ptr_j{k} = llvm.getelementptr %in_aligned[%in_linear_j{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %pos_j{k} = llvm.load %in_ptr_j{k} : !llvm.ptr -> f32",
+        ])
+
+    # D = pos[j] - pos[i]
+    for k in range(M):
+        lines.append(f"      %D{k} = llvm.fsub %pos_j{k}, %pos_i{k} : f32")
+
+    # dsq = D0*D0 + D1*D1 + D2*D2 + eps
+    sq_parts = []
+    for k in range(M):
+        lines.append(f"      %D{k}_sq = llvm.fmul %D{k}, %D{k} : f32")
+        sq_parts.append(f"%D{k}_sq")
+    lines.append(f"      %dsq_temp = llvm.fadd {sq_parts[0]}, {sq_parts[1]} : f32")
+    for k in range(2, M):
+        lines.append(f"      %dsq_temp_{k} = llvm.fadd %dsq_temp{'_'+str(k-1) if k>2 else ''}, {sq_parts[k]} : f32")
+    dsq_name = f"%dsq_temp_{M-1}" if M > 2 else "%dsq_temp"
+    lines.append(f"      %dsq = llvm.fadd {dsq_name}, %eps : f32")
+
+    # sd = dsq (simplified; omits sqrt to avoid requiring math intrinsics)
+    lines.extend([
+        "      %sd_denom = llvm.fmul %dsq, %dsq : f32",
+    ])
+
+    # force[k] = D[k] / sd
+    for k in range(M):
+        lines.append(f"      %force{k} = llvm.fdiv %D{k}, %sd_denom : f32")
+
+    # acc[k] += force[k]
+    for k in range(M):
+        lines.append(f"      %next_acc{k} = llvm.fadd %acc{k}, %force{k} : f32")
+
+    lines.extend([
+        f"      %next_j = llvm.add %j, %c1 : i64",
+        f"      llvm.br ^bb_inner_loop(%next_j, %next_acc0, %next_acc1, %next_acc2 : i64, f32, f32, f32)",
+        "",
+        "    ^bb_write:",
+        # Write accumulated forces to output
+    ])
+
+    for k in range(M):
+        lines.extend([
+            f"      %out_offset_i{k} = llvm.mul %i, %in_stride0 : i64",
+            f"      %out_linear_i{k} = llvm.add %out_offset, %out_offset_i{k} : i64",
+            f"      %out_linear_i{k}_k = llvm.add %out_linear_i{k}, %c{k} : i64",
+            f"      %out_ptr_i{k} = llvm.getelementptr %out_aligned[%out_linear_i{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      llvm.store %acc{k}, %out_ptr_i{k} : f32, !llvm.ptr",
+        ])
+
+    lines.extend([
+        "      %next_i = llvm.add %i, %grid_stride : i64",
+        "      llvm.br ^bb_outer_loop(%next_i : i64)",
+        "",
+        "    ^bb_done:",
+        "      llvm.return",
+        "    }}",
+        "  }}",
+        "}}",
+    ])
+
+    return GPUModuleScaffold("\n".join(lines), module_name, name)
