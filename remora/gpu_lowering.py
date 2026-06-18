@@ -1548,3 +1548,117 @@ def build_descriptor_abi_f32_append_gpu_module(
   }}
 }}"""
     return GPUModuleScaffold(text, module_name, name)
+
+
+def _sobel_kernel(function: HIRFunction) -> tuple[HIRFunction, tuple[int, int], int]:
+    """Return ``(function, kernel_shape, stride)`` if *function* is a valid Sobel."""
+    from remora.hir import HIRIm2col
+    if len(function.params) != 3:
+        raise GPUScaffoldError("Sobel requires exactly 3 parameters (image, kx, ky)")
+    def _find(expr):
+        if isinstance(expr, HIRIm2col):
+            return (expr.kernel_shape[0], expr.kernel_shape[1], expr.stride)
+        for fld in ("array", "arrays", "args", "body", "value"):
+            ch = getattr(expr, fld, None)
+            if ch is None: continue
+            if isinstance(ch, (list, tuple)):
+                for c in ch:
+                    r = _find(c)
+                    if r: return r
+            else:
+                r = _find(ch)
+                if r: return r
+        return None
+    s = _find(function.body)
+    if s is None: raise GPUScaffoldError("Sobel requires an im2col in the body")
+    return function, s[:2], s[2]
+
+
+def build_descriptor_abi_sobel_gpu_module(
+    function: HIRFunction, *, module_name: str = "remora_gpu", kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a combined GPU kernel for Sobel (Gx dot-product + Gy dot-product → Gx²+Gy²)."""
+    _, (kh, kw), stride = _sobel_kernel(function)
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("Sobel requires an array image parameter")
+    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    ppa = (h - kh) // stride + 1; pc = ppa * ppa; cs = kh * kw
+    name = kernel_name or f"remora_{function.name}_sobel"
+    _validate_scaffold_names(module_name, name)
+    ds = _descriptor_load_lines("img", "%input_desc", 2)
+    ds.extend(_descriptor_load_lines("kx", "%kernx_desc", 1))
+    ds.extend(_descriptor_load_lines("ky", "%kerny_desc", 1))
+    ds.extend(_descriptor_load_lines("out", "%output_desc", 1))
+    def _cloop(pf, ka, ko):
+        return [
+            f"      %{pf}_init = llvm.mlir.constant(0.000000e+00 : f32) : f32",
+            f"      llvm.br ^sb_{pf}_loop(%sb_zero, %{pf}_init : i64, f32)",
+            f"    ^sb_{pf}_loop(%{pf}_e: i64, %{pf}_acc: f32):",
+            f"      %{pf}_done = llvm.icmp \"uge\" %{pf}_e, %sb_end : i64",
+            f"      llvm.cond_br %{pf}_done, ^sb_{pf}_end(%{pf}_acc : f32), ^sb_{pf}_body",
+            f"    ^sb_{pf}_body:",
+            f"      %{pf}_krow = llvm.udiv %{pf}_e, %sb_kw : i64",
+            f"      %{pf}_kcol = llvm.urem %{pf}_e, %sb_kw : i64",
+            f"      %{pf}_ir1 = llvm.mul %sb_prow, %sb_st : i64",
+            f"      %{pf}_ir2 = llvm.add %{pf}_ir1, %{pf}_krow : i64",
+            f"      %{pf}_ic1 = llvm.mul %sb_pcol, %sb_st : i64",
+            f"      %{pf}_ic2 = llvm.add %{pf}_ic1, %{pf}_kcol : i64",
+            f"      %{pf}_ir3 = llvm.add %{pf}_ir2, %sb_zero : i64",
+            f"      %{pf}_ic3 = llvm.add %{pf}_ic2, %sb_zero : i64",
+            f"      %{pf}_t0 = llvm.mul %{pf}_ir3, %img_stride0 : i64",
+            f"      %{pf}_roff = llvm.add %img_offset, %{pf}_t0 : i64",
+            f"      %{pf}_lin = llvm.add %{pf}_roff, %{pf}_ic3 : i64",
+            f"      %{pf}_pp = llvm.getelementptr %img_aligned[%{pf}_lin] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %{pf}_pix = llvm.load %{pf}_pp : !llvm.ptr -> f32",
+            f"      %{pf}_ek = llvm.add %{pf}_e, %sb_zero : i64",
+            f"      %{pf}_koff = llvm.add {ko}, %{pf}_ek : i64",
+            f"      %{pf}_kp = llvm.getelementptr {ka}[%{pf}_koff] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      %{pf}_kv = llvm.load %{pf}_kp : !llvm.ptr -> f32",
+            f"      %{pf}_mul = llvm.fmul %{pf}_pix, %{pf}_kv : f32",
+            f"      %{pf}_new = llvm.fadd %{pf}_acc, %{pf}_mul : f32",
+            f"      %{pf}_next = llvm.add %{pf}_e, %sb_one : i64",
+            f"      llvm.br ^sb_{pf}_loop(%{pf}_next, %{pf}_new : i64, f32)",
+            f"    ^sb_{pf}_end(%{pf}_result: f32):",
+        ]
+    body = ds + [
+        "      %sb_tid32 = nvvm.read.ptx.sreg.tid.x : i32",
+        "      %sb_tid = llvm.sext %sb_tid32 : i32 to i64",
+        "      %sb_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
+        "      %sb_bid = llvm.sext %sb_bid32 : i32 to i64",
+        "      %sb_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
+        "      %sb_bdim = llvm.sext %sb_bdim32 : i32 to i64",
+        "      %sb_blk = llvm.mul %sb_bid, %sb_bdim  : i64",
+        "      %sb_idx = llvm.add %sb_blk, %sb_tid  : i64",
+        f"      %sb_n = llvm.mlir.constant({pc} : index) : i64",
+        "      %sb_ok = llvm.icmp \"ult\" %sb_idx, %sb_n : i64",
+        "      llvm.cond_br %sb_ok, ^sb_body, ^sb_done",
+        f"    ^sb_body:",
+        f"      %sb_ppa = llvm.mlir.constant({ppa} : index) : i64",
+        "      %sb_prow = llvm.udiv %sb_idx, %sb_ppa : i64",
+        "      %sb_pcol = llvm.urem %sb_idx, %sb_ppa : i64",
+        f"      %sb_zero = llvm.mlir.constant(0 : index) : i64",
+        f"      %sb_one = llvm.mlir.constant(1 : index) : i64",
+        f"      %sb_end = llvm.mlir.constant({cs} : index) : i64",
+        f"      %sb_st = llvm.mlir.constant({stride} : index) : i64",
+        f"      %sb_kw = llvm.mlir.constant({kw} : index) : i64",
+    ] + _cloop("gx", "%kx_aligned", "%kx_offset") + [
+        "      %sb_gx2 = llvm.fmul %gx_result, %gx_result : f32",
+    ] + _cloop("gy", "%ky_aligned", "%ky_offset") + [
+        "      %sb_gy2 = llvm.fmul %gy_result, %gy_result : f32",
+        "      %sb_sum = llvm.fadd %sb_gx2, %sb_gy2 : f32",
+        "      %sb_out_off = llvm.add %out_offset, %sb_idx : i64",
+        "      %sb_out_p = llvm.getelementptr %out_aligned[%sb_out_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      llvm.store %sb_sum, %sb_out_p : f32, !llvm.ptr",
+        "      llvm.br ^sb_done",
+        "    ^sb_done:",
+        "      llvm.return",
+    ]
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %kernx_desc: !llvm.ptr, %kerny_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(body)}
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)

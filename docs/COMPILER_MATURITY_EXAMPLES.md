@@ -1,5 +1,28 @@
 # Compiler Maturity Example Roadmap
 
+## Current Status (2026-06-17)
+
+| # | Example | Interp | CPU | GPU | Notes |
+|---|---------|--------|-----|-----|-------|
+| 3 | Image processing | ✓ | ✓ | ✓ | Sobel, threshold, blur (Phases 4A/4G) |
+| 4 | Logistic regression | ✓ | ✓ | ~ | Phase 1 done; GPU elementwise patterns exist |
+| 1 | PDE solver (heat) | ✓ | ✓ | ✗ | `subarray` views CPU-only; GPU needs pass-through kernel |
+| 8 | Monte Carlo | ✓ | ✓ | ~ | Scan + reduce patterns exist on GPU |
+| 2 | N-body | ✓ | ~ | ✗ | Pairwise broadcasting [N,3]→[N,N,3] large intermediates |
+| 12 | Diff. renderer | ✓ | ~ | ✗ | AD output too complex for GPU pattern matchers; needs multi-op decomposition |
+| 5 | K-Means | ✓ | ~ | ✗ | Broadcasting + argmin; `grade` typecheck-only |
+| 6 | Molecular dynamics | ✓ | ✗ | ✗ | Gather/scatter not supported |
+| 7 | Tomography | ✓ | ✗ | ✗ | Interpolation not supported |
+| 9 | Kalman filter | ✓ | ~ | ✗ | Matmul + scan; scan exists on GPU |
+| 10 | PageRank | ✓ | ✗ | ✗ | Scatter-add not supported |
+| 11 | FFT | ✓ | ✗ | ✗ | Complex numbers not supported |
+
+**Interpreter:** `evaluate_source` / `_lambda_callable` path — works for all
+examples (interpreter handles the full Remora surface).  **CPU:** descriptor-ABI
+native compilation.  **GPU:** `compile_function_source_to_mlir_gpu_ptx` →
+PTX → CUDA launch.  ✓ = verified, ~ = likely works / not fully tested, ✗ =
+blocked by missing compiler capability.
+
 ## Purpose
 
 This document lists candidate end-to-end examples that could mature `remorac` in

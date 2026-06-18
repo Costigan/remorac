@@ -41,6 +41,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_f32_scan_gpu_module,
     build_descriptor_abi_i32_map_gpu_module,
     build_descriptor_abi_im2col_gpu_module,
+    build_descriptor_abi_sobel_gpu_module,
     extract_gpu_module_body_as_module,
 )
 
@@ -183,6 +184,35 @@ def generate_mlir_descriptor_abi_ptx(
                 input_elem_types=["f32", "f32"],
                 output_elem_types=["f32"],
                 output_shape=(pc2,),
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+    except GPUScaffoldError:
+        pass
+
+    # ── try GPU Sobel (combined 2-kernel cell-fold) ──
+    try:
+        from remora.gpu_lowering import _sobel_kernel
+
+        _, (kh, kw), stride = _sobel_kernel(function)
+        param_type3 = function.params[0].type
+        if isinstance(param_type3, ArrayType) and param_type3.rank == 2:
+            h3, w3 = int(param_type3.shape[0].value), int(param_type3.shape[1].value)
+            ppa3 = (h3 - kh) // stride + 1
+            pc3 = ppa3 * ppa3
+            gpu_module = build_descriptor_abi_sobel_gpu_module(function, kernel_name=name)
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=3,
+                num_outputs=1,
+                input_elem_types=["f32", "f32", "f32"],
+                output_elem_types=["f32"],
+                output_shape=(pc3,),
                 output_dtype="float32",
             )
             device_module = extract_gpu_module_body_as_module(gpu_module.text)

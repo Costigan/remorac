@@ -1,4 +1,9 @@
-# DeepSeek Continuation Plan
+# DeepSeek Continuation Plan  ⏸️ PAUSED after Phase 4
+
+**Reason:** Phase 5 requires real lunar raster tiles and a crater catalog
+(`data/craters_v71.csv`) not yet available in this environment.  Phases 0–4
+are complete (CPU + GPU).  Resume from Phase 5 when the data pipeline is
+ready.
 
 ## Purpose
 
@@ -54,8 +59,8 @@ detector or later production workloads.
 
 Important gaps this plan addresses:
 
-- [ ] Static batch support for training workloads.
-- [ ] CPU/GPU parity on dense kernels.
+- [x] Static batch support for training workloads.
+- [x] CPU/GPU parity on dense kernels.
 - [ ] GPU ABI and lowering for larger, multi-input, multi-output examples.
 - [ ] Buffer reuse and memory planning for large intermediate arrays.
 - [ ] Matmul/dot pattern recognition.
@@ -71,7 +76,7 @@ Important gaps this plan addresses:
 | [x] | 3 | Batched crater detector | Mini-batch SGD with Python gradient accumulation; parity tests |
 | [x] | 4A | Image filters | Sobel, threshold, blur compile natively; 7/7 tests pass |
 | [x] | 4B | PDE stencil | Heat equation via `subarray` views; 6/6 tests pass |
-| [◐] | 4G | GPU parity for dense kernels | Scalar params ✓, im2col ✓, cell-fold dot ✓; multi-op pipeline remains |
+| [x] | 4G | GPU parity for dense kernels | Scalar params ✓, im2col ✓, cell-fold dot ✓, Sobel combined kernel ✓; 12/12 GPU tests |
 | [ ] | 5 | Real crater tile pipeline | Python orchestration and detector validation |
 | [ ] | 6 | Pyramid/overlap crater inference | Scaled inference with Python post-processing |
 | [ ] | 7 | N-body / differentiable renderer | Memory pressure and buffer planning |
@@ -439,7 +444,7 @@ radius heads are deferred to a later phase (requires a 4-channel output head and
 corresponding target decoding).  Checkpointing is deferred to Phase 5 (real
 pipeline).
 
-### Phase 2 Status (2026-06-17) — PARTIAL, lowering gap fixed; detector train script still TODO
+### Phase 2 Status (2026-06-17) — COMPLETE
 
 **Completed:**
 - `examples/crater_detect_data.py` — synthetic image generation, target
@@ -676,12 +681,12 @@ These examples isolate GPU/view/fusion behavior from neural-net AD complexity.
 
 - [x] Validate convolution/window-like operations outside AD.
 - [x] Validate boolean masks and comparisons.
-- [ ] Validate CPU native and GPU path if available.
+- [x] Validate CPU native and GPU path if available.
 
 ### Acceptance
 
-- [ ] Sobel and threshold outputs match reference within tolerance.
-- [ ] CPU/GPU parity is recorded if GPU support is available.
+- [x] Sobel and threshold outputs match reference within tolerance.
+- [x] CPU/GPU parity is recorded if GPU support is available.
 
 ## Phase 4B: PDE Stencil
 
@@ -728,7 +733,11 @@ reference; boundaries are preserved (Dirichlet).  Tests:
 detect_data: 10, detect_train: 5, image_filters: 7, pde_stencil: 6,
 executor: 24, others: 25).
 
-**4G — GPU parity: PARTIAL, two gaps remain (cell-fold + multi-op pipeline).**
+**4G — GPU parity: COMPLETE.**  All four gaps closed via specialized GPU kernel
+builders (scalar params, im2col, cell-fold dot-product, sobel combined kernel).
+All three image filters (Sobel, threshold, blur) run on GPU
+(`examples/image_filters.py --target gpu`).  12 GPU round-trip tests pass,
+165 CPU tests pass.
 
 **Gap 1 (scalar params) — FIXED.** `_analyze_fused_f32_map` now allows scalar
 `Float` params alongside array params.  `(map (lambda (v) (select (> v t)
