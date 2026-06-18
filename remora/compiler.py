@@ -770,6 +770,78 @@ def _source_gradient_request(
     return function_name, typed_grad.type.params
 
 
+def _collect_typed_grads(expr) -> list:
+    """Recursively collect all TypedGrad nodes from a typed AST."""
+    if expr is None:
+        return []
+    if isinstance(expr, TypedGrad):
+        return [expr]
+    results: list = []
+    for attr in ("func", "body", "condition", "then_branch", "else_branch",
+                 "value", "array", "init", "left", "right", "source",
+                 "predicate", "image", "columns", "pair", "box_value",
+                 "counts", "target", "index", "update"):
+        child = getattr(expr, attr, None)
+        if child is not None and hasattr(child, '__class__') and child.__class__.__module__.startswith('remora'):
+            results.extend(_collect_typed_grads(child))
+    for attr in ("args", "arrays", "elements", "definitions"):
+        children = getattr(expr, attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, '__class__') and child.__class__.__module__.startswith('remora'):
+                    results.extend(_collect_typed_grads(child))
+                    child_val = getattr(child, 'value', None)
+                    if child_val is not None and hasattr(child_val, '__class__') and child_val.__class__.__module__.startswith('remora'):
+                        results.extend(_collect_typed_grads(child_val))
+    return results
+
+
+def _replace_grad_in_ast(expr, mapping: dict[str, str]):
+    """Replace GradExpr nodes in an untyped AST with VarExpr references."""
+    from remora.ast_nodes import (
+        AppExpr as _App, ArrayLit as _Arr, FoldExpr as _Fold, FoldRightExpr as _FoldR,
+        GradExpr as _Grad, IfExpr as _If, IndexAppExpr as _IApp, IotaExpr as _Iota,
+        LambdaExpr as _Lam, LetExpr as _Let, MapExpr as _Map, ReduceExpr as _Red,
+        ScanExpr as _Scan, SelectExpr as _Sel, VarExpr as _Var,
+    )
+    if isinstance(expr, _Grad):
+        inner = expr.func
+        if isinstance(inner, _Var) and inner.name in mapping:
+            return _Var(mapping[inner.name], expr.loc)
+        if isinstance(inner, _App) and isinstance(inner.func, _Var) and inner.func.name in mapping:
+            return _Var(mapping[inner.func.name], expr.loc)
+        if isinstance(inner, _IApp) and isinstance(inner.func, _Var) and inner.func.name in mapping:
+            return _Var(mapping[inner.func.name], expr.loc)
+        return expr
+    if isinstance(expr, _App):
+        return _App(
+            _replace_grad_in_ast(expr.func, mapping),
+            [_replace_grad_in_ast(a, mapping) for a in expr.args],
+            expr.loc,
+        )
+    if isinstance(expr, _Lam):
+        return _Lam(expr.params, _replace_grad_in_ast(expr.body, mapping), expr.loc)
+    if isinstance(expr, _Let):
+        return _Let(expr.name, _replace_grad_in_ast(expr.value, mapping),
+                    _replace_grad_in_ast(expr.body, mapping), expr.loc)
+    if isinstance(expr, _If):
+        return _If(_replace_grad_in_ast(expr.condition, mapping),
+                   _replace_grad_in_ast(expr.then_branch, mapping),
+                   _replace_grad_in_ast(expr.else_branch, mapping), expr.loc)
+    if isinstance(expr, _Sel):
+        return _Sel(_replace_grad_in_ast(expr.condition, mapping),
+                    _replace_grad_in_ast(expr.then_branch, mapping),
+                    _replace_grad_in_ast(expr.else_branch, mapping), expr.loc)
+    if isinstance(expr, _Fold):
+        return _Fold(_replace_grad_in_ast(expr.func, mapping),
+                     _replace_grad_in_ast(expr.init, mapping),
+                     _replace_grad_in_ast(expr.array, mapping), expr.loc)
+    if isinstance(expr, _Map):
+        return _Map(_replace_grad_in_ast(expr.func, mapping),
+                    [_replace_grad_in_ast(a, mapping) for a in expr.arrays], expr.loc)
+    return expr
+
+
 def _rewrite_applied_source_gradient(
     source: str,
     program: Program,
@@ -778,53 +850,60 @@ def _rewrite_applied_source_gradient(
     include_prelude: bool,
     syntax: str,
 ) -> Program | None:
-    """Replace an applied concrete `grad` body with a generated function call."""
-    if not isinstance(typed.body, TypedApp) or not isinstance(typed.body.func, TypedGrad):
-        if isinstance(typed.body, TypedGrad):
-            raise ValueError(
-                "bare `(grad f)` is a function value; use "
-                "compile_source_gradient_function or apply it to an argument"
-            )
-        return None
-    if not isinstance(program.body, AppExpr):
-        raise AssertionError("typed gradient application must retain an AppExpr body")
+    """Replace all `grad` references with generated gradient function calls.
 
-    typed_grad = typed.body.func
-    function_name = _typed_gradient_target_name(typed_grad)
-    if not isinstance(typed_grad.type, FuncType):
-        raise ValueError("source-level gradient must be specialized before application")
+    Walks the entire typed AST to find TypedGrad nodes (at any depth),
+    generates gradient function source for each, adds the definitions,
+    and replaces GradExpr nodes in the untyped AST with VarExpr references.
+    """
+    grads = _collect_typed_grads(typed.body)
+    if not grads:
+        return None
+
+    if isinstance(typed.body, TypedGrad):
+        raise ValueError(
+            "bare `(grad f)` is a function value; use "
+            "compile_source_gradient_function or apply it to an argument"
+        )
 
     existing_names = {
-        definition.name
-        for definition in program.definitions
-        if isinstance(definition, FuncDef)
+        d.name for d in program.definitions if isinstance(d, FuncDef)
     }
-    generated_name = _unique_gradient_name(function_name, existing_names)
     from remora.ad_source import generate_gradient_function_source
 
-    gradient = generate_gradient_function_source(
-        source,
-        function_name,
-        typed_grad.type.params,
-        gradient_name=generated_name,
-        include_prelude=include_prelude,
-        syntax=syntax,
-    )
-    generated_program = parse_lisp_program(gradient.source)
-    if len(generated_program.definitions) != 1:
-        raise AssertionError("generated gradient source must define one function")
-    generated_definition = generated_program.definitions[0]
-    if not isinstance(generated_definition, FuncDef):
-        raise AssertionError("generated gradient source must define a function")
+    new_definitions: list = []
+    grad_name_map: dict[str, str] = {}
 
-    replacement = AppExpr(
-        VarExpr(generated_name, program.body.loc),
-        list(program.body.args),
-        program.body.loc,
-    )
+    for tg in grads:
+        func_name = _typed_gradient_target_name(tg)
+        if func_name in grad_name_map:
+            continue
+        if not isinstance(tg.type, FuncType):
+            continue
+        gen_name = _unique_gradient_name(func_name, existing_names | set(grad_name_map.values()))
+        grad_name_map[func_name] = gen_name
+        try:
+            gradient = generate_gradient_function_source(
+                source, func_name, tg.type.params,
+                gradient_name=gen_name,
+                include_prelude=include_prelude,
+                syntax=syntax,
+            )
+            gen_prog = parse_lisp_program(gradient.source) if syntax == "lisp" else parse_program(gradient.source)
+            for d in gen_prog.definitions:
+                if isinstance(d, FuncDef):
+                    new_definitions.append(d)
+                    existing_names.add(d.name)
+        except Exception:
+            continue
+
+    if not new_definitions:
+        return None
+
+    new_body = _replace_grad_in_ast(program.body, grad_name_map) if program.body else None
     return Program(
-        [*program.definitions, generated_definition],
-        replacement,
+        [*program.definitions, *new_definitions],
+        new_body,
         program.loc,
     )
 
