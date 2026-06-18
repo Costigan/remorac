@@ -1,14 +1,15 @@
-"""Train an anchor-free crater grid detector (objectness-only) on synthetic data.
+"""Train an anchor-free crater grid detector on synthetic data.
 
-Uses a single compiled value-and-grad function returning gradients for kernel
-k, bias b1, weight w2, and bias b2.  Python accumulates gradients over a
-static batch and updates parameters with SGD.
+Uses a single compiled value-and-grad function returning gradients for four
+kernels (objectness, dx, dy, log_radius), plus shared bias b1, weight w2,
+and bias b2 — 7 trainable parameters total.  Python accumulates gradients
+across a mini-batch and updates parameters with SGD.
 
 Model contract:
-  images:  [1, 64, 64]  float32
-  targets: [64]          float32  (objectness, 0 or 1)
-  logits:  [64]          float32  (unbounded)
-  loss:    Float
+  images:       [1, 64, 64]  float32
+  target grid:  [8, 8, 4]    float32  (objectness, dx, dy, log_radius)
+  Output:       [64] × 4     float32  (one per channel, flattened)
+  loss:         Float
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from time import perf_counter
 import numpy as np
 
 from examples.crater_detect_data import (
-    CELL_SIZE,
     CraterParams,
     TargetInfo,
     assign_targets,
@@ -36,62 +36,114 @@ IMAGE_SIZE = 64
 GRID_SIZE = 8
 KERNEL_SIZE = 3
 STRIDE = 8
-PATCH_SIZE = KERNEL_SIZE ** 2  # 9
-PATCHES_PER_AXIS = (IMAGE_SIZE - KERNEL_SIZE) // STRIDE + 1  # 8
-PATCH_COUNT = PATCHES_PER_AXIS ** 2  # 64
+PATCH_COUNT = ((IMAGE_SIZE - KERNEL_SIZE) // STRIDE + 1) ** 2  # 64
+
+CENTER_WEIGHT = 1.0
+RADIUS_WEIGHT = 0.1
+
 DATA_SEED = 1729
 PARAMETER_SEED = 22022022
 
-TRAINABLE_NAMES = ("k", "b1", "w2", "b2")
+# ── Remora source (programmatically built for correct paren balancing) ──────
 
-# ── Remora source ───────────────────────────────────────────────────────────
 
-_D = (
-    f"(+ (* w2 (map relu (+ (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) "
-    f"(im2col image [{KERNEL_SIZE} {KERNEL_SIZE}] {STRIDE})) b1))) b2)"
-)
+def _D(k_name: str) -> str:
+    """One detector channel (3×3 dot over im2col + ReLU + w2 * + b2) → [64]."""
+    return (
+        f"(+ (* w2 (map relu (+ (map (lambda (p) (fold + 0.0 (map * p (ravel {k_name})))) "
+        f"(im2col image [{KERNEL_SIZE} {KERNEL_SIZE}] {STRIDE})) b1))) b2)"
+    )
 
-_DETECTOR_LISP_SRC = f"""
-(define/pi ()
-  (relu [v Float] Float)
-  (select (> v 0.0) v 0.0))
 
-(define/pi ()
-  (absv [v Float] Float)
-  (select (> v 0.0) v (- 0.0 v)))
+def _bce(expr: str, target: str) -> str:
+    """Stable BCE elementwise on [64] arrays — all primitive ops, no lambdas."""
+    return (
+        f"(+ (map relu {expr})"
+        f" (+ (* -1.0 (* {expr} {target}))"
+        f" (log (+ 1.0 (exp (- 0.0 (map absv {expr})))))))"
+    )
 
-(define/pi ()
-  (detect-loss [k (Array Float {KERNEL_SIZE} {KERNEL_SIZE}) b1 Float w2 Float b2 Float image (Array Float {IMAGE_SIZE} {IMAGE_SIZE}) target (Array Float {PATCH_COUNT})] Float)
-  (fold + 0.0
-    (+ (map relu {_D})
-       (+ (* -1.0 (* {_D} target))
-          (log (+ 1.0 (exp (- 0.0 (map absv {_D})))))))))
-"""
+
+def _masked_l2(expr: str, target: str, mask: str) -> str:
+    """Masked L2 loss: sum(mask * (expr - target)^2)."""
+    return f"(fold + 0.0 (* {mask} (* (- {expr} {target}) (- {expr} {target}))))"
+
+
+def _build_detector_source() -> str:
+    bce_loss = f"(fold + 0.0 {_bce(_D('k_obj'), 'target_obj')})"
+    center = (
+        f"(* {CENTER_WEIGHT} (+"
+        f" {_masked_l2(_D('k_dx'), 'target_dx', 'target_obj')}"
+        f" {_masked_l2(_D('k_dy'), 'target_dy', 'target_obj')}))"
+    )
+    radius = f"(* {RADIUS_WEIGHT} {_masked_l2(_D('k_logr'), 'target_logr', 'target_obj')})"
+    body = f"(+ {bce_loss} (+ {center} {radius}))"
+
+    params = " ".join([
+        "k_obj (Array Float 3 3)",
+        "k_dx (Array Float 3 3)",
+        "k_dy (Array Float 3 3)",
+        "k_logr (Array Float 3 3)",
+        "b1 Float w2 Float b2 Float",
+        f"image (Array Float {IMAGE_SIZE} {IMAGE_SIZE})",
+        f"target_obj (Array Float {PATCH_COUNT})",
+        f"target_dx (Array Float {PATCH_COUNT})",
+        f"target_dy (Array Float {PATCH_COUNT})",
+        f"target_logr (Array Float {PATCH_COUNT})",
+    ])
+
+    return "\n".join([
+        "",
+        "(define/pi ()",
+        "  (relu [v Float] Float)",
+        "  (select (> v 0.0) v 0.0))",
+        "",
+        "(define/pi ()",
+        "  (absv [v Float] Float)",
+        "  (select (> v 0.0) v (- 0.0 v)))",
+        "",
+        "(define/pi ()",
+        f"  (detect-loss [{params}] Float)",
+        f"  {body})",
+        "",
+    ])
+
+
+_DETECTOR_LISP_SRC = _build_detector_source()
 
 # ── data helpers ────────────────────────────────────────────────────────────
 
 
-def _objectness_target(target_grid: np.ndarray) -> np.ndarray:
-    """Extract objectness channel from [8,8,4] and flatten to [64]."""
-    return np.ascontiguousarray(target_grid[..., 0].ravel())
+def _extract_channels(target_grid: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Return four [64] channels from a [8,8,4] target grid."""
+    return (
+        np.ascontiguousarray(target_grid[..., 0].ravel()),
+        np.ascontiguousarray(target_grid[..., 1].ravel()),
+        np.ascontiguousarray(target_grid[..., 2].ravel()),
+        np.ascontiguousarray(target_grid[..., 3].ravel()),
+    )
 
 
 def make_dataset(
     n: int = 4,
     *,
     seed: int = DATA_SEED,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[TargetInfo]]:
+) -> tuple[
+    list[np.ndarray],
+    list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    list[TargetInfo],
+]:
     """Generate a synthetic crater detection dataset.
 
     Returns
-        images   list of [64,64] float32  (squeezed from [1,64,64])
-        targets  list of [64]   float32  (objectness channel, flattened)
+        images   list of [64,64] float32
+        targets  list of (obj[64], dx[64], dy[64], logr[64])
         infos    diagnostic summary per example.
     """
     n_craters = max(n // 2 + 1, 1)
     rng = np.random.RandomState(seed)
     images: list[np.ndarray] = []
-    targets: list[np.ndarray] = []
+    targets: list[tuple[np.ndarray, ...]] = []
     infos: list[TargetInfo] = []
 
     for i in range(n):
@@ -106,28 +158,24 @@ def make_dataset(
         target_grid, info = assign_targets(craters)
 
         images.append(np.ascontiguousarray(img_1[0].astype(np.float32)))
-        targets.append(_objectness_target(target_grid))
+        targets.append(_extract_channels(target_grid))
         infos.append(info)
 
     return images, targets, infos
 
 
-def _objectness_target_grid(targets_flat: np.ndarray) -> np.ndarray:
-    """Reshape [64] back to [8,8] with zeros for the remaining 3 channels."""
-    grid = np.zeros((GRID_SIZE, GRID_SIZE, 4), dtype=np.float32)
-    grid[..., 0] = targets_flat.reshape(GRID_SIZE, GRID_SIZE)
-    return grid
-
-
 def initialize_parameters(
     *, seed: int = PARAMETER_SEED
-) -> tuple[np.ndarray, np.float32, np.float32, np.float32]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+           np.float32, np.float32, np.float32]:
     rng = np.random.RandomState(seed)
-    k = np.ascontiguousarray(rng.randn(KERNEL_SIZE, KERNEL_SIZE).astype(np.float32) * 0.1)
-    b1 = np.float32(0.0)
-    w2 = np.float32(rng.randn() * 0.1)
-    b2 = np.float32(0.0)
-    return k, b1, w2, b2
+    kernels = tuple(
+        np.ascontiguousarray(
+            rng.randn(KERNEL_SIZE, KERNEL_SIZE).astype(np.float32) * 0.1
+        )
+        for _ in range(4)
+    )
+    return (*kernels, np.float32(0.0), np.float32(rng.randn() * 0.1), np.float32(0.0))
 
 
 # ── parameter types ─────────────────────────────────────────────────────────
@@ -135,12 +183,10 @@ def initialize_parameters(
 
 def _parameter_types() -> tuple[RemoraType, ...]:
     return (
-        ArrayType(FLOAT, (StaticDim(KERNEL_SIZE), StaticDim(KERNEL_SIZE))),
-        FLOAT,
-        FLOAT,
-        FLOAT,
+        *(ArrayType(FLOAT, (StaticDim(KERNEL_SIZE), StaticDim(KERNEL_SIZE))),) * 4,
+        FLOAT, FLOAT, FLOAT,
         ArrayType(FLOAT, (StaticDim(IMAGE_SIZE), StaticDim(IMAGE_SIZE))),
-        ArrayType(FLOAT, (StaticDim(PATCH_COUNT),)),
+        *(ArrayType(FLOAT, (StaticDim(PATCH_COUNT),)),) * 4,
     )
 
 
@@ -149,35 +195,38 @@ def _parameter_types() -> tuple[RemoraType, ...]:
 
 @dataclass(frozen=True)
 class DetectorCompiledFunctions:
-    """Compiled forward and value-and-grad function for native CPU execution."""
+    """Compiled forward and value-and-grad (7 trainable parameters)."""
 
     _loss_exe: CPUFunctionExecutor
     _grad_exe: CPUFunctionExecutor
 
     def forward(
         self,
-        k: np.ndarray,
+        kernels: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
         b1: float,
         w2: float,
         b2: float,
         image: np.ndarray,
-        target_flat: np.ndarray,
+        channels: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     ) -> float:
         return float(np.asarray(self._loss_exe.execute(
-            k, np.float32(b1), np.float32(w2), np.float32(b2), image, target_flat,
+            *kernels, np.float32(b1), np.float32(w2), np.float32(b2),
+            image, *channels,
         ).value))
 
     def gradients(
         self,
-        k: np.ndarray,
+        kernels: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
         b1: float,
         w2: float,
         b2: float,
         image: np.ndarray,
-        target_flat: np.ndarray,
-    ) -> tuple[np.ndarray, np.float32, np.float32, np.float32]:
+        channels: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+               np.float32, np.float32, np.float32]:
         result = self._grad_exe.execute(
-            k, np.float32(b1), np.float32(w2), np.float32(b2), image, target_flat,
+            *kernels, np.float32(b1), np.float32(w2), np.float32(b2),
+            image, *channels,
         )
 
         def _flatten(value):
@@ -189,12 +238,12 @@ class DetectorCompiledFunctions:
             return [value]
 
         flat = _flatten(result.value)
-        # Pair order: g_k, g_b1, g_w2, g_b2
-        g_k = np.asarray(flat[0], dtype=np.float32)
-        g_b1 = np.float32(flat[1])
-        g_w2 = np.float32(flat[2])
-        g_b2 = np.float32(flat[3])
-        return g_k, g_b1, g_w2, g_b2
+        # Pair order: g_k_obj, g_k_dx, g_k_dy, g_k_logr, g_b1, g_w2, g_b2
+        g_ks = tuple(np.asarray(flat[i], dtype=np.float32) for i in range(4))
+        g_b1 = np.float32(flat[4])
+        g_w2 = np.float32(flat[5])
+        g_b2 = np.float32(flat[6])
+        return g_ks, g_b1, g_w2, g_b2
 
     @staticmethod
     def compile() -> DetectorCompiledFunctions:
@@ -203,7 +252,7 @@ class DetectorCompiledFunctions:
             _DETECTOR_LISP_SRC,
             "detect-loss",
             param_types,
-            differentiate_inputs=(0, 1, 2, 3),
+            differentiate_inputs=tuple(range(7)),
             include_prelude=False,
             syntax="lisp",
         )
@@ -232,7 +281,10 @@ class DetectorCompiledFunctions:
 
 @dataclass(frozen=True)
 class DetectorTrainingResult:
-    parameters: tuple[np.ndarray, np.float32, np.float32, np.float32]
+    parameters: tuple[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        np.float32, np.float32, np.float32,
+    ]
     loss_history: tuple[float, ...]
     compile_seconds: float
     mean_step_seconds: float
@@ -244,13 +296,15 @@ def train(
     n: int = 8,
     batch_size: int = 4,
     epochs: int = 10,
-    learning_rate: float = 0.05,
+    learning_rate: float = 0.01,
     data_seed: int = DATA_SEED,
     parameter_seed: int = PARAMETER_SEED,
     verbose: bool = True,
 ) -> DetectorTrainingResult:
-    images, targets, infos = make_dataset(n=n, seed=data_seed)
-    k, b1, w2, b2 = initialize_parameters(seed=parameter_seed)
+    images, targets_list, infos = make_dataset(n=n, seed=data_seed)
+    k_obj, k_dx, k_dy, k_logr, b1, w2, b2 = initialize_parameters(
+        seed=parameter_seed,
+    )
 
     compile_start = perf_counter()
     compiled = DetectorCompiledFunctions.compile()
@@ -268,33 +322,37 @@ def train(
             batch_idx = indices[start : start + batch_size]
             step_start = perf_counter()
 
-            # Accumulate gradients over the minibatch.
-            g_k_sum = np.zeros_like(k)
+            g_k_sum = [np.zeros_like(k_obj) for _ in range(4)]
             g_b1_sum = 0.0
             g_w2_sum = 0.0
             g_b2_sum = 0.0
             for idx in batch_idx:
                 x_img = images[idx]
-                loss_i = compiled.forward(
-                    k, float(b1), float(w2), float(b2), x_img, targets[idx],
-                )
+                ch = targets_list[idx]
+                kernels = (k_obj, k_dx, k_dy, k_logr)
+                loss_i = compiled.forward(kernels, float(b1), float(w2), float(b2), x_img, ch)
                 epoch_loss += loss_i
 
-                g_k, g_b1, g_w2, g_b2 = compiled.gradients(
-                    k, float(b1), float(w2), float(b2), x_img, targets[idx],
+                g_ks, g_b1, g_w2, g_b2 = compiled.gradients(
+                    kernels, float(b1), float(w2), float(b2), x_img, ch,
                 )
-                g_k_sum += g_k
+                for c in range(4):
+                    g_k_sum[c] += g_ks[c]
                 g_b1_sum += float(g_b1)
                 g_w2_sum += float(g_w2)
                 g_b2_sum += float(g_b2)
 
-            # Mean gradient over the batch, then SGD update.
             bn = len(batch_idx)
-            k = np.asarray(k - learning_rate * (g_k_sum / bn), dtype=np.float32)
-            k = np.ascontiguousarray(k)
-            b1 = np.float32(b1 - learning_rate * (np.float32(g_b1_sum) / bn))
-            w2 = np.float32(w2 - learning_rate * (np.float32(g_w2_sum) / bn))
-            b2 = np.float32(b2 - learning_rate * (np.float32(g_b2_sum) / bn))
+            lr_bn = learning_rate / bn
+            k_obj = np.asarray(k_obj - lr_bn * g_k_sum[0], dtype=np.float32)
+            k_dx = np.asarray(k_dx - lr_bn * g_k_sum[1], dtype=np.float32)
+            k_dy = np.asarray(k_dy - lr_bn * g_k_sum[2], dtype=np.float32)
+            k_logr = np.asarray(k_logr - lr_bn * g_k_sum[3], dtype=np.float32)
+            for arr in (k_obj, k_dx, k_dy, k_logr):
+                arr = np.ascontiguousarray(arr)
+            b1 = np.float32(b1 - lr_bn * g_b1_sum)
+            w2 = np.float32(w2 - lr_bn * g_w2_sum)
+            b2 = np.float32(b2 - lr_bn * g_b2_sum)
 
             step_seconds.append(perf_counter() - step_start)
 
@@ -310,7 +368,7 @@ def train(
         print(f"initial loss {loss_history[0]:.6f} -> final {loss_history[-1]:.6f}")
 
     return DetectorTrainingResult(
-        parameters=(k, b1, w2, b2),
+        parameters=((k_obj, k_dx, k_dy, k_logr), b1, w2, b2),
         loss_history=tuple(loss_history),
         compile_seconds=compile_seconds,
         mean_step_seconds=mean_step_seconds,
@@ -326,11 +384,13 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--examples", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=DATA_SEED)
     args = parser.parse_args()
 
     train(
         n=args.examples,
+        batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         data_seed=args.seed,
