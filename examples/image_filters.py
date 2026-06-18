@@ -7,7 +7,8 @@ Compiled filters are verified against NumPy references.
 Usage:
   python examples/image_filters.py --size 128 --filter sobel
   python examples/image_filters.py --size 64  --filter blur
-  python examples/image_filters.py                 # run all
+  python examples/image_filters.py --target gpu --size 128
+  python examples/image_filters.py                 # run all on CPU
 """
 
 from __future__ import annotations
@@ -73,6 +74,35 @@ def _compile_and_run(
         compiled.close()
 
 
+def _compile_and_run_gpu(
+    function_name: str,
+    param_types: tuple,
+    inputs: tuple,
+) -> np.ndarray:
+    """Compile *function_name* to PTX and run it on GPU."""
+    from remora.compiler import compile_function_source_to_mlir_gpu_ptx
+    from remora.executor import RemoraExecutor
+    from remora.runtime import CUDARuntime, RuntimeUnavailable
+
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable:
+        raise RuntimeError("CUDA not available — cannot use GPU target") from None
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            _IMAGE_FILTERS_LISP_SRC,
+            function_name,
+            param_types,
+            include_prelude=False,
+            syntax="lisp",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        result = executor.execute_main([np.asarray(v, dtype=np.float32) for v in inputs])
+    finally:
+        runtime.close()
+    return np.asarray(result, dtype=np.float32)
+
+
 _SOBEL_X = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
 _SOBEL_Y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
 _BOX_KERNEL = np.full((3, 3), 1.0 / 9.0, dtype=np.float32)
@@ -105,17 +135,18 @@ def _ref_blur(image: np.ndarray) -> np.ndarray:
     return _conv2d_valid(image, _BOX_KERNEL).ravel().astype(np.float32)
 
 
-def run_sobel(size: int, *, verbose: bool = True) -> np.ndarray:
+def run_sobel(size: int, *, target: str = "cpu", verbose: bool = True) -> np.ndarray:
     image = np.random.default_rng(0).standard_normal((size, size)).astype(np.float32)
     ptype = (
         ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),
         ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
         ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
     )
+    run = _compile_and_run_gpu if target == "gpu" else _compile_and_run
     if verbose:
-        print(f"Sobel {size}×{size} …", end=" ", flush=True)
+        print(f"Sobel {size}×{size} ({target}) …", end=" ", flush=True)
     t0 = perf_counter()
-    out = _compile_and_run("sobel", ptype, (image, _SOBEL_X, _SOBEL_Y))
+    out = run("sobel", ptype, (image, _SOBEL_X, _SOBEL_Y))
     elapsed = perf_counter() - t0
     patches = (size - 2) ** 2
     ref = _ref_sobel_sq(image)
@@ -125,16 +156,17 @@ def run_sobel(size: int, *, verbose: bool = True) -> np.ndarray:
     return out
 
 
-def run_threshold(size: int, t: float = 0.0, *, verbose: bool = True) -> np.ndarray:
+def run_threshold(size: int, t: float = 0.0, *, target: str = "cpu", verbose: bool = True) -> np.ndarray:
     image = np.random.default_rng(1).standard_normal((size, size)).astype(np.float32)
     ptype = (
         ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),
         FLOAT,
     )
+    run = _compile_and_run_gpu if target == "gpu" else _compile_and_run
     if verbose:
-        print(f"Threshold {size}×{size} …", end=" ", flush=True)
+        print(f"Threshold {size}×{size} ({target}) …", end=" ", flush=True)
     t0 = perf_counter()
-    out = _compile_and_run("threshold", ptype, (image, np.float32(t)))
+    out = run("threshold", ptype, (image, np.float32(t)))
     elapsed = perf_counter() - t0
     ref = _ref_threshold(image, t)
     np.testing.assert_array_equal(out, ref)
@@ -143,16 +175,17 @@ def run_threshold(size: int, t: float = 0.0, *, verbose: bool = True) -> np.ndar
     return out
 
 
-def run_blur(size: int, *, verbose: bool = True) -> np.ndarray:
+def run_blur(size: int, *, target: str = "cpu", verbose: bool = True) -> np.ndarray:
     image = np.random.default_rng(2).standard_normal((size, size)).astype(np.float32)
     ptype = (
         ArrayType(FLOAT, (StaticDim(size), StaticDim(size))),
         ArrayType(FLOAT, (StaticDim(3), StaticDim(3))),
     )
+    run = _compile_and_run_gpu if target == "gpu" else _compile_and_run
     if verbose:
-        print(f"Blur {size}×{size} …", end=" ", flush=True)
+        print(f"Blur {size}×{size} ({target}) …", end=" ", flush=True)
     t0 = perf_counter()
-    out = _compile_and_run("blur", ptype, (image, _BOX_KERNEL))
+    out = run("blur", ptype, (image, _BOX_KERNEL))
     elapsed = perf_counter() - t0
     patches = (size - 2) ** 2
     ref = _ref_blur(image)
@@ -170,14 +203,15 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=32)
     parser.add_argument("--filter", choices=["sobel", "threshold", "blur", "all"], default="all")
     parser.add_argument("--threshold", type=float, default=0.0)
+    parser.add_argument("--target", choices=["cpu", "gpu"], default="cpu", help="Execution target")
     args = parser.parse_args()
 
     if args.filter in ("sobel", "all"):
-        run_sobel(args.size)
+        run_sobel(args.size, target=args.target)
     if args.filter in ("threshold", "all"):
-        run_threshold(args.size, args.threshold)
+        run_threshold(args.size, args.threshold, target=args.target)
     if args.filter in ("blur", "all"):
-        run_blur(args.size)
+        run_blur(args.size, target=args.target)
 
 
 if __name__ == "__main__":

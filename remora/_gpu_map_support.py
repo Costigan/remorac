@@ -32,6 +32,11 @@ class F32InputExpr:
 
 
 @dataclass(frozen=True)
+class F32ScalarParamExpr:
+    index: int
+
+
+@dataclass(frozen=True)
 class F32ConstantExpr:
     value: float
 
@@ -57,7 +62,7 @@ class F32CmpExpr:
     right: "F32Expr"
 
 
-F32Expr = F32InputExpr | F32ConstantExpr | F32BinaryExpr | F32SelectExpr | F32CmpExpr
+F32Expr = F32InputExpr | F32ScalarParamExpr | F32ConstantExpr | F32BinaryExpr | F32SelectExpr | F32CmpExpr
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,8 @@ class F32MapKernel:
     operation: F32MapOperation
     num_inputs: int
     expression: F32Expr | None = None
+    scalar_count: int = 0
+    input_kinds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,15 +200,38 @@ def _analyze_fused_f32_map(
     on_unsupported: Callable[[str], Exception],
     context: str,
 ) -> F32MapKernel:
-    input_types = _require_scalar_array_params(function, FLOAT, context, on_unsupported)
+    array_param_indices: dict[str, int] = {}
+    scalar_param_indices: dict[str, int] = {}
+    input_types: list[ArrayType] = []
+    input_kinds: list[str] = []
+    for param in function.params:
+        if isinstance(param.type, ArrayType) and param.type.element == FLOAT and 1 <= param.type.rank <= 10:
+            array_param_indices[param.name] = len(input_types)
+            input_types.append(param.type)
+            input_kinds.append("array")
+        elif param.type == FLOAT:
+            scalar_param_indices[param.name] = len(scalar_param_indices)
+            input_kinds.append("scalar")
+        else:
+            raise on_unsupported(
+                f"{context} currently supports rank-1 through rank-10 float array inputs and float scalar inputs only"
+            )
     if len(input_types) not in (1, 2):
-        raise on_unsupported(f"{context} currently supports one or two input parameters")
+        raise on_unsupported(f"{context} currently supports one or two array input parameters")
     if not isinstance(function.return_type, ArrayType) or function.return_type.element != FLOAT:
         raise on_unsupported(f"{context} currently supports float array outputs only")
     if any(input_type.shape != function.return_type.shape for input_type in input_types):
         raise on_unsupported(f"{context} input and output shapes must match")
-    param_indices = {param.name: index for index, param in enumerate(function.params)}
-    expression = _f32_expr_from_array(function.body, param_indices, {}, on_unsupported, context)
+    scalar_env = {
+        name: F32ScalarParamExpr(index) for name, index in scalar_param_indices.items()
+    }
+    expression = _f32_expr_from_array(
+        function.body,
+        array_param_indices,
+        scalar_env,
+        on_unsupported,
+        context,
+    )
     root = expression if isinstance(expression, (F32BinaryExpr, F32SelectExpr, F32CmpExpr)) else None
     if root is None:
         raise on_unsupported(f"{context} fused map result must be arithmetic")
@@ -209,8 +239,10 @@ def _analyze_fused_f32_map(
     return F32MapKernel(
         tuple(dim.value for dim in function.return_type.shape),
         F32MapOperation(root_op),
-        len(function.params),
+        len(input_types),
         expression,
+        len(scalar_param_indices),
+        tuple(input_kinds),
     )
 
 
@@ -223,6 +255,8 @@ def _f32_expr_from_array(
 ) -> F32Expr:
     if isinstance(expr, HIRVar) and expr.name in param_indices:
         return F32InputExpr(param_indices[expr.name])
+    if isinstance(expr, HIRVar) and expr.name in scalar_env:
+        return scalar_env[expr.name]
     if isinstance(expr, HIRIf):
         return F32SelectExpr(
             _f32_expr_from_array(expr.condition, param_indices, scalar_env, on_unsupported, context),

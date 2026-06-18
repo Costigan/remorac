@@ -34,11 +34,13 @@ from remora.pipeline import (
 from remora.gpu_lowering import (
     GPUScaffoldError,
     build_descriptor_abi_bool_map_gpu_module,
+    build_descriptor_abi_cell_fold_dot_gpu_module,
     build_descriptor_abi_f32_append_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_f32_scan_gpu_module,
     build_descriptor_abi_i32_map_gpu_module,
+    build_descriptor_abi_im2col_gpu_module,
     extract_gpu_module_body_as_module,
 )
 
@@ -56,6 +58,7 @@ class KernelMeta:
     num_outputs: int
     input_elem_types: list[str]
     output_elem_types: list[str]
+    input_kinds: list[str] | None = None
     output_shape: tuple[int, ...] | None = None
     output_dtype: str | None = None
     is_reduction: bool = False
@@ -127,6 +130,68 @@ def generate_mlir_descriptor_abi_ptx(
     """
     toolchain = detect_toolchain() if toolchain is None else toolchain
     name = kernel_name or f"remora_{function.name}"
+
+    # ── try GPU im2col first (most specific) ──
+    from remora.hir import HIRIm2col
+
+    if isinstance(function.body, HIRIm2col):
+        from remora.types import ArrayType
+
+        im2col = function.body
+        kh, kw = im2col.kernel_shape
+        param_type = function.params[0].type
+        if isinstance(param_type, ArrayType) and param_type.rank == 2:
+            h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+            ppa = (h - kh) // im2col.stride + 1
+            pc = ppa * ppa
+            ps = kh * kw
+            gpu_module = build_descriptor_abi_im2col_gpu_module(function, kernel_name=name)
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=1,
+                num_outputs=1,
+                input_elem_types=["f32"],
+                output_elem_types=["f32"],
+                output_shape=(pc, ps),
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+
+    # ── try GPU cell-fold dot-product (convolution) ──
+    try:
+        from remora.gpu_lowering import _cell_fold_dot_kernel
+        from remora.types import ArrayType
+
+        _, (kh, kw), stride = _cell_fold_dot_kernel(function)
+        param_type2 = function.params[0].type
+        if isinstance(param_type2, ArrayType) and param_type2.rank == 2:
+            h2, w2 = int(param_type2.shape[0].value), int(param_type2.shape[1].value)
+            ppa2 = (h2 - kh) // stride + 1
+            pc2 = ppa2 * ppa2
+            gpu_module = build_descriptor_abi_cell_fold_dot_gpu_module(function, kernel_name=name)
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=2,
+                num_outputs=1,
+                input_elem_types=["f32", "f32"],
+                output_elem_types=["f32"],
+                output_shape=(pc2,),
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+    except GPUScaffoldError:
+        pass
+
     try:
         map_kernel = _direct_f32_map_kernel(function)
         rank = len(map_kernel.shape)
@@ -138,6 +203,7 @@ def generate_mlir_descriptor_abi_ptx(
             map_kernel.expression is None
             and map_kernel.num_inputs == 1
             and map_kernel.operation.constant is None
+            and map_kernel.scalar_count == 0
         ):
             raise CodegenUnavailable(
                 "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary f32 maps only"
@@ -147,14 +213,21 @@ def generate_mlir_descriptor_abi_ptx(
                 "MLIR-derived descriptor-ABI PTX currently supports one or two f32 input descriptors only"
             )
         gpu_module = build_descriptor_abi_f32_map_gpu_module(function, kernel_name=name)
+        input_kinds = list(map_kernel.input_kinds) if map_kernel.scalar_count else None
+        input_elem_types = (
+            ["f32"] * (map_kernel.num_inputs + map_kernel.scalar_count)
+            if map_kernel.scalar_count
+            else ["f32"]
+        )
         meta = KernelMeta(
             name=name,
             grid_dims=1,
             block_size=0,
-            num_inputs=map_kernel.num_inputs,
+            num_inputs=map_kernel.num_inputs + map_kernel.scalar_count,
             num_outputs=1,
-            input_elem_types=["f32"],
+            input_elem_types=input_elem_types,
             output_elem_types=["f32"],
+            input_kinds=input_kinds,
             output_shape=map_kernel.shape,
             output_dtype="float32",
         )

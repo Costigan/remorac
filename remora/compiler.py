@@ -217,6 +217,7 @@ def compile_function_source_to_mlir_gpu_ptx(
     *,
     include_prelude: bool = True,
     kernel_name: str | None = None,
+    syntax: str = "ml",
 ) -> tuple[str, list[KernelMeta], FunctionCompilerArtifact]:
     """Compile one supported function to MLIR-derived GPU PTX."""
     artifact = compile_function_source(
@@ -225,6 +226,7 @@ def compile_function_source_to_mlir_gpu_ptx(
         param_types,
         verify=False,
         include_prelude=include_prelude,
+        syntax=syntax,
     )
     ptx, kernels = generate_mlir_descriptor_abi_ptx(
         artifact.hir_function,

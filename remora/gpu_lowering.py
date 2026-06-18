@@ -11,6 +11,7 @@ from remora._gpu_map_support import (
     F32ConstantExpr,
     F32Expr,
     F32InputExpr,
+    F32ScalarParamExpr,
     F32MapKernel,
     F32MapOperation,
     F32SelectExpr,
@@ -221,7 +222,305 @@ def build_descriptor_abi_f32_reduction_gpu_module(
     )
 
 
-def _scan_kernel(function: HIRFunction) -> HIRFunction:
+def _cell_fold_dot_kernel(function: HIRFunction) -> tuple[HIRFunction, tuple[int, int], int]:
+    """Return ``(function, kernel_shape, stride)`` if *function* is a valid cell-fold
+    dot-product over im2col (convolution pattern)."""
+    from remora.hir import HIRApply, HIRFold, HIRIm2col, HIRLambda, HIRMap, HIRPrimCallable, HIRRavel, HIRReduce, HIRVar
+
+    if not isinstance(function.body, (HIRMap, HIRApply)):
+        raise GPUScaffoldError("cell-fold dot requires a map as the top-level expression")
+    outer_map = function.body
+    if not outer_map.cell_shape or len(outer_map.cell_shape) != 1:
+        raise GPUScaffoldError("cell-fold dot requires a cell-map with rank-1 cells")
+    if not isinstance(outer_map.func, HIRLambda):
+        raise GPUScaffoldError("cell-fold dot requires an inline lambda callable")
+    body_expr = outer_map.func.body
+    if not isinstance(body_expr, (HIRFold, HIRReduce)):
+        raise GPUScaffoldError("cell-fold dot requires a fold as the lambda body")
+    if not isinstance(body_expr.func, HIRPrimCallable) or body_expr.func.op != "+":
+        raise GPUScaffoldError("cell-fold dot currently supports fold + only")
+    if not isinstance(body_expr.array, (HIRMap, HIRApply)):
+        raise GPUScaffoldError("cell-fold dot requires map * as the fold's array")
+    inner_map = body_expr.array
+    if not isinstance(inner_map.func, HIRPrimCallable) or inner_map.func.op != "*":
+        raise GPUScaffoldError("cell-fold dot requires map * as the inner binary operation")
+    inner_arrays = inner_map.arrays
+    if len(inner_arrays) != 2:
+        raise GPUScaffoldError("cell-fold dot requires exactly two inner operands")
+
+    # One operand must be the cell param (HIRVar named after the lambda param)
+    param_name = outer_map.func.params[0].name
+    free_operand = None
+    for a in inner_arrays:
+        if isinstance(a, HIRVar) and a.name == param_name:
+            continue
+        free_operand = a
+    if free_operand is None:
+        raise GPUScaffoldError("cell-fold dot could not identify the free kernel operand")
+
+    # The free operand should be a ravel of a kernel parameter
+    if not isinstance(free_operand, HIRRavel):
+        raise GPUScaffoldError("cell-fold dot requires the kernel operand to be raveled")
+    kernel_var = free_operand.array
+    if not isinstance(kernel_var, HIRVar):
+        raise GPUScaffoldError("cell-fold dot requires the kernel to be a function parameter")
+
+    # The cell-map's array must be an im2col
+    if not isinstance(outer_map.array, HIRIm2col):
+        raise GPUScaffoldError("cell-fold dot requires im2col as the cell-map array")
+    im2col = outer_map.array
+    kh, kw = im2col.kernel_shape
+    return function, (kh, kw), im2col.stride
+
+
+def build_descriptor_abi_cell_fold_dot_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a GPU module for a cell-fold dot-product over im2col (convolution).
+
+    One thread per output patch.  Each thread loads the patch from the image,
+    loads the kernel elements, computes the dot product, and stores the result.
+    """
+    _, (kh, kw), stride = _cell_fold_dot_kernel(function)
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("cell-fold dot requires an array image parameter")
+    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    patches_per_axis = (h - kh) // stride + 1
+    patch_count = patches_per_axis * patches_per_axis
+
+    name = kernel_name or f"remora_{function.name}_celldot"
+    _validate_scaffold_names(module_name, name)
+
+    # ── descriptor loads (image rank 2, kernel rank 1, output rank 1) ──
+    desc_lines = _descriptor_load_lines("img", "%input_desc", 2)
+    desc_lines.extend(_descriptor_load_lines("kern", "%kernel_desc", 1))
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 1))
+
+    # ── thread ID → patch index ──
+    thread_lines = [
+        "      %cf_tid32 = nvvm.read.ptx.sreg.tid.x : i32",
+        "      %cf_tid = llvm.sext %cf_tid32 : i32 to i64",
+        "      %cf_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
+        "      %cf_bid = llvm.sext %cf_bid32 : i32 to i64",
+        "      %cf_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
+        "      %cf_bdim = llvm.sext %cf_bdim32 : i32 to i64",
+        "      %cf_blk = llvm.mul %cf_bid, %cf_bdim  : i64",
+        "      %cf_idx = llvm.add %cf_blk, %cf_tid  : i64",
+        f"      %cf_n = llvm.mlir.constant({patch_count} : index) : i64",
+        "      %cf_ok = llvm.icmp \"ult\" %cf_idx, %cf_n : i64",
+        "      llvm.cond_br %cf_ok, ^cf_process, ^cf_done",
+    ]
+
+    # ── compute patch coordinates ──
+    process_lines = [
+        "    ^cf_process:",
+        f"      %cf_ppa = llvm.mlir.constant({patches_per_axis} : index) : i64",
+        "      %cf_prow = llvm.udiv %cf_idx, %cf_ppa : i64",
+        "      %cf_pcol = llvm.urem %cf_idx, %cf_ppa : i64",
+    ]
+
+    # ── loop over kh × kw kernel elements ──
+    cell_size = kh * kw
+    loop_lines = [
+        f"      %cf_init = llvm.mlir.constant(0.000000e+00 : f32) : f32",
+        f"      %cf_zero = llvm.mlir.constant(0 : index) : i64",
+        f"      %cf_one = llvm.mlir.constant(1 : index) : i64",
+        f"      %cf_end = llvm.mlir.constant({cell_size} : index) : i64",
+        f"      %cf_st = llvm.mlir.constant({stride} : index) : i64",
+        f"      %cf_kw = llvm.mlir.constant({kw} : index) : i64",
+        "      llvm.br ^cf_loop(%cf_zero, %cf_init : i64, f32)",
+        "",
+        "    ^cf_loop(%cf_elem: i64, %cf_acc: f32):",
+        "      %cf_done = llvm.icmp \"uge\" %cf_elem, %cf_end : i64",
+        "      llvm.cond_br %cf_done, ^cf_write(%cf_acc : f32), ^cf_body",
+        "",
+        "    ^cf_body:",
+        "      %cf_krow = llvm.udiv %cf_elem, %cf_kw : i64",
+        "      %cf_kcol = llvm.urem %cf_elem, %cf_kw : i64",
+        # image row/col
+        "      %cf_ir1 = llvm.mul %cf_prow, %cf_st : i64",
+        "      %cf_ir2 = llvm.add %cf_ir1, %cf_krow : i64",
+        "      %cf_ic1 = llvm.mul %cf_pcol, %cf_st : i64",
+        "      %cf_ic2 = llvm.add %cf_ic1, %cf_kcol : i64",
+        # linearize image index
+        "      %cf_ir3 = llvm.add %cf_ir2, %cf_zero : i64",
+        "      %cf_ic3 = llvm.add %cf_ic2, %cf_zero : i64",
+        "      %cf_t0 = llvm.mul %cf_ir3, %img_stride0 : i64",
+        "      %cf_roff = llvm.add %img_offset, %cf_t0 : i64",
+        "      %cf_lin = llvm.add %cf_roff, %cf_ic3 : i64",
+        "      %cf_pix_p = llvm.getelementptr %img_aligned[%cf_lin] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      %cf_pix = llvm.load %cf_pix_p : !llvm.ptr -> f32",
+        # load kernel element
+        "      %cf_ek = llvm.add %cf_elem, %cf_zero : i64",
+        "      %cf_koff = llvm.add %kern_offset, %cf_ek : i64",
+        "      %cf_kp = llvm.getelementptr %kern_aligned[%cf_koff] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      %cf_kv = llvm.load %cf_kp : !llvm.ptr -> f32",
+        # accumulate
+        "      %cf_mul = llvm.fmul %cf_pix, %cf_kv : f32",
+        "      %cf_new = llvm.fadd %cf_acc, %cf_mul : f32",
+        "      %cf_next = llvm.add %cf_elem, %cf_one : i64",
+        "      llvm.br ^cf_loop(%cf_next, %cf_new : i64, f32)",
+        "",
+        "    ^cf_write(%cf_result: f32):",
+        # store: output[patch_idx]
+        "      %cf_out_off = llvm.add %out_offset, %cf_idx : i64",
+        "      %cf_out_p = llvm.getelementptr %out_aligned[%cf_out_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      llvm.store %cf_result, %cf_out_p : f32, !llvm.ptr",
+        "      llvm.br ^cf_done",
+    ]
+
+    done_lines = [
+        "    ^cf_done:",
+        "      llvm.return",
+    ]
+
+    body = desc_lines + thread_lines + process_lines + loop_lines + done_lines
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %kernel_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(body)}
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+    """Return ``(function, kernel_shape, stride)`` if *function* is a valid im2col."""
+    from remora.hir import HIRIm2col
+
+    if not isinstance(function.body, HIRIm2col):
+        raise GPUScaffoldError("GPU im2col requires the body to be a single im2col")
+    im2col = function.body
+    kh, kw = im2col.kernel_shape
+    stride = im2col.stride
+    if kh <= 0 or kw <= 0:
+        raise GPUScaffoldError(f"invalid im2col kernel shape ({kh}, {kw})")
+    if stride <= 0:
+        raise GPUScaffoldError(f"invalid im2col stride {stride}")
+    return function, (kh, kw), stride
+
+
+def _im2col_kernel(function: HIRFunction) -> tuple[HIRFunction, tuple[int, int], int]:
+    """Return ``(function, kernel_shape, stride)`` if *function* is a valid im2col."""
+    from remora.hir import HIRIm2col
+
+    if not isinstance(function.body, HIRIm2col):
+        raise GPUScaffoldError("GPU im2col requires the body to be a single im2col")
+    im2col = function.body
+    kh, kw = im2col.kernel_shape
+    stride = im2col.stride
+    if kh <= 0 or kw <= 0:
+        raise GPUScaffoldError(f"invalid im2col kernel shape ({kh}, {kw})")
+    if stride <= 0:
+        raise GPUScaffoldError(f"invalid im2col stride {stride}")
+    return function, (kh, kw), stride
+
+
+def build_descriptor_abi_im2col_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU module for a 2-D im2col operation.
+
+    One thread per output element: each thread loads the corresponding image
+    pixel and stores it into the patches buffer.
+    """
+    _, (kh, kw), stride = _im2col_kernel(function)
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("im2col requires an array image parameter")
+    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    patches_per_axis = (h - kh) // stride + 1
+    patch_count = patches_per_axis * patches_per_axis
+    patch_size = kh * kw
+
+    name = kernel_name or f"remora_{function.name}_im2col"
+    _validate_scaffold_names(module_name, name)
+
+    # ── descriptor loads (input rank 2, output rank 2) ──
+    desc_lines = _descriptor_load_lines("in", "%input_desc", 2)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 2))
+
+    # ── thread ID → flat output index ──
+    thread_lines = [
+        "      %im2c_tid32 = nvvm.read.ptx.sreg.tid.x : i32",
+        "      %im2c_tid = llvm.sext %im2c_tid32 : i32 to i64",
+        "      %im2c_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
+        "      %im2c_bid = llvm.sext %im2c_bid32 : i32 to i64",
+        "      %im2c_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
+        "      %im2c_bdim = llvm.sext %im2c_bdim32 : i32 to i64",
+        "      %im2c_block_base = llvm.mul %im2c_bid, %im2c_bdim  : i64",
+        "      %im2c_idx = llvm.add %im2c_block_base, %im2c_tid  : i64",
+        f"      %im2c_outdim0 = llvm.mlir.constant({patch_count} : index) : i64",
+        f"      %im2c_outdim1 = llvm.mlir.constant({patch_size} : index) : i64",
+        f"      %im2c_total = llvm.mul %im2c_outdim0, %im2c_outdim1 : i64",
+        "      %im2c_in_bounds = llvm.icmp \"ult\" %im2c_idx, %im2c_total : i64",
+        "      llvm.cond_br %im2c_in_bounds, ^im2c_process, ^im2c_done",
+    ]
+
+    # ── compute patch coordinates and image coordinates ──
+    process_lines = [
+        f"    ^im2c_process:",
+        f"      %im2c_ostride = llvm.mlir.constant({patch_size} : index) : i64",
+        "      %im2c_patch_idx = llvm.udiv %im2c_idx, %im2c_ostride  : i64",
+        "      %im2c_elem_idx = llvm.urem %im2c_idx, %im2c_ostride  : i64",
+        f"      %im2c_ppl = llvm.mlir.constant({patches_per_axis} : index) : i64",
+        "      %im2c_prow = llvm.udiv %im2c_patch_idx, %im2c_ppl  : i64",
+        "      %im2c_pcol = llvm.urem %im2c_patch_idx, %im2c_ppl  : i64",
+        f"      %im2c_ksz = llvm.mlir.constant({kw} : index) : i64",
+        "      %im2c_krow = llvm.udiv %im2c_elem_idx, %im2c_ksz  : i64",
+        "      %im2c_kcol = llvm.urem %im2c_elem_idx, %im2c_ksz  : i64",
+        f"      %im2c_st = llvm.mlir.constant({stride} : index) : i64",
+        "      %im2c_ir = llvm.mul %im2c_prow, %im2c_st : i64",
+        "      %im2c_ir2 = llvm.add %im2c_ir, %im2c_krow : i64",
+        "      %im2c_ic = llvm.mul %im2c_pcol, %im2c_st : i64",
+        "      %im2c_ic2 = llvm.add %im2c_ic, %im2c_kcol : i64",
+    ]
+
+    # ── linearize image index, load pixel ──
+    load_lines = [
+        "      %im2c_z = llvm.mlir.constant(0 : index) : i64",
+        "      %im2c_ir3 = llvm.add %im2c_ir2, %im2c_z : i64",
+        "      %im2c_ic3 = llvm.add %im2c_ic2, %im2c_z : i64",
+        "      %im2c_t0 = llvm.mul %im2c_ir3, %in_stride0 : i64",
+        "      %im2c_roff = llvm.add %in_offset, %im2c_t0 : i64",
+        "      %im2c_lin = llvm.add %im2c_roff, %im2c_ic3 : i64",
+        "      %im2c_pix_ptr = llvm.getelementptr %in_aligned[%im2c_lin] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      %im2c_pixel = llvm.load %im2c_pix_ptr : !llvm.ptr -> f32",
+    ]
+
+    # ── store to output: out[patch_idx, elem_idx] ──
+    store_lines = [
+        "      %im2c_z0 = llvm.mlir.constant(0 : index) : i64",
+        "      %im2c_z1 = llvm.mlir.constant(0 : index) : i64",
+        "      %im2c_po = llvm.add %im2c_patch_idx, %im2c_z0 : i64",
+        "      %im2c_pe = llvm.add %im2c_elem_idx, %im2c_z1 : i64",
+        "      %im2c_ot0 = llvm.mul %im2c_po, %im2c_ostride : i64",
+        "      %im2c_oo0 = llvm.add %out_offset, %im2c_ot0 : i64",
+        "      %im2c_olin = llvm.add %im2c_oo0, %im2c_pe : i64",
+        "      %im2c_out_ptr = llvm.getelementptr %out_aligned[%im2c_olin] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+        "      llvm.store %im2c_pixel, %im2c_out_ptr : f32, !llvm.ptr",
+        "      llvm.br ^im2c_done",
+    ]
+
+    done_lines = [
+        "    ^im2c_done:",
+        "      llvm.return",
+    ]
+
+    body = desc_lines + thread_lines + process_lines + load_lines + store_lines + done_lines
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(body)}
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
     """Analyze the HIR function and return it if it's a valid scan kernel."""
     if not function.params:
         raise GPUScaffoldError("GPU scan requires a single-parameter function")
@@ -564,6 +863,7 @@ def _build_descriptor_abi_f32_map_gpu_module(
     rank = len(shape)
     params = [
         *(f"%input{index}_desc: !llvm.ptr" for index in range(kernel.num_inputs)),
+        *(f"%scalar{index}: f32" for index in range(kernel.scalar_count)),
         "%output_desc: !llvm.ptr",
     ]
     body_lines = _descriptor_kernel_body_lines(kernel)
@@ -797,6 +1097,8 @@ def _f32_expression_lines(
         nonlocal counter
         if isinstance(expr, F32InputExpr):
             return f"%x{expr.index}"
+        if isinstance(expr, F32ScalarParamExpr):
+            return f"%scalar{expr.index}"
         name = f"%expr{counter}"
         counter += 1
         if isinstance(expr, F32ConstantExpr):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from remora.abi import element_strides, make_memref_descriptor
@@ -34,7 +36,7 @@ class RemoraExecutor:
     def execute(
         self,
         kernel_name: str,
-        inputs: list[np.ndarray],
+        inputs: list[Any],
         *,
         arena: Any | None = None,
     ) -> np.ndarray:
@@ -52,7 +54,21 @@ class RemoraExecutor:
                 f"kernel {kernel_name} expects {meta.num_inputs} inputs, got {len(inputs)}"
             )
 
-        host_inputs = [np.asarray(array) for array in inputs]
+        input_kinds = meta.input_kinds or ["array"] * meta.num_inputs
+        if len(input_kinds) != len(inputs):
+            raise RemoraExecutorError(
+                f"kernel {kernel_name} metadata has {len(input_kinds)} input kinds for {len(inputs)} inputs"
+            )
+        host_inputs: list[np.ndarray] = []
+        scalar_inputs: list[Any] = []
+        for kind, value in zip(input_kinds, inputs):
+            if kind == "array":
+                host_inputs.append(np.asarray(value))
+            elif kind == "scalar":
+                scalar_inputs.append(value)
+            else:
+                raise RemoraExecutorError(f"kernel {kernel_name} has unsupported input kind {kind!r}")
+
         output_shape = compute_output_shape(meta, host_inputs)
         output_dtype = kernel_output_dtype(meta, host_inputs)
         output = np.empty(output_shape, dtype=output_dtype)
@@ -104,7 +120,7 @@ class RemoraExecutor:
             kernel.launch(
                 (grid_size, 1, 1),
                 (block_size, 1, 1),
-                [*input_descs, output_desc],
+                [*input_descs, *scalar_inputs, output_desc],
             )
             self._rt.synchronize()
             self._rt.copy_device_to_host(output_ptr, output)
@@ -116,7 +132,7 @@ class RemoraExecutor:
 
         return output
 
-    def execute_main(self, inputs: list[np.ndarray] | None = None, *, arena: Any | None = None) -> np.ndarray:
+    def execute_main(self, inputs: list[Any] | None = None, *, arena: Any | None = None) -> np.ndarray:
         """Run the program entry kernel using the shared executor-style API."""
         kernel_name = self._main_kernel_name()
         return self.execute(kernel_name, [] if inputs is None else inputs, arena=arena)

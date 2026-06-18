@@ -140,6 +140,34 @@ def test_remora_executor_execute_main_uses_shared_entrypoint():
     assert len(runtime.kernel.launches) == 1
 
 
+def test_remora_executor_packs_scalar_inputs_after_descriptors():
+    runtime = FakeRuntime()
+    meta = KernelMeta(
+        name="threshold",
+        grid_dims=1,
+        block_size=4,
+        num_inputs=2,
+        num_outputs=1,
+        input_elem_types=["f32", "f32"],
+        output_elem_types=["f32"],
+        input_kinds=["array", "scalar"],
+        output_shape=(4,),
+    )
+    executor = RemoraExecutor("ptx", [meta], runtime=runtime)
+
+    result = executor.execute_main(
+        [np.arange(4, dtype=np.float32), np.float32(1.5)]
+    )
+
+    np.testing.assert_array_equal(result, np.full((4,), 3, dtype=np.float32))
+    assert len(runtime.kernel.launches) == 1
+    _grid, _block, args = runtime.kernel.launches[0]
+    assert len(args) == 3
+    assert args[0].size0 == 4
+    assert args[1] == np.float32(1.5)
+    assert args[2].size0 == 4
+
+
 def test_remora_executor_rejects_unknown_kernel_and_wrong_input_count():
     runtime = FakeRuntime()
     meta = KernelMeta(
@@ -207,6 +235,27 @@ def test_compile_function_source_to_mlir_binary_rank1_map_ptx():
     assert artifact.function_name == "add"
     assert ".visible .entry remora_add" in ptx
     assert kernels[0].num_inputs == 2
+
+
+def test_compile_function_source_to_mlir_f32_map_with_scalar_param_ptx():
+    src = """
+    (define/pi () (threshold [x (Array Float 4) t Float] (Array Float 4))
+      (map (lambda (v) (select (> v t) 1.0 0.0)) x))
+    """
+    ptx, kernels, artifact = compile_function_source_to_mlir_gpu_ptx(
+        src,
+        "threshold",
+        (ArrayType(FLOAT, (StaticDim(4),)), FLOAT),
+        include_prelude=False,
+        kernel_name="remora_threshold",
+        syntax="lisp",
+    )
+
+    assert artifact.function_name == "threshold"
+    assert ".visible .entry remora_threshold" in ptx
+    assert kernels[0].num_inputs == 2
+    assert kernels[0].input_kinds == ["array", "scalar"]
+    assert kernels[0].output_shape == (4,)
 
 
 def test_compile_function_source_to_mlir_binary_rank2_and_rank3_map_ptx():
@@ -508,6 +557,37 @@ def test_remora_executor_runs_rank1_binary_mlir_gpu_ptx_round_trip_when_availabl
     np.testing.assert_array_equal(result, np.array([11, 22, 33, 44], dtype=np.float32))
 
 
+def test_remora_executor_runs_scalar_threshold_mlir_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+
+    src = """
+    (define/pi () (threshold [x (Array Float 4) t Float] (Array Float 4))
+      (map (lambda (v) (select (> v t) 1.0 0.0)) x))
+    """
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            src,
+            "threshold",
+            (ArrayType(FLOAT, (StaticDim(4),)), FLOAT),
+            include_prelude=False,
+            kernel_name="remora_threshold",
+            syntax="lisp",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        result = executor.execute_main(
+            [np.array([1, 2, 3, 4], dtype=np.float32), np.float32(2.5)]
+        )
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()
+
+    np.testing.assert_array_equal(result, np.array([0, 0, 1, 1], dtype=np.float32))
+
+
 def test_remora_executor_runs_rank1_sum_mlir_gpu_ptx_round_trip_when_available():
     try:
         runtime = CUDARuntime()
@@ -768,3 +848,71 @@ def test_remora_executor_runs_rank2_and_rank3_cuda_descriptor_round_trip_when_av
         rank3,
         np.array([[[2], [4]], [[6], [8]]], dtype=np.float32),
     )
+
+
+def test_remora_executor_runs_im2col_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            '(define/pi () (f [image (Array Float 8 8)] (Array Float 36 9)) (im2col image [3 3] 1))',
+            "f",
+            (ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),),
+            include_prelude=False,
+            syntax="lisp",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        rng = np.random.default_rng(0)
+        img = rng.standard_normal((8, 8)).astype(np.float32)
+        result = executor.execute_main([img])
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()
+
+    patches = (8 - 3) // 1 + 1
+    ref = np.empty((patches * patches, 9), dtype=np.float32)
+    idx = 0
+    for y in range(patches):
+        for x in range(patches):
+            ref[idx] = img[y : y + 3, x : x + 3].ravel()
+            idx += 1
+    np.testing.assert_allclose(result, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_remora_executor_runs_cell_fold_dot_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            '(define/pi () (f [image (Array Float 8 8) k (Array Float 3 3)] (Array Float 36)) (map (lambda (p) (fold + 0.0 (map * p (ravel k)))) (im2col image [3 3] 1)))',
+            "f",
+            (ArrayType(FLOAT, (StaticDim(8), StaticDim(8))),
+             ArrayType(FLOAT, (StaticDim(3), StaticDim(3)))),
+            include_prelude=False,
+            syntax="lisp",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        rng = np.random.default_rng(0)
+        img = rng.standard_normal((8, 8)).astype(np.float32)
+        kb = np.full((3, 3), 1.0 / 9.0, dtype=np.float32)
+        result = executor.execute_main([img, kb])
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()
+
+    patches = (8 - 3) // 1 + 1
+    ref = np.empty(patches * patches, dtype=np.float32)
+    idx = 0
+    for y in range(patches):
+        for x in range(patches):
+            ref[idx] = (img[y : y + 3, x : x + 3] * kb).sum()
+            idx += 1
+    np.testing.assert_allclose(result, ref, rtol=1e-4, atol=1e-5)
