@@ -8,7 +8,7 @@
 | 4 | Logistic regression | ✓ | ✓ | ~ | Phase 1 done; GPU elementwise patterns exist |
 | 1 | PDE solver (heat) | ✓ | ✓ | ✓ | Subarray+fused-map path (Phase 4G); 13/13 GPU tests |
 | 8 | Monte Carlo | ✓ | ✓ | ~ | Scan + reduce patterns exist on GPU |
-| 2 | N-body | ✓ | ~ | ✗ | Pairwise broadcasting [N,3]→[N,N,3] large intermediates |
+| 2 | N-body | ✓ | ~ | ✗ | Interpreter works; CPU/GPU blocked by scalar-map-with-fold lowering gap |
 | 12 | Diff. renderer | ✓ | ~ | ✗ | AD output too complex for GPU pattern matchers; needs multi-op decomposition |
 | 5 | K-Means | ✓ | ~ | ✗ | Broadcasting + argmin; `grade` typecheck-only |
 | 6 | Molecular dynamics | ✓ | ✗ | ✗ | Gather/scatter not supported |

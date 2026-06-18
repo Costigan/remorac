@@ -1383,10 +1383,12 @@ def _lower_scalar_fold_result(
     tensor_env: TensorEnv | None = None,
     *,
     scalar_env: dict[str, _Operand] | None = None,
+    prefix: str = "",
 ) -> tuple[str, str, str]:
     input_code, input_name, input_type, input_element_type = _lower_fold_input(
         node.array,
         functions,
+        _join_prefix(prefix, "fold_input"),
         tensor_env=tensor_env,
         scalar_env=scalar_env,
     )
@@ -1405,7 +1407,8 @@ def _lower_scalar_fold_result(
         acc_type,
         functions=functions,
         env=scalar_env or {},
-        result_prefix="init_scalar",
+        result_prefix=_join_prefix(prefix, "init"),
+        ssa_prefix=prefix,
     )
     fold_body = _lower_fold_callable_body(
         node.func,
@@ -1603,6 +1606,18 @@ def _lower_fold_input(
                 "only unary and binary scalar maps lower to fold MLIR so far"
             )
 
+        # ---- compound-body detection ----
+        # When a map callable body contains tensor-level operations (fold,
+        # index, nested map) the scalar emitter running inside a
+        # linalg.generic block cannot lower them.  We switch to a
+        # scf.for-based path that allows full tensor operations.
+        if isinstance(node.func, HIRLambda):
+            if _body_needs_tensor_lowering(node.func.body):
+                return _lower_map_body_with_loops(
+                    node, functions, prefix,
+                    tensor_env=tensor_env, scalar_env=scalar_env,
+                )
+
         input_code, input_name, input_type, input_element_type = (
             _lower_fold_input(
                 node.array,
@@ -1652,6 +1667,203 @@ def _lower_fold_input(
     return _lower_tensor_input(
         node, _join_prefix(prefix, "fold_input"), functions, tensor_env, scalar_env
     )
+
+
+def _body_needs_tensor_lowering(body: HIRExpr) -> bool:
+    """Return True if *body* contains operations the scalar emitter cannot emit
+    inside a ``linalg.generic`` region body.
+
+    Intrinsic compound nodes: ``HIRFold``, ``HIRReduce``, ``HIRIndex``.
+    ``HIRMap`` / ``HIRApply`` are only compound when their *callable body*
+    or their array arguments are compound.
+    ``HIRLet`` chains are traversed so that intermediate bindings hoist
+    complex sub-expressions out of the final callable body.
+    """
+    if isinstance(body, (HIRFold, HIRReduce, HIRIndex)):
+        return True
+    if isinstance(body, (HIRVar, HIRLit, HIRCast)):
+        return False
+    if isinstance(body, HIRLet):
+        return _body_needs_tensor_lowering(body.body) or _body_needs_tensor_lowering(
+            body.value
+        )
+    if isinstance(body, HIRIf):
+        return any(
+            _body_needs_tensor_lowering(c)
+            for c in (body.condition, body.then_branch, body.else_branch)
+        )
+    if isinstance(body, (HIRMap, HIRApply)):
+        if isinstance(body.func, HIRLambda):
+            if _body_needs_tensor_lowering(body.func.body):
+                return True
+        return any(_body_needs_tensor_lowering(a) for a in body.arrays)
+    if isinstance(body, HIRPrimOp):
+        return any(_body_needs_tensor_lowering(a) for a in body.args)
+    if isinstance(body, HIRCall):
+        return False
+    return False
+
+
+def _lower_map_body_with_loops(
+    node: HIRMap,
+    functions: dict[str, HIRFunction],
+    prefix: str,
+    *,
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    """Lower a scalar HIRMap whose body needs tensor access.
+
+    Uses ``scf.for`` loops so sub-expressions can freely emit
+    ``tensor.extract``, ``tensor.extract_slice``, and ``linalg.generic``
+    reductions — operations that are illegal inside a ``linalg.generic``
+    block body.
+    """
+    result_mlir = type_to_mlir(node.result_type)
+    elem_mlir = type_to_mlir(node.result_type.element)
+    frame = node.frame_shape
+
+    if len(frame) != 1:
+        raise RemoraLoweringError(
+            "loop-based map lowering supports only rank-1 frames"
+        )
+    N_val = frame[0].value
+    outer = node.result_type.shape[1].value if node.result_type.rank > 1 else 1
+
+    # Lower the array being mapped
+    arr_code, arr_name, arr_type, arr_elem = _lower_tensor_input(
+        node.array, _join_prefix(prefix, "lp_arr"), functions,
+        tensor_env, scalar_env,
+    )
+
+    lam = node.func
+    if not isinstance(lam, HIRLambda):
+        raise RemoraLoweringError("loop-based map needs a HIRLambda callable")
+    param = lam.params[0].name
+    body = lam.body
+
+    # Build scf.for
+    cN = f"%{_join_prefix(prefix, 'lp_N')}"
+    c0 = f"%{_join_prefix(prefix, 'lp_c0')}"
+    c1 = f"%{_join_prefix(prefix, 'lp_c1')}"
+    empty = f"%{_join_prefix(prefix, 'lp_empty')}"
+    zero = f"%{_join_prefix(prefix, 'lp_zero')}"
+    filled = f"%{_join_prefix(prefix, 'lp_fill')}"
+    result = f"%{_join_prefix(prefix, 'lp_result')}"
+    idx = f"%{_join_prefix(prefix, 'lp_i')}"
+    acc = f"%{_join_prefix(prefix, 'lp_acc')}"
+
+    # Scalar environment for the loop body.  scf.for induction variables
+    # are of type ``index``; we cast to ``i32`` because that is the Remora
+    # integer type used throughout the lowering.
+    loop_env = dict(scalar_env or {})
+    cast_var = f"%{_join_prefix(prefix, 'lp_i32')}"
+
+    loop_body_prefix = f"      {cast_var} = arith.index_cast {idx} : index to {arr_elem}"
+
+    loop_env[param] = _Operand(cast_var, [], arr_elem)
+
+    lines: list[str] = []
+    body_val, body_mlir = _lower_body_in_loop(
+        body, lines, prefix, functions, tensor_env, loop_env,
+        _next_uid=0,
+    )
+
+    updated = f"%{_join_prefix(prefix, 'lp_updated')}"
+    if node.result_type.rank > 1:
+        insert = (
+            f"      {updated} = tensor.insert_slice {body_val}"
+            f" into {acc}[{idx}, 0] [1, {outer}] [1, 1]"
+            f" : {body_mlir} into {result_mlir}"
+        )
+    else:
+        insert = (
+            f"      {updated} = tensor.insert {body_val}"
+            f" into {acc}[{idx}] : {result_mlir}"
+        )
+
+    loop_body = loop_body_prefix + "\n" + "\n".join(lines) + "\n" + insert
+
+    code = f"""{arr_code}
+    {cN} = arith.constant {N_val} : index
+    {c0} = arith.constant 0 : index
+    {c1} = arith.constant 1 : index
+    {zero} = arith.constant 0.000000e+00 : {elem_mlir}
+    {empty} = tensor.empty() : {result_mlir}
+    {filled} = linalg.fill ins({zero} : {elem_mlir}) outs({empty} : {result_mlir}) -> {result_mlir}
+    {result} = scf.for {idx} = {c0} to {cN} step {c1} iter_args({acc} = {filled}) -> {result_mlir} {{
+{loop_body}
+      scf.yield {updated} : {result_mlir}
+    }}"""
+    return code, result, result_mlir, elem_mlir
+
+
+def _lower_body_in_loop(
+    expr: HIRExpr,
+    lines: list[str],
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv,
+    scalar_env: dict[str, _Operand],
+    _next_uid: int = 0,
+) -> tuple[str, str]:
+    """Recursively lower *expr* inside a ``scf.for`` loop body.
+
+    * HIRLet bindings lower the value first, register it in ``tensor_env`` /
+      ``scalar_env``, then lower the body.
+    * Scalar HIRFold / HIRReduce delegates to ``_lower_scalar_fold_result``.
+    * Everything else goes through ``_lower_tensor_input`` (which has full
+      access to tensor operations inside the loop).  If that fails, the
+      scalar emitter is tried as a fallback for simple scalar expressions.
+    """
+    from remora.types import ArrayType, ScalarType
+
+    if isinstance(expr, HIRLet):
+        val_name, val_mlir = _lower_body_in_loop(
+            expr.value, lines, _join_prefix(prefix, f"lv{_next_uid}"), functions,
+            tensor_env, scalar_env, _next_uid + 1,
+        )
+        if _is_scalar_type(expr.value_type) or (
+            isinstance(expr.value_type, ArrayType) and expr.value_type.rank == 0
+        ):
+            scalar_env[expr.name] = _Operand(val_name, [], val_mlir)
+        # Compute correct element type for tensor_env registration
+        if isinstance(expr.value_type, ArrayType) and expr.value_type.rank > 0:
+            elem_mlir = type_to_mlir(expr.value_type.element)
+        else:
+            elem_mlir = val_mlir
+        tensor_env[expr.name] = _TensorValue(val_name, val_mlir, elem_mlir)
+        return _lower_body_in_loop(
+            expr.body, lines, _join_prefix(prefix, f"lb{_next_uid}"), functions,
+            tensor_env, scalar_env, _next_uid + 1,
+        )
+
+    if isinstance(expr, (HIRFold, HIRReduce)) and _is_scalar_type(expr.result_type):
+        fold_prefix = _join_prefix(prefix, f"sf{_next_uid}")
+        fold_code, fold_val, fold_type = _lower_scalar_fold_result(
+            expr, functions, tensor_env, scalar_env=scalar_env,
+            prefix=fold_prefix,
+        )
+        lines.append(fold_code)
+        return fold_val, fold_type
+
+    # Try full tensor lowering first
+    try:
+        code, val, mlir_type, _elem = _lower_tensor_input(
+            expr, _join_prefix(prefix, f"tl{_next_uid}"), functions, tensor_env, scalar_env,
+        )
+        lines.append(code)
+        return val, mlir_type
+    except RemoraLoweringError:
+        pass
+
+    # Scalar-emitter fallback for simple expressions (HIRPrimOp, HIRVar, …)
+    emitter = _RegionEmitter(
+        input_name="", input_type="", functions=functions,
+    )
+    value = emitter.emit_expr(expr, scalar_env)
+    lines.extend(emitter.lines)
+    return value.value, value.type
 
 
 def _lower_binary_map_fold_input(

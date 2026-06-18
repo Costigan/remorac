@@ -622,6 +622,9 @@ def _rewrite_children(
             left_arg=rewrite(node.left_arg, local_names) if node.left_arg is not None else None,  # type: ignore[arg-type]
             right_arg=rewrite(node.right_arg, local_names) if node.right_arg is not None else None,  # type: ignore[arg-type]
         )
+    # Nodes that are neither compound nor scoping — return as-is (leaf / opaque).
+    if isinstance(node, (HIRIota, HIRIm2col, HIRCol2im, HIRSubarray, HIRRavel, HIRReshape, HIRTranspose)):
+        return node
     raise AssertionError(f"unexpected HIR node type in CSE: {type(node).__name__}")
 
 

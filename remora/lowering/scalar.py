@@ -143,8 +143,9 @@ def _lower_scalar_value_for_fold_init(
     functions: dict[str, Any],
     env: dict[str, _Operand],
     result_prefix: str,
+    ssa_prefix: str = "",
 ) -> tuple[str, str]:
-    emitter = _RegionEmitter(input_name="", input_type="", functions=functions)
+    emitter = _RegionEmitter(input_name="", input_type="", functions=functions, prefix=ssa_prefix)
     value = emitter.emit_expr(expr, env)
     cast_name = f"%{result_prefix}_cast"
     cast_lines = _cast_if_needed(value.value, value.type, result_type, cast_name)
