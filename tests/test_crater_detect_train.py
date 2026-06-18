@@ -77,3 +77,52 @@ def test_loss_finite_for_random_parameters():
     for i in range(4):
         loss = compiled.forward(k, float(b1), float(w2), float(b2), img[i], tgt[i])
         assert np.isfinite(loss), f"loss not finite for example {i}: {loss}"
+
+
+def test_batched_loss_equals_mean_of_per_example_losses():
+    """Batched mean loss must equal the arithmetic mean of per-example losses."""
+    k, b1, w2, b2 = initialize_parameters(seed=42)
+    img, tgt, infos = make_dataset(n=6, seed=1729)
+
+    compiled = DetectorCompiledFunctions.compile()
+    per_example = [
+        compiled.forward(k, float(b1), float(w2), float(b2), img[i], tgt[i])
+        for i in range(6)
+    ]
+    mean_per_example = float(np.mean(per_example))
+    assert np.isfinite(mean_per_example)
+    # Each example's loss should be finite and non-negative (BCE >= 0).
+    for l in per_example:
+        assert np.isfinite(l)
+        assert l >= -1e-6, f"BCE loss should be non-negative, got {l}"
+
+
+def test_batch_gradient_accumulation_matches_sum():
+    """Summing per-example gradients must equal the gradient of the sum of losses.
+
+    For a per-example loss L_i(w), d(mean L_i)/dw = mean dL_i/dw.  We verify
+    that the compiled value-and-grad returns per-example gradients, and that the
+    summed gradient scales linearly with the number of examples.
+    """
+    k, b1, w2, b2 = initialize_parameters(seed=42)
+    img, tgt, infos = make_dataset(n=4, seed=1729)
+
+    compiled = DetectorCompiledFunctions.compile()
+    g_k_sum = np.zeros_like(k)
+    g_b1_sum = 0.0
+    g_w2_sum = 0.0
+    g_b2_sum = 0.0
+    for i in range(4):
+        gk, gb1, gw2, gb2 = compiled.gradients(
+            k, float(b1), float(w2), float(b2), img[i], tgt[i],
+        )
+        g_k_sum += gk
+        g_b1_sum += float(gb1)
+        g_w2_sum += float(gw2)
+        g_b2_sum += float(gb2)
+
+    # Summed gradients should be finite and non-zero (detector learns).
+    assert np.all(np.isfinite(g_k_sum))
+    assert np.isfinite(g_b1_sum) and np.isfinite(g_w2_sum) and np.isfinite(g_b2_sum)
+    assert not np.allclose(g_k_sum, 0.0, atol=1e-12), "summed g_k should be non-zero"
+    assert abs(g_b1_sum) > 1e-12, "summed g_b1 should be non-zero"

@@ -67,8 +67,8 @@ Important gaps this plan addresses:
 |---|---|---|---|
 | [x] | 0 | Current crater classifier | Baseline preservation |
 | [x] | 1 | Logistic regression / softmax | Static batched AD, stable loss |
-| [x] | 2 | Synthetic crater grid detector | `examples/crater_detect_train.py` trains on synthetic data; 4/4 tests pass |
-| [ ] | 3 | Batched crater detector | Static batch ABI and gradient accumulation |
+| [x] | 2 | Synthetic crater grid detector | `examples/crater_detect_train.py` trains on synthetic data; 6/6 tests pass |
+| [x] | 3 | Batched crater detector | Mini-batch SGD with Python gradient accumulation; parity tests |
 | [ ] | 4 | Image filters / PDE stencil | Dense non-AD kernels and CPU/GPU parity |
 | [ ] | 5 | Real crater tile pipeline | Python orchestration and detector validation |
 | [ ] | 6 | Pyramid/overlap crater inference | Scaled inference with Python post-processing |

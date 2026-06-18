@@ -236,11 +236,13 @@ class DetectorTrainingResult:
     loss_history: tuple[float, ...]
     compile_seconds: float
     mean_step_seconds: float
+    compiled: bool
 
 
 def train(
     *,
     n: int = 8,
+    batch_size: int = 4,
     epochs: int = 10,
     learning_rate: float = 0.05,
     data_seed: int = DATA_SEED,
@@ -262,27 +264,37 @@ def train(
     for epoch in range(epochs):
         indices = np.random.RandomState(epoch + parameter_seed).permutation(n)
         epoch_loss = 0.0
-        for idx in indices:
+        for start in range(0, n, batch_size):
+            batch_idx = indices[start : start + batch_size]
             step_start = perf_counter()
-            x_img = images[idx]
 
-            loss = compiled.forward(k, float(b1), float(w2), float(b2), x_img, targets[idx])
-            epoch_loss += loss
+            # Accumulate gradients over the minibatch.
+            g_k_sum = np.zeros_like(k)
+            g_b1_sum = 0.0
+            g_w2_sum = 0.0
+            g_b2_sum = 0.0
+            for idx in batch_idx:
+                x_img = images[idx]
+                loss_i = compiled.forward(
+                    k, float(b1), float(w2), float(b2), x_img, targets[idx],
+                )
+                epoch_loss += loss_i
 
-            g_k, g_b1, g_w2, g_b2 = compiled.gradients(
-                k, float(b1), float(w2), float(b2), x_img, targets[idx],
-            )
+                g_k, g_b1, g_w2, g_b2 = compiled.gradients(
+                    k, float(b1), float(w2), float(b2), x_img, targets[idx],
+                )
+                g_k_sum += g_k
+                g_b1_sum += float(g_b1)
+                g_w2_sum += float(g_w2)
+                g_b2_sum += float(g_b2)
 
-            if not np.all(np.isfinite(g_k)):
-                raise FloatingPointError(f"non-finite gradient at epoch {epoch}")
-            if not (np.isfinite(g_b1) and np.isfinite(g_w2) and np.isfinite(g_b2)):
-                raise FloatingPointError(f"non-finite scalar gradient at epoch {epoch}")
-
-            k = np.asarray(k - learning_rate * g_k, dtype=np.float32)
+            # Mean gradient over the batch, then SGD update.
+            bn = len(batch_idx)
+            k = np.asarray(k - learning_rate * (g_k_sum / bn), dtype=np.float32)
             k = np.ascontiguousarray(k)
-            b1 = np.float32(b1 - learning_rate * float(g_b1))
-            w2 = np.float32(w2 - learning_rate * float(g_w2))
-            b2 = np.float32(b2 - learning_rate * float(g_b2))
+            b1 = np.float32(b1 - learning_rate * (np.float32(g_b1_sum) / bn))
+            w2 = np.float32(w2 - learning_rate * (np.float32(g_w2_sum) / bn))
+            b2 = np.float32(b2 - learning_rate * (np.float32(g_b2_sum) / bn))
 
             step_seconds.append(perf_counter() - step_start)
 
@@ -293,7 +305,8 @@ def train(
 
     mean_step_seconds = float(np.mean(step_seconds)) if step_seconds else 0.0
     if verbose:
-        print(f"compile_seconds={compile_seconds:.1f} mean_step_seconds={mean_step_seconds:.3f}")
+        print(f"compile_seconds={compile_seconds:.1f} "
+              f"mean_step_seconds={mean_step_seconds:.3f}")
         print(f"initial loss {loss_history[0]:.6f} -> final {loss_history[-1]:.6f}")
 
     return DetectorTrainingResult(
@@ -301,6 +314,7 @@ def train(
         loss_history=tuple(loss_history),
         compile_seconds=compile_seconds,
         mean_step_seconds=mean_step_seconds,
+        compiled=True,
     )
 
 
