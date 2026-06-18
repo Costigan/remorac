@@ -65,47 +65,47 @@ The approach is to handle them in the HIR→GPUExpr compiler:
 when a view op wraps a descriptor input, adjust the `GpuInputLoad`
 coordinates rather than emitting a new kernel.
 
-- [ ] **A.1 — `HIRTake`**: When lowering `HIRTake(count, array)`,
+- [x] **A.1 — `HIRTake`**: When lowering `HIRTake(count, array)`,
       reduce the descriptor size and bound the thread index accordingly.
       The coordinated load uses the same index expressions; just the
       size changes.
 
-- [ ] **A.2 — `HIRDrop`**: When lowering `HIRDrop(count, array)`,
+- [x] **A.2 — `HIRDrop`**: When lowering `HIRDrop(count, array)`,
       add `count` to the logical offset for dimension 0.  Thread
       coordinates add `count` before the stride multiplication.
 
-- [ ] **A.3 — `HIRSubarray`**: When lowering `HIRSubarray(array, offsets, sizes)`,
+- [x] **A.3 — `HIRSubarray`**: When lowering `HIRSubarray(array, offsets, sizes)`,
       add each `offsets[k]` to the per-dimension coordinate before
       stride multiplication, and clamp the thread range to `sizes[k]`.
       The GPU descriptor load path already has subarray offset support
       (lines 964–984 in `gpu_lowering.py`); generalize it to all ranks.
 
-- [ ] **A.4 — `HIRSlice`**: Same mechanism as Subarray for a single
+- [x] **A.4 — `HIRSlice`**: Same mechanism as Subarray for a single
       axis with a start offset and a size.  Essentially `Subarray`
       with `offsets=(start,)` and `sizes=(end-start,)`.
 
-- [ ] **A.5 — `HIRReverse`**: When a load references dimension 0,
+- [x] **A.5 — `HIRReverse`**: When a load references dimension 0,
       replace coordinate `i` with `size[0] - 1 - i`.  No descriptor
       changes needed — just an affine transform on the coordinate
       expression before the stride multiplication.
 
-- [ ] **A.6 — `HIRRotate`**: Replace coordinate `i` with
+- [x] **A.6 — `HIRRotate`**: Replace coordinate `i` with
       `(i + shift) % size[0]`.  Requires a modulo operation in the
       coordinate computation.  Alternatively, emit two conditional
       loads (left and right portions) but the modulo approach is
       simpler to generate.
 
-- [ ] **A.7 — `HIRTranspose`**: For rank-2, swap `stride[0]` and
+- [x] **A.7 — `HIRTranspose`**: For rank-2, swap `stride[0]` and
       `stride[1]` in the descriptor, and swap the coordinate
       computation order (`%i0` ↔ `%i1`).  For higher ranks, reorder
       the stride array and coordinate mapping.
 
-- [ ] **A.8 — `HIRArrayLit`**: Already partially supported as fold-init
+- [x] **A.8 — `HIRArrayLit`**: Already partially supported as fold-init
       values.  Extend `_lower_hir` to produce `GpuArrayExpr` containing
       `GpuConstant` nodes.  When it appears as a free operand to a map,
       each component resolves to a constant.
 
-- [ ] **A tests** — Add compilation + numeric parity tests for each
+- [x] **A tests** — Add compilation + numeric parity tests for each
       view op type.  Verify that a program like
       `map (fn x -> x) (take 3 arr)` produces correct GPU output
       matching CPU.

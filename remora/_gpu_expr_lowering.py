@@ -15,6 +15,7 @@ from remora.hir import (
     HIRApply,
     HIRArrayLit,
     HIRCast,
+    HIRDrop,
     HIRExpr,
     HIRFold,
     HIRIf,
@@ -27,6 +28,12 @@ from remora.hir import (
     HIRPrimCallable,
     HIRPrimOp,
     HIRReduce,
+    HIRReverse,
+    HIRRotate,
+    HIRSlice,
+    HIRSubarray,
+    HIRTake,
+    HIRTranspose,
     HIRVar,
 )
 from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, StaticDim
@@ -43,10 +50,18 @@ class GpuInputLoad:
 
     ``index`` is the descriptor slot index.
     ``coords`` is the list of coordinate specifiers (SSA names or integers).
+    ``coord_offsets`` is an optional per-axis additive offset (for drop/subarray).
+    ``coord_transforms`` is an optional per-axis transform string:
+      - ``""`` — identity
+      - ``"reverse:N"`` — replace coord with ``N - 1 - coord``
+      - ``"mod:N:S"`` — replace coord with ``(coord + S) % N``
+    Transforms are applied before offsets during emission.
     """
 
     index: int
-    coords: list[str]  # SSA names or literal integers as strings
+    coords: list[str]
+    coord_offsets: tuple[int, ...] = ()
+    coord_transforms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -214,6 +229,7 @@ class _CompileCtx:
     coords: list[str] = field(default_factory=list)
     coord_map: dict[str, str] = field(default_factory=dict)
     context: str = "general GPU lowering"
+    input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = field(default_factory=dict)
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
@@ -239,6 +255,7 @@ def gpu_expr_from_hir(
     coords: list[str],
     coord_map: dict[str, str] | None = None,
     context: str = "general GPU lowering",
+    input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] | None = None,
 ) -> GpuExpr:
     """Compile a HIR expression to a GpuExpr."""
     ctx = _CompileCtx(
@@ -247,6 +264,7 @@ def gpu_expr_from_hir(
         coords=list(coords),
         coord_map=dict(coord_map or {}),
         context=context,
+        input_adjustments=dict(input_adjustments or {}),
     )
     return _lower_hir(expr, ctx)
 
@@ -257,6 +275,10 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
         if expr.name in ctx.let_env:
             return GpuLetBinding(expr.name)
         if expr.name in ctx.input_map:
+            adj = ctx.input_adjustments.get(expr.name)
+            if adj is not None:
+                offsets, transforms = adj
+                return GpuInputLoad(ctx.input_map[expr.name], list(ctx.coords), offsets, transforms)
             return GpuInputLoad(ctx.input_map[expr.name], list(ctx.coords))
         if expr.name in ctx.coord_map:
             return GpuIndexCoordinate(expr.name)
@@ -313,6 +335,44 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
     if isinstance(expr, HIRIota):
         return _lower_iota(expr, ctx)
 
+    # HIRTake — the outer map already constrains iteration to count elements
+    if isinstance(expr, HIRTake):
+        return _lower_hir(expr.array, ctx)
+
+    # HIRDrop — offset first coordinate by count
+    if isinstance(expr, HIRDrop):
+        return _lower_view_offset(expr.array, ctx, dim0_offset=expr.count)
+
+    # HIRSubarray — offset each coordinate by the subarray offsets
+    if isinstance(expr, HIRSubarray):
+        offsets = tuple(int(o.value) for o in expr.offsets)
+        return _lower_view_offset(expr.array, ctx, per_axis_offsets=offsets)
+
+    # HIRSlice (standalone) — offset first coordinate by start
+    if isinstance(expr, HIRSlice):
+        return _lower_view_offset_slice(expr, ctx)
+
+    # HIRReverse — reverse first coordinate
+    if isinstance(expr, HIRReverse):
+        N = int(expr.result_type.shape[0].value)
+        return _lower_view_transform(expr.array, ctx, dim0_transform=f"reverse:{N}")
+
+    # HIRRotate — modular shift on first coordinate
+    if isinstance(expr, HIRRotate):
+        N = int(expr.result_type.shape[0].value)
+        shift = int(expr.shift.value)
+        return _lower_view_transform(expr.array, ctx, dim0_transform=f"mod:{N}:{shift}")
+
+    # HIRTranspose — swap first two coordinates
+    if isinstance(expr, HIRTranspose):
+        return _lower_transpose(expr, ctx)
+
+    # HIRArrayLit — lower each element to GpuArrayExpr
+    if isinstance(expr, HIRArrayLit):
+        components = [_lower_hir(e, ctx) for e in expr.elements]
+        elem_type = _scalar_type_to_mlir(expr.result_type.element)
+        return GpuArrayExpr(components=components, element_type=elem_type)
+
     raise GPUScaffoldError(
         f"{ctx.context}: unsupported HIR node {type(expr).__name__}"
     )
@@ -334,6 +394,116 @@ def _lower_iota(expr: HIRIota, ctx: _CompileCtx) -> GpuExpr:
         return GpuIndexCoordinate("_iota_coord")
     raise GPUScaffoldError(
         f"{ctx.context}: iota with size {dim} cannot be lowered standalone"
+    )
+
+
+def _apply_offset_to_load(
+    inner: GpuExpr,
+    offsets: tuple[int, ...],
+    ctx: _CompileCtx,
+) -> GpuExpr:
+    if isinstance(inner, GpuInputLoad):
+        base = list(inner.coord_offsets or (0,) * len(inner.coords))
+        while len(base) < len(inner.coords):
+            base.append(0)
+        for k, off in enumerate(offsets):
+            if k < len(base):
+                base[k] += off
+        return GpuInputLoad(inner.index, inner.coords, tuple(base), inner.coord_transforms)
+    if isinstance(inner, GpuArrayExpr):
+        start = offsets[0] if offsets else 0
+        return GpuArrayExpr(
+            components=inner.components[start:],
+            element_type=inner.element_type,
+        )
+    raise GPUScaffoldError(
+        f"{ctx.context}: view offset on non-input-load expression ({type(inner).__name__})"
+    )
+
+
+def _lower_view_offset(
+    array: HIRExpr,
+    ctx: _CompileCtx,
+    *,
+    dim0_offset: int = 0,
+    per_axis_offsets: tuple[int, ...] | None = None,
+) -> GpuExpr:
+    inner = _lower_hir(array, ctx)
+    if per_axis_offsets is not None:
+        return _apply_offset_to_load(inner, per_axis_offsets, ctx)
+    return _apply_offset_to_load(inner, (dim0_offset,), ctx)
+
+
+def _lower_view_offset_slice(expr: HIRSlice, ctx: _CompileCtx) -> GpuExpr:
+    raise GPUScaffoldError(
+        f"{ctx.context}: standalone HIRSlice is not supported in GPU lowering"
+    )
+
+
+def _apply_transform_to_load(
+    inner: GpuExpr,
+    dim0_transform: str,
+    ctx: _CompileCtx,
+) -> GpuExpr:
+    if isinstance(inner, GpuInputLoad):
+        transforms = list(inner.coord_transforms or ("",) * len(inner.coords))
+        while len(transforms) < len(inner.coords):
+            transforms.append("")
+        transforms[0] = dim0_transform
+        return GpuInputLoad(inner.index, inner.coords, inner.coord_offsets, tuple(transforms))
+    if isinstance(inner, GpuArrayExpr):
+        if dim0_transform.startswith("reverse:"):
+            return GpuArrayExpr(
+                components=list(reversed(inner.components)),
+                element_type=inner.element_type,
+            )
+        if dim0_transform.startswith("mod:"):
+            parts = dim0_transform.split(":")
+            N = int(parts[1])
+            shift = int(parts[2])
+            comps = inner.components
+            rotated = comps[shift % N:] + comps[:shift % N]
+            return GpuArrayExpr(
+                components=rotated,
+                element_type=inner.element_type,
+            )
+    raise GPUScaffoldError(
+        f"{ctx.context}: view transform on non-input-load expression ({type(inner).__name__})"
+    )
+
+
+def _lower_view_transform(
+    array: HIRExpr,
+    ctx: _CompileCtx,
+    *,
+    dim0_transform: str,
+) -> GpuExpr:
+    inner = _lower_hir(array, ctx)
+    return _apply_transform_to_load(inner, dim0_transform, ctx)
+
+
+def _lower_transpose(expr: HIRTranspose, ctx: _CompileCtx) -> GpuExpr:
+    inner = _lower_hir(expr.array, ctx)
+    if isinstance(inner, GpuInputLoad):
+        if len(inner.coords) < 2:
+            raise GPUScaffoldError(
+                f"{ctx.context}: transpose requires at least rank-2 input"
+            )
+        new_coords = list(inner.coords)
+        new_coords[0], new_coords[1] = new_coords[1], new_coords[0]
+        offsets = list(inner.coord_offsets or ())
+        if len(offsets) >= 2:
+            offsets[0], offsets[1] = offsets[1], offsets[0]
+        elif len(offsets) == 1:
+            offsets = [0, offsets[0]]
+        transforms = list(inner.coord_transforms or ())
+        if len(transforms) >= 2:
+            transforms[0], transforms[1] = transforms[1], transforms[0]
+        elif len(transforms) == 1:
+            transforms = ["", transforms[0]]
+        return GpuInputLoad(inner.index, new_coords, tuple(offsets), tuple(transforms))
+    raise GPUScaffoldError(
+        f"{ctx.context}: transpose on non-input-load expression ({type(inner).__name__})"
     )
 
 
@@ -436,6 +606,7 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
         coords=list(ctx.coords),
         coord_map=dict(ctx.coord_map),
         context=ctx.context,
+        input_adjustments=dict(ctx.input_adjustments),
     )
 
 

@@ -35,6 +35,12 @@ from remora.hir import (
     HIRPrimOp,
     HIRReduce,
     HIRVar,
+    HIRDrop,
+    HIRReverse,
+    HIRRotate,
+    HIRSubarray,
+    HIRTake,
+    HIRTranspose,
 )
 from remora.pipeline import detect_toolchain, translate_llvmir_to_nvptx_text, translate_mlir_to_llvmir
 from remora.runtime import CUDARuntime, evaluate_source, RuntimeUnavailable
@@ -290,6 +296,193 @@ class TestGPUExprCompiler:
         )
         ptx, _ = _build_and_compile_to_ptx(hfunc, "test_arr_fold")
         assert ".visible .entry test_arr_fold" in ptx
+
+
+# ---------------------------------------------------------------------------
+# Phase A: Descriptor-level view ops (GPU_CPU_PARITY_PLAN.md)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseAViewOps:
+    """Direct HIR → PTX tests for descriptor-level view ops."""
+
+    def test_take_compiles(self):
+        """A.1: map (* 2.0) (take 3 arr) where arr has shape [5]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(5),))
+        take_expr = HIRTake(3, HIRVar('arr', arr_type), ArrayType(FLOAT, (StaticDim(3),)))
+        result_type = ArrayType(FLOAT, (StaticDim(3),))
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_take',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[take_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_take")
+        assert ".visible .entry test_take" in ptx
+
+    def test_drop_compiles(self):
+        """A.2: map (* 2.0) (drop 2 arr) where arr has shape [5]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(5),))
+        drop_expr = HIRDrop(2, HIRVar('arr', arr_type), ArrayType(FLOAT, (StaticDim(3),)))
+        result_type = ArrayType(FLOAT, (StaticDim(3),))
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_drop',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[drop_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_drop")
+        assert ".visible .entry test_drop" in ptx
+
+    def test_subarray_compiles(self):
+        """A.3: map (* 2.0) (subarray arr (1,1) (2,2)) where arr has shape [4,4]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(4), StaticDim(4)))
+        sub_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(2)))
+        sub_expr = HIRSubarray(
+            HIRVar('arr', arr_type),
+            offsets=(StaticDim(1), StaticDim(1)),
+            sizes=(StaticDim(2), StaticDim(2)),
+            result_type=sub_type,
+        )
+        result_type = sub_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_sub',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(2), StaticDim(2)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[sub_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_sub")
+        assert ".visible .entry test_sub" in ptx
+
+    def test_reverse_compiles(self):
+        """A.5: map (* 2.0) (reverse arr) where arr has shape [4]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(4),))
+        rev_expr = HIRReverse(HIRVar('arr', arr_type), arr_type)
+        result_type = arr_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_rev',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(4),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[rev_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_rev")
+        assert ".visible .entry test_rev" in ptx
+
+    def test_rotate_compiles(self):
+        """A.6: map (* 2.0) (rotate 2 arr) where arr has shape [4]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(4),))
+        rot_expr = HIRRotate(HIRVar('arr', arr_type), StaticDim(2), arr_type)
+        result_type = arr_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_rot',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(4),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[rot_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_rot")
+        assert ".visible .entry test_rot" in ptx
+
+    def test_transpose_compiles(self):
+        """A.7: map (* 2.0) (transpose arr) where arr has shape [3,2]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(3), StaticDim(2)))
+        trans_type = ArrayType(FLOAT, (StaticDim(2), StaticDim(3)))
+        trans_expr = HIRTranspose(HIRVar('arr', arr_type), trans_type)
+        result_type = trans_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_trans',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(2), StaticDim(3)), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[trans_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_trans")
+        assert ".visible .entry test_trans" in ptx
+
+    def test_array_lit_in_fold_body_compiles(self):
+        """A.8: map (\\_ -> fold (+) 0.0 [1.0, 2.0, 3.0]) (iota 3)."""
+        arr_lit = HIRArrayLit(
+            [HIRLit(1.0, FLOAT), HIRLit(2.0, FLOAT), HIRLit(3.0, FLOAT)],
+            ArrayType(FLOAT, (StaticDim(3),)),
+        )
+        inner_fold = HIRFold(
+            reduction_dim=StaticDim(3),
+            func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+            init=HIRLit(0.0, FLOAT),
+            array=arr_lit,
+            result_type=FLOAT,
+        )
+        result_type = ArrayType(FLOAT, (StaticDim(3),))
+        hfunc = HIRFunction(
+            name='test_arrlit',
+            params=[HIRParam('dummy', FLOAT)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('i', INT)], body=inner_fold, result_type=None),
+                arrays=[HIRIota(StaticDim(3), ArrayType(INT, (StaticDim(3),)))],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_arrlit")
+        assert ".visible .entry test_arrlit" in ptx
+
+    def test_chained_take_drop_compiles(self):
+        """Chained: map (* 2.0) (take 2 (drop 1 arr)) where arr has shape [5]."""
+        arr_type = ArrayType(FLOAT, (StaticDim(5),))
+        drop_type = ArrayType(FLOAT, (StaticDim(4),))
+        take_type = ArrayType(FLOAT, (StaticDim(2),))
+        drop_expr = HIRDrop(1, HIRVar('arr', arr_type), drop_type)
+        take_expr = HIRTake(2, drop_expr, take_type)
+        result_type = take_type
+        body = HIRPrimOp("*f", [HIRVar('x', FLOAT), HIRLit(2.0, FLOAT)], FLOAT)
+        hfunc = HIRFunction(
+            name='test_chain_td',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(2),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('x', FLOAT)], body=body, result_type=None),
+                arrays=[take_expr],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_chain_td")
+        assert ".visible .entry test_chain_td" in ptx
 
 
 # ---------------------------------------------------------------------------

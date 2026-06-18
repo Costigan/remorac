@@ -22,6 +22,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.hir import HIRDrop, HIRReverse, HIRRotate, HIRSubarray, HIRTake, HIRTranspose
 from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
 
@@ -1694,6 +1695,56 @@ def build_descriptor_abi_sobel_gpu_module(
 # ---------------------------------------------------------------------------
 
 
+def _unwrap_view_op(expr):
+    """Peel view-op wrappers from a map array expression.
+
+    Returns ``(base_var_name, coord_offsets, coord_transforms)`` if the
+    expression is a chain of view ops wrapping an HIRVar, or
+    ``(None, (), ())`` if not.
+    """
+    offsets: list[int] = []
+    transforms: list[str] = []
+
+    while True:
+        if isinstance(expr, HIRVar):
+            return expr.name, tuple(offsets), tuple(transforms)
+        if isinstance(expr, HIRTake):
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRDrop):
+            while len(offsets) < 1:
+                offsets.append(0)
+            offsets[0] += expr.count
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRSubarray):
+            for k, o in enumerate(expr.offsets):
+                while len(offsets) <= k:
+                    offsets.append(0)
+                offsets[k] += int(o.value)
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRReverse):
+            N = int(expr.result_type.shape[0].value)
+            while len(transforms) < 1:
+                transforms.append("")
+            transforms[0] = f"reverse:{N}"
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRRotate):
+            N = int(expr.result_type.shape[0].value)
+            shift = int(expr.shift.value)
+            while len(transforms) < 1:
+                transforms.append("")
+            transforms[0] = f"mod:{N}:{shift}"
+            expr = expr.array
+            continue
+        if isinstance(expr, HIRTranspose):
+            expr = expr.array
+            continue
+        return None, (), ()
+
+
 def build_descriptor_abi_general_map_gpu_module(
     function: HIRFunction,
     *,
@@ -1777,6 +1828,7 @@ def build_descriptor_abi_general_map_gpu_module(
     # When the outer map's array is HIRIota, the lambda param maps to
     # the thread coordinate rather than an input descriptor slot.
     coord_map: dict[str, str] = {}
+    input_adjustments: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = {}
 
     # Bind lambda params to input slots or thread coords.
     for idx, array_expr in enumerate(body_map.arrays):
@@ -1788,12 +1840,16 @@ def build_descriptor_abi_general_map_gpu_module(
                 scalar_params[param_name] = num_scalar_inputs
                 num_scalar_inputs += 1
             else:
-                # Non-input array (e.g. HIRIota): bind params to thread coords
-                # For rank-N output, bind up to N lambda params to N coords
-                for axis_idx in range(len(body_map.func.params)):
-                    pname = body_map.func.params[axis_idx].name
-                    if axis_idx < len(coords):
-                        coord_map[pname] = coords[axis_idx]
+                base_name, view_offsets, view_transforms = _unwrap_view_op(array_expr)
+                if base_name is not None and base_name in input_map:
+                    input_map[param_name] = input_map[base_name]
+                    if view_offsets or view_transforms:
+                        input_adjustments[param_name] = (view_offsets, view_transforms)
+                else:
+                    for axis_idx in range(len(body_map.func.params)):
+                        pname = body_map.func.params[axis_idx].name
+                        if axis_idx < len(coords):
+                            coord_map[pname] = coords[axis_idx]
 
     expr = gpu_expr_from_hir(
         lambda_body,
@@ -1802,6 +1858,7 @@ def build_descriptor_abi_general_map_gpu_module(
         coords=coords,
         coord_map=coord_map,
         context="general GPU map kernel",
+        input_adjustments=input_adjustments,
     )
 
     # Emit the kernel body lines
@@ -2171,9 +2228,12 @@ def _gpu_emit_expr(
 
         Coords may be literal integers, SSA names, or placeholder names
         that resolve through env (e.g., "_iota_coord" → loop variable).
+
+        Supports coord_offsets (per-axis additive offset) and
+        coord_transforms (per-axis: "reverse:N" or "mod:N:S").
+        Transforms are applied first, then offsets, then stride multiply.
         """
         prefix = f"in{expr.index}"
-        # Resolve placeholder coords through env
         resolved_coords: list[str] = []
         for c in expr.coords:
             if c in env:
@@ -2181,89 +2241,117 @@ def _gpu_emit_expr(
             else:
                 resolved_coords.append(c)
 
-        # Check if coords are literal integers (for HIRIndex) or SSA names
-        all_literals = all(
-            c.lstrip("-").isdigit() for c in resolved_coords
-        )
+        has_adjustments = bool(expr.coord_offsets) or bool(expr.coord_transforms)
 
-        if all_literals:
-            # Index with literal positions: compute linear index from coords
-            terms: list[str] = []
-            for axis, coord_str in enumerate(resolved_coords):
-                coord_val = int(coord_str)
-                coord_name = _fresh_ssa()
-                lines.append(
-                    f"      {coord_name} = llvm.mlir.constant({coord_val} : index) : i64"
-                )
-                term_name = _fresh_ssa()
-                lines.append(
-                    f"      {term_name} = llvm.mul {coord_name}, %{prefix}_stride{axis}  : i64"
-                )
-                terms.append(term_name)
-
-            # Sum terms + offset
-            current = f"%{prefix}_offset"
-            for term in terms:
-                sum_name = _fresh_ssa()
-                lines.append(
-                    f"      {sum_name} = llvm.add {current}, {term}  : i64"
-                )
-                current = sum_name
-
-            linear_name = _fresh_ssa()
-            lines.append(
-                f"      {linear_name} = llvm.add {current}, %gen_zidx_{expr.index} : i64"
+        if not has_adjustments:
+            all_literals = all(
+                c.lstrip("-").isdigit() for c in resolved_coords
             )
-            # Add the zero constant just before use
-            lines.insert(
-                -2 if len(lines) >= 2 else len(lines),
-                f"      %gen_zidx_{expr.index} = llvm.mlir.constant(0 : index) : i64",
-            )
-
-            ptr_name = _fresh_ssa()
-            lines.append(
-                f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{linear_name}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
-            )
-            load_name = _fresh_ssa()
-            lines.append(
-                f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
-            )
-            return load_name
-        else:
-            # Use SSA coords: multiply by strides and sum
-            # Some coords may be literal integers — emit constants for them
-            terms: list[str] = []
-            for axis, coord_ssa in enumerate(resolved_coords):
-                if coord_ssa.lstrip("-").isdigit():
-                    # Literal integer: emit constant first
-                    lit_name = _fresh_ssa()
+            if all_literals:
+                terms: list[str] = []
+                for axis, coord_str in enumerate(resolved_coords):
+                    coord_val = int(coord_str)
+                    coord_name = _fresh_ssa()
                     lines.append(
-                        f"      {lit_name} = llvm.mlir.constant({int(coord_ssa)} : index) : i64"
+                        f"      {coord_name} = llvm.mlir.constant({coord_val} : index) : i64"
                     )
-                    coord_ssa = lit_name
-                term_name = _fresh_ssa()
-                lines.append(
-                    f"      {term_name} = llvm.mul {coord_ssa}, %{prefix}_stride{axis}  : i64"
-                )
-                terms.append(term_name)
+                    term_name = _fresh_ssa()
+                    lines.append(
+                        f"      {term_name} = llvm.mul {coord_name}, %{prefix}_stride{axis}  : i64"
+                    )
+                    terms.append(term_name)
 
-            current = f"%{prefix}_offset"
-            for term in terms:
-                sum_name = _fresh_ssa()
-                lines.append(
-                    f"      {sum_name} = llvm.add {current}, {term}  : i64"
-                )
-                current = sum_name
+                current = f"%{prefix}_offset"
+                for term in terms:
+                    sum_name = _fresh_ssa()
+                    lines.append(
+                        f"      {sum_name} = llvm.add {current}, {term}  : i64"
+                    )
+                    current = sum_name
 
-            ptr_name = _fresh_ssa()
+                linear_name = _fresh_ssa()
+                lines.append(
+                    f"      {linear_name} = llvm.add {current}, %gen_zidx_{expr.index} : i64"
+                )
+                lines.insert(
+                    -2 if len(lines) >= 2 else len(lines),
+                    f"      %gen_zidx_{expr.index} = llvm.mlir.constant(0 : index) : i64",
+                )
+
+                ptr_name = _fresh_ssa()
+                lines.append(
+                    f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{linear_name}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
+                )
+                load_name = _fresh_ssa()
+                lines.append(
+                    f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
+                )
+                return load_name
+
+        terms: list[str] = []
+        for axis, coord_ssa in enumerate(resolved_coords):
+            if coord_ssa.lstrip("-").isdigit():
+                lit_name = _fresh_ssa()
+                lines.append(
+                    f"      {lit_name} = llvm.mlir.constant({int(coord_ssa)} : index) : i64"
+                )
+                coord_ssa = lit_name
+
+            if expr.coord_transforms and axis < len(expr.coord_transforms):
+                t = expr.coord_transforms[axis]
+                if t.startswith("reverse:"):
+                    N = int(t.split(":")[1])
+                    n_ssa = _fresh_ssa()
+                    lines.append(f"      {n_ssa} = llvm.mlir.constant({N - 1} : index) : i64")
+                    rev_ssa = _fresh_ssa()
+                    lines.append(f"      {rev_ssa} = llvm.sub {n_ssa}, {coord_ssa}  : i64")
+                    coord_ssa = rev_ssa
+                elif t.startswith("mod:"):
+                    parts = t.split(":")
+                    N = int(parts[1])
+                    S = int(parts[2])
+                    s_ssa = _fresh_ssa()
+                    lines.append(f"      {s_ssa} = llvm.mlir.constant({S} : index) : i64")
+                    shifted_ssa = _fresh_ssa()
+                    lines.append(f"      {shifted_ssa} = llvm.add {coord_ssa}, {s_ssa}  : i64")
+                    n_ssa = _fresh_ssa()
+                    lines.append(f"      {n_ssa} = llvm.mlir.constant({N} : index) : i64")
+                    mod_ssa = _fresh_ssa()
+                    lines.append(f"      {mod_ssa} = llvm.urem {shifted_ssa}, {n_ssa}  : i64")
+                    coord_ssa = mod_ssa
+
+            if expr.coord_offsets and axis < len(expr.coord_offsets):
+                off = expr.coord_offsets[axis]
+                if off != 0:
+                    off_ssa = _fresh_ssa()
+                    lines.append(f"      {off_ssa} = llvm.mlir.constant({off} : index) : i64")
+                    adj_ssa = _fresh_ssa()
+                    lines.append(f"      {adj_ssa} = llvm.add {coord_ssa}, {off_ssa}  : i64")
+                    coord_ssa = adj_ssa
+
+            term_name = _fresh_ssa()
             lines.append(
-                f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{current}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
+                f"      {term_name} = llvm.mul {coord_ssa}, %{prefix}_stride{axis}  : i64"
             )
-            load_name = _fresh_ssa()
+            terms.append(term_name)
+
+        current = f"%{prefix}_offset"
+        for term in terms:
+            sum_name = _fresh_ssa()
             lines.append(
-                f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
+                f"      {sum_name} = llvm.add {current}, {term}  : i64"
             )
-            return load_name
+            current = sum_name
+
+        ptr_name = _fresh_ssa()
+        lines.append(
+            f"      {ptr_name} = llvm.getelementptr %{prefix}_aligned[{current}] : (!llvm.ptr, i64) -> !llvm.ptr, f32"
+        )
+        load_name = _fresh_ssa()
+        lines.append(
+            f"      {load_name} = llvm.load {ptr_name} : !llvm.ptr -> f32"
+        )
+        return load_name
 
     def _emit_reduce(expr: GpuReduce, env: dict[str, str]) -> str | list[str]:
         """Emit a per-thread scf.for reduction loop (scalar or array-valued)."""
