@@ -9,8 +9,9 @@ statically-shaped subset of the Remora language (both ML and Lisp syntax)
 to CPU and GPU executables via MLIR.
 
 **Design principle**: the implementation must handle valid dense Remora
-programs, not specific examples.  Example-specific code (like the current
-hand-written N-body GPU kernel) is a code smell to be eliminated.
+programs, not specific examples.  The GPU backend now handles general
+compound-body maps through a recursive expression compiler targeting
+MLIR LLVM dialect — no example-specific pattern matching remains.
 
 ## Architecture
 
@@ -59,9 +60,10 @@ Source (ML or Lisp syntax)
 - `remora/lowering/scalar.py` — Scalar region emitter (`_RegionEmitter`)
 - `remora/pipeline.py` — MLIR pass pipelines for CPU and GPU
 
-### GPU Lowering (needs generalisation — see plan)
+### GPU Lowering
 - `remora/codegen.py` — `generate_mlir_descriptor_abi_ptx()` dispatch cascade
-- `remora/gpu_lowering.py` — LLVM dialect GPU kernel builders (1875 lines)
+- `remora/gpu_lowering.py` — LLVM dialect GPU kernel builders + general lowering
+- `remora/_gpu_expr_lowering.py` — GPU expression IR (GpuExpr) and HIR→GPUExpr compiler
 - `remora/_gpu_map_support.py` — GPU map analysis and `F32MapKernel`
 
 ### Runtime
@@ -73,25 +75,26 @@ Source (ML or Lisp syntax)
 - `remora/ad.py` — Reverse-mode AD via evaluation tape
 - `remora/ad_source.py` — Generates Remora gradient source from tape
 
-## Current State (as of last session)
+## Current State
 
 ### Working
 - **CPU**: General lowering for any valid dense program.  Compound bodies
   (maps containing fold/index/nested-map) lowered via `scf.for` loops.
-- **GPU**: Specialised kernels only (im2col, cell-fold-dot, sobel, simple
-  elementwise f32/i32/bool maps).  Hand-written N-body kernel exists but
-  is example-specific.
+- **GPU**: General lowering for compound-body maps via recursive
+  expression compiler (`remora/_gpu_expr_lowering.py`).  Handles folds,
+  index expressions, nested maps, conditionals, casts, let bindings,
+  scalar and array-valued reductions, element-wise operations, and math
+  intrinsics (exp/log/sqrt via NVVM).  N-body runs correctly on GPU
+  through the general path.
 - **Interpreter**: Handles most programs (used for test validation).
 - **AD**: Reverse-mode works for scalar-cost functions.  Tape → source
   compilation.
 
-### In Progress
-- GPU general lowering (see `docs/GPU_GENERAL_LOWERING_PLAN.md`)
-
 ### Test Counts
-- CPU tests: ≈170 (im2col 24, AD 53, phase7 51, detect 15, filters 7, PDE 6, nbody 5, etc.)
-- GPU tests: ≈14 (maps, reductions, im2col, cell-fold-dot, heat-step)
-- 2 pre-existing GPU failures (binary map tests)
+- CPU tests: ≈340 (all passing)
+- GPU tests: ≈97 (2 pre-existing binary map test failures, all others pass)
+- General GPU lowering tests: 16 (all passing, in `tests/test_gpu_general_lowering.py`)
+- N-body tests: 5 (all passing, including GPU compilation + numeric parity)
 
 ## Conventions
 
@@ -112,7 +115,7 @@ Source (ML or Lisp syntax)
 
 | Document | Purpose |
 |----------|---------|
-| `docs/GPU_GENERAL_LOWERING_PLAN.md` | Plan for general GPU lowering (current priority) |
+| `docs/GPU_GENERAL_LOWERING_PLAN.md` | Plan for general GPU lowering **(COMPLETE)** |
 | `docs/DEEPSEEK_CONTINUATION_PLAN.md` | Overall development roadmap |
 | `docs/COMPILER_MATURITY_EXAMPLES.md` | What examples compile on which backend |
 | `docs/ABI.md` | Descriptor ABI specification |

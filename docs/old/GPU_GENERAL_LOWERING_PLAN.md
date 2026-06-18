@@ -1,4 +1,6 @@
-# GPU General Lowering Plan
+# GPU General Lowering Plan — **COMPLETE**
+
+**Status**: All phases implemented, all success criteria met, N-body runs correctly on GPU through the general path.
 
 ## Goal
 
