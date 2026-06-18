@@ -309,6 +309,103 @@ def compile_function_source(
     )
 
 
+def _try_monomorphize(
+    hir_function: HIRFunction,
+    func_type_params: list[tuple[int, "HIRParam"]],
+    program: Program,
+    function_name: str,
+    checker: TypeChecker,
+    env: TypeEnv,
+) -> HIRFunction:
+    """Inline concrete lambda arguments for FuncType parameters.
+
+    When the program body calls the function with concrete lambdas,
+    substitute them into the HIR body and remove the FuncType params.
+    This enables GPU compilation for higher-order functions.
+    """
+    from remora.hir import (
+        HIRApply as _HIRApply, HIRLambda as _HIRLambda, HIRLet as _HIRLet,
+        HIRMap as _HIRMap, HIRPrimCallable as _HIRPrimCallable, HIRVar as _HIRVar,
+    )
+
+    body = program.body
+    if body is None:
+        return hir_function
+
+    all_args: list = []
+    cur = body
+    while isinstance(cur, AppExpr):
+        all_args = list(cur.args) + all_args
+        cur = cur.func
+    if not (isinstance(cur, VarExpr) and cur.name == function_name):
+        return hir_function
+
+    if len(all_args) != len(hir_function.params):
+        return hir_function
+
+    substitutions: dict[str, "HIRExpr"] = {}
+    from remora.hir import (
+        HIRLambda as _HLam, HIRPrimCallable as _HPC,
+    )
+    from remora.typechecker import TypedLambda as _TLam
+    from remora.hir import lower_callable as _lower_callable
+
+    for idx, param in func_type_params:
+        if idx >= len(all_args):
+            return hir_function
+        ast_arg = all_args[idx]
+        if not isinstance(param.type, FuncType):
+            return hir_function
+        try:
+            typed_arg = checker.check_callable(ast_arg, param.type, env)
+            hir_arg = _lower_callable(typed_arg)
+            if not isinstance(hir_arg, (_HLam, _HPC)):
+                return hir_function
+            substitutions[param.name] = hir_arg
+        except Exception:
+            return hir_function
+
+    if not substitutions:
+        return hir_function
+
+    new_body = _substitute_hir(hir_function.body, substitutions)
+    new_params = [p for i, p in enumerate(hir_function.params)
+                  if i not in {idx for idx, _ in func_type_params}]
+    return HIRFunction(hir_function.name, new_params, new_body, hir_function.return_type)
+
+
+def _substitute_hir(expr, subs: dict):
+    """Replace HIRVar references in subs with their concrete expressions."""
+    from remora.hir import (
+        HIRApply as _HIRApply, HIRLambda as _HIRLambda, HIRLet as _HIRLet,
+        HIRMap as _HIRMap, HIRPrimCallable as _HIRPrimCallable, HIRVar as _HIRVar,
+    )
+
+    if isinstance(expr, _HIRVar) and expr.name in subs:
+        return subs[expr.name]
+    if isinstance(expr, _HIRMap):
+        func = expr.func
+        if isinstance(func, _HIRVar) and func.name in subs:
+            resolved = subs[func.name]
+            if isinstance(resolved, (_HIRLambda, _HIRPrimCallable)):
+                func = resolved
+        arrays = [_substitute_hir(a, subs) for a in expr.arrays]
+        return _HIRMap(expr.frame_shape, expr.cell_shape, func, arrays, expr.result_type)
+    if isinstance(expr, _HIRApply):
+        func = expr.func
+        if isinstance(func, _HIRVar) and func.name in subs:
+            resolved = subs[func.name]
+            if isinstance(resolved, (_HIRLambda, _HIRPrimCallable)):
+                func = resolved
+        arrays = [_substitute_hir(a, subs) for a in expr.arrays]
+        return _HIRApply(expr.frame_shape, expr.cell_shape, func, arrays, expr.result_type)
+    if isinstance(expr, _HIRLet):
+        value = _substitute_hir(expr.value, subs)
+        body = _substitute_hir(expr.body, subs)
+        return _HIRLet(expr.name, expr.value_type, value, body, expr.result_type)
+    return expr
+
+
 def prepare_function_source(
     source: str,
     function_name: str,
@@ -354,6 +451,17 @@ def prepare_function_source(
         lower_expr(typed_function.body),
         function_type.result,
     )
+
+    func_params_with_func_type = [
+        (i, p) for i, p in enumerate(hir_function.params)
+        if isinstance(p.type, FuncType)
+    ]
+    if func_params_with_func_type and program.body is not None:
+        hir_function = _try_monomorphize(
+            hir_function, func_params_with_func_type,
+            program, function_name, checker, env,
+        )
+
     return PreparedFunctionArtifact(
         source=source,
         function_name=function_name,
