@@ -19,6 +19,7 @@ from remora.hir import (
     HIRDrop,
     HIRExpr,
     HIRFold,
+    HIRFoldRight,
     HIRIf,
     HIRIndex,
     HIRIota,
@@ -135,6 +136,7 @@ class GpuReduce:
     dimension: int
     loop_var_name: str = "_reduction_idx"
     components: list["GpuExpr"] = field(default_factory=list)
+    reverse: bool = False
 
 
 @dataclass(frozen=True)
@@ -369,8 +371,8 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
     if isinstance(expr, HIRIndex):
         return _lower_index(expr, ctx)
 
-    # HIRFold / HIRReduce
-    if isinstance(expr, (HIRFold, HIRReduce)):
+    # HIRFold / HIRReduce / HIRFoldRight
+    if isinstance(expr, (HIRFold, HIRReduce, HIRFoldRight)):
         return _lower_fold_to_gpu(expr, ctx)
 
     # HIRLet
@@ -860,11 +862,12 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
 
 
 def _lower_fold_to_gpu(
-    fold: HIRFold | HIRReduce, ctx: _CompileCtx
+    fold: HIRFold | HIRReduce | HIRFoldRight, ctx: _CompileCtx
 ) -> GpuExpr:
     """Lower a fold (scalar or array-valued) to a GpuReduce."""
     from remora.types import ArrayType, StaticDim
 
+    is_reverse = isinstance(fold, HIRFoldRight)
     result_type = fold.result_type
 
     if not isinstance(fold.func, HIRPrimCallable):
@@ -928,6 +931,7 @@ def _lower_fold_to_gpu(
                 dimension=dim,
                 loop_var_name=loop_var_name,
                 components=list(body_expr.components),
+                reverse=is_reverse,
             )
         return GpuReduce(
             op=op,
@@ -935,18 +939,23 @@ def _lower_fold_to_gpu(
             body_expr=body_expr,
             dimension=dim,
             loop_var_name=loop_var_name,
+            reverse=is_reverse,
         )
 
     # Array-valued result: decompose into K components via GpuExtractComponent
     assert isinstance(result_type, ArrayType)
-    K = int(result_type.shape[0].value) if result_type.shape else 0
-    if K <= 0 or result_type.rank != 1:
+    K = 1
+    for d in result_type.shape:
+        K *= int(d.value)
+    if K <= 0:
         raise GPUScaffoldError(
-            f"{ctx.context}: array-valued fold supports rank-1 results only"
+            f"{ctx.context}: array-valued fold has zero-size result"
         )
 
     # Lower init to per-component expressions
-    init_exprs: list[GpuExpr] = _lower_fold_init_components(fold.init, K, ctx)
+    init_exprs: list[GpuExpr] = _flatten_gpu_exprs(
+        _lower_fold_init_components(fold.init, K, ctx)
+    )
 
     # Decompose body into K per-component scalar expressions
     # If the fold body came from a map-over-iota pattern producing an array,
@@ -958,10 +967,13 @@ def _lower_fold_to_gpu(
         inner = inner.body
 
     if isinstance(inner, GpuArrayExpr):
-        # Directly use the array's components — avoids redundant emission
-        component_bodies = list(inner.components[:K])
+        component_bodies = _flatten_gpu_exprs(list(inner.components))
     else:
         for k in range(K):
+            component_bodies.append(GpuExtractComponent(body_expr, k))
+
+    if len(component_bodies) < K:
+        for k in range(len(component_bodies), K):
             component_bodies.append(GpuExtractComponent(body_expr, k))
 
     return GpuReduce(
@@ -971,7 +983,19 @@ def _lower_fold_to_gpu(
         dimension=dim,
         loop_var_name=loop_var_name,
         components=component_bodies,
+        reverse=is_reverse,
     )
+
+
+def _flatten_gpu_exprs(exprs: list[GpuExpr]) -> list[GpuExpr]:
+    """Recursively flatten nested GpuArrayExpr into scalar components."""
+    result: list[GpuExpr] = []
+    for e in exprs:
+        if isinstance(e, GpuArrayExpr):
+            result.extend(_flatten_gpu_exprs(list(e.components)))
+        else:
+            result.append(e)
+    return result
 
 
 def _lower_fold_init_components(

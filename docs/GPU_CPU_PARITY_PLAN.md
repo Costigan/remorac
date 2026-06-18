@@ -139,7 +139,7 @@ across multiple inputs.
       Requires mapping target thread coordinates to source coordinates
       by dropping leading dimensions.
 
-- [ ] **B.5 — `HIRScatterAdd`**: `target[i] += update`.  On GPU,
+- [x] **B.5 — `HIRScatterAdd`**: `target[i] += update`.  On GPU,
       this is an atomic add: `llvm.atomicrmw fadd %target_ptr, %update`.
       Requires a separate kernel (scatter-add is a write, not a read)
       or handling as a special node in the expression tree that lowers
@@ -164,7 +164,7 @@ across multiple inputs.
       arrays of the same shape, emit element-wise `GpuSelect` for
       each component.
 
-- [ ] **C.5 — Multi-rank array-valued folds**: Currently only rank-1
+- [x] **C.5 — Multi-rank array-valued folds**: Currently only rank-1
       array results are supported.  Extend to rank > 1 by recursively
       decomposing into nested component iterations.
 
@@ -173,7 +173,7 @@ across multiple inputs.
       with stride != 1).  The existing `_linear_index_lines` already
       multiplies by per-dimension strides, so this should mostly work.
 
-- [ ] **C.7 — Zero-size shape handling**: Bounds-check before any
+- [x] **C.7 — Zero-size shape handling**: Bounds-check before any
       load/store when a dimension is zero.  Currently untested.
 
 - [x] **C tests** — Targeted tests for each hardening item.

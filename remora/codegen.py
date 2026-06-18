@@ -25,6 +25,7 @@ from remora._gpu_map_support import (
 )
 from remora.errors import RemoraError
 from remora.hir import HIRFunction
+from remora.hir import HIRIndicesOf, HIRMatmul, HIRScatterAdd, HIRSort, HIRGrade
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
@@ -39,9 +40,14 @@ from remora.gpu_lowering import (
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_f32_scan_gpu_module,
     build_descriptor_abi_general_map_gpu_module,
+    build_descriptor_abi_grade_gpu_module,
     build_descriptor_abi_i32_map_gpu_module,
     build_descriptor_abi_im2col_gpu_module,
+    build_descriptor_abi_indices_of_gpu_module,
+    build_descriptor_abi_matmul_gpu_module,
+    build_descriptor_abi_scatter_add_gpu_module,
     build_descriptor_abi_sobel_gpu_module,
+    build_descriptor_abi_sort_gpu_module,
     extract_gpu_module_body_as_module,
 )
 
@@ -162,6 +168,109 @@ def generate_mlir_descriptor_abi_ptx(
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
             return ptx, [meta]
+
+    # ── try GPU scatter-add ──
+    if isinstance(function.body, HIRScatterAdd):
+        try:
+            gpu_module = build_descriptor_abi_scatter_add_gpu_module(function, kernel_name=name)
+            sa_result = function.body.result_type
+            sa_shape = tuple(int(d.value) for d in sa_result.shape) if isinstance(sa_result, ArrayType) else ()
+            num_array = sum(1 for p in function.params if isinstance(p.type, ArrayType))
+            num_scalar = sum(1 for p in function.params if not isinstance(p.type, ArrayType))
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=1,
+                num_inputs=num_array + num_scalar,
+                num_outputs=1,
+                input_elem_types=["f32"] * (num_array + num_scalar),
+                output_elem_types=["f32"],
+                output_shape=sa_shape,
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+        except GPUScaffoldError:
+            pass
+
+    # ── try GPU matmul ──
+    if isinstance(function.body, HIRMatmul):
+        try:
+            gpu_module = build_descriptor_abi_matmul_gpu_module(function, kernel_name=name)
+            mm_result = function.body.result_type
+            mm_shape = tuple(int(d.value) for d in mm_result.shape) if isinstance(mm_result, ArrayType) else ()
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=2,
+                num_outputs=1,
+                input_elem_types=["f32", "f32"],
+                output_elem_types=["f32"],
+                output_shape=mm_shape,
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+        except GPUScaffoldError:
+            pass
+
+    # ── try GPU sort / grade ──
+    if isinstance(function.body, (HIRSort, HIRGrade)):
+        try:
+            if isinstance(function.body, HIRSort):
+                gpu_module = build_descriptor_abi_sort_gpu_module(function, kernel_name=name)
+                out_dtype = "float32"
+            else:
+                gpu_module = build_descriptor_abi_grade_gpu_module(function, kernel_name=name)
+                out_dtype = "int32"
+            sg_result = function.body.result_type
+            sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=1,
+                num_inputs=1,
+                num_outputs=1,
+                input_elem_types=["f32"],
+                output_elem_types=["f32" if out_dtype == "float32" else "i32"],
+                output_shape=sg_shape,
+                output_dtype=out_dtype,
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+        except GPUScaffoldError:
+            pass
+
+    # ── try GPU indices-of ──
+    if isinstance(function.body, HIRIndicesOf):
+        try:
+            gpu_module = build_descriptor_abi_indices_of_gpu_module(function, kernel_name=name)
+            io_result = function.body.result_type
+            io_shape = tuple(int(d.value) for d in io_result.shape) if isinstance(io_result, ArrayType) else ()
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=1,
+                num_outputs=1,
+                input_elem_types=["f32"],
+                output_elem_types=["i32"],
+                output_shape=io_shape,
+                output_dtype="int32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+        except GPUScaffoldError:
+            pass
 
     # ── try GPU cell-fold dot-product (convolution) ──
     try:
@@ -396,15 +505,16 @@ def generate_mlir_descriptor_abi_ptx(
                 except GPUScaffoldError as reduction_error:
                     try:
                         gpu_module = build_descriptor_abi_f32_scan_gpu_module(function, kernel_name=name)
+                        scan_shape = tuple(int(d.value) for d in function.params[0].type.shape)
                         meta = KernelMeta(
                             name=name,
                             grid_dims=1,
-                            block_size=1,  # single-thread scan
+                            block_size=scan_shape[0],
                             num_inputs=1,
                             num_outputs=1,
                             input_elem_types=["f32"],
                             output_elem_types=["f32"],
-                            output_shape=(),
+                            output_shape=scan_shape,
                             output_dtype="float32",
                         )
                     except GPUScaffoldError as scan_error:

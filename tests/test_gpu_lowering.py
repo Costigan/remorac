@@ -222,8 +222,8 @@ def test_rank1_through_rank3_binary_map_gpu_scaffolds_are_parseable():
 
 
 def test_rank1_f32_unary_map_gpu_scaffold_rejects_invalid_size():
-    with pytest.raises(GPUScaffoldError, match="positive"):
-        build_rank1_f32_unary_map_gpu_scaffold(size=0)
+    with pytest.raises(GPUScaffoldError, match="non-negative"):
+        build_rank1_f32_unary_map_gpu_scaffold(size=-1)
 
 
 def test_builds_gpu_scaffold_from_rank1_f32_scale_hir_function():
@@ -807,11 +807,11 @@ def test_gpu_scaffold_from_function_rejects_binary_operator_sections():
         build_gpu_scaffold_for_function(function)
 
 
-def test_gpu_scaffold_rejects_rank_above_ten_and_zero_dimensions():
+def test_gpu_scaffold_rejects_rank_above_ten_and_negative_dimensions():
     with pytest.raises(GPUScaffoldError, match="rank-1 through rank-10"):
         build_f32_unary_map_gpu_scaffold(shape=(1,) * 11, operation="*", constant=2.0)
-    with pytest.raises(GPUScaffoldError, match="positive"):
-        build_f32_binary_map_gpu_scaffold(shape=(2, 0), operation="+")
+    with pytest.raises(GPUScaffoldError, match="non-negative"):
+        build_f32_binary_map_gpu_scaffold(shape=(2, -1), operation="+")
 
 
 def test_gpu_scaffold_rejects_manual_mismatched_binary_shapes():

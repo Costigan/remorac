@@ -24,6 +24,7 @@ from remora.hir import (
     HIRArrayLit,
     HIRCast,
     HIRFold,
+    HIRFoldRight,
     HIRFunction,
     HIRIf,
     HIRIndex,
@@ -31,17 +32,22 @@ from remora.hir import (
     HIRLambda,
     HIRLit,
     HIRMap,
+    HIRMatmul,
     HIRParam,
     HIRPrimCallable,
     HIRPrimOp,
     HIRReduce,
     HIRVar,
     HIRAppend,
+    HIRCast,
     HIRDrop,
     HIRRavel,
     HIRReshape,
     HIRReverse,
     HIRRotate,
+    HIRScatterAdd,
+    HIRSort,
+    HIRGrade,
     HIRSubarray,
     HIRTake,
     HIRTranspose,
@@ -258,17 +264,21 @@ class TestGPUExprCompiler:
         ptx, _scaffold = _build_and_compile_to_ptx(hfunc, "test_r2_idx")
         assert ".visible .entry test_r2_idx" in ptx
 
-    def test_unsupported_rank2_array_fold_raises_error(self):
-        """Rank > 1 array-valued fold raises GPUScaffoldError."""
+    def test_rank2_array_fold_compiles(self):
+        """Rank-2 array-valued fold now compiles (C.5)."""
+        init_row = HIRArrayLit([HIRLit(0.0, FLOAT), HIRLit(0.0, FLOAT)],
+                               ArrayType(FLOAT, (StaticDim(2),)))
+        init_arr = HIRArrayLit([init_row, init_row, init_row],
+                               ArrayType(FLOAT, (StaticDim(3), StaticDim(2))))
         fold_arr = HIRFold(
             reduction_dim=StaticDim(3),
             func=HIRPrimCallable("+", (FLOAT, FLOAT), FLOAT),
-            init=HIRLit(0.0, FLOAT),
+            init=init_arr,
             array=HIRIota(StaticDim(3), ArrayType(INT, (StaticDim(3),))),
-            result_type=ArrayType(FLOAT, (StaticDim(3), StaticDim(2))),  # rank 2!
+            result_type=ArrayType(FLOAT, (StaticDim(3), StaticDim(2))),
         )
         hfunc = HIRFunction(
-            name="bad", params=[HIRParam("x", FLOAT)],
+            name="r2fold", params=[HIRParam("x", FLOAT)],
             body=HIRMap(
                 frame_shape=(StaticDim(3),), cell_shape=(),
                 func=HIRLambda(params=[HIRParam("i", INT)], body=fold_arr, result_type=None),
@@ -277,8 +287,8 @@ class TestGPUExprCompiler:
             ),
             return_type=ArrayType(FLOAT, (StaticDim(3),)),
         )
-        with pytest.raises(GPUScaffoldError, match="rank-1"):
-            build_descriptor_abi_general_map_gpu_module(hfunc, kernel_name="bad")
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_r2fold")
+        assert ".visible .entry test_r2fold" in ptx
 
     def test_array_valued_fold_compiles(self):
         """Rank-1 array-valued fold compiles (was previously out of scope)."""
@@ -589,6 +599,30 @@ class TestPhaseBReinterpOps:
         ptx, _ = _build_and_compile_to_ptx(hfunc, "test_ws")
         assert ".visible .entry test_ws" in ptx
 
+    def test_scatter_add_compiles(self):
+        """B.5: scatter_add(target, idx, val) with literal index."""
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        sa_body = HIRScatterAdd(
+            target=HIRVar('target', arr_type),
+            index=HIRLit(2, INT),
+            update=HIRLit(1.0, FLOAT),
+            result_type=arr_type,
+        )
+        hfunc = HIRFunction(
+            name='test_sa',
+            params=[HIRParam('target', arr_type)],
+            body=sa_body,
+            return_type=arr_type,
+        )
+        from remora.gpu_lowering import build_descriptor_abi_scatter_add_gpu_module, extract_gpu_module_body_as_module
+        from remora.pipeline import detect_toolchain, translate_llvmir_to_nvptx_text, translate_mlir_to_llvmir
+        gpu_module = build_descriptor_abi_scatter_add_gpu_module(hfunc, kernel_name="test_sa")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_sa" in ptx
+
 
 # ---------------------------------------------------------------------------
 # Phase C: Hardening (GPU_CPU_PARITY_PLAN.md)
@@ -698,6 +732,111 @@ class TestPhaseCHardening:
         )
         ptx, _ = _build_and_compile_to_ptx(hfunc, "test_stride")
         assert ".visible .entry test_stride" in ptx
+
+    def test_fold_right_compiles(self):
+        """HIRFoldRight: reverse fold over iota inside a map body."""
+        N = 4
+        inner_fold = HIRFoldRight(
+            reduction_dim=StaticDim(N),
+            func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+            init=HIRLit(0.0, FLOAT),
+            array=HIRIota(StaticDim(N), ArrayType(INT, (StaticDim(N),))),
+            result_type=FLOAT,
+        )
+        result_type = ArrayType(FLOAT, (StaticDim(3),))
+        hfunc = HIRFunction(
+            name='test_foldr',
+            params=[HIRParam('dummy', FLOAT)],
+            body=HIRMap(
+                frame_shape=(StaticDim(3),), cell_shape=(),
+                func=HIRLambda(params=[HIRParam('i', INT)], body=inner_fold, result_type=None),
+                arrays=[HIRIota(StaticDim(3), ArrayType(INT, (StaticDim(3),)))],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_foldr")
+        assert ".visible .entry test_foldr" in ptx
+
+    def test_parallel_scan_compiles(self):
+        """Parallel Hillis-Steele scan compiles to PTX."""
+        from remora.hir import HIRScan
+        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module, extract_gpu_module_body_as_module
+        arr_type = ArrayType(FLOAT, (StaticDim(8),))
+        hfunc = HIRFunction(
+            name='test_scan',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRScan(
+                reduction_dim=StaticDim(8),
+                func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+                init=HIRLit(0.0, FLOAT),
+                array=HIRVar('xs', arr_type),
+                exclusive=False,
+                right=False,
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(hfunc, kernel_name="test_scan")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_scan" in ptx
+
+    def test_matmul_compiles(self):
+        """HIRMatmul: GPU matmul kernel compiles to PTX."""
+        from remora.gpu_lowering import build_descriptor_abi_matmul_gpu_module, extract_gpu_module_body_as_module
+        left_type = ArrayType(FLOAT, (StaticDim(3), StaticDim(4)))
+        right_type = ArrayType(FLOAT, (StaticDim(4), StaticDim(2)))
+        result_type = ArrayType(FLOAT, (StaticDim(3), StaticDim(2)))
+        hfunc = HIRFunction(
+            name='test_mm',
+            params=[HIRParam('a', left_type), HIRParam('b', right_type)],
+            body=HIRMatmul(HIRVar('a', left_type), HIRVar('b', right_type), result_type),
+            return_type=result_type,
+        )
+        gpu_module = build_descriptor_abi_matmul_gpu_module(hfunc, kernel_name="test_mm")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_mm" in ptx
+
+    def test_sort_compiles(self):
+        """HIRSort: GPU sort kernel compiles to PTX."""
+        from remora.gpu_lowering import build_descriptor_abi_sort_gpu_module, extract_gpu_module_body_as_module
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        hfunc = HIRFunction(
+            name='test_sort',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRSort(HIRVar('xs', arr_type), arr_type),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_sort_gpu_module(hfunc, kernel_name="test_sort")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_sort" in ptx
+
+    def test_grade_compiles(self):
+        """HIRGrade: GPU grade kernel compiles to PTX."""
+        from remora.gpu_lowering import build_descriptor_abi_grade_gpu_module, extract_gpu_module_body_as_module
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        grade_type = ArrayType(INT, (StaticDim(6),))
+        hfunc = HIRFunction(
+            name='test_grade',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRGrade(HIRVar('xs', arr_type), grade_type),
+            return_type=grade_type,
+        )
+        gpu_module = build_descriptor_abi_grade_gpu_module(hfunc, kernel_name="test_grade")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_grade" in ptx
 
 
 # ---------------------------------------------------------------------------
