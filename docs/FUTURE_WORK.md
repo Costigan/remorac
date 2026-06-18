@@ -41,3 +41,34 @@ memory-bandwidth-limited for large matrices.
 **Upgrade path**: standard CUDA tiled matmul with TILE×TILE shared-memory
 tiles, cooperative loading, and register blocking.  Would improve
 throughput significantly for matrices larger than ~64×64.
+
+## Multi-block Parallel Scan
+
+**Current state**: The parallel Hillis-Steele scan handles arrays up to
+1024 elements (one block).  Arrays larger than 1024 fall back to a serial
+single-thread kernel — correct but O(N) on one core.
+
+**Upgrade path**: multi-block scan with inter-block prefix propagation
+(Blelloch or decoupled look-back).  Each block scans its tile in shared
+memory, then a second pass propagates block-level prefixes.  Would bring
+large-array scan to O(N/P).
+
+## Parallel Sort and Grade
+
+**Current state**: `HIRSort` and `HIRGrade` use serial insertion sort
+(single-thread, O(N²)).  Correct for any size but impractical for
+arrays larger than a few hundred elements.
+
+**Upgrade path**: bitonic sort in shared memory for small arrays
+(N ≤ 1024), or a radix sort for larger arrays.  Both are well-known
+GPU algorithms with O(N log²N) or O(N·W) work.
+
+## Parallel Scatter-Add
+
+**Current state**: `HIRScatterAdd` uses a serial single-thread kernel
+that copies the target to the output and then performs a single add.
+Correct but sequential.
+
+**Upgrade path**: parallel copy (one thread per element) followed by
+a single atomic add, or a fully parallel scatter with `llvm.atomicrmw
+fadd` for each update position.  Would scale with array size.

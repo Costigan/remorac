@@ -1,62 +1,73 @@
 # Compiler Maturity Example Roadmap
 
-## Current Status (2026-06-17)
+## Current Status (2026-06-18)
 
-| # | Example | Interp | CPU | GPU | Notes |
-|---|---------|--------|-----|-----|-------|
-| 3 | Image processing | ✓ | ✓ | ✓ | Sobel, threshold, blur (Phases 4A/4G) |
-| 4 | Logistic regression | ✓ | ✓ | ~ | Phase 1 done; GPU elementwise patterns exist |
-| 1 | PDE solver (heat) | ✓ | ✓ | ✓ | Subarray+fused-map path (Phase 4G); 13/13 GPU tests |
-| 8 | Monte Carlo | ✓ | ✓ | ~ | Scan + reduce patterns exist on GPU |
-| 2 | N-body | ✓ | ~ | ✗ | Interpreter works; CPU/GPU blocked by scalar-map-with-fold lowering gap |
-| 12 | Diff. renderer | ✓ | ~ | ✗ | AD output too complex for GPU pattern matchers; needs multi-op decomposition |
-| 5 | K-Means | ✓ | ~ | ✗ | Broadcasting + argmin; `grade` typecheck-only |
-| 6 | Molecular dynamics | ✓ | ✗ | ✗ | Gather/scatter not supported |
-| 7 | Tomography | ✓ | ✗ | ✗ | Interpolation not supported |
-| 9 | Kalman filter | ✓ | ~ | ✗ | Matmul + scan; scan exists on GPU |
-| 10 | PageRank | ✓ | ✗ | ✗ | Scatter-add not supported |
-| 11 | FFT | ✓ | ✗ | ✗ | Complex numbers not supported |
+| #   | Example             | Interp | CPU | GPU | Notes                                                                    |
+| --- | ------------------- | ------ | --- | --- | ------------------------------------------------------------------------ |
+| 1   | PDE solver (heat)   | ✓      | ✓   | ✓   | Subarray+fused-map path; 13/13 GPU tests                                 |
+| 2   | N-body              | ✓      | ✓   | ~   | General path handles compound map bodies (fold+index+nested map)         |
+| 3   | Image processing    | ✓      | ✓   | ✓   | Sobel, threshold, blur (Phases 4A/4G)                                    |
+| 4   | Logistic regression | ✓      | ✓   | ✓   | Matmul kernel, type-aware arithmetic, general map fallback               |
+| 5   | K-Means             | ✓      | ~   | ~   | Sort/grade GPU kernels exist; broadcasting via with-shape                |
+| 6   | Molecular dynamics  | ✓      | ✗   | ✗   | CPU-level gaps (neighbor lists, periodic boundaries) block both backends |
+| 7   | Tomography          | ✓      | ✗   | ✗   | Interpolation primitives not yet a compiler surface                      |
+| 8   | Monte Carlo         | ✓      | ✓   | ✓   | Parallel scan (all ops, exclusive, right), reductions                    |
+| 9   | Kalman filter       | ✓      | ~   | ~   | Matmul + full scan now available on GPU                                  |
+| 10  | PageRank            | ✓      | ~   | ~   | Scatter-add GPU kernel available; edge-list patterns partially supported |
+| 11  | FFT                 | ✓      | ✗   | ✗   | Complex numbers not supported                                            |
+| 12  | Diff. renderer      | ✓      | ~   | ~   | General map fallback handles AD-generated compound bodies                |
 
 **Interpreter:** `evaluate_source` / `_lambda_callable` path — works for all
-examples (interpreter handles the full Remora surface).  **CPU:** descriptor-ABI
-native compilation.  **GPU:** `compile_function_source_to_mlir_gpu_ptx` →
-PTX → CUDA launch.  ✓ = verified, ~ = likely works / not fully tested, ✗ =
+examples (interpreter handles the full Remora surface). **CPU:** descriptor-ABI
+native compilation. **GPU:** `compile_function_source_to_mlir_gpu_ptx` →
+PTX → CUDA launch. ✓ = verified, ~ = likely works / not fully tested, ✗ =
 blocked by missing compiler capability.
 
 ## Purpose
 
 This document lists candidate end-to-end examples that could mature `remorac` in
-the same way the crater neural-net work does.  A good driving example should be
+the same way the crater neural-net work does. A good driving example should be
 large enough to expose real compiler gaps, small enough to validate in stages,
 and shaped around Remora's strengths: dense array programming, rank
 polymorphism, shape checking, AD, reductions, scans, and CPU/GPU lowering.
 
-The crater detector remains the primary near-term example.  These examples are
+The crater detector remains the primary near-term example. These examples are
 options for broadening the compiler roadmap after, or alongside, that work.
 
 ## Current Baseline
 
-As of the current crater CNN work, `remorac` has useful coverage for:
+As of the current state, `remorac` has useful coverage for:
 
 - Lisp and ML syntaxes for dense array programs.
 - Scalar and array arithmetic with rank-polymorphic lifting.
-- `map`, `fold`, reductions, scans, and several shape/view primitives.
+- `map`, `fold`, `fold-right`, reductions, scans (parallel Hillis-Steele),
+  and a full set of shape/view primitives.
 - Static-shape `im2col`/`col2im` for CNN-style image kernels.
 - Reverse-mode AD for scalar losses over many elementwise, view, reduction, and
   indexing operations.
 - Multi-output value-and-grad source generation.
 - Native CPU compilation through the descriptor path.
-- Early GPU support for a subset of maps, reductions, views, scan, and append.
+- GPU compilation for the full dense statically-shaped subset: all view ops
+  (take/drop/subarray/reverse/rotate/transpose), descriptor reinterpretation
+  (reshape/ravel/append/with-shape), scatter-add, matmul, sort/grade,
+  filter/replicate, indices-of, scan (all variants), and a general map path
+  that serves as a universal fallback for any compound-body map.
+- Type-aware i32/f32/bool loads, stores, and arithmetic on GPU.
+- Automatic monomorphization of higher-order function parameters for GPU.
 
 Important known gaps for larger examples:
 
-- GPU ABI and lowering are not yet sufficient for the full crater CNN gradient.
-- Static batch support is still a major milestone for production training.
-- Buffer reuse and memory planning are not yet mature enough for large deep
-  models.
-- Sparse, segmented, and irregular data structures are limited.
-- Dynamic shapes and variable-length outputs are not first-class.
-- Some patterns still require explicit named helpers or source-shape discipline.
+- Interpolation and coordinate-transform primitives are not yet a polished
+  surface (blocks tomography, some advanced image processing).
+- Complex number support is absent (blocks FFT).
+- Sparse, segmented, and irregular data structures are limited (affects
+  molecular dynamics neighbor lists, graph algorithms).
+- Dynamic shapes and variable-length outputs use serial GPU kernels
+  (filter/replicate) pending multi-kernel executor orchestration.
+- GPU sort, grade, scatter-add, and filter use serial single-thread kernels;
+  parallel versions are documented in `docs/FUTURE_WORK.md`.
+- Buffer reuse and memory planning are not yet mature enough for large
+  intermediates (e.g. N-body pairwise `[N,N,3]` tensors).
 
 ## Evaluation Criteria
 
@@ -113,7 +124,7 @@ Implement one heat-equation step:
 step(grid [64,64]) -> [64,64]
 ```
 
-Then let Python run `T` steps and compare against a NumPy reference.  Later,
+Then let Python run `T` steps and compare against a NumPy reference. Later,
 move fixed-step iteration into Remora and scale to `512x512`.
 
 ## 2. N-Body Simulation
@@ -132,7 +143,7 @@ forces:     [N, 3]
 ### Value
 
 N-body is a compact dense benchmark for pairwise maps, broadcasting, reductions,
-and GPU memory pressure.  It is also a good AD target if optimizing initial
+and GPU memory pressure. It is also a good AD target if optimizing initial
 conditions or fitting parameters.
 
 It would exercise:
@@ -147,10 +158,11 @@ It would exercise:
 
 - A naive all-pairs tensor can become too large quickly; the compiler needs
   fusion or tiling to avoid memory blowups.
-- Efficient GPU lowering for large pairwise computations is not yet proven.
-- Masking diagonal/self-interactions needs clean array patterns.
 - In-language multi-step integration requires loop or scan support with good
   buffer behavior.
+- Masking diagonal/self-interactions needs clean array patterns.
+- ~~Scalar-map-with-fold lowering gap~~ — **resolved** by the general GPU map
+  path (compound bodies with folds, index expressions, nested maps).
 
 ### First Milestone
 
@@ -160,7 +172,7 @@ Implement single-step force computation for `N=128`:
 forces(positions [128,3], masses [128]) -> [128,3]
 ```
 
-Validate against NumPy, then add one velocity/position update.  Python can run
+Validate against NumPy, then add one velocity/position update. Python can run
 multiple steps until Remora loop support is ready.
 
 ## 3. Image Processing Pipeline
@@ -178,7 +190,7 @@ mask:  [H, W]
 
 ### Value
 
-This is a natural companion to crater detection.  It exercises real image
+This is a natural companion to crater detection. It exercises real image
 operators without neural-network AD complexity and gives visually inspectable
 outputs.
 
@@ -279,7 +291,7 @@ labels:  [N]
 ### Value
 
 K-means is a good bridge from dense pairwise arrays to irregular grouped
-reductions.  It is not AD-heavy, but it is shape-heavy and reduction-heavy.
+reductions. It is not AD-heavy, but it is shape-heavy and reduction-heavy.
 
 It would exercise:
 
@@ -290,9 +302,10 @@ It would exercise:
 
 ### Current Gaps
 
-- `sort` and `grade` are documented as typecheck-only; argmin/argmax support may
-  need implementation.
-- Updating centers requires segmented sums/counts or one-hot masks.  Dense
+- ~~`sort` and `grade` are documented as typecheck-only~~ — **resolved**:
+  both have dedicated GPU kernels (serial insertion sort).
+- Argmin/argmax support may need explicit patterns using `grade`.
+- Updating centers requires segmented sums/counts or one-hot masks. Dense
   one-hot is possible but inefficient for large `N` and `K`.
 - Convergence checks need scalar reductions and host orchestration.
 - Empty clusters need conditionals and safe division.
@@ -305,7 +318,7 @@ Implement pairwise squared distances:
 dists(points [N,D], centers [K,D]) -> [N,K]
 ```
 
-Then add Python-owned argmin/update as an intermediate step.  Later move dense
+Then add Python-owned argmin/update as an intermediate step. Later move dense
 one-hot center updates into Remora for small `K`.
 
 ## 6. Molecular Dynamics With Neighbor Lists
@@ -323,7 +336,7 @@ forces:      [N, 3]
 ### Value
 
 This matures gather/scatter, masked computation, and more realistic scientific
-simulation than all-pairs N-body.  It introduces controlled irregularity through
+simulation than all-pairs N-body. It introduces controlled irregularity through
 a padded fixed-width neighbor list.
 
 It would exercise:
@@ -337,10 +350,13 @@ It would exercise:
 ### Current Gaps
 
 - Advanced gather patterns over `[N,K]` index arrays need validation.
-- Scatter-add exists in AD support for some indexing paths, but a user-facing
-  primitive and GPU lowering may be needed.
+- ~~Scatter-add~~ — **resolved**: `HIRScatterAdd` has a dedicated GPU kernel.
+  However, the kernel is serial (single-thread); parallel scatter is in
+  `docs/FUTURE_WORK.md`.
 - Dynamic neighbor counts are not first-class; padding and masks are required.
 - Periodic boundary conditions need careful vector arithmetic and wrapping.
+- CPU-level gaps (neighbor-list construction, masked boundaries) block both
+  backends equally.
 
 ### First Milestone
 
@@ -365,7 +381,7 @@ image:    [H, W]
 ### Value
 
 Tomography is a real scientific imaging workload with structured transforms,
-large reductions, and interpolation.  It is a good stress test for layout,
+large reductions, and interpolation. It is a good stress test for layout,
 transposes, and memory bandwidth.
 
 It would exercise:
@@ -408,7 +424,7 @@ price:   Float
 ### Value
 
 This is an embarrassingly parallel workload with scans over time and reductions
-over simulations.  It can later use AD to compute sensitivities.
+over simulations. It can later use AD to compute sensitivities.
 
 It would exercise:
 
@@ -450,7 +466,7 @@ weights:      [Particles]
 ### Value
 
 Filtering exercises scans over time, normalization, reductions, and controlled
-state updates.  Particle filters add irregular resampling pressure later.
+state updates. Particle filters add irregular resampling pressure later.
 
 It would exercise:
 
@@ -461,8 +477,10 @@ It would exercise:
 
 ### Current Gaps
 
-- General matrix multiplication and small linear algebra primitives are not
-  mature.
+- ~~General matrix multiplication~~ — **resolved**: `HIRMatmul` has a dedicated
+  GPU kernel (per-thread dot-product; tiled version in `docs/FUTURE_WORK.md`).
+- ~~Scan~~ — **resolved**: parallel Hillis-Steele scan handles all operators,
+  exclusive/inclusive, left/right, any size.
 - Resampling is irregular and likely should remain Python-owned initially.
 - Dynamic observation lengths are deferred; use static `T` first.
 - Stable probability computations need `max` reductions and log-domain helpers.
@@ -470,7 +488,7 @@ It would exercise:
 ### First Milestone
 
 Implement a fixed-shape linear Kalman predict/update for one time step, then use
-Python to loop over `T`.  Move to Remora `scan` after one-step correctness.
+Python to loop over `T`. Move to Remora `scan` after one-step correctness.
 
 ## 10. PageRank or Graph Propagation
 
@@ -486,7 +504,7 @@ next_rank: [N]
 
 ### Value
 
-Graph workloads push Remora toward sparse and irregular data.  This should be a
+Graph workloads push Remora toward sparse and irregular data. This should be a
 later example, after dense examples are solid.
 
 It would exercise:
@@ -498,7 +516,9 @@ It would exercise:
 
 ### Current Gaps
 
-- User-facing scatter-add and segmented reduction support are limited.
+- ~~User-facing scatter-add~~ — **resolved**: `HIRScatterAdd` has a dedicated
+  GPU kernel.
+- Segmented reduction support is limited.
 - Sparse storage formats are not yet central to the compiler.
 - GPU lowering for scatter-heavy kernels is nontrivial.
 - Dynamic graph sizes need either recompilation or shape padding.
@@ -529,7 +549,7 @@ spectrogram: [Frames, Freq]
 ### Value
 
 This is a useful benchmark if Remora eventually needs primitive-library
-integration.  FFTs are foundational, but they are less ideal as an early
+integration. FFTs are foundational, but they are less ideal as an early
 compiler example because a good implementation often depends on specialized
 runtime primitives.
 
@@ -556,7 +576,7 @@ Implement direct DFT for tiny fixed sizes using real/imag pair arrays:
 dft(signal [32]) -> [32,2]
 ```
 
-Use this as a semantics test, not a performance target.  Defer real FFT
+Use this as a semantics test, not a performance target. Defer real FFT
 performance to library integration.
 
 ## 12. Differentiable Renderer Toy
@@ -574,8 +594,8 @@ loss:    Float
 
 ### Value
 
-This is a visually inspectable AD workload.  It is related to crater geometry
-but avoids CNN training.  It can test differentiable control flow and reductions
+This is a visually inspectable AD workload. It is related to crater geometry
+but avoids CNN training. It can test differentiable control flow and reductions
 over object and pixel axes.
 
 It would exercise:
@@ -610,16 +630,15 @@ Use AD to optimize circle positions and radii from a synthetic target image.
 The strongest complements to crater neural-net training are:
 
 1. **Finite difference PDE solver**: best dense GPU/stencil maturity path.
-2. **N-body simulation**: best pairwise map/reduction and memory-pressure path.
-3. **Logistic regression / softmax classifier**: best small AD and static-batch
+1. **N-body simulation**: best pairwise map/reduction and memory-pressure path.
+1. **Logistic regression / softmax classifier**: best small AD and static-batch
    validation path.
-4. **Image processing pipeline**: best non-neural companion to crater detection.
-5. **K-means**: best transition toward argmin and segmented reductions.
-6. **PageRank or molecular dynamics**: later sparse/irregular milestones once
+1. **Image processing pipeline**: best non-neural companion to crater detection.
+1. **K-means**: best transition toward argmin and segmented reductions.
+1. **PageRank or molecular dynamics**: later sparse/irregular milestones once
    dense examples are solid.
 
 Together with the anchor-free crater detector, these examples cover a broad
 compiler maturity surface: dense maps, reductions, scans, stencils, AD,
 convolution, static batch ABI, buffer reuse, scatter, segmented reductions,
 irregular data, and GPU lowering.
-
