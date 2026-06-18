@@ -21,7 +21,7 @@ from remora._gpu_map_support import (
     analyze_supported_i32_map_function,
 )
 from remora.errors import RemoraError
-from remora.hir import HIRFold, HIRFunction, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.hir import HIRFold, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRVar
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
@@ -560,8 +560,6 @@ def build_descriptor_abi_f32_scan_gpu_module(
 
     shape = _validate_shape(tuple(int(d.value) for d in param_type.shape))
     N = shape[0]
-    if N > 1024:
-        raise GPUScaffoldError("GPU parallel scan supports arrays up to 1024 elements")
     name = kernel_name or f"remora_{function.name}_f32_scan"
     _validate_scaffold_names(module_name, name)
 
@@ -590,6 +588,66 @@ def build_descriptor_abi_f32_scan_gpu_module(
     rank = 1
     desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
+
+    if N > 1024:
+        idx_expr = "llvm.sub %ss_Nm1, %ss_i" if is_right else "llvm.add %ss_i, %ss_c0"
+        if is_exclusive:
+            body_block = f"""    ^ss_body:
+      %ss_idx = {idx_expr}  : i64
+      %ss_si = llvm.add %in_offset, %ss_idx  : i64
+      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32
+      %ss_di = llvm.add %out_offset, %ss_idx  : i64
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ss_acc, %ss_dp : f32, !llvm.ptr
+      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : f32
+      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+        else:
+            body_block = f"""    ^ss_body:
+      %ss_idx = {idx_expr}  : i64
+      %ss_si = llvm.add %in_offset, %ss_idx  : i64
+      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32
+      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : f32
+      %ss_di = llvm.add %out_offset, %ss_idx  : i64
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ss_nacc, %ss_dp : f32, !llvm.ptr
+      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+
+        text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %ss_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %ss_tid = llvm.sext %ss_tid32 : i32 to i64
+      %ss_c0 = llvm.mlir.constant(0 : index) : i64
+      %ss_is_t0 = llvm.icmp "eq" %ss_tid, %ss_c0 : i64
+      llvm.cond_br %ss_is_t0, ^ss_work, ^ss_done
+
+    ^ss_work:
+      %ss_N = llvm.mlir.constant({N} : index) : i64
+      %ss_Nm1 = llvm.mlir.constant({N - 1} : index) : i64
+      %ss_c1 = llvm.mlir.constant(1 : index) : i64
+      %ss_init = llvm.mlir.constant({identity} : f32) : f32
+      llvm.br ^ss_loop(%ss_c0, %ss_init : i64, f32)
+
+    ^ss_loop(%ss_i: i64, %ss_acc: f32):
+      %ss_done_cond = llvm.icmp "uge" %ss_i, %ss_N : i64
+      llvm.cond_br %ss_done_cond, ^ss_done, ^ss_body
+
+{body_block}
+
+    ^ss_done:
+      llvm.return
+    }}
+  }}
+}}"""
+        return GPUModuleScaffold(text, module_name, name)
+
+    import math
+    max_d = math.ceil(math.log2(N)) if N > 1 else 0
 
     if is_right:
         load_idx = f"      %sc_load_idx = llvm.sub %sc_Nm1, %sc_tid  : i64"
@@ -2168,20 +2226,39 @@ def build_descriptor_abi_filter_gpu_module(
         raise GPUScaffoldError("GPU filter supports rank-1 only")
 
     pred = function.body.predicate
-    if not isinstance(pred, HIRPrimCallable):
-        raise GPUScaffoldError("GPU filter requires a primitive comparison predicate")
-    cmp_op = pred.op
-    if cmp_op not in {"<", "<=", ">", ">=", "==", "!="}:
-        raise GPUScaffoldError(f"GPU filter predicate op '{cmp_op}' not supported")
-
+    cmp_op = None
     cmp_const = None
     cmp_side = "right"
-    if pred.right_arg is not None and isinstance(pred.right_arg, HIRLit):
-        cmp_const = float(pred.right_arg.value)
-        cmp_side = "right"
-    elif pred.left_arg is not None and isinstance(pred.left_arg, HIRLit):
-        cmp_const = float(pred.left_arg.value)
-        cmp_side = "left"
+
+    if isinstance(pred, HIRPrimCallable):
+        cmp_op = pred.op
+        if pred.right_arg is not None and isinstance(pred.right_arg, HIRLit):
+            cmp_const = float(pred.right_arg.value)
+            cmp_side = "right"
+        elif pred.left_arg is not None and isinstance(pred.left_arg, HIRLit):
+            cmp_const = float(pred.left_arg.value)
+            cmp_side = "left"
+    elif isinstance(pred, HIRLambda):
+        from remora.hir import HIRPrimOp as _PO2
+        body = pred.body
+        if isinstance(body, _PO2) and len(body.args) == 2:
+            raw_op = body.op
+            for sfx in ("f", "i", "b"):
+                if raw_op.endswith(sfx):
+                    raw_op = raw_op[:-1]
+                    break
+            if raw_op in {"<", "<=", ">", ">=", "==", "!="}:
+                cmp_op = raw_op
+                a0, a1 = body.args
+                if isinstance(a1, HIRLit):
+                    cmp_const = float(a1.value)
+                    cmp_side = "right"
+                elif isinstance(a0, HIRLit):
+                    cmp_const = float(a0.value)
+                    cmp_side = "left"
+
+    if cmp_op is None or cmp_op not in {"<", "<=", ">", ">=", "==", "!="}:
+        raise GPUScaffoldError("GPU filter requires a comparison predicate (primitive or simple lambda)")
     if cmp_const is None:
         raise GPUScaffoldError("GPU filter predicate requires a literal constant")
 
@@ -2565,9 +2642,44 @@ def build_descriptor_abi_general_map_gpu_module(
         )
 
     body_map = function.body
+    map_func = body_map.func
+    if isinstance(map_func, HIRPrimCallable):
+        from remora.hir import HIRLambda as _L, HIRParam as _P, HIRPrimOp as _PO, HIRVar as _V
+        from remora.types import FuncType as _FT
+        _op = map_func.op
+        _rt = map_func.result_type
+        _elem_rt = _rt.element if isinstance(_rt, ArrayType) else _rt
+        _suffix = "f" if _elem_rt == FLOAT else ("i" if str(getattr(_elem_rt, 'name', '')) == 'int' else "f")
+        _typed_op = f"{_op}{_suffix}"
+        if map_func.left_arg is not None:
+            _p = _P("_gx", map_func.params[0] if map_func.params else FLOAT)
+            map_func = _L([_p], _PO(_typed_op, [map_func.left_arg, _V("_gx", _p.type)], _rt), _FT((_p.type,), _rt))
+        elif map_func.right_arg is not None:
+            _p = _P("_gx", map_func.params[0] if map_func.params else FLOAT)
+            map_func = _L([_p], _PO(_typed_op, [_V("_gx", _p.type), map_func.right_arg], _rt), _FT((_p.type,), _rt))
+        elif len(map_func.params) == 2:
+            _p0 = _P("_gx", map_func.params[0])
+            _p1 = _P("_gy", map_func.params[1])
+            map_func = _L([_p0, _p1], _PO(_typed_op, [_V("_gx", _p0.type), _V("_gy", _p1.type)], _rt), _FT((_p0.type, _p1.type), _rt))
+        body_map = HIRMap(body_map.frame_shape, body_map.cell_shape, map_func, body_map.arrays, body_map.result_type)
+
+    if isinstance(body_map.func, HIRVar):
+        var_name = body_map.func.name
+        is_param = any(p.name == var_name for p in function.params)
+        if is_param:
+            raise GPUScaffoldError(
+                f"GPU backend does not support higher-order function parameters as "
+                f"map callables ('{var_name}' is a function parameter); use a lambda "
+                f"or inline the function definition"
+            )
+        raise GPUScaffoldError(
+            f"general GPU map: unresolved function reference '{var_name}' as callable; "
+            f"defunctionalization should have inlined this"
+        )
+
     if not isinstance(body_map.func, HIRLambda):
         raise GPUScaffoldError(
-            "general GPU map requires a HIRLambda callable"
+            f"general GPU map requires a HIRLambda callable (got {type(body_map.func).__name__})"
         )
 
     result_type = body_map.result_type

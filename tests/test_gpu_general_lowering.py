@@ -1024,6 +1024,101 @@ class TestPhaseE1WrongResultRegressions:
                 hfunc, kernel_name="test_r2app",
             )
 
+    def test_prim_callable_as_map_func_compiles(self):
+        """E.2.1: HIRPrimCallable map callable is converted to lambda."""
+        arr_type = ArrayType(FLOAT, (StaticDim(4),))
+        result_type = arr_type
+        hfunc = HIRFunction(
+            name='test_prim_call',
+            params=[HIRParam('arr', arr_type)],
+            body=HIRMap(
+                frame_shape=(StaticDim(4),), cell_shape=(),
+                func=HIRPrimCallable("*", (FLOAT, FLOAT), FLOAT, right_arg=HIRLit(2.0, FLOAT)),
+                arrays=[HIRVar('arr', arr_type)],
+                result_type=result_type,
+            ),
+            return_type=result_type,
+        )
+        ptx, _ = _build_and_compile_to_ptx(hfunc, "test_prim_call")
+        assert ".visible .entry test_prim_call" in ptx
+
+    def test_lambda_filter_predicate_compiles(self):
+        """E.2.2: filter with lambda predicate compiles."""
+        from remora.hir import HIRLambda as _L, HIRParam as _P, HIRPrimOp as _PO
+        from remora.gpu_lowering import build_descriptor_abi_filter_gpu_module, extract_gpu_module_body_as_module
+        from remora.types import FuncType as _FT
+        arr_type = ArrayType(FLOAT, (StaticDim(6),))
+        sigma_rt = SigmaType("n", ArrayType(FLOAT, (StaticDim(6),)))
+        pred_lambda = _L(
+            [_P("x", FLOAT)],
+            _PO(">f", [HIRVar("x", FLOAT), HIRLit(0.0, FLOAT)], BOOL),
+            _FT((FLOAT,), BOOL),
+        )
+        hfunc = HIRFunction(
+            name='test_lfilt',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRFilter(
+                predicate=pred_lambda,
+                array=HIRVar('xs', arr_type),
+                result_type=sigma_rt,
+            ),
+            return_type=sigma_rt,
+        )
+        gpu_module = build_descriptor_abi_filter_gpu_module(hfunc, kernel_name="test_lfilt")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_lfilt" in ptx
+
+    def test_scan_large_array_serial_fallback(self):
+        """E.2.3: scan for N > 1024 falls back to serial kernel."""
+        from remora.hir import HIRScan
+        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module, extract_gpu_module_body_as_module
+        arr_type = ArrayType(FLOAT, (StaticDim(2048),))
+        hfunc = HIRFunction(
+            name='test_big_scan',
+            params=[HIRParam('xs', arr_type)],
+            body=HIRScan(
+                reduction_dim=StaticDim(2048),
+                func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+                init=HIRLit(0.0, FLOAT),
+                array=HIRVar('xs', arr_type),
+                exclusive=False, right=False,
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(hfunc, kernel_name="test_big_scan")
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        tc = detect_toolchain()
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=tc)
+        assert ".visible .entry test_big_scan" in ptx
+
+    def test_higher_order_func_param_raises_error(self):
+        """HIRVar callable from function parameter raises clear error."""
+        from remora.types import FuncType as _FT
+        arr_type = ArrayType(FLOAT, (StaticDim(4),))
+        hfunc = HIRFunction(
+            name='test_hof',
+            params=[
+                HIRParam('f', _FT((FLOAT,), FLOAT)),
+                HIRParam('xs', arr_type),
+            ],
+            body=HIRMap(
+                frame_shape=(StaticDim(4),), cell_shape=(),
+                func=HIRVar('f', _FT((FLOAT,), FLOAT)),
+                arrays=[HIRVar('xs', arr_type)],
+                result_type=arr_type,
+            ),
+            return_type=arr_type,
+        )
+        with pytest.raises(GPUScaffoldError, match="higher-order"):
+            build_descriptor_abi_general_map_gpu_module(
+                hfunc, kernel_name="test_hof",
+            )
+
 
 # ---------------------------------------------------------------------------
 # Program Compilation Tests (full pipeline: source → PTX)

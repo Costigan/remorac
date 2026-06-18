@@ -276,25 +276,25 @@ These compile and run on GPU but produce incorrect output.
 These raise `GPUScaffoldError` or `CodegenUnavailable` on GPU but
 compile and run correctly on CPU.
 
-- [ ] **E.2.1 — Named-function / section callables**: The general map
+- [x] **E.2.1 — Named-function / section callables**: The general map
       builder requires `HIRLambda` as the map callable.  Named functions
       (`HIRVar` referencing a top-level def) and operator sections used
       directly as callables are rejected.  Fix: inline named functions
       by looking them up in the HIR function table, or lower them to
       equivalent lambda expressions before GPU compilation.
 
-- [ ] **E.2.2 — Filter with complex predicates**: The filter kernel
+- [x] **E.2.2 — Filter with complex predicates**: The filter kernel
       only handles `HIRPrimCallable` comparisons with a literal constant.
       Lambda predicates (e.g. `\x -> x > 0 && x < 5`) are rejected.
       Fix: use the `GpuExpr` compiler to lower the predicate body to
       LLVM IR inline in the filter loop.
 
-- [ ] **E.2.3 — Scan for arrays > 1024**: The parallel Hillis-Steele
+- [x] **E.2.3 — Scan for arrays > 1024**: The parallel Hillis-Steele
       scan uses one block with N threads, limiting N to 1024.  Larger
       arrays are rejected.  Fix: multi-block scan with inter-block
       prefix propagation, or fall back to a serial scan for N > 1024.
 
-- [ ] **E.2 tests** — Tests that verify compilation succeeds for named
+- [x] **E.2 tests** — Tests that verify compilation succeeds for named
       callables, complex filter predicates, and large scan arrays.
 
 ### Parallel GPU Filter and Replicate
