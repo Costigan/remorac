@@ -222,37 +222,6 @@ def generate_mlir_descriptor_abi_ptx(
     except GPUScaffoldError:
         pass
 
-    # ── try GPU N-body compound-body kernel ──
-    try:
-        from remora.gpu_lowering import (
-            _detect_nbody_gpu_kernel,
-            build_descriptor_abi_nbody_gpu_module,
-        )
-
-        nbody_info = _detect_nbody_gpu_kernel(function)
-        if nbody_info is not None:
-            N, M = nbody_info
-            gpu_module = build_descriptor_abi_nbody_gpu_module(
-                function, kernel_name=name, N=N, M=M,
-            )
-            meta = KernelMeta(
-                name=name,
-                grid_dims=1,
-                block_size=0,
-                num_inputs=1,
-                num_outputs=1,
-                input_elem_types=["f32"],
-                output_elem_types=["f32"],
-                output_shape=(N * M,),
-                output_dtype="float32",
-            )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
-    except (GPUScaffoldError, CodegenUnavailable):
-        pass
-
     # ── try GPU general map kernel for compound-body maps ──
     try:
         from remora.hir import HIRLambda, HIRMap

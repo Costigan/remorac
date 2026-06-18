@@ -1759,9 +1759,16 @@ def build_descriptor_abi_general_map_gpu_module(
             scalar_params[param.name] = num_scalar_inputs
             num_scalar_inputs += 1
 
-    # Coords: the thread's multi-dimensional indices
-    # For the emission, we build them as SSA names %i0, %i1, ..., %iN-1
-    coords = [f"%i{axis}" for axis in range(rank)]
+    # Frame rank: number of independent computations.
+    # For a map with frame [N] producing output [N, 3], frame_rank=1, output_rank=2.
+    # Each thread computes one frame element, producing all extra output dims.
+    frame_rank = len(body_map.frame_shape)
+    frame_size = 1
+    for d in body_map.frame_shape:
+        frame_size *= int(d.value)
+
+    # Coords: thread's multi-dimensional indices over FRAME dimensions only
+    coords = [f"%i{axis}" for axis in range(frame_rank)]
 
     # Compile the map lambda body to a GpuExpr
     lambda_body = body_map.func.body
@@ -1781,13 +1788,12 @@ def build_descriptor_abi_general_map_gpu_module(
                 scalar_params[param_name] = num_scalar_inputs
                 num_scalar_inputs += 1
             else:
-                # Non-input array (e.g. HIRIota): bind param to thread coord
-                if len(coords) > 0:
-                    coord_map[param_name] = coords[0]
-                # For multi-dim, subsequent params get subsequent coords
-                axis_idx = idx
-                if axis_idx < len(coords):
-                    coord_map[param_name] = coords[axis_idx]
+                # Non-input array (e.g. HIRIota): bind params to thread coords
+                # For rank-N output, bind up to N lambda params to N coords
+                for axis_idx in range(len(body_map.func.params)):
+                    pname = body_map.func.params[axis_idx].name
+                    if axis_idx < len(coords):
+                        coord_map[pname] = coords[axis_idx]
 
     expr = gpu_expr_from_hir(
         lambda_body,
@@ -1826,19 +1832,24 @@ def build_descriptor_abi_general_map_gpu_module(
         "      %idx = llvm.add %block_base, %tid  : i64",
     ])
 
-    # Compute plane sizes for multi-index decomposition
-    body_lines.append("      %plane_last = llvm.mlir.constant(1 : index) : i64")
-    prev_plane = "%plane_last"
-    for axis in range(rank - 1, 0, -1):
-        plane_name = f"%plane{axis - 1}"
-        body_lines.append(
-            f"      {plane_name} = llvm.mul {prev_plane}, %out_size{axis}  : i64"
-        )
-        prev_plane = plane_name
+    # Compute plane sizes for multi-index decomposition over frame dimensions
+    if frame_rank > 1:
+        body_lines.append("      %plane_last = llvm.mlir.constant(1 : index) : i64")
+        prev_plane = "%plane_last"
+        frame_shape_vals = [int(d.value) for d in body_map.frame_shape]
+        for axis in range(frame_rank - 1, 0, -1):
+            plane_name = f"%plane{axis - 1}"
+            val = 1
+            for d in frame_shape_vals[axis:]:
+                val *= d
+            body_lines.append(
+                f"      {plane_name} = llvm.mlir.constant({val} : index) : i64"
+            )
+            prev_plane = plane_name
 
     total_name = "%total_size"
     body_lines.append(
-        f"      {total_name} = llvm.mul {prev_plane}, %out_size0 : i64"
+        f"      {total_name} = llvm.mlir.constant({frame_size} : index) : i64"
     )
 
     body_lines.extend([
@@ -1847,38 +1858,59 @@ def build_descriptor_abi_general_map_gpu_module(
         "    ^bb_body:",
     ])
 
-    # Multi-index decomposition
-    body_lines.extend(_multi_index_lines(rank))
+    # Multi-index decomposition over frame dimensions
+    body_lines.extend(_multi_index_lines(frame_rank))
 
-    # Linear index computation for each input/output
-    for prefix in prefixes:
-        body_lines.extend(_linear_index_lines(prefix, rank))
+    # Linear index computation for output store position (frame coords only)
+    body_lines.extend(_linear_index_lines(out_prefix, frame_rank))
 
     # Emit the expression tree
     result_ssa = _gpu_emit_expr(expr, body_lines, {})
 
-    # Store result
+    # Store result — handle both scalar and array-valued results
+    if isinstance(result_ssa, list):
+        # Array-valued result: store each component at successive output offsets
+        K = len(result_ssa)
+        store_lines: list[str] = []
+        for k in range(K):
+            if k == 0:
+                k_offset = "%out_linear"
+            else:
+                kc = f"%out_kconst{k}"
+                koff = f"%out_off{k}"
+                store_lines.append(f"      {kc} = llvm.mlir.constant({k} : index) : i64")
+                store_lines.append(f"      {koff} = llvm.add %out_linear, {kc}  : i64")
+                k_offset = koff
+            ptr = f"%out_elem_ptr{k}" if k > 0 else "%out_elem_ptr"
+            # Always emit getelementptr for each component
+            store_lines.append(f"      {ptr} = llvm.getelementptr %out_aligned[{k_offset}] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+            store_lines.append(f"      llvm.store {result_ssa[k]}, {ptr} : f32, !llvm.ptr")
+        body_lines.extend(store_lines)
+    else:
+        body_lines.extend([
+            f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            f"      llvm.store {result_ssa}, %out_elem_ptr : f32, !llvm.ptr",
+        ])
+
     body_lines.extend([
-        f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-        f"      llvm.store {result_ssa}, %out_elem_ptr : f32, !llvm.ptr",
         "      llvm.br ^bb_done",
         "    ^bb_done:",
     ])
 
     # Build the module
-    input_params = ", ".join(
-        f"%input{idx}_desc: !llvm.ptr" for idx in range(num_array_inputs)
-    )
-    scalar_params_str = ", ".join(
-        f"%scalar{idx}: f32" for idx in range(num_scalar_inputs)
-    )
-    all_params = input_params
-    if scalar_params_str:
-        all_params += ", " + scalar_params_str
-    all_params += ", %output_desc: !llvm.ptr"
+    param_parts: list[str] = []
+    for idx in range(num_array_inputs):
+        param_parts.append(f"%input{idx}_desc: !llvm.ptr")
+    for idx in range(num_scalar_inputs):
+        param_parts.append(f"%scalar{idx}: f32")
+    param_parts.append("%output_desc: !llvm.ptr")
+    all_params = ", ".join(param_parts)
 
     text = f"""module {{
   gpu.module @{module_name} {{
+    llvm.func @llvm.nvvm.sqrt.f(f32) -> f32
+    llvm.func @llvm.nvvm.ex2.approx.f(f32) -> f32
+    llvm.func @llvm.nvvm.lg2.approx.f(f32) -> f32
     llvm.func @{name}({all_params}) attributes {{gpu.kernel, nvvm.kernel}} {{
 {chr(10).join(body_lines)}
       llvm.return
@@ -1898,7 +1930,9 @@ def _gpu_emit_expr(
 ) -> str:
     """Recursively emit MLIR LLVM dialect lines for a GpuExpr tree.
 
-    Returns the SSA name holding the result.
+    Returns the SSA name (str) for scalar expressions, or a list[str]
+    of SSA names for array-valued expressions (GpuArrayExpr, multi-component
+    GpuReduce).
 
     Parameters
     ----------
@@ -1907,17 +1941,20 @@ def _gpu_emit_expr(
     lines : list[str]
         MLIR line accumulator.
     env : dict[str, str]
-        Maps GpuLetBinding names to SSA names.
+        Maps GpuLetBinding and coordinator names to SSA names.
     temp_counter : int
         Starting temp counter for unique SSA names.
     """
     from remora._gpu_expr_lowering import (
+        GpuArrayExpr,
         GpuBinaryOp,
         GpuCast,
         GpuCompareOp,
         GpuConstant,
+        GpuExtractComponent,
         GpuIndexCoordinate,
         GpuInputLoad,
+        GpuIntrinsic,
         GpuLetBinding,
         GpuReduce,
         GpuScalarParam,
@@ -1939,10 +1976,15 @@ def _gpu_emit_expr(
         return name
 
     _emit_counter = [0]
+    _block_counter = [0]
 
     def _fresh_ssa() -> str:
         _emit_counter[0] += 1
         return f"%gen{_emit_counter[0]}"
+
+    def _fresh_block() -> str:
+        _block_counter[0] += 1
+        return f"bb_gen{_block_counter[0]}"
 
     def emit(expr: "GpuExpr", env: dict[str, str]) -> str:
         # GpuConstant
@@ -2047,6 +2089,10 @@ def _gpu_emit_expr(
                 lines.append(
                     f"      {ssa} = llvm.trunc {inner} : i32 to i1"
                 )
+            elif expr.from_type == "i64" and expr.to_type == "f32":
+                lines.append(
+                    f"      {ssa} = llvm.sitofp {inner} : i64 to f32"
+                )
             else:
                 raise GPUScaffoldError(
                     f"unsupported cast: {expr.from_type} → {expr.to_type}"
@@ -2061,8 +2107,60 @@ def _gpu_emit_expr(
         if isinstance(expr, _GpuLetExpr):
             val_ssa = emit(expr.value, env)
             new_env = dict(env)
-            new_env[expr.name] = val_ssa
+            # If multi-value, store only the first component name
+            if isinstance(val_ssa, list):
+                new_env[expr.name] = val_ssa[0]
+            else:
+                new_env[expr.name] = val_ssa
             return emit(expr.body, new_env)
+
+        # GpuArrayExpr: emit all components, return list of SSA names
+        if isinstance(expr, GpuArrayExpr):
+            result: list[str] = []
+            for comp in expr.components:
+                r = emit(comp, env)
+                if isinstance(r, list):
+                    result.extend(r)
+                else:
+                    result.append(r)
+            return result
+
+        # GpuExtractComponent: emit the array, return the k-th component
+        if isinstance(expr, GpuExtractComponent):
+            arr_result = emit(expr.array, env)
+            if isinstance(arr_result, list):
+                if expr.index < len(arr_result):
+                    return arr_result[expr.index]
+                raise GPUScaffoldError(
+                    f"GpuExtractComponent index {expr.index} out of range (size {len(arr_result)})"
+                )
+            return arr_result
+
+        # GpuIntrinsic: call NV device function via native PTX instructions
+        if isinstance(expr, GpuIntrinsic):
+            inner = emit(expr.arg, env)
+            ssa = _fresh_ssa()
+            if expr.intrinsic == "sqrt":
+                lines.append(
+                    f"      {ssa} = llvm.call @llvm.nvvm.sqrt.f({inner}) : (f32) -> f32"
+                )
+            elif expr.intrinsic == "exp":
+                # exp(x) = ex2(x * log2(e)), log2(e) ≈ 1.44269504089
+                scale = _fresh_ssa()
+                scaled = _fresh_ssa()
+                lines.append(f"      {scale} = llvm.mlir.constant(0x3fb8aa3b : f32) : f32")
+                lines.append(f"      {scaled} = llvm.fmul {inner}, {scale}  : f32")
+                lines.append(f"      {ssa} = llvm.call @llvm.nvvm.ex2.approx.f({scaled}) : (f32) -> f32")
+            elif expr.intrinsic == "log":
+                # log(x) = lg2(x) * ln(2), ln(2) ≈ 0.69314718056
+                lg2 = _fresh_ssa()
+                scale = _fresh_ssa()
+                lines.append(f"      {lg2} = llvm.call @llvm.nvvm.lg2.approx.f({inner}) : (f32) -> f32")
+                lines.append(f"      {scale} = llvm.mlir.constant(0x3f317218 : f32) : f32")
+                lines.append(f"      {ssa} = llvm.fmul {lg2}, {scale}  : f32")
+            else:
+                raise GPUScaffoldError(f"unsupported intrinsic: {expr.intrinsic}")
+            return ssa
 
         raise GPUScaffoldError(
             f"unhandled GpuExpr node: {type(expr).__name__}"
@@ -2133,8 +2231,16 @@ def _gpu_emit_expr(
             return load_name
         else:
             # Use SSA coords: multiply by strides and sum
+            # Some coords may be literal integers — emit constants for them
             terms: list[str] = []
             for axis, coord_ssa in enumerate(resolved_coords):
+                if coord_ssa.lstrip("-").isdigit():
+                    # Literal integer: emit constant first
+                    lit_name = _fresh_ssa()
+                    lines.append(
+                        f"      {lit_name} = llvm.mlir.constant({int(coord_ssa)} : index) : i64"
+                    )
+                    coord_ssa = lit_name
                 term_name = _fresh_ssa()
                 lines.append(
                     f"      {term_name} = llvm.mul {coord_ssa}, %{prefix}_stride{axis}  : i64"
@@ -2159,18 +2265,34 @@ def _gpu_emit_expr(
             )
             return load_name
 
-    def _emit_reduce(expr: GpuReduce, env: dict[str, str]) -> str:
-        """Emit a per-thread scf.for reduction loop."""
-        init_ssa = emit(expr.init, env)
+    def _emit_reduce(expr: GpuReduce, env: dict[str, str]) -> str | list[str]:
+        """Emit a per-thread scf.for reduction loop (scalar or array-valued)."""
+        components = getattr(expr, "components", None) or []
+        is_multi = len(components) > 0
+
+        if is_multi and isinstance(expr.init, list) and len(expr.init) > 1:
+            return _emit_multi_reduce(expr, components, env)
+        elif is_multi:
+            # Scalar fold with array body: iterate components into ONE accumulator
+            return _emit_scalar_reduce(expr, env, components=components)
+        return _emit_scalar_reduce(expr, env)
+
+    def _emit_scalar_reduce(expr: GpuReduce, env: dict[str, str], components: list | None = None) -> str:
+        """Emit a scalar (single-accumulator) scf.for loop."""
+        init_raw = expr.init
+        if isinstance(init_raw, list):
+            init_ssa = emit(init_raw[0], env)
+        else:
+            init_ssa = emit(init_raw, env)
 
         dim = expr.dimension
-        ssa = _fresh_ssa()
-        loop_ssa = f"{ssa}_loop"
+        blk = _fresh_block()
+        loop_label = f"{blk}_loop"
         c0_ssa = _fresh_ssa()
         c1_ssa = _fresh_ssa()
         cN_ssa = _fresh_ssa()
-        idx_ssa = f"{ssa}_idx"
-        acc_in_ssa = f"{ssa}_acc_in"
+        idx_ssa = _fresh_ssa()
+        acc_in_ssa = _fresh_ssa()
 
         lines.extend([
             f"      {c0_ssa} = llvm.mlir.constant(0 : index) : i64",
@@ -2178,37 +2300,47 @@ def _gpu_emit_expr(
             f"      {cN_ssa} = llvm.mlir.constant({dim} : index) : i64",
         ])
 
-        # Start the loop
         lines.append(
-            f"      llvm.br ^{loop_ssa}({c0_ssa}, {init_ssa} : i64, f32)"
+            f"      llvm.br ^{loop_label}({c0_ssa}, {init_ssa} : i64, f32)"
         )
 
-        # Loop header
-        body_label = f"{loop_ssa}_body"
-        done_label = f"{loop_ssa}_done"
-        lines.append(f"    ^{loop_ssa}({idx_ssa}: i64, {acc_in_ssa}: f32):")
+        body_label = f"{loop_label}_body"
+        done_label = f"{loop_label}_done"
+        done_cond_ssa = _fresh_ssa()
+        lines.append(f"    ^{loop_label}({idx_ssa}: i64, {acc_in_ssa}: f32):")
         lines.append(
-            f"      {ssa}_done_cond = llvm.icmp \"uge\" {idx_ssa}, {cN_ssa} : i64"
+            f"      {done_cond_ssa} = llvm.icmp \"uge\" {idx_ssa}, {cN_ssa} : i64"
         )
         lines.append(
-            f"      llvm.cond_br {ssa}_done_cond, ^{done_label}({acc_in_ssa} : f32), ^{body_label}"
+            f"      llvm.cond_br {done_cond_ssa}, ^{done_label}({acc_in_ssa} : f32), ^{body_label}"
         )
 
-        # Loop body: emit the body expression with the loop index variable bound
         body_env = dict(env)
         loop_var_name = getattr(expr, "loop_var_name", "_reduction_idx")
         body_env[loop_var_name] = idx_ssa
+        if loop_var_name == "_iota_coord":
+            body_env["_iota_coord"] = idx_ssa
 
-        # Also bind iota_coord alias
-        body_env["_iota_coord"] = idx_ssa
-
-        # The body expr may reference the loop variable via GpuIndexCoordinate
-        # or via let-bound names that map back to the loop variable.
-        # We need to emit the body within the loop body block.
         lines.append(f"    ^{body_label}:")
-        elem_ssa = emit(expr.body_expr, body_env)
+        if components:
+            # Emit the component indexed by the loop variable
+            # Use a select chain: if idx==0 emit comps[0], elif idx==1 emit comps[1], ...
+            elem_ssa = None
+            for k in range(len(components)):
+                k_ssa = _fresh_ssa()
+                lines.append(f"      {k_ssa} = llvm.mlir.constant({k} : index) : i64")
+                eq_ssa = _fresh_ssa()
+                lines.append(f"      {eq_ssa} = llvm.icmp \"eq\" {idx_ssa}, {k_ssa} : i64")
+                comp_ssa = emit(components[k], body_env)
+                if elem_ssa is None:
+                    elem_ssa = comp_ssa
+                else:
+                    sel_ssa = _fresh_ssa()
+                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comp_ssa}, {elem_ssa} : i1, f32")
+                    elem_ssa = sel_ssa
+        else:
+            elem_ssa = emit(expr.body_expr, body_env)
 
-        # Accumulate (this line is inside ^body_label, after elem emission)
         acc_next_ssa = _fresh_ssa()
         fold_llvm = llvm_op(expr.op, "f32")
         lines.append(
@@ -2219,15 +2351,108 @@ def _gpu_emit_expr(
             f"      {idx_next_ssa} = llvm.add {idx_ssa}, {c1_ssa} : i64"
         )
         lines.append(
-            f"      llvm.br ^{loop_ssa}({idx_next_ssa}, {acc_next_ssa} : i64, f32)"
+            f"      llvm.br ^{loop_label}({idx_next_ssa}, {acc_next_ssa} : i64, f32)"
         )
 
-        # Done: return the accumulated value
         result_ssa = _fresh_ssa()
         lines.append(
             f"    ^{done_label}({result_ssa}: f32):"
         )
         return result_ssa
+
+    def _emit_multi_reduce(
+        expr: GpuReduce, components: list, env: dict[str, str]
+    ) -> list[str]:
+        """Emit a multi-component (array-valued) reduction with K accumulators."""
+        K = len(components)
+        init_exprs = expr.init
+        if not isinstance(init_exprs, list):
+            init_exprs = [init_exprs] * K
+
+        # Emit init values
+        init_ssas: list[str] = []
+        for k in range(K):
+            init_ssas.append(emit(init_exprs[k], env))
+
+        dim = expr.dimension
+        blk = _fresh_block()
+        loop_label = f"{blk}_loop"
+        c0_ssa = _fresh_ssa()
+        c1_ssa = _fresh_ssa()
+        cN_ssa = _fresh_ssa()
+        idx_ssa = _fresh_ssa()
+        acc_in_ssas = [_fresh_ssa() for _ in range(K)]
+
+        lines.extend([
+            f"      {c0_ssa} = llvm.mlir.constant(0 : index) : i64",
+            f"      {c1_ssa} = llvm.mlir.constant(1 : index) : i64",
+            f"      {cN_ssa} = llvm.mlir.constant({dim} : index) : i64",
+        ])
+
+        # Loop branch: (idx, acc0, acc1, ..., accK-1)
+        iter_types = "i64, " + ", ".join("f32" for _ in range(K))
+        iter_args = f"{c0_ssa}, " + ", ".join(init_ssas)
+        lines.append(
+            f"      llvm.br ^{loop_label}({iter_args} : {iter_types})"
+        )
+
+        body_label = f"{loop_label}_body"
+        done_label = f"{loop_label}_done"
+        done_cond_ssa = _fresh_ssa()
+        iter_params = f"{idx_ssa}: i64, " + ", ".join(f"{a}: f32" for a in acc_in_ssas)
+        # Format: %v1, %v2 : type1, type2
+        done_vals = ", ".join(acc_in_ssas)
+        done_types = ", ".join("f32" for _ in range(K))
+        lines.append(f"    ^{loop_label}({iter_params}):")
+        lines.append(
+            f"      {done_cond_ssa} = llvm.icmp \"uge\" {idx_ssa}, {cN_ssa} : i64"
+        )
+        lines.append(
+            f"      llvm.cond_br {done_cond_ssa}, ^{done_label}({done_vals} : {done_types}), ^{body_label}"
+        )
+
+        # Loop body
+        body_env = dict(env)
+        loop_var_name = getattr(expr, "loop_var_name", "_reduction_idx")
+        body_env[loop_var_name] = idx_ssa
+        if loop_var_name == "_iota_coord":
+            body_env["_iota_coord"] = idx_ssa
+
+        lines.append(f"    ^{body_label}:")
+        elem_ssas: list[str] = []
+        for k in range(K):
+            s = emit(components[k], body_env)
+            elem_ssas.append(s)
+
+        # Accumulate each component
+        acc_next_ssas: list[str] = []
+        fold_llvm = llvm_op(expr.op, "f32")
+        for k in range(K):
+            nxt = _fresh_ssa()
+            lines.append(
+                f"      {nxt} = {fold_llvm} {acc_in_ssas[k]}, {elem_ssas[k]}  : f32"
+            )
+            acc_next_ssas.append(nxt)
+
+        idx_next_ssa = _fresh_ssa()
+        lines.append(
+            f"      {idx_next_ssa} = llvm.add {idx_ssa}, {c1_ssa} : i64"
+        )
+
+        # Loop back
+        next_iter_args = f"{idx_next_ssa}, " + ", ".join(acc_next_ssas)
+        next_iter_types = "i64, " + ", ".join("f32" for _ in range(K))
+        lines.append(
+            f"      llvm.br ^{loop_label}({next_iter_args} : {next_iter_types})"
+        )
+
+        # Done
+        result_ssas = [_fresh_ssa() for _ in range(K)]
+        result_params = ", ".join(f"{r}: f32" for r in result_ssas)
+        lines.append(
+            f"    ^{done_label}({result_params}):"
+        )
+        return result_ssas
 
     result = emit(expr, env)
     return result
@@ -2252,189 +2477,3 @@ def _gpu_descriptor_info(
             entry[f"stride{axis}"] = f"%{prefix}_stride{axis}"
         info[prefix] = entry
     return info
-
-
-def _detect_nbody_gpu_kernel(function: HIRFunction) -> tuple[int, int] | None:
-    """Return ``(N, M)`` if *function* matches the N-body force pattern.
-
-    Pattern: ``map (lambda i -> fold + [0..0] (map (lambda j -> force_expr) (iota N))) (iota N)``
-    where ``force_expr`` references param ``pos`` of shape ``[N, M]``.
-    """
-    from remora.hir import (
-        HIRFold, HIRIota, HIRLambda, HIRMap, HIRPrimCallable, HIRReduce,
-    )
-
-    body = function.body
-    if not isinstance(body, HIRMap) or body.cell_shape != ():
-        return None
-    if not isinstance(body.func, HIRLambda):
-        return None
-    outer_lambda = body.func
-    outer_body = outer_lambda.body
-    if not isinstance(outer_body, (HIRFold, HIRReduce)):
-        return None
-    if not isinstance(outer_body.func, HIRPrimCallable) or outer_body.func.left_arg is not None:
-        return None
-    if outer_body.func.right_arg is not None:
-        return None
-    fold_array = outer_body.array
-    if not isinstance(fold_array, HIRMap) or fold_array.cell_shape != ():
-        return None
-    if not isinstance(fold_array.func, HIRLambda):
-        return None
-    if not isinstance(body.array, HIRIota) or not isinstance(fold_array.array, HIRIota):
-        return None
-    N_body = body.frame_shape[0].value
-    N_fold = fold_array.frame_shape[0].value
-    if N_body != N_fold:
-        return None
-
-    if len(function.params) != 1:
-        return None
-    from remora.types import ArrayType
-    ptype = function.params[0].type
-    if not isinstance(ptype, ArrayType) or ptype.rank != 2:
-        return None
-    M = ptype.shape[1].value
-    return (N_body, M)
-
-
-def build_descriptor_abi_nbody_gpu_module(
-    function: HIRFunction,
-    *,
-    module_name: str = "remora_gpu",
-    kernel_name: str | None = None,
-    N: int,
-    M: int,
-) -> GPUModuleScaffold:
-    """Build a descriptor-ABI GPU module for an N-body force kernel."""
-    name = kernel_name or f"remora_{function.name}_nbody"
-    shape = (N * M,)
-
-    eps = 0.01  # softening parameter
-    base_prefixes = ["in", "out"]
-
-    # stride = M (contiguous components), offset = 0
-    lines = [
-        f"module {{",
-        f"  gpu.module @{module_name} {{",
-        f"    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{",
-        *[f"      {l}" for l in _descriptor_load_lines("in", "%input_desc", 2)],
-        *[f"      {l}" for l in _descriptor_load_lines("out", "%output_desc", 2)],
-        "",
-        "      %tid32 = nvvm.read.ptx.sreg.tid.x : i32",
-        "      %tid = llvm.sext %tid32 : i32 to i64",
-        "      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32",
-        "      %bid = llvm.sext %bid32 : i32 to i64",
-        "      %bdim32 = nvvm.read.ptx.sreg.ntid.x : i32",
-        "      %bdim = llvm.sext %bdim32 : i32 to i64",
-        "      %gdim32 = nvvm.read.ptx.sreg.nctaid.x : i32",
-        "      %gdim = llvm.sext %gdim32 : i32 to i64",
-        "      %grid_stride = llvm.mul %bdim, %gdim : i64",
-        "      %block_offset = llvm.mul %bid, %bdim : i64",
-        f"      %start = llvm.add %tid, %block_offset : i64",
-        f"      %total = llvm.mlir.constant({N} : index) : i64",
-        "      llvm.br ^bb_outer_loop(%start : i64)",
-        "",
-        "    ^bb_outer_loop(%i: i64):",
-        "      %keep_going = llvm.icmp \"ult\" %i, %total : i64",
-        "      llvm.cond_br %keep_going, ^bb_outer_body, ^bb_done",
-        "",
-        "    ^bb_outer_body:",
-        f"      %M = llvm.mlir.constant({M} : index) : i64",
-        f"      %eps = llvm.mlir.constant({eps:.6e} : f32) : f32",
-        "      %zero_acc = llvm.mlir.constant(0.000000e+00 : f32) : f32",
-        "",
-        f"      %N_val = llvm.mlir.constant({N} : index) : i64",
-        "      %c0 = llvm.mlir.constant(0 : index) : i64",
-        "      %c1 = llvm.mlir.constant(1 : index) : i64",
-        "      %c2 = llvm.mlir.constant(2 : index) : i64",
-        "",
-        "      llvm.br ^bb_inner_loop(%c0, %zero_acc, %zero_acc, %zero_acc : i64, f32, f32, f32)",
-        "",
-        "    ^bb_inner_loop(%j: i64, %acc0: f32, %acc1: f32, %acc2: f32):",
-        "      %inner_cont = llvm.icmp \"ult\" %j, %N_val : i64",
-        "      llvm.cond_br %inner_cont, ^bb_inner_body, ^bb_write",
-        "",
-        "    ^bb_inner_body:",
-        "",
-    ]
-
-    # Load pos[i, k] for k=0,1,2
-    for k in range(M):
-        kc = f"{k}"
-        lines.extend([
-            f"      %in_offset_i{k} = llvm.mul %i, %in_stride0 : i64",
-            f"      %in_linear_i{k} = llvm.add %in_offset, %in_offset_i{k} : i64",
-            f"      %in_linear_i{k}_k = llvm.add %in_linear_i{k}, %c{k} : i64",
-            f"      %in_ptr_i{k} = llvm.getelementptr %in_aligned[%in_linear_i{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-            f"      %pos_i{k} = llvm.load %in_ptr_i{k} : !llvm.ptr -> f32",
-        ])
-
-    # Load pos[j, k]
-    for k in range(M):
-        lines.extend([
-            f"      %in_offset_j{k} = llvm.mul %j, %in_stride0 : i64",
-            f"      %in_linear_j{k} = llvm.add %in_offset, %in_offset_j{k} : i64",
-            f"      %in_linear_j{k}_k = llvm.add %in_linear_j{k}, %c{k} : i64",
-            f"      %in_ptr_j{k} = llvm.getelementptr %in_aligned[%in_linear_j{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-            f"      %pos_j{k} = llvm.load %in_ptr_j{k} : !llvm.ptr -> f32",
-        ])
-
-    # D = pos[j] - pos[i]
-    for k in range(M):
-        lines.append(f"      %D{k} = llvm.fsub %pos_j{k}, %pos_i{k} : f32")
-
-    # dsq = D0*D0 + D1*D1 + D2*D2 + eps
-    sq_parts = []
-    for k in range(M):
-        lines.append(f"      %D{k}_sq = llvm.fmul %D{k}, %D{k} : f32")
-        sq_parts.append(f"%D{k}_sq")
-    lines.append(f"      %dsq_temp = llvm.fadd {sq_parts[0]}, {sq_parts[1]} : f32")
-    for k in range(2, M):
-        lines.append(f"      %dsq_temp_{k} = llvm.fadd %dsq_temp{'_'+str(k-1) if k>2 else ''}, {sq_parts[k]} : f32")
-    dsq_name = f"%dsq_temp_{M-1}" if M > 2 else "%dsq_temp"
-    lines.append(f"      %dsq = llvm.fadd {dsq_name}, %eps : f32")
-
-    # sd = dsq (simplified; omits sqrt to avoid requiring math intrinsics)
-    lines.extend([
-        "      %sd_denom = llvm.fmul %dsq, %dsq : f32",
-    ])
-
-    # force[k] = D[k] / sd
-    for k in range(M):
-        lines.append(f"      %force{k} = llvm.fdiv %D{k}, %sd_denom : f32")
-
-    # acc[k] += force[k]
-    for k in range(M):
-        lines.append(f"      %next_acc{k} = llvm.fadd %acc{k}, %force{k} : f32")
-
-    lines.extend([
-        f"      %next_j = llvm.add %j, %c1 : i64",
-        f"      llvm.br ^bb_inner_loop(%next_j, %next_acc0, %next_acc1, %next_acc2 : i64, f32, f32, f32)",
-        "",
-        "    ^bb_write:",
-        # Write accumulated forces to output
-    ])
-
-    for k in range(M):
-        lines.extend([
-            f"      %out_offset_i{k} = llvm.mul %i, %in_stride0 : i64",
-            f"      %out_linear_i{k} = llvm.add %out_offset, %out_offset_i{k} : i64",
-            f"      %out_linear_i{k}_k = llvm.add %out_linear_i{k}, %c{k} : i64",
-            f"      %out_ptr_i{k} = llvm.getelementptr %out_aligned[%out_linear_i{k}_k] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-            f"      llvm.store %acc{k}, %out_ptr_i{k} : f32, !llvm.ptr",
-        ])
-
-    lines.extend([
-        "      %next_i = llvm.add %i, %grid_stride : i64",
-        "      llvm.br ^bb_outer_loop(%next_i : i64)",
-        "",
-        "    ^bb_done:",
-        "      llvm.return",
-        "    }}",
-        "  }}",
-        "}}",
-    ])
-
-    return GPUModuleScaffold("\n".join(lines), module_name, name)

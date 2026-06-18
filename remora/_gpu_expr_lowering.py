@@ -13,6 +13,7 @@ from typing import TypeAlias
 from remora.gpu_lowering import GPUScaffoldError
 from remora.hir import (
     HIRApply,
+    HIRArrayLit,
     HIRCast,
     HIRExpr,
     HIRFold,
@@ -94,20 +95,25 @@ class GpuCast:
 
 @dataclass(frozen=True)
 class GpuReduce:
-    """Per-thread scalar reduction (scf.for loop).
+    """Per-thread scalar or array reduction (scf.for loop).
 
     ``op``: reduction operator (``"+"``, ``"*"``).
-    ``init``: initial value.
-    ``body_expr``: per-element expression.
+    ``init``: initial value (single GpuExpr for scalar, list for array-valued).
+    ``body_expr``: per-element expression (single GpuExpr for scalar).
+    ``components``: when non-empty, per-component body expressions for
+      array-valued folds.  Each component gets its own accumulator but
+      shares the same loop.  When set, ``init`` is a list of per-component
+      init expressions and ``body_expr`` is ignored.
     ``dimension``: loop bound.
     ``loop_var_name``: name for the loop index variable inside body_expr.
     """
 
     op: str
-    init: "GpuExpr"
+    init: "GpuExpr | list[GpuExpr]"
     body_expr: "GpuExpr"
     dimension: int
     loop_var_name: str = "_reduction_idx"
+    components: list["GpuExpr"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -141,6 +147,42 @@ class _GpuLetExpr:
     body: "GpuExpr"
 
 
+@dataclass(frozen=True)
+class GpuArrayExpr:
+    """An array-typed value: K scalar GpuExpr components.
+
+    Created when lowering a HIRIndex that produces an ArrayType result
+    (fewer indices than the source array's rank).  Each component is a
+    separate GpuExpr (typically GpuInputLoad at different coordinates).
+
+    During emission, all K components are emitted and returned as a list
+    of SSA names.
+    """
+
+    components: list["GpuExpr"]
+    element_type: str = "f32"
+
+
+@dataclass(frozen=True)
+class GpuExtractComponent:
+    """Extract the k-th scalar from an array-valued expression.
+
+    At emission time, the ``array`` must resolve to a GpuArrayExpr
+    (or a multi-value list), and the k-th SSA name is returned.
+    """
+
+    array: "GpuExpr"
+    index: int
+
+
+@dataclass(frozen=True)
+class GpuIntrinsic:
+    """Call an LLVM intrinsic (sqrt, exp, log, etc.)."""
+
+    intrinsic: str  # "sqrt", "exp", "log"
+    arg: "GpuExpr"
+
+
 GpuExpr: TypeAlias = (
     GpuInputLoad
     | GpuConstant
@@ -152,6 +194,9 @@ GpuExpr: TypeAlias = (
     | GpuScalarParam
     | GpuLetBinding
     | GpuIndexCoordinate
+    | GpuArrayExpr
+    | GpuExtractComponent
+    | GpuIntrinsic
     | _GpuLetExpr
 )
 
@@ -253,7 +298,7 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
 
     # HIRFold / HIRReduce
     if isinstance(expr, (HIRFold, HIRReduce)):
-        return _lower_scalar_fold_to_gpu(expr, ctx)
+        return _lower_fold_to_gpu(expr, ctx)
 
     # HIRLet
     if isinstance(expr, HIRLet):
@@ -305,12 +350,17 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     if base_op in {"+", "-", "*", "/"}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: binary op needs 2 args")
-        return GpuBinaryOp(base_op, lowered_args[0], lowered_args[1])
+        return _gpu_element_wise_binary(base_op, lowered_args[0], lowered_args[1])
 
     if base_op in {"<", ">", "<=", ">=", "==", "!="}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: comparison needs 2 args")
         return GpuCompareOp(base_op, lowered_args[0], lowered_args[1])
+
+    if base_op in {"exp", "log", "sqrt"}:
+        if len(lowered_args) != 1:
+            raise GPUScaffoldError(f"{ctx.context}: math intrinsic needs 1 arg")
+        return GpuIntrinsic(base_op, lowered_args[0])
 
     raise GPUScaffoldError(f"{ctx.context}: unsupported prim op '{op}'")
 
@@ -343,8 +393,31 @@ def _lower_map_apply(expr: HIRMap | HIRApply, ctx: _CompileCtx) -> GpuExpr:
                 # Wrap in placeholder let for the param
                 return _GpuLetExpr(param_name, GpuIndexCoordinate("_iota_coord"), body_expr)
 
-        # General lambda inlining: bind params to lowered args
-        body_expr = _lower_hir(callable_expr.body, ctx)
+        # Check for element-wise map: all args are GpuArrayExpr of same size
+        all_arrays = len(lowered_args) >= 1 and all(
+            isinstance(a, GpuArrayExpr) for a in lowered_args
+        )
+        if all_arrays:
+            K = len(lowered_args[0].components)
+            if all(len(a.components) == K for a in lowered_args[1:]):
+                comps: list[GpuExpr] = []
+                for k in range(K):
+                    comp_args = [a.components[k] for a in lowered_args]
+                    inner_ctx = _copy_ctx(ctx)
+                    for param in callable_expr.params:
+                        inner_ctx.let_env[param.name] = _placeholder(param.name)
+                    body_expr = _lower_hir(callable_expr.body, inner_ctx)
+                    for param, arg in reversed(list(zip(callable_expr.params, comp_args))):
+                        body_expr = _GpuLetExpr(param.name, arg, body_expr)
+                    comps.append(body_expr)
+                return GpuArrayExpr(components=comps, element_type="f32")
+
+        # General lambda inlining: bind params to lowered args, then lower body
+        inner_ctx = _copy_ctx(ctx)
+        for param in callable_expr.params:
+            inner_ctx.let_env[param.name] = _placeholder(param.name)
+        body_expr = _lower_hir(callable_expr.body, inner_ctx)
+        # Wrap in let bindings so each param resolves to its lowered arg
         for param, arg_expr in reversed(list(zip(callable_expr.params, lowered_args))):
             body_expr = _GpuLetExpr(param.name, arg_expr, body_expr)
 
@@ -366,6 +439,21 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
     )
 
 
+def _gpu_element_wise_binary(op: str, left: GpuExpr, right: GpuExpr) -> GpuExpr:
+    """Create a binary op, promoting to element-wise GpuArrayExpr if needed."""
+    if isinstance(left, GpuArrayExpr) or isinstance(right, GpuArrayExpr):
+        left_comps = left.components if isinstance(left, GpuArrayExpr) else [left]
+        right_comps = right.components if isinstance(right, GpuArrayExpr) else [right]
+        if len(left_comps) != len(right_comps):
+            raise GPUScaffoldError(
+                f"element-wise op on mismatched sizes: {len(left_comps)} vs {len(right_comps)}"
+            )
+        comps = [GpuBinaryOp(op, l, r) for l, r in zip(left_comps, right_comps)]
+        elem_type = "f32"
+        return GpuArrayExpr(components=comps, element_type=elem_type)
+    return GpuBinaryOp(op, left, right)
+
+
 def _lower_prim_callable(
     callable_expr: HIRPrimCallable,
     args: list[HIRExpr],
@@ -384,7 +472,7 @@ def _lower_prim_callable(
     if op in {"+", "-", "*", "/"}:
         if len(full_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: op {op} needs 2 operands")
-        return GpuBinaryOp(op, full_args[0], full_args[1])
+        return _gpu_element_wise_binary(op, full_args[0], full_args[1])
 
     if op in {"<", "<=", ">", ">=", "==", "!="}:
         if len(full_args) != 2:
@@ -395,25 +483,38 @@ def _lower_prim_callable(
 
 
 def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
-    """Lower HIRIndex to a GpuInputLoad with literal or SSA coords."""
-    if isinstance(expr.array, HIRVar) and expr.array.name in ctx.input_map:
-        slot = ctx.input_map[expr.array.name]
-    else:
+    """Lower HIRIndex to a GpuInputLoad (scalar) or GpuArrayExpr (sub-array)."""
+    if not isinstance(expr.array, HIRVar):
         raise GPUScaffoldError(
-            f"{ctx.context}: index on non-input or complex array"
+            f"{ctx.context}: index on non-variable array"
         )
 
+    array_name = expr.array.name
+    slot = ctx.input_map.get(array_name)
+    if slot is None and isinstance(expr.array.type, ArrayType):
+        raise GPUScaffoldError(
+            f"{ctx.context}: index on non-input array '{array_name}'"
+        )
+    if slot is None:
+        raise GPUScaffoldError(
+            f"{ctx.context}: index on non-input variable '{array_name}'"
+        )
+
+    # Resolve index coordinates
     index_coords: list[str] = []
     for idx in expr.indices:
         if isinstance(idx, HIRLit) and idx.type == INT:
             index_coords.append(str(int(idx.value)))
         elif isinstance(idx, HIRVar):
             if idx.name in ctx.coord_map:
-                index_coords.append("_iota_coord")
+                index_coords.append(ctx.coord_map[idx.name])
             elif idx.name in ctx.let_env:
-                index_coords.append("_iota_coord")
+                index_coords.append(f"_let_{idx.name}")
             elif idx.name in ctx.input_map:
-                index_coords.append("%i0")
+                if len(ctx.coords) > 0:
+                    index_coords.append(ctx.coords[0])
+                else:
+                    index_coords.append("%i0")
             else:
                 raise GPUScaffoldError(
                     f"{ctx.context}: index variable '{idx.name}' not resolved"
@@ -422,20 +523,40 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
             raise GPUScaffoldError(
                 f"{ctx.context}: non-literal index in HIRIndex"
             )
-    return GpuInputLoad(slot, index_coords)
+
+    # Determine the result rank from the HIRIndex result_type
+    result_type = expr.result_type
+    if isinstance(result_type, ScalarType):
+        # Scalar result: single GpuInputLoad
+        return GpuInputLoad(slot, index_coords)
+
+    # Array result: fewer indices than source rank → unroll trailing dims
+    if isinstance(result_type, ArrayType):
+        K = int(result_type.shape[0].value) if result_type.shape else 0
+        if K <= 0:
+            raise GPUScaffoldError(
+                f"{ctx.context}: array index result has zero-size dimension"
+            )
+        # For each trailing dimension index, create a GpuInputLoad
+        components: list[GpuExpr] = []
+        for k in range(K):
+            full_coords = list(index_coords) + [str(k)]
+            components.append(GpuInputLoad(slot, full_coords))
+        elem_type = _scalar_type_to_mlir(result_type.element)
+        return GpuArrayExpr(components=components, element_type=elem_type)
+
+    raise GPUScaffoldError(
+        f"{ctx.context}: unexpected index result type {type(result_type).__name__}"
+    )
 
 
-def _lower_scalar_fold_to_gpu(
+def _lower_fold_to_gpu(
     fold: HIRFold | HIRReduce, ctx: _CompileCtx
 ) -> GpuExpr:
-    """Lower a fold to a GpuReduce, handling map-over-iota patterns."""
+    """Lower a fold (scalar or array-valued) to a GpuReduce."""
     from remora.types import ArrayType, StaticDim
 
     result_type = fold.result_type
-    if isinstance(result_type, ArrayType):
-        raise GPUScaffoldError(
-            f"{ctx.context}: array-valued fold not supported"
-        )
 
     if not isinstance(fold.func, HIRPrimCallable):
         raise GPUScaffoldError(
@@ -447,10 +568,17 @@ def _lower_scalar_fold_to_gpu(
             f"{ctx.context}: fold op '{op}' not supported"
         )
 
-    init_expr = _lower_hir(fold.init, ctx)
+    if not isinstance(fold.reduction_dim, StaticDim):
+        raise GPUScaffoldError(
+            f"{ctx.context}: fold dimension must be static"
+        )
+    dim = int(fold.reduction_dim.value)
 
-    # Handle the fold array
     array_expr = fold.array
+
+    # ── Resolve map-over-iota patterns into body+loop_var ──
+    body_expr: GpuExpr | None = None
+    loop_var_name = "_reduction_idx"
 
     # Pattern: fold over HIRMap(HIRLambda, [HIRIota(N)])
     if isinstance(array_expr, (HIRMap, HIRApply)):
@@ -460,44 +588,113 @@ def _lower_scalar_fold_to_gpu(
                 iota_dim = int(inner_array.size.value) if isinstance(inner_array.size, StaticDim) else 0
                 if iota_dim > 0:
                     param_name = array_expr.func.params[0].name
-                    # Build a context where param_name maps to _iota_coord
                     inner_ctx = _copy_ctx(ctx)
                     inner_ctx.coord_map[param_name] = "_iota_coord"
                     body_expr = _lower_hir(array_expr.func.body, inner_ctx)
-                    # Wrap in a let binding the param
-                    body_with_let = _GpuLetExpr(
-                        param_name,
-                        GpuIndexCoordinate("_iota_coord"),
-                        body_expr,
-                    )
-                    return GpuReduce(
-                        op=op,
-                        init=init_expr,
-                        body_expr=body_with_let,
-                        dimension=iota_dim,
-                        loop_var_name="_iota_coord",
-                    )
+                    loop_var_name = "_iota_coord"
+                    dim = iota_dim
 
     # Pattern: fold over HIRIota(N) directly
     if isinstance(array_expr, HIRIota):
         iota_dim = int(array_expr.size.value) if isinstance(array_expr.size, StaticDim) else 0
         if iota_dim > 0:
-            # Body is just the loop index value (GpuIndexCoordinate)
+            body_raw: GpuExpr = GpuIndexCoordinate("_iota_coord")
+            body_expr = GpuCast(body_raw, "i64", "f32")
+            dim = iota_dim
+            loop_var_name = "_iota_coord"
+
+    # Fallback: lower the array directly
+    if body_expr is None:
+        body_expr = _lower_hir(array_expr, ctx)
+
+    # ── Handle result type: scalar vs array-valued ──
+    if isinstance(result_type, ScalarType):
+        init_expr = _lower_hir(fold.init, ctx)
+        # Scalar fold with array body: use components for per-element iteration
+        if isinstance(body_expr, GpuArrayExpr):
             return GpuReduce(
                 op=op,
                 init=init_expr,
-                body_expr=GpuIndexCoordinate("_iota_coord"),
-                dimension=iota_dim,
-                loop_var_name="_iota_coord",
+                body_expr=body_expr.components[0],  # dummy
+                dimension=dim,
+                loop_var_name=loop_var_name,
+                components=list(body_expr.components),
             )
+        return GpuReduce(
+            op=op,
+            init=init_expr,
+            body_expr=body_expr,
+            dimension=dim,
+            loop_var_name=loop_var_name,
+        )
 
-    # General case: lower the array directly
-    dim = int(fold.reduction_dim.value) if isinstance(fold.reduction_dim, StaticDim) else 1
-    body_expr = _lower_hir(array_expr, ctx)
+    # Array-valued result: decompose into K components via GpuExtractComponent
+    assert isinstance(result_type, ArrayType)
+    K = int(result_type.shape[0].value) if result_type.shape else 0
+    if K <= 0 or result_type.rank != 1:
+        raise GPUScaffoldError(
+            f"{ctx.context}: array-valued fold supports rank-1 results only"
+        )
+
+    # Lower init to per-component expressions
+    init_exprs: list[GpuExpr] = _lower_fold_init_components(fold.init, K, ctx)
+
+    # Decompose body into K per-component scalar expressions
+    # If the fold body came from a map-over-iota pattern producing an array,
+    # unwind the _GpuLetExpr to extract the GpuArrayExpr components.
+    component_bodies: list[GpuExpr] = []
+    inner = body_expr
+    if isinstance(inner, _GpuLetExpr):
+        # Unwrap single let layer (map-over-iota wraps param in _GpuLetExpr)
+        inner = inner.body
+
+    if isinstance(inner, GpuArrayExpr):
+        # Directly use the array's components — avoids redundant emission
+        component_bodies = list(inner.components[:K])
+    else:
+        for k in range(K):
+            component_bodies.append(GpuExtractComponent(body_expr, k))
+
     return GpuReduce(
         op=op,
-        init=init_expr,
-        body_expr=body_expr,
+        init=init_exprs,
+        body_expr=component_bodies[0],
         dimension=dim,
-        loop_var_name="_reduction_idx",
+        loop_var_name=loop_var_name,
+        components=component_bodies,
     )
+
+
+def _lower_fold_init_components(
+    init: HIRExpr, K: int, ctx: _CompileCtx
+) -> list[GpuExpr]:
+    """Lower a fold init value into K per-component GpuExpr values."""
+    if isinstance(init, HIRArrayLit):
+        exprs: list[GpuExpr] = []
+        for elem in init.elements:
+            exprs.append(_lower_hir(elem, ctx))
+        return exprs
+    if isinstance(init, HIRLit):
+        return [_lower_hir(init, ctx)] * K
+    # General case: index into each component
+    result: list[GpuExpr] = []
+    init_type = getattr(init, "result_type", getattr(init, "type", None))
+    elem_type = init_type.element if isinstance(init_type, ArrayType) else FLOAT
+    for k in range(K):
+        idx_k = HIRIndex(
+            array=init,
+            indices=[HIRLit(k, INT)],
+            result_type=elem_type,
+        )
+        result.append(_lower_hir(idx_k, ctx))
+    return result
+
+
+def _iota_loop_name(array_expr: HIRExpr) -> str:
+    """Extract the loop variable name from a map-over-iota pattern, if any."""
+    if isinstance(array_expr, (HIRMap, HIRApply)):
+        if (isinstance(array_expr.func, HIRLambda)
+                and len(array_expr.arrays) == 1
+                and isinstance(array_expr.arrays[0], HIRIota)):
+            return array_expr.func.params[0].name
+    return "_reduction_idx"
