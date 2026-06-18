@@ -253,6 +253,78 @@ def generate_mlir_descriptor_abi_ptx(
     except (GPUScaffoldError, CodegenUnavailable):
         pass
 
+    # ── try GPU general map kernel for compound-body maps ──
+    try:
+        from remora.hir import HIRLambda, HIRMap
+        from remora.lowering.tensor_ops import _body_needs_tensor_lowering
+
+        if (isinstance(function.body, HIRMap)
+                and isinstance(function.body.func, HIRLambda)
+                and _body_needs_tensor_lowering(function.body.func.body)):
+            from remora.gpu_lowering import (
+                build_descriptor_abi_general_map_gpu_module,
+            )
+            from remora.types import ArrayType
+
+            gpu_module = build_descriptor_abi_general_map_gpu_module(
+                function, kernel_name=name,
+            )
+
+            body_map = function.body
+            result_type = body_map.result_type
+            if not isinstance(result_type, ArrayType):
+                raise CodegenUnavailable(
+                    "general GPU map requires an array result type"
+                )
+
+            output_shape = tuple(
+                int(d.value) for d in result_type.shape
+            )
+
+            # Determine input types from function params
+            num_array_inputs = sum(
+                1 for p in function.params
+                if isinstance(p.type, ArrayType)
+            )
+            num_scalar_inputs = sum(
+                1 for p in function.params
+                if not isinstance(p.type, ArrayType)
+            )
+            total_inputs = num_array_inputs + num_scalar_inputs
+
+            input_elem_types: list[str] = []
+            for param in function.params:
+                if isinstance(param.type, ArrayType):
+                    elem = param.type.element.name
+                    if elem == "float":
+                        input_elem_types.append("f32")
+                    elif elem == "int":
+                        input_elem_types.append("i32")
+                    elif elem == "bool":
+                        input_elem_types.append("i1")
+                    else:
+                        input_elem_types.append("f32")
+                else:
+                    input_elem_types.append("f32")
+
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=0,
+                num_inputs=total_inputs,
+                num_outputs=1,
+                input_elem_types=input_elem_types,
+                output_elem_types=["f32"],
+                output_shape=output_shape,
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta]
+    except (GPUScaffoldError, CodegenUnavailable):
+        pass
+
     try:
         map_kernel = _direct_f32_map_kernel(function)
         rank = len(map_kernel.shape)
