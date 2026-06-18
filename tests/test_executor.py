@@ -916,3 +916,33 @@ def test_remora_executor_runs_cell_fold_dot_gpu_ptx_round_trip_when_available():
             ref[idx] = (img[y : y + 3, x : x + 3] * kb).sum()
             idx += 1
     np.testing.assert_allclose(result, ref, rtol=1e-4, atol=1e-5)
+
+def test_remora_executor_runs_heat_step_gpu_ptx_round_trip_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            '(define/pi () (f [image (Array Float 16 16)] (Array Float 14 14)) (+ (subarray image [1 1] [14 14]) (* 0.2 (- (+ (subarray image [0 1] [14 14]) (subarray image [2 1] [14 14]) (subarray image [1 0] [14 14]) (subarray image [1 2] [14 14])) (* 4.0 (subarray image [1 1] [14 14]))))))',
+            "f",
+            (ArrayType(FLOAT, (StaticDim(16), StaticDim(16))),),
+            include_prelude=False,
+            syntax="lisp",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        rng = np.random.default_rng(0)
+        img = rng.standard_normal((16, 16)).astype(np.float32)
+        result = executor.execute_main([img, img, img, img, img])
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()
+    a = 0.2; ref = np.empty(14 * 14, dtype=np.float32); idx = 0
+    for y in range(14):
+        for x in range(14):
+            c = img[y+1,x+1]; u = img[y,x+1]; d = img[y+2,x+1]
+            lv = img[y+1,x]; rv = img[y+1,x+2]
+            ref[idx] = c + a * (u + d + lv + rv - 4*c)
+            idx += 1
+    np.testing.assert_allclose(result.ravel(), ref, rtol=1e-4, atol=1e-5)

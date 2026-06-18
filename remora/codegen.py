@@ -238,17 +238,14 @@ def generate_mlir_descriptor_abi_ptx(
             raise CodegenUnavailable(
                 "MLIR-derived descriptor-ABI PTX currently supports unary literal-section or binary f32 maps only"
             )
-        if map_kernel.num_inputs not in (1, 2):
+        if map_kernel.num_inputs not in (1, 2) and map_kernel.expression is None:
             raise CodegenUnavailable(
                 "MLIR-derived descriptor-ABI PTX currently supports one or two f32 input descriptors only"
             )
         gpu_module = build_descriptor_abi_f32_map_gpu_module(function, kernel_name=name)
-        input_kinds = list(map_kernel.input_kinds) if map_kernel.scalar_count else None
-        input_elem_types = (
-            ["f32"] * (map_kernel.num_inputs + map_kernel.scalar_count)
-            if map_kernel.scalar_count
-            else ["f32"]
-        )
+        input_kinds = list(map_kernel.input_kinds) if map_kernel.input_kinds else None
+        total_inputs = map_kernel.num_inputs + map_kernel.scalar_count
+        input_elem_types = ["f32"] * total_inputs if total_inputs > 1 else ["f32"]
         meta = KernelMeta(
             name=name,
             grid_dims=1,

@@ -6,7 +6,7 @@
 |---|---------|--------|-----|-----|-------|
 | 3 | Image processing | ✓ | ✓ | ✓ | Sobel, threshold, blur (Phases 4A/4G) |
 | 4 | Logistic regression | ✓ | ✓ | ~ | Phase 1 done; GPU elementwise patterns exist |
-| 1 | PDE solver (heat) | ✓ | ✓ | ✗ | `subarray` views CPU-only; GPU needs pass-through kernel |
+| 1 | PDE solver (heat) | ✓ | ✓ | ✓ | Subarray+fused-map path (Phase 4G); 13/13 GPU tests |
 | 8 | Monte Carlo | ✓ | ✓ | ~ | Scan + reduce patterns exist on GPU |
 | 2 | N-body | ✓ | ~ | ✗ | Pairwise broadcasting [N,3]→[N,N,3] large intermediates |
 | 12 | Diff. renderer | ✓ | ~ | ✗ | AD output too complex for GPU pattern matchers; needs multi-op decomposition |

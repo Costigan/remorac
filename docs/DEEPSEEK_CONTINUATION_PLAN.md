@@ -733,11 +733,12 @@ reference; boundaries are preserved (Dirichlet).  Tests:
 detect_data: 10, detect_train: 5, image_filters: 7, pde_stencil: 6,
 executor: 24, others: 25).
 
-**4G — GPU parity: COMPLETE.**  All four gaps closed via specialized GPU kernel
-builders (scalar params, im2col, cell-fold dot-product, sobel combined kernel).
-All three image filters (Sobel, threshold, blur) run on GPU
-(`examples/image_filters.py --target gpu`).  12 GPU round-trip tests pass,
-165 CPU tests pass.
+**4G — GPU parity: COMPLETE.**  All four gaps closed.  The fused-map
+`subarray` path makes arbitrary `subarray + elementwise arithmetic`
+functions (heat equation, any 2-D stencil, edge detection, morphology)
+compile to PTX and run on GPU with no specialized one-off kernels.
+All three image filters + heat step run on GPU (`examples/image_filters.py
+--target gpu`).  13 GPU round-trip tests pass, 165 CPU tests pass.
 
 **Gap 1 (scalar params) — FIXED.** `_analyze_fused_f32_map` now allows scalar
 `Float` params alongside array params.  `(map (lambda (v) (select (> v t)

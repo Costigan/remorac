@@ -73,6 +73,7 @@ class F32MapKernel:
     expression: F32Expr | None = None
     scalar_count: int = 0
     input_kinds: tuple[str, ...] = ()
+    subarray_offsets: tuple[tuple[int, int] | None, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -200,15 +201,72 @@ def _analyze_fused_f32_map(
     on_unsupported: Callable[[str], Exception],
     context: str,
 ) -> F32MapKernel:
+    from remora.hir import HIRApply, HIRSubarray, HIRVar
+
     array_param_indices: dict[str, int] = {}
     scalar_param_indices: dict[str, int] = {}
     input_types: list[ArrayType] = []
     input_kinds: list[str] = []
+    subarray_offsets: list[tuple[int, int] | None] = []
+
+    # ── Phase 1: register subarray views as logical inputs ──
+    # Each unique (param, offsets) pair becomes a separate input slot.
+    subarray_map: dict[tuple[str, int, int], int] = {}
+
+    def _collect_subarrays(expr: HIRExpr) -> None:
+        if isinstance(expr, HIRSubarray) and isinstance(expr.array, HIRVar):
+            base = expr.array.name
+            ro = int(expr.offsets[0].value)
+            co = int(expr.offsets[1].value)
+            key = (base, ro, co)
+            if key not in subarray_map:
+                subarray_map[key] = len(input_types)
+                input_types.append(expr.result_type)
+                input_kinds.append("array")
+                subarray_offsets.append((ro, co))
+        # recursively collect from children
+        for fld in ("arrays", "args", "condition", "then_branch", "else_branch",
+                     "body", "value", "init", "array"):
+            ch = getattr(expr, fld, None)
+            if ch is None:
+                continue
+            if isinstance(ch, (list, tuple)):
+                for c in ch:
+                    _collect_subarrays(c)
+            elif isinstance(ch, HIRExpr):
+                _collect_subarrays(ch)
+
+    _collect_subarrays(function.body)
+
+    # ── Phase 2: register function parameters ──
+    def _has_direct_ref(body, name):
+        if isinstance(body, HIRVar) and body.name == name:
+            return True
+        if isinstance(body, HIRSubarray):
+            return False
+        for fld in ("arrays", "args", "condition", "then_branch", "else_branch",
+                     "body", "value", "init", "array"):
+            ch = getattr(body, fld, None)
+            if ch is None: continue
+            for c in (ch if isinstance(ch, (list, tuple)) else [ch]):
+                if isinstance(c, HIRExpr) and _has_direct_ref(c, name):
+                    return True
+        return False
+
     for param in function.params:
         if isinstance(param.type, ArrayType) and param.type.element == FLOAT and 1 <= param.type.rank <= 10:
-            array_param_indices[param.name] = len(input_types)
-            input_types.append(param.type)
-            input_kinds.append("array")
+            if subarray_map and not _has_direct_ref(function.body, param.name):
+                key = (param.name, 0, 0)
+                if key in subarray_map:
+                    array_param_indices[param.name] = subarray_map[key]
+                continue
+            key = (param.name, 0, 0)
+            if key not in subarray_map:
+                subarray_map[key] = len(input_types)
+                input_types.append(param.type)
+                input_kinds.append("array")
+                subarray_offsets.append(None)
+            array_param_indices[param.name] = subarray_map[key]
         elif param.type == FLOAT:
             scalar_param_indices[param.name] = len(scalar_param_indices)
             input_kinds.append("scalar")
@@ -216,18 +274,30 @@ def _analyze_fused_f32_map(
             raise on_unsupported(
                 f"{context} currently supports rank-1 through rank-10 float array inputs and float scalar inputs only"
             )
-    if len(input_types) not in (1, 2):
-        raise on_unsupported(f"{context} currently supports one or two array input parameters")
+    if len(input_types) < 1 or len(input_types) > 10:
+        raise on_unsupported(f"{context} currently supports 1–10 array inputs, got {len(input_types)}")
     if not isinstance(function.return_type, ArrayType) or function.return_type.element != FLOAT:
         raise on_unsupported(f"{context} currently supports float array outputs only")
-    if any(input_type.shape != function.return_type.shape for input_type in input_types):
+    if any(
+        input_type.shape != function.return_type.shape and (subarray_offsets[i] is None)
+        for i, input_type in enumerate(input_types)
+    ):
         raise on_unsupported(f"{context} input and output shapes must match")
     scalar_env = {
         name: F32ScalarParamExpr(index) for name, index in scalar_param_indices.items()
     }
+    # build combined param_indices for _f32_expr_from_array — includes
+    # both direct params and subarray views
+    all_indices: dict[str, int] = {}
+    for (base, ro, co), idx in subarray_map.items():
+        all_indices[f"{base}__{ro}_{co}"] = idx
+    # also map the base param name for direct references
+    for param in function.params:
+        if isinstance(param.type, ArrayType):
+            all_indices[param.name] = array_param_indices.get(param.name, 0)
     expression = _f32_expr_from_array(
         function.body,
-        array_param_indices,
+        all_indices,
         scalar_env,
         on_unsupported,
         context,
@@ -243,6 +313,7 @@ def _analyze_fused_f32_map(
         expression,
         len(scalar_param_indices),
         tuple(input_kinds),
+        subarray_offsets=tuple(subarray_offsets) if any(o is not None for o in subarray_offsets) else None,
     )
 
 
@@ -253,17 +324,27 @@ def _f32_expr_from_array(
     on_unsupported: Callable[[str], Exception],
     context: str,
 ) -> F32Expr:
+    from remora.hir import HIRApply, HIRLit, HIRSubarray, HIRVar
     if isinstance(expr, HIRVar) and expr.name in param_indices:
         return F32InputExpr(param_indices[expr.name])
     if isinstance(expr, HIRVar) and expr.name in scalar_env:
         return scalar_env[expr.name]
+    if isinstance(expr, HIRLit):
+        return F32ConstantExpr(float(expr.value))
+    if isinstance(expr, HIRSubarray) and isinstance(expr.array, HIRVar):
+        ro = int(expr.offsets[0].value)
+        co = int(expr.offsets[1].value)
+        key = f"{expr.array.name}__{ro}_{co}"
+        if key in param_indices:
+            return F32InputExpr(param_indices[key])
+        raise on_unsupported(f"{context} subarray of '{expr.array.name}' at ({ro},{co}) is not registered")
     if isinstance(expr, HIRIf):
         return F32SelectExpr(
             _f32_expr_from_array(expr.condition, param_indices, scalar_env, on_unsupported, context),
             _f32_expr_from_array(expr.then_branch, param_indices, scalar_env, on_unsupported, context),
             _f32_expr_from_array(expr.else_branch, param_indices, scalar_env, on_unsupported, context),
         )
-    if not isinstance(expr, HIRMap):
+    if not isinstance(expr, (HIRMap, HIRApply)):
         raise on_unsupported(f"{context} fused maps require parameter or map operands")
     array_exprs = [
         _f32_expr_from_array(array, param_indices, scalar_env, on_unsupported, context)

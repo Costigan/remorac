@@ -959,13 +959,38 @@ def _descriptor_kernel_body_lines(
     for prefix in prefixes:
         lines.extend(_linear_index_lines(prefix, rank))
     for index in range(kernel.num_inputs):
-        lines.extend(
-            [
-                f"      %{prefixes[index]}_elem_ptr = llvm.getelementptr %{prefixes[index]}_aligned[%{prefixes[index]}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
-                f"      %x{index} = llvm.load %{prefixes[index]}_elem_ptr : !llvm.ptr -> {element_type}",
-            ]
+        pf = prefixes[index]
+        sub = (
+            getattr(kernel, 'subarray_offsets', None)[index]
+            if getattr(kernel, 'subarray_offsets', None) and index < len(getattr(kernel, 'subarray_offsets', None) or ())
+            else None
         )
-        lines[-2] = lines[-2].replace(", f32", f", {element_type}")
+        if sub is not None and rank == 2:
+            orow, ocol = sub
+            radj = f"%{pf}_radj_{index}"
+            cadj = f"%{pf}_cadj_{index}"
+            cor = f"%{pf}_cor_{index}"
+            coc = f"%{pf}_coc_{index}"
+            linadj = f"%{pf}_linadj_{index}"
+            lines.extend([
+                f"      {cor} = llvm.mlir.constant({orow} : index) : i64",
+                f"      {coc} = llvm.mlir.constant({ocol} : index) : i64",
+                f"      {radj} = llvm.add %i0, {cor} : i64",
+                f"      {cadj} = llvm.add %i1, {coc} : i64",
+                f"      %_{pf}_tadj_{index} = llvm.mul {radj}, %{pf}_stride0 : i64",
+                f"      %_{pf}_roffadj_{index} = llvm.add %{pf}_offset, %_{pf}_tadj_{index} : i64",
+                f"      {linadj} = llvm.add %_{pf}_roffadj_{index}, {cadj} : i64",
+                f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[{linadj}] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+            ])
+        else:
+            lines.extend(
+                [
+                    f"      %{pf}_elem_ptr = llvm.getelementptr %{pf}_aligned[%{pf}_linear] : (!llvm.ptr, i64) -> !llvm.ptr, f32",
+                ]
+            )
+        lines.append(
+            f"      %x{index} = llvm.load %{pf}_elem_ptr : !llvm.ptr -> {element_type}"
+        )
     lines.extend(operation_builder(kernel))
     lines.extend(
         [
