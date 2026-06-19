@@ -33,6 +33,12 @@ uv run remorac examples/prelude_sum.remora
 # Run on the reference interpreter (supports more syntax than CPU backend)
 uv run remorac --target interp examples/conditional.remora
 
+# Run AD optimization example (interpreter)
+uv run remorac --syntax lisp --target interp examples/ad_optimize.lisp
+
+# Run AD optimization example (compiled CPU)
+uv run remorac --syntax lisp --target cpu examples/ad_optimize.lisp
+
 # Inspect compiler stages
 uv run remorac --emit-ast examples/prelude_sum.remora
 uv run remorac --emit-typed-ast examples/prelude_sum.remora
@@ -69,6 +75,7 @@ Entry points: `remorac` (CLI, `remora/cli.py`), `remora` (REPL, `remora/repl.py`
 - **Prelude auto-prepended.** `stdlib/prelude.rem` is injected by `remora/prelude.py` before compilation.
 - **Two syntaxes.** ML syntax is the default; Lisp syntax is selected with `--syntax lisp`. The ML grammar is in `remora/grammar.lark` (Lark). The Lisp grammar is inline in `remora/lisp_reader.py`.
 - **`_` prefix** on filenames means internal helper module.
+- **Lisp syntax local bindings.** Use `let`/`let*` for local bindings (standard Scheme-style). The `::` let-form was removed.
 
 ## Testing
 
@@ -99,6 +106,7 @@ uv run python tools/validate_mlir_toolchain.py
 | `tests/golden_mlir/` | Golden MLIR output files |
 | `stdlib/prelude.rem` | Standard library prelude |
 | `examples/` | `.remora` examples and Python drivers |
+| `examples/ad_*.lisp` | AD examples: `ad_polynomial`, `ad_circle`, `ad_spring`, `ad_softmax`, `ad_optimize` |
 | `docs/` | Design docs; `PROJECT_OVERVIEW.md` is the best starting point |
 | `docs/remora-reference/` | Academic papers on the Remora language |
 | `tools/` | MLIR toolchain validation scripts |

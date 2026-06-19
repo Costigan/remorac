@@ -87,16 +87,18 @@ Source (ML or Lisp syntax)
   NVVM), descriptor-level view ops (take/drop/subarray/reverse/rotate/
   transpose), descriptor reinterpretation (reshape/ravel/append/with-shape),
   type-aware i32 arithmetic and comparisons, and array-typed conditionals.
+  Includes grad-lifting pass, state fold lowering, and monomorphization.
   The general path serves as a universal dispatch fallback for any map
   program.
 - **Interpreter**: Handles most programs (used for test validation).
 - **AD**: Reverse-mode works for scalar-cost functions.  Tape → source
-  compilation.
+  compilation.  AD now works through compiled CPU path for optimization
+  loops (grad-lifting + state fold); see `examples/ad_optimize.lisp`.
 
 ### Test Counts
 - CPU tests: ≈340 (all passing)
 - GPU tests: ≈97 (all passing)
-- General GPU lowering tests: 31 (all passing, in `tests/test_gpu_general_lowering.py`)
+- General GPU lowering tests: 120+ (all passing, in `tests/test_gpu_general_lowering.py`)
 - N-body tests: 5 (all passing, including GPU compilation + numeric parity)
 
 ## Conventions
@@ -122,3 +124,4 @@ Source (ML or Lisp syntax)
 | `docs/DEEPSEEK_CONTINUATION_PLAN.md` | Overall development roadmap |
 | `docs/COMPILER_MATURITY_EXAMPLES.md` | What examples compile on which backend |
 | `docs/ABI.md` | Descriptor ABI specification |
+| `docs/FUTURE_WORK.md` | Future work and planned features |
