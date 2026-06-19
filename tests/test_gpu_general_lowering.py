@@ -1252,15 +1252,18 @@ class TestGPUNumericParity:
     def _run_parity(self, src, name, param_types, inputs, include_prelude=False, syntax="ml"):
         """Compile on CPU and GPU, execute both, assert close match."""
         # CPU: use interpreter for reference
+        formatted = [self._format_input(v) for v in inputs]
         if syntax == "ml":
-            call_expr = f"({name} {' '.join(self._format_input(v) for v in inputs)})"
+            arg_str = " ".join(f"({a})" for a in formatted)
+            call_expr = f"{name} {arg_str}"
         else:
-            call_expr = f"({name} {' '.join(self._format_input(v) for v in inputs)})"
+            arg_str = " ".join(formatted)
+            call_expr = f"({name} {arg_str})"
         full_src = f"{src}\n{call_expr}"
         cpu_result = evaluate_source(
             full_src, include_prelude=include_prelude, syntax=syntax,
         )
-        cpu_arr = np.asarray(cpu_result, dtype=np.float32)
+        cpu_arr = np.asarray(cpu_result.value, dtype=np.float32)
 
         # GPU
         ptx, kernels, _ = compile_function_source_to_mlir_gpu_ptx(
@@ -1283,18 +1286,21 @@ class TestGPUNumericParity:
     @staticmethod
     def _format_input(v):
         if isinstance(v, np.ndarray):
-            if v.dtype == np.float32:
-                rows = []
-                for row in v:
-                    rows.append("[" + " ".join(f"{x:.6f}" for x in np.atleast_1d(row)) + "]")
-                return "[" + " ".join(rows) + "]"
-            elif v.dtype == np.int32:
-                rows = []
-                for row in v:
-                    rows.append("[" + " ".join(str(int(x)) for x in np.atleast_1d(row)) + "]")
-                return "[" + " ".join(rows) + "]"
-            else:
-                return str(v.tolist()).replace(",", "")
+            if v.ndim == 1:
+                if v.dtype == np.float32:
+                    return "[" + ", ".join(f"{x:.6f}" for x in v) + "]"
+                elif v.dtype == np.int32:
+                    return "[" + ", ".join(str(int(x)) for x in v) + "]"
+                return str(list(v))
+            if v.ndim == 2:
+                if v.dtype == np.float32:
+                    rows = ["[" + ", ".join(f"{x:.6f}" for x in row) + "]" for row in v]
+                elif v.dtype == np.int32:
+                    rows = ["[" + ", ".join(str(int(x)) for x in row) + "]" for row in v]
+                else:
+                    rows = [str(list(row)) for row in v]
+                return "[" + ", ".join(rows) + "]"
+            return str(v.tolist())
         elif isinstance(v, (np.floating, float)):
             return f"{float(v):.6f}"
         elif isinstance(v, (np.integer, int)):
