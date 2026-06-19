@@ -20,6 +20,7 @@ from remora.defunc import defunctionalize
 from remora.elaborated import CoreProgram
 from remora.elaborate import elaborate_program
 from remora.erase import erase_to_hir
+from remora.execution_plan import ExecutionPlan
 from remora.hir import HIRFunction, HIRParam, HIRProgram, lower_expr, lower_to_hir
 from remora.lowering import MLIRLowering
 from remora.lowering.types import RemoraLoweringError
@@ -99,6 +100,7 @@ class SupportedGPUFunctionArtifact:
     scaffold: GPUModuleScaffold
     ptx_text: str
     kernels: list[KernelMeta]
+    plan: ExecutionPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -203,7 +205,7 @@ def compile_function_source_to_rank1_mlir_gpu_ptx(
         verify=False,
         include_prelude=include_prelude,
     )
-    ptx, kernels = generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
+    ptx, kernels, _plan = generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
         artifact.hir_function,
         kernel_name=kernel_name,
     )
@@ -228,7 +230,7 @@ def compile_function_source_to_mlir_gpu_ptx(
         include_prelude=include_prelude,
         syntax=syntax,
     )
-    ptx, kernels = generate_mlir_descriptor_abi_ptx(
+    ptx, kernels, _plan = generate_mlir_descriptor_abi_ptx(
         artifact.hir_function,
         kernel_name=kernel_name,
     )
@@ -261,7 +263,7 @@ def compile_function_source_to_supported_gpu_artifacts(
         syntax=syntax,
     )
     kernel = kernel_name or f"remora_{function_name}"
-    ptx_text, kernels = generate_mlir_descriptor_abi_ptx(
+    ptx_text, kernels, plan = generate_mlir_descriptor_abi_ptx(
         artifact.hir_function,
         kernel_name=kernel,
     )
@@ -281,6 +283,7 @@ def compile_function_source_to_supported_gpu_artifacts(
         scaffold=scaffold,
         ptx_text=ptx_text,
         kernels=kernels,
+        plan=plan,
     )
 
 

@@ -1226,7 +1226,7 @@ class TestDispatchChain:
         )
 
         from remora.codegen import generate_mlir_descriptor_abi_ptx
-        ptx, kernels = generate_mlir_descriptor_abi_ptx(hfunc, kernel_name="test_dispatch")
+        ptx, kernels, _plan = generate_mlir_descriptor_abi_ptx(hfunc, kernel_name="test_dispatch")
         assert len(kernels) == 1
         assert kernels[0].name == "test_dispatch"
         assert "f32" in ptx or "float" in ptx.lower()

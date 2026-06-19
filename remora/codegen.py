@@ -24,6 +24,7 @@ from remora._gpu_map_support import (
     I32MapOperation,
 )
 from remora.errors import RemoraError
+from remora.execution_plan import ExecutionPlan
 from remora.hir import HIRFunction
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
 from remora.pipeline import (
@@ -130,7 +131,7 @@ def generate_mlir_descriptor_abi_ptx(
     *,
     kernel_name: str | None = None,
     toolchain: PipelineToolchain | None = None,
-) -> tuple[str, list[KernelMeta]]:
+) -> tuple[str, list[KernelMeta], ExecutionPlan | None]:
     """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
 
     This is intentionally narrow: rank-1 through rank-3 unary/binary
@@ -169,7 +170,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
 
     # ── try GPU scatter-add ──
     if isinstance(function.body, HIRScatterAdd):
@@ -193,7 +194,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -217,7 +218,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -246,7 +247,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -270,7 +271,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -287,7 +288,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -304,7 +305,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
         except GPUScaffoldError:
             pass
 
@@ -334,7 +335,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
     except GPUScaffoldError:
         pass
 
@@ -363,7 +364,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
     except GPUScaffoldError:
         pass
 
@@ -435,7 +436,7 @@ def generate_mlir_descriptor_abi_ptx(
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
             ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta]
+            return ptx, [meta], None
     except (GPUScaffoldError, CodegenUnavailable):
         pass
 
@@ -612,7 +613,7 @@ def generate_mlir_descriptor_abi_ptx(
     device_module = extract_gpu_module_body_as_module(gpu_module.text)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
     ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-    return ptx, [meta]
+    return ptx, [meta], None
 
 
 def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
@@ -620,7 +621,7 @@ def generate_rank1_f32_unary_mlir_descriptor_abi_ptx(
     *,
     kernel_name: str | None = None,
     toolchain: PipelineToolchain | None = None,
-) -> tuple[str, list[KernelMeta]]:
+) -> tuple[str, list[KernelMeta], ExecutionPlan | None]:
     """Backward-compatible wrapper for the first MLIR-derived executable slice."""
     return generate_mlir_descriptor_abi_ptx(
         function,

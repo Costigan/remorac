@@ -27,6 +27,13 @@ is the new work.
 **Blocked on**: `RemoraExecutor` multi-kernel orchestration.  Today the
 executor assumes one kernel per function.
 
+**Status**: The ``ExecutionPlan`` infrastructure and
+``RemoraExecutor.execute_plan()`` are now implemented
+(``remora/execution_plan.py``, ``remora/executor.py``).  The next step
+is to wire the two-kernel codegen (prefix-sum + scatter) into
+``generate_mlir_descriptor_abi_ptx`` and return an ``ExecutionPlan``
+instead of the serial single-thread kernel.
+
 **Where this is tracked**:
 - `docs/GPU_CPU_PARITY_PLAN.md` — Future Work section
 - Kernel docstrings in `remora/gpu_lowering.py`
@@ -72,6 +79,12 @@ The parallelism is *within* each step (the gradient computation), not
 needed for parallel filter/replicate.  The executor needs to support
 launching multiple kernels per function call, with CPU-side control flow
 between them.
+
+**Status**: The ``ExecutionPlan`` infrastructure is now implemented with
+``LoopPlan`` support for host-side iteration and buffer swapping.  The
+next step is to compile the gradient function and parameter update as
+separate GPU kernels, then emit a ``LoopPlan``-based
+``ExecutionPlan`` from the state-fold lowering path.
 
 **Example**: `examples/ad_optimize.lisp` — gradient descent on a
 polynomial curve-fitting loss.  Currently produces

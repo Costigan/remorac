@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -9,11 +10,49 @@ import numpy as np
 from remora.abi import element_strides, make_memref_descriptor
 from remora.codegen import KernelMeta
 from remora.errors import RemoraError
+from remora.execution_plan import ExecutionPlan, KernelStep, LoopPlan, PlanStep
 from remora.runtime import CUDARuntime
 
 
 class RemoraExecutorError(RemoraError):
     """Raised when high-level Remora execution cannot proceed."""
+
+
+@dataclass
+class _DeviceBuffer:
+    """Tracks a device allocation for execute_plan."""
+    ptr: int
+    shape: tuple[int, ...]
+    dtype: np.dtype
+
+
+def _contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Compute C-contiguous element strides for a given shape."""
+    if not shape:
+        return ()
+    strides: list[int] = []
+    stride = 1
+    for dim in reversed(shape):
+        strides.append(stride)
+        stride *= dim
+    return tuple(reversed(strides))
+
+
+_PLAN_DTYPES = {
+    "f32": np.float32,
+    "float32": np.float32,
+    "i32": np.int32,
+    "int32": np.int32,
+    "i1": np.bool_,
+    "bool": np.bool_,
+}
+
+
+def _plan_dtype(name: str) -> np.dtype:
+    try:
+        return np.dtype(_PLAN_DTYPES[name])
+    except KeyError:
+        return np.dtype(name)
 
 
 class RemoraExecutor:
@@ -27,11 +66,22 @@ class RemoraExecutor:
     ) -> None:
         self._rt = CUDARuntime() if runtime is None else runtime
         self._owns_runtime = runtime is None
-        self._module = self._rt.load_ptx(ptx)
-        self._meta = {kernel.name: kernel for kernel in kernels}
-        self._kernels = {
-            kernel.name: self._module.get_function(kernel.name) for kernel in kernels
+        self._modules = [self._rt.load_ptx(ptx)]
+        self._meta: dict[str, KernelMeta] = {
+            kernel.name: kernel for kernel in kernels
         }
+        self._kernels = {
+            kernel.name: self._modules[0].get_function(kernel.name)
+            for kernel in kernels
+        }
+
+    def add_module(self, ptx: str, kernels: list[KernelMeta]) -> None:
+        """Load additional kernels from a separate PTX module."""
+        module = self._rt.load_ptx(ptx)
+        self._modules.append(module)
+        for kernel in kernels:
+            self._meta[kernel.name] = kernel
+            self._kernels[kernel.name] = module.get_function(kernel.name)
 
     def execute(
         self,
@@ -87,8 +137,6 @@ class RemoraExecutor:
                 output_ptr = self._rt.alloc(output.nbytes)
 
             if meta.is_reduction:
-                # Initialize output to 0 (for atomicAdd)
-                # output.nbytes // 4 is the count of 32-bit words
                 self._rt.memset_d32(output_ptr, 0, output.nbytes // 4)
 
             input_descs = [
@@ -108,11 +156,8 @@ class RemoraExecutor:
             )
             block_size = int(meta.block_size or 256)
             if meta.is_reduction and host_inputs:
-                # Base grid size on input size for better parallelism
                 input_count = int(np.prod(host_inputs[0].shape, dtype=np.int64))
                 grid_size = int((input_count + block_size - 1) // block_size)
-                # Limit grid size to avoid too many atomic operations if needed?
-                # For now, let's just go with it.
             else:
                 element_count = max(1, int(np.prod(output.shape, dtype=np.int64)))
                 grid_size = int((element_count + block_size - 1) // block_size)
@@ -132,13 +177,70 @@ class RemoraExecutor:
 
         return output
 
+    def execute_plan(
+        self,
+        plan: ExecutionPlan,
+        inputs: list[np.ndarray],
+    ) -> np.ndarray:
+        """Execute a multi-kernel plan and return the host output array.
+
+        The plan describes a sequence of kernel launches with named
+        intermediate buffers.  Input arrays are registered as
+        ``input_0``, ``input_1``, etc.  Temporary buffers declared in
+        ``plan.buffers`` are allocated on the device before execution
+        and freed afterward.  ``LoopPlan`` steps run their body
+        repeatedly with optional buffer swapping between iterations.
+        """
+        plan.validate()
+        missing_kernels = plan.kernel_names() - set(self._kernels)
+        if missing_kernels:
+            raise RemoraExecutorError(
+                f"Plan references unknown kernels: {sorted(missing_kernels)}"
+            )
+
+        registry: dict[str, _DeviceBuffer] = {}
+        allocated_ptrs: list[int] = []
+
+        try:
+            for i, inp in enumerate(inputs):
+                arr = np.ascontiguousarray(inp)
+                ptr = self._rt.alloc(arr.nbytes)
+                self._rt.copy_host_to_device(arr, ptr)
+                registry[f"input_{i}"] = _DeviceBuffer(ptr, arr.shape, arr.dtype)
+                allocated_ptrs.append(ptr)
+
+            for buf_spec in plan.buffers:
+                dtype = _plan_dtype(buf_spec.dtype)
+                n_elements = max(1, int(np.prod(buf_spec.shape, dtype=np.int64)))
+                nbytes = n_elements * dtype.itemsize
+                ptr = self._rt.alloc(nbytes)
+                self._rt.memset_d32(ptr, 0, max(1, nbytes // 4))
+                registry[buf_spec.name] = _DeviceBuffer(
+                    ptr, buf_spec.shape, dtype,
+                )
+                allocated_ptrs.append(ptr)
+
+            for step in plan.steps:
+                self._run_plan_step(step, registry)
+
+            final = registry[plan.final_output]
+            out_shape = plan.output_shape
+            out_dtype = _plan_dtype(plan.output_dtype)
+            output = np.empty(out_shape, dtype=out_dtype)
+            self._rt.copy_device_to_host(final.ptr, output)
+            return output
+        finally:
+            for ptr in allocated_ptrs:
+                self._rt.free(ptr)
+
     def execute_main(self, inputs: list[Any] | None = None, *, arena: Any | None = None) -> np.ndarray:
         """Run the program entry kernel using the shared executor-style API."""
         kernel_name = self._main_kernel_name()
         return self.execute(kernel_name, [] if inputs is None else inputs, arena=arena)
 
     def close(self) -> None:
-        self._module.close()
+        for mod in self._modules:
+            mod.close()
         if self._owns_runtime:
             self._rt.close()
 
@@ -156,6 +258,63 @@ class RemoraExecutor:
         raise RemoraExecutorError(
             "execute_main requires a kernel named main or exactly one compiled kernel"
         )
+
+    def _run_plan_step(
+        self,
+        step: PlanStep,
+        registry: dict[str, _DeviceBuffer],
+    ) -> None:
+        if isinstance(step, KernelStep):
+            self._run_kernel_step(step, registry)
+        elif isinstance(step, LoopPlan):
+            for _ in range(step.count):
+                for body_step in step.body:
+                    self._run_kernel_step(body_step, registry)
+                for a, b in step.swap_pairs:
+                    registry[a], registry[b] = registry[b], registry[a]
+
+    def _run_kernel_step(
+        self,
+        step: KernelStep,
+        registry: dict[str, _DeviceBuffer],
+    ) -> None:
+        meta = self._meta[step.kernel_name]
+        kernel = self._kernels[step.kernel_name]
+
+        input_descs = []
+        first_input_shape: tuple[int, ...] | None = None
+        for ref in step.input_refs:
+            buf = registry[ref]
+            if first_input_shape is None:
+                first_input_shape = buf.shape
+            strides = _contiguous_strides(buf.shape)
+            input_descs.append(
+                make_memref_descriptor(buf.ptr, buf.shape, strides, buf.dtype)
+            )
+
+        out_buf = registry[step.output_ref]
+        if step.is_reduction:
+            nbytes = max(4, int(np.prod(out_buf.shape, dtype=np.int64)) * out_buf.dtype.itemsize)
+            self._rt.memset_d32(out_buf.ptr, 0, max(1, nbytes // 4))
+
+        out_strides = _contiguous_strides(out_buf.shape)
+        output_desc = make_memref_descriptor(
+            out_buf.ptr, out_buf.shape, out_strides, out_buf.dtype,
+        )
+
+        block_size = int(meta.block_size or 256)
+        if step.is_reduction and first_input_shape is not None:
+            element_count = max(1, int(np.prod(first_input_shape, dtype=np.int64)))
+        else:
+            element_count = max(1, int(np.prod(out_buf.shape, dtype=np.int64)))
+        grid_size = int((element_count + block_size - 1) // block_size)
+
+        kernel.launch(
+            (grid_size, 1, 1),
+            (block_size, 1, 1),
+            [*input_descs, output_desc],
+        )
+        self._rt.synchronize()
 
 
 class GPUPtxContext:
