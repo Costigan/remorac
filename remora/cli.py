@@ -194,8 +194,8 @@ def _handle_gpu_target(source: str, syntax: str = "ml") -> None:
     from remora.compiler import compile_source
 
     try:
-        result = execute_program_on_gpu(source)
-        artifact = compile_source(source)
+        result = execute_program_on_gpu(source, syntax=syntax)
+        artifact = compile_source(source, syntax=syntax)
         from remora.types import ArrayType, ScalarType
         from remora.runtime import _result_dtype
         rtype = artifact.return_type

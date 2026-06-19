@@ -197,11 +197,12 @@ def execute_program_on_gpu(
     source: str,
     *,
     include_prelude: bool = True,
+    syntax: str = "ml",
 ) -> np.ndarray:
     """Compile a Remora body program to GPU PTX and execute it."""
     from remora.compiler import compile_source_to_ptx
 
-    artifact = compile_source_to_ptx(source, include_prelude=include_prelude)
+    artifact = compile_source_to_ptx(source, include_prelude=include_prelude, syntax=syntax)
     return execute_program_from_ptx(artifact)
 
 
