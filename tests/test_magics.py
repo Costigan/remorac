@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import sys
+
 import numpy as np
 import pytest
 from IPython.testing.globalipapp import get_ipython
@@ -43,3 +46,59 @@ def test_remora_magic_prelude(ip):
     """Test that the prelude is available in the magic."""
     result = ip.run_cell_magic("remora", "", "sum (iota 5)")
     assert int(result) == 10
+
+
+def test_remora_eval_expression(ip):
+    """Test %remora_eval with a simple expression."""
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        ip.run_line_magic("remora_eval", "iota 3")
+    finally:
+        sys.stdout = old_stdout
+    output = buf.getvalue().strip()
+    assert "[0, 1, 2]" in output
+
+
+def test_remora_eval_definition_and_use(ip):
+    """Test %remora_eval with definition then use."""
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        ip.run_line_magic("remora_eval", "def inc x = x + 1")
+        ip.run_line_magic("remora_eval", "inc 41")
+    finally:
+        sys.stdout = old_stdout
+    output = buf.getvalue().strip()
+    assert "42" in output
+
+
+def test_remora_eval_reset(ip):
+    """Test %remora_eval --reset clears session state."""
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        ip.run_line_magic("remora_eval", "--reset")
+    finally:
+        sys.stdout = old_stdout
+    output = buf.getvalue().strip()
+    assert "reset" in output.lower()
+
+
+def test_remora_magic_types(ip):
+    """Test %%remora --types prints type information."""
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        ip.run_cell_magic(
+            "remora", "--types --syntax lisp",
+            "(define/pi () (scale [xs (Array Float 4)] (Array Float 4)) (map (* 2.0) xs))",
+        )
+    finally:
+        sys.stdout = old_stdout
+    output = buf.getvalue()
+    assert "scale" in output
