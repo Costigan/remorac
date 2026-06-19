@@ -1339,7 +1339,8 @@ def _lower_fold_module(
     body, result_value, result_type = _lower_fold_result(
         node, functions, tensor_env, scalar_env=scalar_env
     )
-    builder = _MLIRMainModuleBuilder(result_type)
+    called = _collect_called_functions(node, functions)
+    builder = _MLIRMainModuleBuilder(result_type, functions=called)
     builder.add_block(body)
     return builder.render(result_value)
 
@@ -1353,7 +1354,12 @@ def _lower_fold_result(
     scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str]:
     if isinstance(node.result_type, ArrayType):
-        return _lower_array_fold_result(
+        input_type = _expr_result_type(node.array)
+        if isinstance(input_type, ArrayType) and input_type.rank >= 2:
+            return _lower_array_fold_result(
+                node, functions, tensor_env, prefix=prefix, scalar_env=scalar_env
+            )
+        return _lower_state_fold_result(
             node, functions, tensor_env, prefix=prefix, scalar_env=scalar_env
         )
     return _lower_scalar_fold_result(
@@ -1450,6 +1456,206 @@ def _lower_scalar_fold_result(
     %result = tensor.extract %folded[] : tensor<{acc_type}>
 """
     return body.rstrip(), "%result", result_type
+
+
+def _collect_called_functions(node, functions: dict) -> dict:
+    """Collect HIR functions that are directly called (via HIRCall) from the node."""
+    names: set[str] = set()
+    def _walk(expr):
+        if isinstance(expr, HIRCall):
+            names.add(expr.func_name)
+        for attr in ('func', 'body', 'value', 'array', 'init', 'condition',
+                     'then_branch', 'else_branch', 'left', 'right'):
+            child = getattr(expr, attr, None)
+            if child is not None and hasattr(child, '__class__') and child.__class__.__module__.startswith('remora'):
+                _walk(child)
+        for attr in ('args', 'arrays', 'elements'):
+            children = getattr(expr, attr, None)
+            if isinstance(children, (list, tuple)):
+                for c in children:
+                    if hasattr(c, '__class__') and c.__class__.__module__.startswith('remora'):
+                        _walk(c)
+    _walk(node)
+    if isinstance(node, (HIRFold, HIRReduce)) and isinstance(node.func, HIRVar):
+        func = functions.get(node.func.name)
+        if func is not None:
+            _walk(func.body)
+    return {n: functions[n] for n in names if n in functions}
+
+
+def _inline_hir_calls(expr, functions: dict):
+    """Inline HIRCall nodes and simplify trivial let bindings."""
+    if isinstance(expr, HIRCall):
+        func = functions.get(expr.func_name)
+        if func is not None:
+            body = func.body
+            for param, arg in reversed(list(zip(func.params, expr.args))):
+                body = HIRLet(param.name, param.type, _inline_hir_calls(arg, functions), body, expr.result_type)
+            return _inline_hir_calls(body, functions)
+        return expr
+    if isinstance(expr, HIRLet):
+        value = _inline_hir_calls(expr.value, functions)
+        body = _inline_hir_calls(expr.body, functions)
+        if isinstance(value, HIRVar):
+            return _subst_var(body, expr.name, value)
+        return HIRLet(expr.name, expr.value_type, value, body, expr.result_type)
+    if isinstance(expr, HIRApply):
+        return HIRApply(expr.frame_shape, expr.cell_shape, expr.func,
+                        [_inline_hir_calls(a, functions) for a in expr.arrays], expr.result_type)
+    if isinstance(expr, HIRMap):
+        return HIRMap(expr.frame_shape, expr.cell_shape, expr.func,
+                      [_inline_hir_calls(a, functions) for a in expr.arrays], expr.result_type)
+    if isinstance(expr, HIRPrimOp):
+        return HIRPrimOp(expr.op, [_inline_hir_calls(a, functions) for a in expr.args], expr.result_type)
+    return expr
+
+
+def _subst_var(expr, name: str, replacement):
+    """Substitute all occurrences of HIRVar(name) with replacement."""
+    if isinstance(expr, HIRVar) and expr.name == name:
+        return replacement
+    if isinstance(expr, HIRApply):
+        return HIRApply(expr.frame_shape, expr.cell_shape, expr.func,
+                        [_subst_var(a, name, replacement) for a in expr.arrays], expr.result_type)
+    if isinstance(expr, HIRMap):
+        func = expr.func
+        if isinstance(func, HIRLambda):
+            if name not in [p.name for p in func.params]:
+                func = HIRLambda(func.params, _subst_var(func.body, name, replacement), func.result_type)
+        return HIRMap(expr.frame_shape, expr.cell_shape, func,
+                      [_subst_var(a, name, replacement) for a in expr.arrays], expr.result_type)
+    if isinstance(expr, HIRLet):
+        value = _subst_var(expr.value, name, replacement)
+        body = expr.body if expr.name == name else _subst_var(expr.body, name, replacement)
+        return HIRLet(expr.name, expr.value_type, value, body, expr.result_type)
+    if isinstance(expr, HIRPrimOp):
+        return HIRPrimOp(expr.op, [_subst_var(a, name, replacement) for a in expr.args], expr.result_type)
+    return expr
+
+
+def _lower_state_fold_result(
+    node: HIRFold | HIRReduce,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    *,
+    prefix: str = "",
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str]:
+    """Lower a fold with array-valued accumulator over a rank-1 input.
+
+    Uses ``scf.for`` with ``iter_args`` carrying the accumulator tensor.
+    Each iteration applies the fold body to (carry, element) and yields
+    the new carry.
+    """
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("state fold requires an array result type")
+
+    result_mlir = type_to_mlir(node.result_type)
+    reduction_dim = node.reduction_dim
+    N_val = int(reduction_dim.value)
+
+    init_code, init_name, init_type, init_elem = _lower_tensor_input(
+        node.init, _join_prefix(prefix, "sf_init"), functions, tensor_env, scalar_env,
+    )
+
+    lam_params: list[HIRParam] = []
+    lam_body: HIRExpr | None = None
+    callable_expr = node.func
+
+    if isinstance(callable_expr, HIRLambda):
+        lam_params = callable_expr.params
+        lam_body = callable_expr.body
+    elif isinstance(callable_expr, HIRVar):
+        func = functions.get(callable_expr.name)
+        if func is not None:
+            lam_params = func.params
+            lam_body = func.body
+    if lam_body is None:
+        raise RemoraLoweringError(
+            f"state fold callable must be a lambda or named function "
+            f"(got {type(callable_expr).__name__})"
+        )
+
+    p = _join_prefix(prefix, "sf")
+    cN = f"%{_join_prefix(p, 'N')}"
+    c0 = f"%{_join_prefix(p, 'c0')}"
+    c1 = f"%{_join_prefix(p, 'c1')}"
+    idx = f"%{_join_prefix(p, 'i')}"
+    result = f"%{_join_prefix(p, 'result')}"
+
+    if not isinstance(node.result_type, ArrayType) or node.result_type.rank != 1:
+        raise RemoraLoweringError("state fold scalar decomposition supports rank-1 results only")
+    K = int(node.result_type.shape[0].value)
+
+    init_scalars: list[str] = []
+    init_extract_code = ""
+    for k in range(K):
+        sc_name = f"%{_join_prefix(p, f'init_s{k}')}"
+        ck_name = f"%{_join_prefix(p, f'ck{k}')}"
+        init_extract_code += f"    {ck_name} = arith.constant {k} : index\n"
+        init_extract_code += f"    {sc_name} = tensor.extract {init_name}[{ck_name}] : {init_type}\n"
+        init_scalars.append(sc_name)
+
+    carry_scalars = [f"%{_join_prefix(p, f'carry_s{k}')}" for k in range(K)]
+    iter_arg_str = ", ".join(f"{cs} = {ins}" for cs, ins in zip(carry_scalars, init_scalars))
+    type_str = ", ".join(init_elem for _ in range(K))
+
+    carry_tensor = f"%{_join_prefix(p, 'carry_tensor')}"
+    carry_elems_str = ", ".join(carry_scalars)
+    reconstruct_code = f"      {carry_tensor} = tensor.from_elements {carry_elems_str} : {result_mlir}"
+
+    loop_tenv = dict(tensor_env or {})
+    loop_senv = dict(scalar_env or {})
+
+    if len(lam_params) >= 1:
+        acc_param = lam_params[0].name
+        loop_tenv[acc_param] = _TensorValue(carry_tensor, result_mlir, init_elem)
+
+    cast_var = f"%{_join_prefix(p, 'i32')}"
+    loop_body_prefix = f"      {cast_var} = arith.index_cast {idx} : index to i32"
+    if len(lam_params) >= 2:
+        elem_param = lam_params[1].name
+        loop_senv[elem_param] = _Operand(cast_var, [], "i32")
+
+    lines: list[str] = []
+    try:
+        body_code, new_carry_val, new_carry_type, _ = _lower_tensor_input(
+            lam_body, _join_prefix(p, "body"), functions,
+            loop_tenv, loop_senv,
+        )
+        lines.append(body_code)
+    except RemoraLoweringError:
+        new_carry_val, new_carry_type = _lower_body_in_loop(
+            lam_body, lines, _join_prefix(p, "body"), functions,
+            loop_tenv, loop_senv, _next_uid=0,
+        )
+
+    new_scalars: list[str] = []
+    extract_code = ""
+    for k in range(K):
+        ns = f"%{_join_prefix(p, f'new_s{k}')}"
+        ek = f"%{_join_prefix(p, f'ek{k}')}"
+        extract_code += f"      {ek} = arith.constant {k} : index\n"
+        extract_code += f"      {ns} = tensor.extract {new_carry_val}[{ek}] : {new_carry_type}\n"
+        new_scalars.append(ns)
+
+    new_scalars_str = ", ".join(new_scalars)
+    loop_body = loop_body_prefix + "\n" + reconstruct_code + "\n" + "\n".join(lines) + "\n" + extract_code
+
+    result_scalars = [f"%{_join_prefix(p, f'result_s{k}')}" for k in range(K)]
+    result_scalars_str = ", ".join(result_scalars)
+
+    code = f"""{init_code}
+{init_extract_code}\
+    {cN} = arith.constant {N_val} : index
+    {c0} = arith.constant 0 : index
+    {c1} = arith.constant 1 : index
+    {result_scalars_str} = scf.for {idx} = {c0} to {cN} step {c1} iter_args({iter_arg_str}) -> ({type_str}) {{
+{loop_body}\
+      scf.yield {new_scalars_str} : {type_str}
+    }}
+    {result} = tensor.from_elements {result_scalars_str} : {result_mlir}"""
+    return code.rstrip(), result, result_mlir
 
 
 def _lower_array_fold_module(
@@ -1846,6 +2052,225 @@ def _lower_body_in_loop(
         )
         lines.append(fold_code)
         return fold_val, fold_type
+
+    if isinstance(expr, HIRCall):
+        func = functions.get(expr.func_name)
+        if func is not None:
+            call_prefix = _join_prefix(prefix, f"cl{_next_uid}")
+            arg_vals: list[str] = []
+            arg_types: list[str] = []
+            for i, arg in enumerate(expr.args):
+                av, at = _lower_body_in_loop(
+                    arg, lines, _join_prefix(call_prefix, f"a{i}"), functions,
+                    tensor_env, scalar_env, _next_uid + i + 1,
+                )
+                arg_vals.append(av)
+                arg_types.append(at)
+            result_mlir = type_to_mlir(expr.result_type)
+            call_result = f"%{_join_prefix(call_prefix, 'ret')}"
+            arg_list = ", ".join(arg_vals)
+            type_list = ", ".join(arg_types)
+            lines.append(
+                f"    {call_result} = func.call @{expr.func_name}({arg_list})"
+                f" : ({type_list}) -> {result_mlir}"
+            )
+            return call_result, result_mlir
+
+    if isinstance(expr, HIRScatterAdd):
+        from remora.lowering.scalar import _RegionEmitter as _ScatterEmitter
+        sp = _join_prefix(prefix, f"sa{_next_uid}")
+
+    if isinstance(expr, HIRIndex) and isinstance(expr.result_type, ScalarType):
+        ip = _join_prefix(prefix, f"ix{_next_uid}")
+        arr_val, arr_type = _lower_body_in_loop(
+            expr.array, lines, _join_prefix(ip, "arr"), functions,
+            tensor_env, scalar_env, _next_uid + 1,
+        )
+        idx_strs: list[str] = []
+        for i, idx_expr in enumerate(expr.indices):
+            if isinstance(idx_expr, HIRLit) and idx_expr.type == INT:
+                c_name = f"%{_join_prefix(ip, f'c{i}')}"
+                lines.append(f"    {c_name} = arith.constant {int(idx_expr.value)} : index")
+                idx_strs.append(c_name)
+            else:
+                iv, _ = _lower_body_in_loop(
+                    idx_expr, lines, _join_prefix(ip, f"i{i}"), functions,
+                    tensor_env, scalar_env, _next_uid + i + 2,
+                )
+                cast_name = f"%{_join_prefix(ip, f'ic{i}')}"
+                lines.append(f"    {cast_name} = arith.index_cast {iv} : i32 to index")
+                idx_strs.append(cast_name)
+        result_mlir = type_to_mlir(expr.result_type)
+        result_name = f"%{_join_prefix(ip, 'val')}"
+        idx_list = ", ".join(idx_strs)
+        lines.append(f"    {result_name} = tensor.extract {arr_val}[{idx_list}] : {arr_type}")
+        return result_name, result_mlir
+
+    if isinstance(expr, HIRPrimOp) and _is_scalar_type(expr.result_type):
+        pp = _join_prefix(prefix, f"po{_next_uid}")
+        if tensor_env:
+            arg_vals: list[str] = []
+            arg_vals: list[str] = []
+            for i, arg in enumerate(expr.args):
+                av, _ = _lower_body_in_loop(
+                    arg, lines, _join_prefix(pp, f"a{i}"), functions,
+                    tensor_env, scalar_env, _next_uid + i + 1,
+                )
+                arg_vals.append(av)
+            result_mlir = type_to_mlir(expr.result_type)
+            result_name = f"%{_join_prefix(pp, 'r')}"
+            base_op = expr.op
+            for sfx in ("f", "i", "b"):
+                if base_op.endswith(sfx):
+                    base_op = base_op[:-1]
+                    break
+            from remora.operators import arith_op as _aop
+            mlir_op = _aop(base_op, result_mlir)
+            if len(arg_vals) == 2:
+                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]}, {arg_vals[1]} : {result_mlir}")
+            elif len(arg_vals) == 1:
+                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]} : {result_mlir}")
+            else:
+                raise RemoraLoweringError(f"HIRPrimOp with {len(arg_vals)} args not supported in loop body")
+            return result_name, result_mlir
+
+    if isinstance(expr, HIRScatterAdd):
+        sp2 = _join_prefix(prefix, f"sa2_{_next_uid}")
+        target_val, target_type = _lower_body_in_loop(
+            expr.target, lines, _join_prefix(sp2, "tgt"), functions,
+            tensor_env, scalar_env, _next_uid + 1,
+        )
+        idx_val, _ = _lower_body_in_loop(
+            expr.index, lines, _join_prefix(sp2, "idxv"), functions,
+            tensor_env, scalar_env, _next_uid + 2,
+        )
+        idx_ssa = f"%{_join_prefix(sp2, 'idx')}"
+        lines.append(f"    {idx_ssa} = arith.index_cast {idx_val} : i32 to index")
+        upd_val, _ = _lower_body_in_loop(
+            expr.update, lines, _join_prefix(sp2, "upd"), functions,
+            tensor_env, scalar_env, _next_uid + 3,
+        )
+        elem_type = type_to_mlir(expr.result_type.element)
+        old_val = f"%{_join_prefix(sp2, 'old')}"
+        new_val = f"%{_join_prefix(sp2, 'new')}"
+        result_val = f"%{_join_prefix(sp2, 'result')}"
+        lines.append(f"    {old_val} = tensor.extract {target_val}[{idx_ssa}] : {target_type}")
+        lines.append(f"    {new_val} = arith.addf {old_val}, {upd_val} : {elem_type}")
+        lines.append(f"    {result_val} = tensor.insert {new_val} into {target_val}[{idx_ssa}] : {target_type}")
+        return result_val, target_type
+
+    if isinstance(expr, (HIRMap, HIRApply)) and isinstance(getattr(expr, 'func', None), HIRPrimCallable):
+        if isinstance(expr.result_type, ArrayType) and expr.result_type.rank >= 1:
+            ep = _join_prefix(prefix, f"ew{_next_uid}")
+            op_vals: list[str] = []
+            op_types: list[str] = []
+            for i, arr in enumerate(expr.arrays):
+                ov, ot = _lower_body_in_loop(
+                    arr, lines, _join_prefix(ep, f"op{i}"), functions,
+                    tensor_env, scalar_env, _next_uid + i + 1,
+                )
+                op_vals.append(ov)
+                op_types.append(ot)
+            result_mlir = type_to_mlir(expr.result_type)
+            elem_mlir = type_to_mlir(expr.result_type.element)
+            rank = expr.result_type.rank
+            identity = _identity_affine_map(rank)
+            iterators = _parallel_iterators(rank)
+            prim = expr.func
+            op_name = prim.op
+            from remora.operators import arith_op as _arith_op
+            if len(op_vals) == 1:
+                const_val = None
+                if prim.right_arg is not None and isinstance(prim.right_arg, HIRLit):
+                    const_val = prim.right_arg.value
+                    const_side = "right"
+                elif prim.left_arg is not None and isinstance(prim.left_arg, HIRLit):
+                    const_val = prim.left_arg.value
+                    const_side = "left"
+                if const_val is not None:
+                    empty = f"%{_join_prefix(ep, 'empty')}"
+                    result = f"%{_join_prefix(ep, 'result')}"
+                    mlir_op = _arith_op(op_name, elem_mlir)
+                    left_arg = f"%{_join_prefix(ep, 'in0')}" if const_side == "right" else f"%{_join_prefix(ep, 'const')}"
+                    right_arg = f"%{_join_prefix(ep, 'const')}" if const_side == "right" else f"%{_join_prefix(ep, 'in0')}"
+                    const_str = f"{float(const_val):.6e}" if elem_mlir == "f32" else str(int(const_val))
+                    lines.append(f"""\
+    %{_join_prefix(ep, 'const')} = arith.constant {const_str} : {elem_mlir}
+    {empty} = tensor.empty() : {result_mlir}
+    {result} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({op_vals[0]} : {op_types[0]}) outs({empty} : {result_mlir}) {{
+    ^bb0(%{_join_prefix(ep, 'in0')}: {elem_mlir}, %{_join_prefix(ep, 'out')}: {elem_mlir}):
+      %{_join_prefix(ep, 'r')} = {mlir_op} {left_arg}, {right_arg} : {elem_mlir}
+      linalg.yield %{_join_prefix(ep, 'r')} : {elem_mlir}
+    }} -> {result_mlir}""")
+                    return result, result_mlir
+            elif len(op_vals) == 2:
+                empty = f"%{_join_prefix(ep, 'empty')}"
+                result = f"%{_join_prefix(ep, 'result')}"
+                mlir_op = _arith_op(op_name, elem_mlir)
+                is_t0 = "tensor" in op_types[0]
+                is_t1 = "tensor" in op_types[1]
+                if is_t0 and is_t1:
+                    lines.append(f"""\
+    {empty} = tensor.empty() : {result_mlir}
+    {result} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({op_vals[0]}, {op_vals[1]} : {op_types[0]}, {op_types[1]}) outs({empty} : {result_mlir}) {{
+    ^bb0(%{_join_prefix(ep, 'in0')}: {elem_mlir}, %{_join_prefix(ep, 'in1')}: {elem_mlir}, %{_join_prefix(ep, 'out')}: {elem_mlir}):
+      %{_join_prefix(ep, 'r')} = {mlir_op} %{_join_prefix(ep, 'in0')}, %{_join_prefix(ep, 'in1')} : {elem_mlir}
+      linalg.yield %{_join_prefix(ep, 'r')} : {elem_mlir}
+    }} -> {result_mlir}""")
+                elif is_t0 and not is_t1:
+                    lines.append(f"""\
+    {empty} = tensor.empty() : {result_mlir}
+    {result} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({op_vals[0]} : {op_types[0]}) outs({empty} : {result_mlir}) {{
+    ^bb0(%{_join_prefix(ep, 'in0')}: {elem_mlir}, %{_join_prefix(ep, 'out')}: {elem_mlir}):
+      %{_join_prefix(ep, 'r')} = {mlir_op} %{_join_prefix(ep, 'in0')}, {op_vals[1]} : {elem_mlir}
+      linalg.yield %{_join_prefix(ep, 'r')} : {elem_mlir}
+    }} -> {result_mlir}""")
+                elif not is_t0 and is_t1:
+                    lines.append(f"""\
+    {empty} = tensor.empty() : {result_mlir}
+    {result} = linalg.generic {{
+      indexing_maps = [{identity}, {identity}],
+      iterator_types = {iterators}
+    }} ins({op_vals[1]} : {op_types[1]}) outs({empty} : {result_mlir}) {{
+    ^bb0(%{_join_prefix(ep, 'in0')}: {elem_mlir}, %{_join_prefix(ep, 'out')}: {elem_mlir}):
+      %{_join_prefix(ep, 'r')} = {mlir_op} {op_vals[0]}, %{_join_prefix(ep, 'in0')} : {elem_mlir}
+      linalg.yield %{_join_prefix(ep, 'r')} : {elem_mlir}
+    }} -> {result_mlir}""")
+                else:
+                    result_name2 = f"%{_join_prefix(ep, 'sr')}"
+                    lines.append(f"    {result_name2} = {mlir_op} {op_vals[0]}, {op_vals[1]} : {elem_mlir}")
+                    return result_name2, elem_mlir
+                return result, result_mlir
+
+    if isinstance(expr, HIRLit):
+        lp = _join_prefix(prefix, f"lt{_next_uid}")
+        result_mlir = type_to_mlir(expr.type)
+        result_name = f"%{_join_prefix(lp, 'c')}"
+        if isinstance(expr.value, float):
+            val_str = f"{expr.value:.6e}"
+        elif isinstance(expr.value, bool):
+            val_str = "1" if expr.value else "0"
+        else:
+            val_str = str(int(expr.value))
+        lines.append(f"    {result_name} = arith.constant {val_str} : {result_mlir}")
+        return result_name, result_mlir
+
+    if isinstance(expr, HIRVar):
+        if expr.name in (scalar_env or {}):
+            op = scalar_env[expr.name]
+            return op.value, op.type
+        if expr.name in (tensor_env or {}):
+            tv = tensor_env[expr.name]
+            return tv.name, tv.type
 
     # Try full tensor lowering first
     try:
