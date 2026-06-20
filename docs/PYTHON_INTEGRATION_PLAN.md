@@ -140,11 +140,12 @@ in one cell, call compiled functions from Python in the next.
 
 ## Future Work
 
-### GPU Target in Cell Magic and Codec
+### GPU Target in Codec
 
-`%%remora --target gpu` and GPU compilation from `.py` files.
-Compile to PTX, launch via `RemoraExecutor`, return results as
-NumPy arrays (device→host copy).
+GPU compilation from `# coding: remora` `.py` files is not yet
+implemented.  `%%remora --target gpu` is now available in the cell
+magic and compiles to PTX via `execute_program_on_gpu`.  The codec
+path would need a GPU-aware `compile_all` variant.
 
 ### PyTorch Tensor Interop
 

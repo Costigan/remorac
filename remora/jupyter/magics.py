@@ -39,8 +39,8 @@ class RemoraMagics(Magics):
     @argument(
         "--target",
         default="cpu",
-        choices=["cpu", "interp"],
-        help="Execution target (cpu or interp)",
+        choices=["cpu", "interp", "gpu"],
+        help="Execution target (cpu, interp, or gpu)",
     )
     @argument(
         "--syntax",
@@ -87,6 +87,9 @@ class RemoraMagics(Magics):
             result = evaluate_source(source, syntax=syntax).value
         elif args.target == "cpu":
             result = evaluate_source_compiled(source, syntax=syntax).value
+        elif args.target == "gpu":
+            from remora.executor import execute_program_on_gpu
+            result = execute_program_on_gpu(source, syntax=syntax)
         else:
             return None
 

@@ -2670,6 +2670,180 @@ def build_descriptor_abi_replicate_gpu_module(
     return GPUModuleScaffold(text, module_name, name)
 
 
+def build_descriptor_abi_parallel_replicate_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    output_upper_bound: int | None = None,
+) -> GPUModuleScaffold:
+    """Build a two-kernel parallel replicate using prefix-sum + scatter.
+
+    Returns a gpu.module with two entry points:
+    - ``{name}_scan``: i32 inclusive prefix sum on counts
+    - ``{name}_scatter``: scatter-replicate values to output positions
+
+    Only supports rank-1 with N ≤ 1024.
+    """
+    if not isinstance(function.body, HIRReplicate):
+        raise GPUScaffoldError("GPU parallel replicate requires HIRReplicate body")
+    if len(function.params) != 2:
+        raise GPUScaffoldError("GPU parallel replicate requires two parameters")
+
+    counts_type = function.params[0].type
+    values_type = function.params[1].type
+    if not isinstance(counts_type, ArrayType) or not isinstance(values_type, ArrayType):
+        raise GPUScaffoldError("GPU parallel replicate requires array parameters")
+    if values_type.element != FLOAT:
+        raise GPUScaffoldError("GPU parallel replicate supports f32 values only")
+    if counts_type.rank != 1 or values_type.rank != 1:
+        raise GPUScaffoldError("GPU parallel replicate supports rank-1 only")
+
+    N = int(values_type.shape[0].value)
+    if N > 1024:
+        raise GPUScaffoldError("GPU parallel replicate requires N ≤ 1024")
+
+    out_N = output_upper_bound or N * N
+    base = kernel_name or f"remora_{function.name}_replicate"
+    scan_name = f"{base}_scan"
+    scatter_name = f"{base}_scatter"
+    _validate_scaffold_names(module_name, scan_name)
+
+    max_d = (N - 1).bit_length() if N > 1 else 1
+
+    k1_desc = _descriptor_load_lines("rs_cnt", "%counts_desc", 1)
+    k1_desc.extend(_descriptor_load_lines("rs_scan", "%scan_desc", 1))
+
+    k2_desc = _descriptor_load_lines("rx_cnt", "%counts_desc", 1)
+    k2_desc.extend(_descriptor_load_lines("rx_val", "%values_desc", 1))
+    k2_desc.extend(_descriptor_load_lines("rx_scan", "%scan_desc", 1))
+    k2_desc.extend(_descriptor_load_lines("rx_out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.mlir.global internal @pr_scan_shmem() {{addr_space = 3 : i32}} : !llvm.array<1024 x i32>
+
+    llvm.func @{scan_name}(%counts_desc: !llvm.ptr, %scan_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k1_desc)}
+      %rs_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %rs_tid = llvm.sext %rs_tid32 : i32 to i64
+      %rs_N = llvm.mlir.constant({N} : index) : i64
+      %rs_in_bounds = llvm.icmp "ult" %rs_tid, %rs_N : i64
+      %rs_shmem_base = llvm.mlir.addressof @pr_scan_shmem : !llvm.ptr<3>
+      %rs_zero_val = llvm.mlir.constant(0 : i32) : i32
+      llvm.cond_br %rs_in_bounds, ^rs_load, ^rs_load_oob
+
+    ^rs_load:
+      %rs_si = llvm.add %rs_cnt_offset, %rs_tid  : i64
+      %rs_sp = llvm.getelementptr %rs_cnt_aligned[%rs_si] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %rs_val = llvm.load %rs_sp : !llvm.ptr -> i32
+      %rs_me = llvm.getelementptr %rs_shmem_base[0, %rs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      llvm.store %rs_val, %rs_me : i32, !llvm.ptr<3>
+      llvm.br ^rs_after_load
+
+    ^rs_load_oob:
+      %rs_me_oob = llvm.getelementptr %rs_shmem_base[0, %rs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      llvm.store %rs_zero_val, %rs_me_oob : i32, !llvm.ptr<3>
+      llvm.br ^rs_after_load
+
+    ^rs_after_load:
+      nvvm.barrier0
+      %rs_c0 = llvm.mlir.constant(0 : index) : i64
+      %rs_c1 = llvm.mlir.constant(1 : index) : i64
+      %rs_c2 = llvm.mlir.constant(2 : index) : i64
+      %rs_max_d = llvm.mlir.constant({max_d} : index) : i64
+      llvm.br ^rs_loop(%rs_c0, %rs_c1 : i64, i64)
+
+    ^rs_loop(%rs_d: i64, %rs_stride: i64):
+      %rs_loop_done = llvm.icmp "uge" %rs_d, %rs_max_d : i64
+      llvm.cond_br %rs_loop_done, ^rs_write, ^rs_step
+
+    ^rs_step:
+      %rs_active = llvm.icmp "uge" %rs_tid, %rs_stride : i64
+      %rs_partner_raw = llvm.sub %rs_tid, %rs_stride  : i64
+      %rs_safe_partner = llvm.select %rs_active, %rs_partner_raw, %rs_c0 : i1, i64
+      %rs_pptr = llvm.getelementptr %rs_shmem_base[0, %rs_safe_partner] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %rs_pval = llvm.load %rs_pptr : !llvm.ptr<3> -> i32
+      %rs_temp = llvm.select %rs_active, %rs_pval, %rs_zero_val : i1, i32
+      nvvm.barrier0
+      %rs_me2 = llvm.getelementptr %rs_shmem_base[0, %rs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %rs_cur = llvm.load %rs_me2 : !llvm.ptr<3> -> i32
+      %rs_new = llvm.add %rs_cur, %rs_temp  : i32
+      %rs_result = llvm.select %rs_active, %rs_new, %rs_cur : i1, i32
+      llvm.store %rs_result, %rs_me2 : i32, !llvm.ptr<3>
+      nvvm.barrier0
+      %rs_next_d = llvm.add %rs_d, %rs_c1  : i64
+      %rs_next_stride = llvm.mul %rs_stride, %rs_c2  : i64
+      llvm.br ^rs_loop(%rs_next_d, %rs_next_stride : i64, i64)
+
+    ^rs_write:
+      llvm.cond_br %rs_in_bounds, ^rs_write_body, ^rs_done
+
+    ^rs_write_body:
+      %rs_me3 = llvm.getelementptr %rs_shmem_base[0, %rs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %rs_final = llvm.load %rs_me3 : !llvm.ptr<3> -> i32
+      %rs_oi = llvm.add %rs_scan_offset, %rs_tid  : i64
+      %rs_op = llvm.getelementptr %rs_scan_aligned[%rs_oi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      llvm.store %rs_final, %rs_op : i32, !llvm.ptr
+      llvm.br ^rs_done
+
+    ^rs_done:
+      llvm.return
+    }}
+
+    llvm.func @{scatter_name}(%counts_desc: !llvm.ptr, %values_desc: !llvm.ptr, %scan_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k2_desc)}
+      %rx_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %rx_tid = llvm.sext %rx_tid32 : i32 to i64
+      %rx_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %rx_bid = llvm.sext %rx_bid32 : i32 to i64
+      %rx_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %rx_bdim = llvm.sext %rx_bdim32 : i32 to i64
+      %rx_base = llvm.mul %rx_bid, %rx_bdim  : i64
+      %rx_idx = llvm.add %rx_base, %rx_tid  : i64
+      %rx_N = llvm.mlir.constant({N} : index) : i64
+      %rx_in_bounds = llvm.icmp "ult" %rx_idx, %rx_N : i64
+      llvm.cond_br %rx_in_bounds, ^rx_work, ^rx_done
+
+    ^rx_work:
+      %rx_c0 = llvm.mlir.constant(0 : index) : i64
+      %rx_c1 = llvm.mlir.constant(1 : index) : i64
+      %rx_sci = llvm.add %rx_scan_offset, %rx_idx  : i64
+      %rx_scp = llvm.getelementptr %rx_scan_aligned[%rx_sci] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %rx_end_i32 = llvm.load %rx_scp : !llvm.ptr -> i32
+      %rx_end = llvm.sext %rx_end_i32 : i32 to i64
+      %rx_is_first = llvm.icmp "eq" %rx_idx, %rx_c0 : i64
+      %rx_prev_idx = llvm.sub %rx_idx, %rx_c1  : i64
+      %rx_prev_safe = llvm.select %rx_is_first, %rx_c0, %rx_prev_idx : i1, i64
+      %rx_prev_sci = llvm.add %rx_scan_offset, %rx_prev_safe  : i64
+      %rx_prev_scp = llvm.getelementptr %rx_scan_aligned[%rx_prev_sci] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %rx_prev_i32 = llvm.load %rx_prev_scp : !llvm.ptr -> i32
+      %rx_prev = llvm.sext %rx_prev_i32 : i32 to i64
+      %rx_start = llvm.select %rx_is_first, %rx_c0, %rx_prev : i1, i64
+      %rx_vi = llvm.add %rx_val_offset, %rx_idx  : i64
+      %rx_vp = llvm.getelementptr %rx_val_aligned[%rx_vi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %rx_val = llvm.load %rx_vp : !llvm.ptr -> f32
+      llvm.br ^rx_inner(%rx_start : i64)
+
+    ^rx_inner(%rx_pos: i64):
+      %rx_inner_done = llvm.icmp "uge" %rx_pos, %rx_end : i64
+      llvm.cond_br %rx_inner_done, ^rx_done, ^rx_store
+
+    ^rx_store:
+      %rx_oi = llvm.add %rx_out_offset, %rx_pos  : i64
+      %rx_op = llvm.getelementptr %rx_out_aligned[%rx_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %rx_val, %rx_op : f32, !llvm.ptr
+      %rx_next_pos = llvm.add %rx_pos, %rx_c1  : i64
+      llvm.br ^rx_inner(%rx_next_pos : i64)
+
+    ^rx_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, scatter_name)
+
+
 # ---------------------------------------------------------------------------
 # Scatter-add kernel
 # ---------------------------------------------------------------------------

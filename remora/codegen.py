@@ -48,6 +48,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_indices_of_gpu_module,
     build_descriptor_abi_matmul_gpu_module,
     build_descriptor_abi_parallel_filter_gpu_module,
+    build_descriptor_abi_parallel_replicate_gpu_module,
     build_descriptor_abi_replicate_gpu_module,
     build_descriptor_abi_scatter_add_gpu_module,
     build_descriptor_abi_sobel_gpu_module,
@@ -344,6 +345,46 @@ def generate_mlir_descriptor_abi_ptx(
 
     # ── try GPU replicate ──
     if isinstance(function.body, HIRReplicate):
+        try:
+            gpu_module = build_descriptor_abi_parallel_replicate_gpu_module(function, kernel_name=name)
+            r_N = int(function.params[1].type.shape[0].value) if isinstance(function.params[1].type, ArrayType) else 0
+            out_N = r_N * r_N
+            scan_name_r = f"{name}_scan"
+            scatter_name_r = f"{name}_scatter"
+            kernels = [
+                KernelMeta(
+                    name=scan_name_r, grid_dims=1, block_size=r_N,
+                    num_inputs=1, num_outputs=1,
+                    input_elem_types=["i32"], output_elem_types=["i32"],
+                    output_shape=(r_N,), output_dtype="int32",
+                ),
+                KernelMeta(
+                    name=scatter_name_r, grid_dims=1, block_size=0,
+                    num_inputs=3, num_outputs=1,
+                    input_elem_types=["i32", "f32", "i32"], output_elem_types=["f32"],
+                    output_shape=(out_N,), output_dtype="float32",
+                ),
+            ]
+            plan = ExecutionPlan(
+                buffers=[
+                    BufferSpec("scan", (r_N,), "i32"),
+                    BufferSpec("output", (out_N,), "f32"),
+                ],
+                steps=[
+                    KernelStep(scan_name_r, ["input_0"], "scan"),
+                    KernelStep(scatter_name_r, ["input_0", "input_1", "scan"], "output"),
+                ],
+                final_output="output",
+                output_shape=(out_N,),
+                output_dtype="f32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, kernels, plan
+        except GPUScaffoldError:
+            pass
+
         try:
             gpu_module = build_descriptor_abi_replicate_gpu_module(function, kernel_name=name)
             r_N = int(function.params[1].type.shape[0].value) if isinstance(function.params[1].type, ArrayType) else 0

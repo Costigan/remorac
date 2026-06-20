@@ -7,15 +7,14 @@ or completeness.
 
 **Current state**: `HIRFilter` uses a parallel three-kernel plan for
 N ≤ 1024: predicate evaluation, Hillis-Steele i32 prefix sum in shared
-memory, and scatter-write.  All three kernels live in one PTX module
-and are orchestrated by an ``ExecutionPlan``.  For N > 1024 or
-non-comparison predicates, the serial single-thread fallback is used.
-`HIRReplicate` still uses the serial single-thread kernel.
+memory, and scatter-write.  `HIRReplicate` uses a parallel two-kernel
+plan for N ≤ 1024: prefix sum on counts followed by scatter-replicate.
+All kernels live in single PTX modules and are orchestrated by
+``ExecutionPlan`` objects.  For N > 1024 or unsupported predicates,
+serial single-thread fallbacks are used.
 
-**Upgrade path for replicate**: same two-kernel pattern as filter —
-prefix-sum the counts array, then scatter values to computed positions.
-The ``ExecutionPlan`` infrastructure is in place; the remaining work is
-writing the replicate-specific kernels.
+**Remaining work**: Multi-block parallel versions for N > 1024
+(requires inter-block prefix propagation for scan).
 
 **Where this is tracked**:
 - `docs/GPU_CPU_PARITY_PLAN.md` — Future Work section
