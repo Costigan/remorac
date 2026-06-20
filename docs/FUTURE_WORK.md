@@ -5,34 +5,17 @@ or completeness.
 
 ## Parallel GPU Filter and Replicate
 
-**Current state**: `HIRFilter` and `HIRReplicate` use serial single-thread
-GPU kernels.  Thread 0 iterates the input, evaluates the predicate (filter)
-or reads the counts (replicate), and writes matching/replicated elements
-contiguously to the output.  Correct for any input size but O(N) on one
-SM core.
+**Current state**: `HIRFilter` uses a parallel three-kernel plan for
+N ≤ 1024: predicate evaluation, Hillis-Steele i32 prefix sum in shared
+memory, and scatter-write.  All three kernels live in one PTX module
+and are orchestrated by an ``ExecutionPlan``.  For N > 1024 or
+non-comparison predicates, the serial single-thread fallback is used.
+`HIRReplicate` still uses the serial single-thread kernel.
 
-**Upgrade path**: two-kernel parallel execution plan.
-
-1. **Prefix-sum pass** — run the existing parallel Hillis-Steele scan
-   kernel on the predicate results (filter) or counts array (replicate)
-   to compute per-element output positions.
-2. **Scatter-write pass** — one thread per input element reads its
-   output position from the scan result and writes to that position.
-
-This requires `RemoraExecutor` to support **multi-step execution plans**
-(launch scan, read back output length, allocate output, launch scatter).
-The kernel builders for both passes are straightforward; the orchestration
-is the new work.
-
-**Blocked on**: `RemoraExecutor` multi-kernel orchestration.  Today the
-executor assumes one kernel per function.
-
-**Status**: The ``ExecutionPlan`` infrastructure and
-``RemoraExecutor.execute_plan()`` are now implemented
-(``remora/execution_plan.py``, ``remora/executor.py``).  The next step
-is to wire the two-kernel codegen (prefix-sum + scatter) into
-``generate_mlir_descriptor_abi_ptx`` and return an ``ExecutionPlan``
-instead of the serial single-thread kernel.
+**Upgrade path for replicate**: same two-kernel pattern as filter —
+prefix-sum the counts array, then scatter values to computed positions.
+The ``ExecutionPlan`` infrastructure is in place; the remaining work is
+writing the replicate-specific kernels.
 
 **Where this is tracked**:
 - `docs/GPU_CPU_PARITY_PLAN.md` — Future Work section

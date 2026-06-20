@@ -2336,9 +2336,246 @@ def build_descriptor_abi_filter_gpu_module(
     return GPUModuleScaffold(text, module_name, name)
 
 
-# ---------------------------------------------------------------------------
-# Replicate kernel (serial)
-# ---------------------------------------------------------------------------
+def build_descriptor_abi_parallel_filter_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a three-kernel parallel filter using prefix-sum + scatter.
+
+    Returns a gpu.module with three entry points:
+    - ``{name}_pred``: evaluate predicate per element → i32 (0/1)
+    - ``{name}_scan``: i32 inclusive prefix sum (Hillis-Steele)
+    - ``{name}_scatter``: scatter matching elements to output
+
+    Only supports rank-1 f32 inputs with N ≤ 1024.
+    """
+    if not isinstance(function.body, HIRFilter):
+        raise GPUScaffoldError("GPU parallel filter requires HIRFilter body")
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU parallel filter requires one array parameter")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU parallel filter supports rank-1 f32 only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU parallel filter supports rank-1 only")
+
+    N = int(param_type.shape[0].value)
+    if N > 1024:
+        raise GPUScaffoldError("GPU parallel filter requires N ≤ 1024")
+
+    pred = function.body.predicate
+    cmp_op = None
+    cmp_const = None
+    cmp_side = "right"
+
+    if isinstance(pred, HIRPrimCallable):
+        cmp_op = pred.op
+        if pred.right_arg is not None and isinstance(pred.right_arg, HIRLit):
+            cmp_const = float(pred.right_arg.value)
+            cmp_side = "right"
+        elif pred.left_arg is not None and isinstance(pred.left_arg, HIRLit):
+            cmp_const = float(pred.left_arg.value)
+            cmp_side = "left"
+    elif isinstance(pred, HIRLambda):
+        from remora.hir import HIRPrimOp as _PO2
+        body = pred.body
+        if isinstance(body, _PO2) and len(body.args) == 2:
+            raw_op = body.op
+            for sfx in ("f", "i", "b"):
+                if raw_op.endswith(sfx):
+                    raw_op = raw_op[:-1]
+                    break
+            if raw_op in {"<", "<=", ">", ">=", "==", "!="}:
+                cmp_op = raw_op
+                a0, a1 = body.args
+                if isinstance(a1, HIRLit):
+                    cmp_const = float(a1.value)
+                    cmp_side = "right"
+                elif isinstance(a0, HIRLit):
+                    cmp_const = float(a0.value)
+                    cmp_side = "left"
+
+    if cmp_op is None or cmp_op not in {"<", "<=", ">", ">=", "==", "!="}:
+        raise GPUScaffoldError("GPU parallel filter requires a comparison predicate")
+    if cmp_const is None:
+        raise GPUScaffoldError("GPU parallel filter predicate requires a literal constant")
+
+    base = kernel_name or f"remora_{function.name}_filter"
+    pred_name = f"{base}_pred"
+    scan_name = f"{base}_scan"
+    scatter_name = f"{base}_scatter"
+    _validate_scaffold_names(module_name, pred_name)
+
+    pred_map = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge", "==": "oeq", "!=": "one"}
+    pred_str = pred_map[cmp_op]
+
+    if cmp_side == "left":
+        cmp_line = f'      %fp_cmp = llvm.fcmp "{pred_str}" %fp_const, %fp_val : f32'
+    else:
+        cmp_line = f'      %fp_cmp = llvm.fcmp "{pred_str}" %fp_val, %fp_const : f32'
+
+    max_d = (N - 1).bit_length() if N > 1 else 1
+
+    k1_desc = _descriptor_load_lines("fp_in", "%input_desc", 1)
+    k1_desc.extend(_descriptor_load_lines("fp_pred", "%pred_desc", 1))
+
+    k2_desc = _descriptor_load_lines("fs_pred", "%pred_desc", 1)
+    k2_desc.extend(_descriptor_load_lines("fs_scan", "%scan_desc", 1))
+
+    k3_desc = _descriptor_load_lines("fx_in", "%input_desc", 1)
+    k3_desc.extend(_descriptor_load_lines("fx_pred", "%pred_desc", 1))
+    k3_desc.extend(_descriptor_load_lines("fx_scan", "%scan_desc", 1))
+    k3_desc.extend(_descriptor_load_lines("fx_out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.mlir.global internal @pf_scan_shmem() {{addr_space = 3 : i32}} : !llvm.array<1024 x i32>
+
+    llvm.func @{pred_name}(%input_desc: !llvm.ptr, %pred_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k1_desc)}
+      %fp_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %fp_tid = llvm.sext %fp_tid32 : i32 to i64
+      %fp_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %fp_bid = llvm.sext %fp_bid32 : i32 to i64
+      %fp_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %fp_bdim = llvm.sext %fp_bdim32 : i32 to i64
+      %fp_base = llvm.mul %fp_bid, %fp_bdim  : i64
+      %fp_idx = llvm.add %fp_base, %fp_tid  : i64
+      %fp_N = llvm.mlir.constant({N} : index) : i64
+      %fp_in_bounds = llvm.icmp "ult" %fp_idx, %fp_N : i64
+      llvm.cond_br %fp_in_bounds, ^fp_work, ^fp_done
+
+    ^fp_work:
+      %fp_const = llvm.mlir.constant({cmp_const:.6e} : f32) : f32
+      %fp_si = llvm.add %fp_in_offset, %fp_idx  : i64
+      %fp_sp = llvm.getelementptr %fp_in_aligned[%fp_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %fp_val = llvm.load %fp_sp : !llvm.ptr -> f32
+{cmp_line}
+      %fp_one = llvm.mlir.constant(1 : i32) : i32
+      %fp_zero = llvm.mlir.constant(0 : i32) : i32
+      %fp_result = llvm.select %fp_cmp, %fp_one, %fp_zero : i1, i32
+      %fp_di = llvm.add %fp_pred_offset, %fp_idx  : i64
+      %fp_dp = llvm.getelementptr %fp_pred_aligned[%fp_di] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      llvm.store %fp_result, %fp_dp : i32, !llvm.ptr
+      llvm.br ^fp_done
+
+    ^fp_done:
+      llvm.return
+    }}
+
+    llvm.func @{scan_name}(%pred_desc: !llvm.ptr, %scan_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k2_desc)}
+      %fs_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %fs_tid = llvm.sext %fs_tid32 : i32 to i64
+      %fs_N = llvm.mlir.constant({N} : index) : i64
+      %fs_in_bounds = llvm.icmp "ult" %fs_tid, %fs_N : i64
+      %fs_shmem_base = llvm.mlir.addressof @pf_scan_shmem : !llvm.ptr<3>
+      %fs_zero_val = llvm.mlir.constant(0 : i32) : i32
+      llvm.cond_br %fs_in_bounds, ^fs_load, ^fs_load_oob
+
+    ^fs_load:
+      %fs_si = llvm.add %fs_pred_offset, %fs_tid  : i64
+      %fs_sp = llvm.getelementptr %fs_pred_aligned[%fs_si] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %fs_val = llvm.load %fs_sp : !llvm.ptr -> i32
+      %fs_me = llvm.getelementptr %fs_shmem_base[0, %fs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      llvm.store %fs_val, %fs_me : i32, !llvm.ptr<3>
+      llvm.br ^fs_after_load
+
+    ^fs_load_oob:
+      %fs_me_oob = llvm.getelementptr %fs_shmem_base[0, %fs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      llvm.store %fs_zero_val, %fs_me_oob : i32, !llvm.ptr<3>
+      llvm.br ^fs_after_load
+
+    ^fs_after_load:
+      nvvm.barrier0
+      %fs_c0 = llvm.mlir.constant(0 : index) : i64
+      %fs_c1 = llvm.mlir.constant(1 : index) : i64
+      %fs_c2 = llvm.mlir.constant(2 : index) : i64
+      %fs_max_d = llvm.mlir.constant({max_d} : index) : i64
+      llvm.br ^fs_loop(%fs_c0, %fs_c1 : i64, i64)
+
+    ^fs_loop(%fs_d: i64, %fs_stride: i64):
+      %fs_loop_done = llvm.icmp "uge" %fs_d, %fs_max_d : i64
+      llvm.cond_br %fs_loop_done, ^fs_write, ^fs_step
+
+    ^fs_step:
+      %fs_active = llvm.icmp "uge" %fs_tid, %fs_stride : i64
+      %fs_partner_raw = llvm.sub %fs_tid, %fs_stride  : i64
+      %fs_safe_partner = llvm.select %fs_active, %fs_partner_raw, %fs_c0 : i1, i64
+      %fs_pptr = llvm.getelementptr %fs_shmem_base[0, %fs_safe_partner] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %fs_pval = llvm.load %fs_pptr : !llvm.ptr<3> -> i32
+      %fs_temp = llvm.select %fs_active, %fs_pval, %fs_zero_val : i1, i32
+      nvvm.barrier0
+      %fs_me2 = llvm.getelementptr %fs_shmem_base[0, %fs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %fs_cur = llvm.load %fs_me2 : !llvm.ptr<3> -> i32
+      %fs_new = llvm.add %fs_cur, %fs_temp  : i32
+      %fs_result = llvm.select %fs_active, %fs_new, %fs_cur : i1, i32
+      llvm.store %fs_result, %fs_me2 : i32, !llvm.ptr<3>
+      nvvm.barrier0
+      %fs_next_d = llvm.add %fs_d, %fs_c1  : i64
+      %fs_next_stride = llvm.mul %fs_stride, %fs_c2  : i64
+      llvm.br ^fs_loop(%fs_next_d, %fs_next_stride : i64, i64)
+
+    ^fs_write:
+      llvm.cond_br %fs_in_bounds, ^fs_write_body, ^fs_done
+
+    ^fs_write_body:
+      %fs_me3 = llvm.getelementptr %fs_shmem_base[0, %fs_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x i32>
+      %fs_final = llvm.load %fs_me3 : !llvm.ptr<3> -> i32
+      %fs_oi = llvm.add %fs_scan_offset, %fs_tid  : i64
+      %fs_op = llvm.getelementptr %fs_scan_aligned[%fs_oi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      llvm.store %fs_final, %fs_op : i32, !llvm.ptr
+      llvm.br ^fs_done
+
+    ^fs_done:
+      llvm.return
+    }}
+
+    llvm.func @{scatter_name}(%input_desc: !llvm.ptr, %pred_desc: !llvm.ptr, %scan_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k3_desc)}
+      %fx_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %fx_tid = llvm.sext %fx_tid32 : i32 to i64
+      %fx_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %fx_bid = llvm.sext %fx_bid32 : i32 to i64
+      %fx_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %fx_bdim = llvm.sext %fx_bdim32 : i32 to i64
+      %fx_base = llvm.mul %fx_bid, %fx_bdim  : i64
+      %fx_idx = llvm.add %fx_base, %fx_tid  : i64
+      %fx_N = llvm.mlir.constant({N} : index) : i64
+      %fx_in_bounds = llvm.icmp "ult" %fx_idx, %fx_N : i64
+      llvm.cond_br %fx_in_bounds, ^fx_work, ^fx_done
+
+    ^fx_work:
+      %fx_pi = llvm.add %fx_pred_offset, %fx_idx  : i64
+      %fx_pp = llvm.getelementptr %fx_pred_aligned[%fx_pi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %fx_pred_val = llvm.load %fx_pp : !llvm.ptr -> i32
+      %fx_one_i32 = llvm.mlir.constant(1 : i32) : i32
+      %fx_is_match = llvm.icmp "eq" %fx_pred_val, %fx_one_i32 : i32
+      llvm.cond_br %fx_is_match, ^fx_scatter, ^fx_done
+
+    ^fx_scatter:
+      %fx_sci = llvm.add %fx_scan_offset, %fx_idx  : i64
+      %fx_scp = llvm.getelementptr %fx_scan_aligned[%fx_sci] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %fx_pos_i32 = llvm.load %fx_scp : !llvm.ptr -> i32
+      %fx_pos = llvm.sext %fx_pos_i32 : i32 to i64
+      %fx_one64 = llvm.mlir.constant(1 : index) : i64
+      %fx_out_idx = llvm.sub %fx_pos, %fx_one64  : i64
+      %fx_ii = llvm.add %fx_in_offset, %fx_idx  : i64
+      %fx_ip = llvm.getelementptr %fx_in_aligned[%fx_ii] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %fx_val = llvm.load %fx_ip : !llvm.ptr -> f32
+      %fx_oi = llvm.add %fx_out_offset, %fx_out_idx  : i64
+      %fx_op = llvm.getelementptr %fx_out_aligned[%fx_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %fx_val, %fx_op : f32, !llvm.ptr
+      llvm.br ^fx_done
+
+    ^fx_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, scatter_name)
 
 
 def build_descriptor_abi_replicate_gpu_module(

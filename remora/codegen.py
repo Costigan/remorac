@@ -24,7 +24,7 @@ from remora._gpu_map_support import (
     I32MapOperation,
 )
 from remora.errors import RemoraError
-from remora.execution_plan import ExecutionPlan
+from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep
 from remora.hir import HIRFunction
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
 from remora.pipeline import (
@@ -47,6 +47,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_im2col_gpu_module,
     build_descriptor_abi_indices_of_gpu_module,
     build_descriptor_abi_matmul_gpu_module,
+    build_descriptor_abi_parallel_filter_gpu_module,
     build_descriptor_abi_replicate_gpu_module,
     build_descriptor_abi_scatter_add_gpu_module,
     build_descriptor_abi_sobel_gpu_module,
@@ -277,6 +278,55 @@ def generate_mlir_descriptor_abi_ptx(
 
     # ── try GPU filter ──
     if isinstance(function.body, HIRFilter):
+        try:
+            gpu_module = build_descriptor_abi_parallel_filter_gpu_module(function, kernel_name=name)
+            f_shape = tuple(int(d.value) for d in function.params[0].type.shape) if isinstance(function.params[0].type, ArrayType) else ()
+            N = f_shape[0] if f_shape else 1
+            pred_name = f"{name}_pred"
+            scan_name = f"{name}_scan"
+            scatter_name = f"{name}_scatter"
+            kernels = [
+                KernelMeta(
+                    name=pred_name, grid_dims=1, block_size=0,
+                    num_inputs=1, num_outputs=1,
+                    input_elem_types=["f32"], output_elem_types=["i32"],
+                    output_shape=f_shape, output_dtype="int32",
+                ),
+                KernelMeta(
+                    name=scan_name, grid_dims=1, block_size=N,
+                    num_inputs=1, num_outputs=1,
+                    input_elem_types=["i32"], output_elem_types=["i32"],
+                    output_shape=f_shape, output_dtype="int32",
+                ),
+                KernelMeta(
+                    name=scatter_name, grid_dims=1, block_size=0,
+                    num_inputs=3, num_outputs=1,
+                    input_elem_types=["f32", "i32", "i32"], output_elem_types=["f32"],
+                    output_shape=f_shape, output_dtype="float32",
+                ),
+            ]
+            plan = ExecutionPlan(
+                buffers=[
+                    BufferSpec("pred", f_shape, "i32"),
+                    BufferSpec("scan", f_shape, "i32"),
+                    BufferSpec("output", f_shape, "f32"),
+                ],
+                steps=[
+                    KernelStep(pred_name, ["input_0"], "pred"),
+                    KernelStep(scan_name, ["pred"], "scan"),
+                    KernelStep(scatter_name, ["input_0", "pred", "scan"], "output"),
+                ],
+                final_output="output",
+                output_shape=f_shape,
+                output_dtype="f32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, kernels, plan
+        except GPUScaffoldError:
+            pass
+
         try:
             gpu_module = build_descriptor_abi_filter_gpu_module(function, kernel_name=name)
             f_shape = tuple(int(d.value) for d in function.params[0].type.shape) if isinstance(function.params[0].type, ArrayType) else ()
