@@ -1853,6 +1853,171 @@ def build_descriptor_abi_matmul_gpu_module(
     return GPUModuleScaffold(text, module_name, name)
 
 
+def build_descriptor_abi_tiled_matmul_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    tile_size: int = 16,
+) -> GPUModuleScaffold:
+    """Build a tiled shared-memory matmul GPU kernel.
+
+    Uses cooperative tile loading with TILE×TILE shared memory blocks.
+    Each thread block computes one TILE×TILE tile of the output matrix.
+    Improves memory bandwidth utilization vs the per-thread dot product.
+    """
+    from remora.hir import HIRMatmul
+
+    if not isinstance(function.body, HIRMatmul):
+        raise GPUScaffoldError("GPU tiled matmul requires HIRMatmul body")
+    if len(function.params) != 2:
+        raise GPUScaffoldError("GPU tiled matmul requires exactly two parameters")
+
+    left_type = function.params[0].type
+    right_type = function.params[1].type
+    if not isinstance(left_type, ArrayType) or not isinstance(right_type, ArrayType):
+        raise GPUScaffoldError("GPU tiled matmul requires array parameters")
+    if left_type.element != FLOAT or right_type.element != FLOAT:
+        raise GPUScaffoldError("GPU tiled matmul supports f32 only")
+    if left_type.rank != 2 or right_type.rank != 2:
+        raise GPUScaffoldError("GPU tiled matmul requires rank-2 arrays")
+
+    M = int(left_type.shape[0].value)
+    K = int(left_type.shape[1].value)
+    K2 = int(right_type.shape[0].value)
+    N = int(right_type.shape[1].value)
+    if K != K2:
+        raise GPUScaffoldError(f"matmul inner dimension mismatch: {K} vs {K2}")
+
+    T = tile_size
+    gridCols = (N + T - 1) // T
+    num_tiles = (K + T - 1) // T
+
+    name = kernel_name or f"remora_{function.name}_mm"
+    _validate_scaffold_names(module_name, name)
+
+    desc_lines = _descriptor_load_lines("la", "%input0_desc", 2)
+    desc_lines.extend(_descriptor_load_lines("rb", "%input1_desc", 2))
+    desc_lines.extend(_descriptor_load_lines("oc", "%output_desc", 2))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.mlir.global internal @mm_sha() {{addr_space = 3 : i32}} : !llvm.array<{T*T} x f32>
+    llvm.mlir.global internal @mm_shb() {{addr_space = 3 : i32}} : !llvm.array<{T*T} x f32>
+
+    llvm.func @{name}(%input0_desc: !llvm.ptr, %input1_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %tm_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tm_tid = llvm.sext %tm_tid32 : i32 to i64
+      %tm_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %tm_bid = llvm.sext %tm_bid32 : i32 to i64
+      %tm_T = llvm.mlir.constant({T} : index) : i64
+      %tm_lr = llvm.udiv %tm_tid, %tm_T  : i64
+      %tm_lc = llvm.urem %tm_tid, %tm_T  : i64
+      %tm_gcols = llvm.mlir.constant({gridCols} : index) : i64
+      %tm_brow = llvm.udiv %tm_bid, %tm_gcols  : i64
+      %tm_bcol = llvm.urem %tm_bid, %tm_gcols  : i64
+      %tm_br_off = llvm.mul %tm_brow, %tm_T  : i64
+      %tm_bc_off = llvm.mul %tm_bcol, %tm_T  : i64
+      %tm_gr = llvm.add %tm_br_off, %tm_lr  : i64
+      %tm_gc = llvm.add %tm_bc_off, %tm_lc  : i64
+      %tm_sha = llvm.mlir.addressof @mm_sha : !llvm.ptr<3>
+      %tm_shb = llvm.mlir.addressof @mm_shb : !llvm.ptr<3>
+      %tm_c0 = llvm.mlir.constant(0 : index) : i64
+      %tm_c1 = llvm.mlir.constant(1 : index) : i64
+      %tm_cM = llvm.mlir.constant({M} : index) : i64
+      %tm_cN = llvm.mlir.constant({N} : index) : i64
+      %tm_cK = llvm.mlir.constant({K} : index) : i64
+      %tm_nt = llvm.mlir.constant({num_tiles} : index) : i64
+      %tm_zf = llvm.mlir.constant(0.000000e+00 : f32) : f32
+      llvm.br ^tm_tloop(%tm_c0, %tm_zf : i64, f32)
+
+    ^tm_tloop(%tm_t: i64, %tm_acc: f32):
+      %tm_td = llvm.icmp "uge" %tm_t, %tm_nt : i64
+      llvm.cond_br %tm_td, ^tm_store, ^tm_tbody
+
+    ^tm_tbody:
+      %tm_tk = llvm.mul %tm_t, %tm_T  : i64
+      %tm_ac = llvm.add %tm_tk, %tm_lc  : i64
+      %tm_a_r_ok = llvm.icmp "ult" %tm_gr, %tm_cM : i64
+      %tm_a_c_ok = llvm.icmp "ult" %tm_ac, %tm_cK : i64
+      %tm_a_ok = llvm.and %tm_a_r_ok, %tm_a_c_ok  : i64
+      %tm_sa_r = llvm.select %tm_a_ok, %tm_gr, %tm_c0 : i1, i64
+      %tm_sa_c = llvm.select %tm_a_ok, %tm_ac, %tm_c0 : i1, i64
+      %tm_a_off = llvm.mul %tm_sa_r, %la_stride0  : i64
+      %tm_a_off2 = llvm.add %tm_a_off, %tm_sa_c  : i64
+      %tm_a_off3 = llvm.add %la_offset, %tm_a_off2  : i64
+      %tm_a_ptr = llvm.getelementptr %la_aligned[%tm_a_off3] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %tm_a_raw = llvm.load %tm_a_ptr : !llvm.ptr -> f32
+      %tm_a_val = llvm.select %tm_a_ok, %tm_a_raw, %tm_zf : i1, f32
+      %tm_sha_idx = llvm.mul %tm_lr, %tm_T  : i64
+      %tm_sha_idx2 = llvm.add %tm_sha_idx, %tm_lc  : i64
+      %tm_sha_p = llvm.getelementptr %tm_sha[0, %tm_sha_idx2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{T*T} x f32>
+      llvm.store %tm_a_val, %tm_sha_p : f32, !llvm.ptr<3>
+      %tm_br = llvm.add %tm_tk, %tm_lr  : i64
+      %tm_b_r_ok = llvm.icmp "ult" %tm_br, %tm_cK : i64
+      %tm_b_c_ok = llvm.icmp "ult" %tm_gc, %tm_cN : i64
+      %tm_b_ok = llvm.and %tm_b_r_ok, %tm_b_c_ok  : i64
+      %tm_sb_r = llvm.select %tm_b_ok, %tm_br, %tm_c0 : i1, i64
+      %tm_sb_c = llvm.select %tm_b_ok, %tm_gc, %tm_c0 : i1, i64
+      %tm_b_off = llvm.mul %tm_sb_r, %rb_stride0  : i64
+      %tm_b_off2 = llvm.add %tm_b_off, %tm_sb_c  : i64
+      %tm_b_off3 = llvm.add %rb_offset, %tm_b_off2  : i64
+      %tm_b_ptr = llvm.getelementptr %rb_aligned[%tm_b_off3] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %tm_b_raw = llvm.load %tm_b_ptr : !llvm.ptr -> f32
+      %tm_b_val = llvm.select %tm_b_ok, %tm_b_raw, %tm_zf : i1, f32
+      %tm_shb_idx = llvm.mul %tm_lr, %tm_T  : i64
+      %tm_shb_idx2 = llvm.add %tm_shb_idx, %tm_lc  : i64
+      %tm_shb_p = llvm.getelementptr %tm_shb[0, %tm_shb_idx2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{T*T} x f32>
+      llvm.store %tm_b_val, %tm_shb_p : f32, !llvm.ptr<3>
+      nvvm.barrier0
+      llvm.br ^tm_kloop(%tm_c0, %tm_acc : i64, f32)
+
+    ^tm_kloop(%tm_k: i64, %tm_kacc: f32):
+      %tm_kd = llvm.icmp "uge" %tm_k, %tm_T : i64
+      llvm.cond_br %tm_kd, ^tm_kend(%tm_kacc : f32), ^tm_kbody
+
+    ^tm_kbody:
+      %tm_ai = llvm.mul %tm_lr, %tm_T  : i64
+      %tm_ai2 = llvm.add %tm_ai, %tm_k  : i64
+      %tm_ap = llvm.getelementptr %tm_sha[0, %tm_ai2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{T*T} x f32>
+      %tm_av = llvm.load %tm_ap : !llvm.ptr<3> -> f32
+      %tm_bi = llvm.mul %tm_k, %tm_T  : i64
+      %tm_bi2 = llvm.add %tm_bi, %tm_lc  : i64
+      %tm_bp = llvm.getelementptr %tm_shb[0, %tm_bi2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{T*T} x f32>
+      %tm_bv = llvm.load %tm_bp : !llvm.ptr<3> -> f32
+      %tm_prod = llvm.fmul %tm_av, %tm_bv  : f32
+      %tm_nacc = llvm.fadd %tm_kacc, %tm_prod  : f32
+      %tm_nk = llvm.add %tm_k, %tm_c1  : i64
+      llvm.br ^tm_kloop(%tm_nk, %tm_nacc : i64, f32)
+
+    ^tm_kend(%tm_facc: f32):
+      nvvm.barrier0
+      %tm_nt2 = llvm.add %tm_t, %tm_c1  : i64
+      llvm.br ^tm_tloop(%tm_nt2, %tm_facc : i64, f32)
+
+    ^tm_store:
+      %tm_s_r_ok = llvm.icmp "ult" %tm_gr, %tm_cM : i64
+      %tm_s_c_ok = llvm.icmp "ult" %tm_gc, %tm_cN : i64
+      %tm_s_ok = llvm.and %tm_s_r_ok, %tm_s_c_ok  : i64
+      llvm.cond_br %tm_s_ok, ^tm_write, ^tm_done
+
+    ^tm_write:
+      %tm_o_off = llvm.mul %tm_gr, %oc_stride0  : i64
+      %tm_o_off2 = llvm.add %tm_o_off, %tm_gc  : i64
+      %tm_o_off3 = llvm.add %oc_offset, %tm_o_off2  : i64
+      %tm_o_ptr = llvm.getelementptr %oc_aligned[%tm_o_off3] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %tm_acc, %tm_o_ptr : f32, !llvm.ptr
+      llvm.br ^tm_done
+
+    ^tm_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+
+
 # ---------------------------------------------------------------------------
 # Sort / Grade kernels (serial single-thread)
 # ---------------------------------------------------------------------------
@@ -2958,6 +3123,120 @@ def build_descriptor_abi_scatter_add_gpu_module(
       llvm.br ^sa_done
 
     ^sa_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
+
+
+def build_descriptor_abi_parallel_scatter_add_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a parallel scatter-add kernel (N ≤ 1024).
+
+    All threads copy target to output in parallel, then thread 0
+    performs the scalar add after a barrier.
+    """
+    if not isinstance(function.body, HIRScatterAdd):
+        raise GPUScaffoldError("GPU parallel scatter-add requires HIRScatterAdd body")
+
+    sa = function.body
+    if not isinstance(sa.result_type, ArrayType) or sa.result_type.element != FLOAT:
+        raise GPUScaffoldError("GPU parallel scatter-add supports f32 only")
+
+    shape = tuple(int(d.value) for d in sa.result_type.shape)
+    if len(shape) != 1:
+        raise GPUScaffoldError("GPU parallel scatter-add supports rank-1 only")
+    N = shape[0]
+    if N > 1024:
+        raise GPUScaffoldError("GPU parallel scatter-add requires N ≤ 1024")
+
+    name = kernel_name or f"remora_{function.name}_scatter"
+    _validate_scaffold_names(module_name, name)
+
+    target_param_name = None
+    idx_param_idx = None
+    upd_param_idx = None
+    scalar_count = 0
+
+    for pidx, p in enumerate(function.params):
+        if isinstance(p.type, ArrayType):
+            if target_param_name is None:
+                target_param_name = p.name
+        else:
+            if isinstance(sa.index, HIRVar) and sa.index.name == p.name:
+                idx_param_idx = scalar_count
+            if isinstance(sa.update, HIRVar) and sa.update.name == p.name:
+                upd_param_idx = scalar_count
+            scalar_count += 1
+
+    desc_lines = _descriptor_load_lines("tgt", "%input0_desc", 1)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 1))
+
+    scalar_params: list[str] = []
+    for si in range(scalar_count):
+        scalar_params.append(f"%scalar{si}: f32")
+
+    idx_load = ""
+    if idx_param_idx is not None:
+        idx_load = f"      %pa_idx = llvm.fptosi %scalar{idx_param_idx} : f32 to i64"
+    elif isinstance(sa.index, HIRLit):
+        idx_load = f"      %pa_idx = llvm.mlir.constant({int(sa.index.value)} : index) : i64"
+    else:
+        raise GPUScaffoldError("GPU parallel scatter-add: index must be a param or literal")
+
+    upd_load = ""
+    if upd_param_idx is not None:
+        upd_load = f"      %pa_upd = llvm.mlir.constant(0.0 : f32) : f32\n      %pa_upd2 = llvm.fadd %scalar{upd_param_idx}, %pa_upd  : f32"
+        upd_ssa = "%pa_upd2"
+    elif isinstance(sa.update, HIRLit):
+        upd_load = f"      %pa_upd = llvm.mlir.constant({float(sa.update.value):.6e} : f32) : f32"
+        upd_ssa = "%pa_upd"
+    else:
+        raise GPUScaffoldError("GPU parallel scatter-add: update must be a param or literal")
+
+    all_params = ["%input0_desc: !llvm.ptr"] + scalar_params + ["%output_desc: !llvm.ptr"]
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}({", ".join(all_params)}) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %pa_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %pa_tid = llvm.sext %pa_tid32 : i32 to i64
+      %pa_N = llvm.mlir.constant({N} : index) : i64
+      %pa_in_bounds = llvm.icmp "ult" %pa_tid, %pa_N : i64
+      llvm.cond_br %pa_in_bounds, ^pa_copy, ^pa_after_copy
+
+    ^pa_copy:
+      %pa_src_off = llvm.add %tgt_offset, %pa_tid  : i64
+      %pa_src_p = llvm.getelementptr %tgt_aligned[%pa_src_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %pa_val = llvm.load %pa_src_p : !llvm.ptr -> f32
+      %pa_dst_off = llvm.add %out_offset, %pa_tid  : i64
+      %pa_dst_p = llvm.getelementptr %out_aligned[%pa_dst_off] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %pa_val, %pa_dst_p : f32, !llvm.ptr
+      llvm.br ^pa_after_copy
+
+    ^pa_after_copy:
+      nvvm.barrier0
+      %pa_zero = llvm.mlir.constant(0 : index) : i64
+      %pa_is_t0 = llvm.icmp "eq" %pa_tid, %pa_zero : i64
+      llvm.cond_br %pa_is_t0, ^pa_add, ^pa_done
+
+    ^pa_add:
+{idx_load}
+{upd_load}
+      %pa_aoff = llvm.add %out_offset, %pa_idx  : i64
+      %pa_ap = llvm.getelementptr %out_aligned[%pa_aoff] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %pa_old = llvm.load %pa_ap : !llvm.ptr -> f32
+      %pa_new = llvm.fadd %pa_old, {upd_ssa}  : f32
+      llvm.store %pa_new, %pa_ap : f32, !llvm.ptr
+      llvm.br ^pa_done
+
+    ^pa_done:
       llvm.return
     }}
   }}

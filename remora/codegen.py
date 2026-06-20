@@ -50,10 +50,12 @@ from remora.gpu_lowering import (
     build_descriptor_abi_matmul_gpu_module,
     build_descriptor_abi_parallel_filter_gpu_module,
     build_descriptor_abi_parallel_replicate_gpu_module,
+    build_descriptor_abi_parallel_scatter_add_gpu_module,
     build_descriptor_abi_replicate_gpu_module,
     build_descriptor_abi_scatter_add_gpu_module,
     build_descriptor_abi_sobel_gpu_module,
     build_descriptor_abi_sort_gpu_module,
+    build_descriptor_abi_tiled_matmul_gpu_module,
     extract_gpu_module_body_as_module,
 )
 
@@ -75,6 +77,7 @@ class KernelMeta:
     output_shape: tuple[int, ...] | None = None
     output_dtype: str | None = None
     is_reduction: bool = False
+    grid_size: int | None = None
 
 
 def generate_ptx(
@@ -178,6 +181,31 @@ def generate_mlir_descriptor_abi_ptx(
     # ── try GPU scatter-add ──
     if isinstance(function.body, HIRScatterAdd):
         try:
+            gpu_module = build_descriptor_abi_parallel_scatter_add_gpu_module(function, kernel_name=name)
+            sa_result = function.body.result_type
+            sa_shape = tuple(int(d.value) for d in sa_result.shape) if isinstance(sa_result, ArrayType) else ()
+            sa_N = sa_shape[0] if sa_shape else 1
+            num_array = sum(1 for p in function.params if isinstance(p.type, ArrayType))
+            num_scalar = sum(1 for p in function.params if not isinstance(p.type, ArrayType))
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=sa_N,
+                num_inputs=num_array + num_scalar,
+                num_outputs=1,
+                input_elem_types=["f32"] * (num_array + num_scalar),
+                output_elem_types=["f32"],
+                output_shape=sa_shape,
+                output_dtype="float32",
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta], None
+        except GPUScaffoldError:
+            pass
+
+        try:
             gpu_module = build_descriptor_abi_scatter_add_gpu_module(function, kernel_name=name)
             sa_result = function.body.result_type
             sa_shape = tuple(int(d.value) for d in sa_result.shape) if isinstance(sa_result, ArrayType) else ()
@@ -203,6 +231,34 @@ def generate_mlir_descriptor_abi_ptx(
 
     # ── try GPU matmul ──
     if isinstance(function.body, HIRMatmul):
+        try:
+            TILE = 16
+            gpu_module = build_descriptor_abi_tiled_matmul_gpu_module(function, kernel_name=name, tile_size=TILE)
+            mm_result = function.body.result_type
+            mm_shape = tuple(int(d.value) for d in mm_result.shape) if isinstance(mm_result, ArrayType) else ()
+            mm_M = mm_shape[0] if len(mm_shape) >= 1 else 1
+            mm_N = mm_shape[1] if len(mm_shape) >= 2 else 1
+            gridRows = (mm_M + TILE - 1) // TILE
+            gridCols = (mm_N + TILE - 1) // TILE
+            meta = KernelMeta(
+                name=name,
+                grid_dims=1,
+                block_size=TILE * TILE,
+                num_inputs=2,
+                num_outputs=1,
+                input_elem_types=["f32", "f32"],
+                output_elem_types=["f32"],
+                output_shape=mm_shape,
+                output_dtype="float32",
+                grid_size=gridRows * gridCols,
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta], None
+        except GPUScaffoldError:
+            pass
+
         try:
             gpu_module = build_descriptor_abi_matmul_gpu_module(function, kernel_name=name)
             mm_result = function.body.result_type

@@ -155,7 +155,9 @@ class RemoraExecutor:
                 output.dtype,
             )
             block_size = int(meta.block_size or 256)
-            if meta.is_reduction and host_inputs:
+            if meta.grid_size is not None:
+                grid_size = meta.grid_size
+            elif meta.is_reduction and host_inputs:
                 input_count = int(np.prod(host_inputs[0].shape, dtype=np.int64))
                 grid_size = int((input_count + block_size - 1) // block_size)
             else:
@@ -307,11 +309,14 @@ class RemoraExecutor:
         )
 
         block_size = int(meta.block_size or 256)
-        if step.is_reduction and first_input_shape is not None:
+        if meta.grid_size is not None:
+            grid_size = meta.grid_size
+        elif step.is_reduction and first_input_shape is not None:
             element_count = max(1, int(np.prod(first_input_shape, dtype=np.int64)))
+            grid_size = int((element_count + block_size - 1) // block_size)
         else:
             element_count = max(1, int(np.prod(out_buf.shape, dtype=np.int64)))
-        grid_size = int((element_count + block_size - 1) // block_size)
+            grid_size = int((element_count + block_size - 1) // block_size)
 
         kernel.launch(
             (grid_size, 1, 1),

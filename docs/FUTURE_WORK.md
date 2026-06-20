@@ -40,13 +40,13 @@ executes the 200-step gradient descent on GPU.
 
 ## Tiled Shared-Memory Matmul
 
-**Current state**: `HIRMatmul` uses a per-thread dot-product kernel.  Each
-thread computes one output element by iterating over K.  Correct but
-memory-bandwidth-limited for large matrices.
-
-**Upgrade path**: standard CUDA tiled matmul with TILE×TILE shared-memory
-tiles, cooperative loading, and register blocking.  Would improve
-throughput significantly for matrices larger than ~64×64.
+**Current state**: `HIRMatmul` uses a tiled shared-memory kernel with
+TILE=16.  Each thread block cooperatively loads 16×16 tiles of A and B
+into shared memory, then computes a partial dot product from the tiles.
+This reduces global memory traffic by a factor of TILE compared to the
+naive per-thread dot-product.  Edge tiles are bounds-checked and
+zero-padded so non-TILE-aligned dimensions work correctly.  Falls back
+to the naive per-thread kernel if the tiled version fails to compile.
 
 ## Multi-block Parallel Scan
 
@@ -71,10 +71,11 @@ GPU algorithms with O(N log²N) or O(N·W) work.
 
 ## Parallel Scatter-Add
 
-**Current state**: `HIRScatterAdd` uses a serial single-thread kernel
-that copies the target to the output and then performs a single add.
-Correct but sequential.
+**Current state**: `HIRScatterAdd` uses a parallel single-block kernel
+for N ≤ 1024: all threads copy target to output in parallel, then
+thread 0 performs the scalar add after a barrier.  For N > 1024, the
+serial single-thread fallback is used.
 
-**Upgrade path**: parallel copy (one thread per element) followed by
-a single atomic add, or a fully parallel scatter with `llvm.atomicrmw
-fadd` for each update position.  Would scale with array size.
+**Upgrade path**: for N > 1024, use a two-kernel ``ExecutionPlan``
+(parallel copy + single-thread add) or ``llvm.atomicrmw fadd`` for
+the add step.
