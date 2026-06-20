@@ -48,6 +48,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_im2col_gpu_module,
     build_descriptor_abi_indices_of_gpu_module,
     build_descriptor_abi_matmul_gpu_module,
+    build_descriptor_abi_multiblock_f32_scan_gpu_module,
     build_descriptor_abi_parallel_filter_gpu_module,
     build_descriptor_abi_parallel_replicate_gpu_module,
     build_descriptor_abi_parallel_scatter_add_gpu_module,
@@ -703,6 +704,52 @@ def generate_mlir_descriptor_abi_ptx(
                             output_dtype="float32",
                         )
                     except GPUScaffoldError as scan_error:
+                        try:
+                            mb_module = build_descriptor_abi_multiblock_f32_scan_gpu_module(function, kernel_name=name)
+                            sc_shape = tuple(int(d.value) for d in function.params[0].type.shape)
+                            sc_N = sc_shape[0]
+                            sc_BS = 1024
+                            sc_NB = (sc_N + sc_BS - 1) // sc_BS
+                            sc_local = f"{name}_local"
+                            sc_extract = f"{name}_extract"
+                            sc_sums = f"{name}_sums"
+                            sc_prop = f"{name}_propagate"
+                            mb_kernels = [
+                                KernelMeta(name=sc_local, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
+                                           input_elem_types=["f32"], output_elem_types=["f32"],
+                                           output_shape=sc_shape, output_dtype="float32", grid_size=sc_NB),
+                                KernelMeta(name=sc_extract, grid_dims=1, block_size=sc_NB, num_inputs=1, num_outputs=1,
+                                           input_elem_types=["f32"], output_elem_types=["f32"],
+                                           output_shape=(sc_NB,), output_dtype="float32", grid_size=1),
+                                KernelMeta(name=sc_sums, grid_dims=1, block_size=sc_NB, num_inputs=1, num_outputs=1,
+                                           input_elem_types=["f32"], output_elem_types=["f32"],
+                                           output_shape=(sc_NB,), output_dtype="float32", grid_size=1),
+                                KernelMeta(name=sc_prop, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
+                                           input_elem_types=["f32"], output_elem_types=["f32"],
+                                           output_shape=sc_shape, output_dtype="float32", grid_size=sc_NB),
+                            ]
+                            mb_plan = ExecutionPlan(
+                                buffers=[
+                                    BufferSpec("scanned", sc_shape, "f32"),
+                                    BufferSpec("block_sums", (sc_NB,), "f32"),
+                                    BufferSpec("block_prefix", (sc_NB,), "f32"),
+                                ],
+                                steps=[
+                                    KernelStep(sc_local, ["input_0"], "scanned"),
+                                    KernelStep(sc_extract, ["scanned"], "block_sums"),
+                                    KernelStep(sc_sums, ["block_sums"], "block_prefix"),
+                                    KernelStep(sc_prop, ["block_prefix"], "scanned"),
+                                ],
+                                final_output="scanned",
+                                output_shape=sc_shape,
+                                output_dtype="f32",
+                            )
+                            mb_dev = extract_gpu_module_body_as_module(mb_module.text)
+                            mb_ir = translate_mlir_to_llvmir(mb_dev, toolchain=toolchain)
+                            mb_ptx = translate_llvmir_to_nvptx_text(mb_ir, toolchain=toolchain)
+                            return mb_ptx, mb_kernels, mb_plan
+                        except GPUScaffoldError:
+                            pass
                         try:
                             from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2
                             if not (isinstance(function.body, _HIRMap2)

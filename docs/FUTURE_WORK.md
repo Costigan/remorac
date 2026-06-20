@@ -50,14 +50,14 @@ to the naive per-thread kernel if the tiled version fails to compile.
 
 ## Multi-block Parallel Scan
 
-**Current state**: The parallel Hillis-Steele scan handles arrays up to
-1024 elements (one block).  Arrays larger than 1024 fall back to a serial
-single-thread kernel — correct but O(N) on one core.
+**Current state**: The f32 scan uses a parallel Hillis-Steele kernel
+for N ≤ 1024 (single block).  For 1024 < N ≤ 1,048,576, a four-kernel
+multi-block scan is used: per-block local scan, extract block sums,
+scan block sums, propagate prefixes.  All four kernels are in one PTX
+module, orchestrated by an ``ExecutionPlan``.  For N > 1,048,576, the
+serial single-thread fallback is used.
 
-**Upgrade path**: multi-block scan with inter-block prefix propagation
-(Blelloch or decoupled look-back).  Each block scans its tile in shared
-memory, then a second pass propagates block-level prefixes.  Would bring
-large-array scan to O(N/P).
+**Remaining work**: extend to arbitrary N via recursive multi-level scan.
 
 ## Parallel Sort and Grade
 

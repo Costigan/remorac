@@ -738,6 +738,276 @@ def build_descriptor_abi_f32_scan_gpu_module(
     return GPUModuleScaffold(text, module_name, name)
 
 
+def build_descriptor_abi_multiblock_f32_scan_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    block_size: int = 1024,
+) -> GPUModuleScaffold:
+    """Build a multi-block f32 inclusive-add scan using 4 kernels.
+
+    Phase 1 (scan_local): per-block Hillis-Steele scan.
+    Phase 2 (extract_sums): extract last element of each block.
+    Phase 3 (scan_sums): single-block scan of block sums.
+    Phase 4 (propagate): add block prefix to each element.
+
+    Supports N up to block_size * 1024 (default: 1,048,576).
+    """
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU multi-block scan requires one parameter")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU multi-block scan supports f32 only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU multi-block scan supports rank-1 only")
+
+    N = int(param_type.shape[0].value)
+    BS = block_size
+    if N <= BS:
+        raise GPUScaffoldError("Use single-block scan for N <= block_size")
+    num_blocks = (N + BS - 1) // BS
+    if num_blocks > 1024:
+        raise GPUScaffoldError(f"N={N} requires {num_blocks} blocks (max 1024)")
+
+    import math
+    max_d_local = math.ceil(math.log2(BS))
+    max_d_sums = math.ceil(math.log2(num_blocks)) if num_blocks > 1 else 1
+
+    base = kernel_name or f"remora_{function.name}_scan"
+    local_name = f"{base}_local"
+    extract_name = f"{base}_extract"
+    sums_name = f"{base}_sums"
+    propagate_name = f"{base}_propagate"
+    _validate_scaffold_names(module_name, local_name)
+
+    k1_desc = _descriptor_load_lines("sl_in", "%input_desc", 1)
+    k1_desc.extend(_descriptor_load_lines("sl_out", "%output_desc", 1))
+
+    k2_desc = _descriptor_load_lines("se_sc", "%scanned_desc", 1)
+    k2_desc.extend(_descriptor_load_lines("se_bs", "%block_sums_desc", 1))
+
+    k3_desc = _descriptor_load_lines("ss_in", "%sums_desc", 1)
+    k3_desc.extend(_descriptor_load_lines("ss_out", "%prefix_desc", 1))
+
+    k4_desc = _descriptor_load_lines("sp_pr", "%prefix_desc", 1)
+    k4_desc.extend(_descriptor_load_lines("sp_sc", "%scanned_desc", 1))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.mlir.global internal @mb_shmem() {{addr_space = 3 : i32}} : !llvm.array<{BS} x f32>
+    llvm.mlir.global internal @mb_shmem2() {{addr_space = 3 : i32}} : !llvm.array<1024 x f32>
+
+    llvm.func @{local_name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k1_desc)}
+      %sl_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %sl_tid = llvm.sext %sl_tid32 : i32 to i64
+      %sl_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %sl_bid = llvm.sext %sl_bid32 : i32 to i64
+      %sl_BS = llvm.mlir.constant({BS} : index) : i64
+      %sl_N = llvm.mlir.constant({N} : index) : i64
+      %sl_base = llvm.mul %sl_bid, %sl_BS  : i64
+      %sl_gidx = llvm.add %sl_base, %sl_tid  : i64
+      %sl_ok = llvm.icmp "ult" %sl_gidx, %sl_N : i64
+      %sl_shmem = llvm.mlir.addressof @mb_shmem : !llvm.ptr<3>
+      %sl_zf = llvm.mlir.constant(0.000000e+00 : f32) : f32
+      llvm.cond_br %sl_ok, ^sl_load, ^sl_load_oob
+
+    ^sl_load:
+      %sl_si = llvm.add %sl_in_offset, %sl_gidx  : i64
+      %sl_sp = llvm.getelementptr %sl_in_aligned[%sl_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %sl_val = llvm.load %sl_sp : !llvm.ptr -> f32
+      %sl_mp = llvm.getelementptr %sl_shmem[0, %sl_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      llvm.store %sl_val, %sl_mp : f32, !llvm.ptr<3>
+      llvm.br ^sl_sync1
+
+    ^sl_load_oob:
+      %sl_mp2 = llvm.getelementptr %sl_shmem[0, %sl_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      llvm.store %sl_zf, %sl_mp2 : f32, !llvm.ptr<3>
+      llvm.br ^sl_sync1
+
+    ^sl_sync1:
+      nvvm.barrier0
+      %sl_c0 = llvm.mlir.constant(0 : index) : i64
+      %sl_c1 = llvm.mlir.constant(1 : index) : i64
+      %sl_c2 = llvm.mlir.constant(2 : index) : i64
+      %sl_maxd = llvm.mlir.constant({max_d_local} : index) : i64
+      llvm.br ^sl_loop(%sl_c0, %sl_c1 : i64, i64)
+
+    ^sl_loop(%sl_d: i64, %sl_stride: i64):
+      %sl_ld = llvm.icmp "uge" %sl_d, %sl_maxd : i64
+      llvm.cond_br %sl_ld, ^sl_write, ^sl_step
+
+    ^sl_step:
+      %sl_act = llvm.icmp "uge" %sl_tid, %sl_stride : i64
+      %sl_pr = llvm.sub %sl_tid, %sl_stride  : i64
+      %sl_sp2 = llvm.select %sl_act, %sl_pr, %sl_c0 : i1, i64
+      %sl_pp = llvm.getelementptr %sl_shmem[0, %sl_sp2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %sl_pv = llvm.load %sl_pp : !llvm.ptr<3> -> f32
+      %sl_tmp = llvm.select %sl_act, %sl_pv, %sl_zf : i1, f32
+      nvvm.barrier0
+      %sl_mp3 = llvm.getelementptr %sl_shmem[0, %sl_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %sl_cur = llvm.load %sl_mp3 : !llvm.ptr<3> -> f32
+      %sl_new = llvm.fadd %sl_cur, %sl_tmp  : f32
+      %sl_res = llvm.select %sl_act, %sl_new, %sl_cur : i1, f32
+      llvm.store %sl_res, %sl_mp3 : f32, !llvm.ptr<3>
+      nvvm.barrier0
+      %sl_nd = llvm.add %sl_d, %sl_c1  : i64
+      %sl_ns = llvm.mul %sl_stride, %sl_c2  : i64
+      llvm.br ^sl_loop(%sl_nd, %sl_ns : i64, i64)
+
+    ^sl_write:
+      llvm.cond_br %sl_ok, ^sl_wb, ^sl_done
+
+    ^sl_wb:
+      %sl_mp4 = llvm.getelementptr %sl_shmem[0, %sl_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %sl_fv = llvm.load %sl_mp4 : !llvm.ptr<3> -> f32
+      %sl_oi = llvm.add %sl_out_offset, %sl_gidx  : i64
+      %sl_op = llvm.getelementptr %sl_out_aligned[%sl_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %sl_fv, %sl_op : f32, !llvm.ptr
+      llvm.br ^sl_done
+
+    ^sl_done:
+      llvm.return
+    }}
+
+    llvm.func @{extract_name}(%scanned_desc: !llvm.ptr, %block_sums_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k2_desc)}
+      %se_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %se_tid = llvm.sext %se_tid32 : i32 to i64
+      %se_NB = llvm.mlir.constant({num_blocks} : index) : i64
+      %se_BS = llvm.mlir.constant({BS} : index) : i64
+      %se_c1 = llvm.mlir.constant(1 : index) : i64
+      %se_ok = llvm.icmp "ult" %se_tid, %se_NB : i64
+      llvm.cond_br %se_ok, ^se_work, ^se_done
+
+    ^se_work:
+      %se_next = llvm.add %se_tid, %se_c1  : i64
+      %se_end = llvm.mul %se_next, %se_BS  : i64
+      %se_last = llvm.sub %se_end, %se_c1  : i64
+      %se_N = llvm.mlir.constant({N} : index) : i64
+      %se_clamp = llvm.icmp "ult" %se_last, %se_N : i64
+      %se_safe = llvm.sub %se_N, %se_c1  : i64
+      %se_idx = llvm.select %se_clamp, %se_last, %se_safe : i1, i64
+      %se_si = llvm.add %se_sc_offset, %se_idx  : i64
+      %se_sp = llvm.getelementptr %se_sc_aligned[%se_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %se_val = llvm.load %se_sp : !llvm.ptr -> f32
+      %se_oi = llvm.add %se_bs_offset, %se_tid  : i64
+      %se_op = llvm.getelementptr %se_bs_aligned[%se_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %se_val, %se_op : f32, !llvm.ptr
+      llvm.br ^se_done
+
+    ^se_done:
+      llvm.return
+    }}
+
+    llvm.func @{sums_name}(%sums_desc: !llvm.ptr, %prefix_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k3_desc)}
+      %ss_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %ss_tid = llvm.sext %ss_tid32 : i32 to i64
+      %ss_NB = llvm.mlir.constant({num_blocks} : index) : i64
+      %ss_ok = llvm.icmp "ult" %ss_tid, %ss_NB : i64
+      %ss_shmem = llvm.mlir.addressof @mb_shmem2 : !llvm.ptr<3>
+      %ss_zf = llvm.mlir.constant(0.000000e+00 : f32) : f32
+      llvm.cond_br %ss_ok, ^ss_load, ^ss_load_oob
+
+    ^ss_load:
+      %ss_si = llvm.add %ss_in_offset, %ss_tid  : i64
+      %ss_sp = llvm.getelementptr %ss_in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %ss_val = llvm.load %ss_sp : !llvm.ptr -> f32
+      %ss_mp = llvm.getelementptr %ss_shmem[0, %ss_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      llvm.store %ss_val, %ss_mp : f32, !llvm.ptr<3>
+      llvm.br ^ss_sync
+
+    ^ss_load_oob:
+      %ss_mp2 = llvm.getelementptr %ss_shmem[0, %ss_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      llvm.store %ss_zf, %ss_mp2 : f32, !llvm.ptr<3>
+      llvm.br ^ss_sync
+
+    ^ss_sync:
+      nvvm.barrier0
+      %ss_c0 = llvm.mlir.constant(0 : index) : i64
+      %ss_c1 = llvm.mlir.constant(1 : index) : i64
+      %ss_c2 = llvm.mlir.constant(2 : index) : i64
+      %ss_maxd = llvm.mlir.constant({max_d_sums} : index) : i64
+      llvm.br ^ss_loop(%ss_c0, %ss_c1 : i64, i64)
+
+    ^ss_loop(%ss_d: i64, %ss_stride: i64):
+      %ss_ld = llvm.icmp "uge" %ss_d, %ss_maxd : i64
+      llvm.cond_br %ss_ld, ^ss_write, ^ss_step
+
+    ^ss_step:
+      %ss_act = llvm.icmp "uge" %ss_tid, %ss_stride : i64
+      %ss_pr = llvm.sub %ss_tid, %ss_stride  : i64
+      %ss_sp2 = llvm.select %ss_act, %ss_pr, %ss_c0 : i1, i64
+      %ss_pp = llvm.getelementptr %ss_shmem[0, %ss_sp2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %ss_pv = llvm.load %ss_pp : !llvm.ptr<3> -> f32
+      %ss_tmp = llvm.select %ss_act, %ss_pv, %ss_zf : i1, f32
+      nvvm.barrier0
+      %ss_mp3 = llvm.getelementptr %ss_shmem[0, %ss_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %ss_cur = llvm.load %ss_mp3 : !llvm.ptr<3> -> f32
+      %ss_new = llvm.fadd %ss_cur, %ss_tmp  : f32
+      %ss_res = llvm.select %ss_act, %ss_new, %ss_cur : i1, f32
+      llvm.store %ss_res, %ss_mp3 : f32, !llvm.ptr<3>
+      nvvm.barrier0
+      %ss_nd = llvm.add %ss_d, %ss_c1  : i64
+      %ss_ns = llvm.mul %ss_stride, %ss_c2  : i64
+      llvm.br ^ss_loop(%ss_nd, %ss_ns : i64, i64)
+
+    ^ss_write:
+      llvm.cond_br %ss_ok, ^ss_wb, ^ss_done
+
+    ^ss_wb:
+      %ss_mp4 = llvm.getelementptr %ss_shmem[0, %ss_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %ss_fv = llvm.load %ss_mp4 : !llvm.ptr<3> -> f32
+      %ss_oi = llvm.add %ss_out_offset, %ss_tid  : i64
+      %ss_op = llvm.getelementptr %ss_out_aligned[%ss_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ss_fv, %ss_op : f32, !llvm.ptr
+      llvm.br ^ss_done
+
+    ^ss_done:
+      llvm.return
+    }}
+
+    llvm.func @{propagate_name}(%prefix_desc: !llvm.ptr, %scanned_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k4_desc)}
+      %sp_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %sp_tid = llvm.sext %sp_tid32 : i32 to i64
+      %sp_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %sp_bid = llvm.sext %sp_bid32 : i32 to i64
+      %sp_c0 = llvm.mlir.constant(0 : index) : i64
+      %sp_is_b0 = llvm.icmp "eq" %sp_bid, %sp_c0 : i64
+      llvm.cond_br %sp_is_b0, ^sp_done, ^sp_work
+
+    ^sp_work:
+      %sp_BS = llvm.mlir.constant({BS} : index) : i64
+      %sp_N = llvm.mlir.constant({N} : index) : i64
+      %sp_c1 = llvm.mlir.constant(1 : index) : i64
+      %sp_prev = llvm.sub %sp_bid, %sp_c1  : i64
+      %sp_pi = llvm.add %sp_pr_offset, %sp_prev  : i64
+      %sp_pp = llvm.getelementptr %sp_pr_aligned[%sp_pi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %sp_prefix = llvm.load %sp_pp : !llvm.ptr -> f32
+      %sp_base = llvm.mul %sp_bid, %sp_BS  : i64
+      %sp_gidx = llvm.add %sp_base, %sp_tid  : i64
+      %sp_ok = llvm.icmp "ult" %sp_gidx, %sp_N : i64
+      llvm.cond_br %sp_ok, ^sp_add, ^sp_done
+
+    ^sp_add:
+      %sp_si = llvm.add %sp_sc_offset, %sp_gidx  : i64
+      %sp_sp = llvm.getelementptr %sp_sc_aligned[%sp_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %sp_val = llvm.load %sp_sp : !llvm.ptr -> f32
+      %sp_new = llvm.fadd %sp_val, %sp_prefix  : f32
+      llvm.store %sp_new, %sp_sp : f32, !llvm.ptr
+      llvm.br ^sp_done
+
+    ^sp_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, propagate_name)
+
+
 def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
     """Raise GPUScaffoldError if module or kernel name is not a valid identifier."""
     if not module_name.isidentifier() or not kernel_name.isidentifier():
