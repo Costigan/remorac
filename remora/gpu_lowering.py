@@ -4288,6 +4288,16 @@ def build_descriptor_abi_general_map_gpu_module(
                         input_map[param_name] = input_map[base_name]
                         if view_offsets or view_transforms:
                             input_adjustments[param_name] = (view_offsets, view_transforms)
+                    elif hasattr(array_expr, 'result_type') and array_expr.result_type is not None:
+                        from remora.hir import HIRLet as _HL
+                        _body_rt = getattr(lambda_body, 'result_type', body_map.result_type)
+                        lambda_body = _HL(
+                            name=param_name,
+                            value_type=array_expr.result_type,
+                            value=array_expr,
+                            body=lambda_body,
+                            result_type=_body_rt,
+                        )
                     else:
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name

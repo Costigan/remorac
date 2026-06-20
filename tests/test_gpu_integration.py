@@ -93,7 +93,18 @@ class TestGPUSort:
             result = exe.execute("test_sort5", [xs])
         np.testing.assert_array_equal(result, np.sort(xs))
 
-    def test_sort_already_sorted(self, rt):
+    def test_sort_with_duplicates(self, rt):
+        from remora.hir import HIRFunction, HIRParam, HIRSort, HIRVar
+        from remora.types import ArrayType, FLOAT, StaticDim
+        from remora.executor import RemoraExecutor
+
+        arr = ArrayType(FLOAT, (StaticDim(8),))
+        hf = HIRFunction("s", [HIRParam("xs", arr)], HIRSort(HIRVar("xs", arr), result_type=arr), return_type=arr)
+        ptx, kernels, plan = _compile_hir_function(hf, "test_sort_dup")
+        xs = np.array([5, 5, 3, 3, 1, 1, 4, 4], dtype=np.float32)
+        with RemoraExecutor(ptx, kernels, runtime=rt) as exe:
+            result = exe.execute("test_sort_dup", [xs])
+        np.testing.assert_array_equal(result, np.sort(xs))
         from remora.hir import HIRFunction, HIRParam, HIRSort, HIRVar
         from remora.types import ArrayType, FLOAT, StaticDim
         from remora.executor import RemoraExecutor
@@ -121,6 +132,21 @@ class TestGPUGrade:
         xs = np.array([3, 1, 4, 1, 5, 9, 2, 6], dtype=np.float32)
         with RemoraExecutor(ptx, kernels, runtime=rt) as exe:
             result = exe.execute("test_grade", [xs])
+        np.testing.assert_array_equal(xs[result], np.sort(xs))
+
+
+    def test_grade_non_power_of_2(self, rt):
+        from remora.hir import HIRFunction, HIRParam, HIRGrade, HIRVar
+        from remora.types import ArrayType, FLOAT, INT, StaticDim
+        from remora.executor import RemoraExecutor
+
+        arr = ArrayType(FLOAT, (StaticDim(5),))
+        iarr = ArrayType(INT, (StaticDim(5),))
+        hf = HIRFunction("g", [HIRParam("xs", arr)], HIRGrade(HIRVar("xs", arr), result_type=iarr), return_type=iarr)
+        ptx, kernels, plan = _compile_hir_function(hf, "test_grade5")
+        xs = np.array([9, 1, 5, 3, 7], dtype=np.float32)
+        with RemoraExecutor(ptx, kernels, runtime=rt) as exe:
+            result = exe.execute("test_grade5", [xs])
         np.testing.assert_array_equal(xs[result], np.sort(xs))
 
 
@@ -166,6 +192,26 @@ class TestGPUMatmul:
         np.testing.assert_allclose(result, a @ b, atol=1e-3)
 
 
+    def test_matmul_16x16(self, rt):
+        from remora.hir import HIRFunction, HIRParam, HIRMatmul, HIRVar
+        from remora.types import ArrayType, FLOAT, StaticDim
+        from remora.executor import RemoraExecutor
+
+        t16 = ArrayType(FLOAT, (StaticDim(16), StaticDim(16)))
+        hf = HIRFunction(
+            "mm", [HIRParam("a", t16), HIRParam("b", t16)],
+            HIRMatmul(HIRVar("a", t16), HIRVar("b", t16), result_type=t16),
+            return_type=t16,
+        )
+        ptx, kernels, plan = _compile_hir_function(hf, "test_mm16")
+        rng = np.random.default_rng(123)
+        a = rng.standard_normal((16, 16)).astype(np.float32)
+        b = rng.standard_normal((16, 16)).astype(np.float32)
+        with RemoraExecutor(ptx, kernels, runtime=rt) as exe:
+            result = exe.execute("test_mm16", [a, b])
+        np.testing.assert_allclose(result, a @ b, atol=1e-2)
+
+
 class TestGPUReduction:
 
     def test_fold_sum(self, rt):
@@ -187,8 +233,9 @@ class TestGPUReduction:
 class TestGPUStateFold:
 
     @pytest.mark.xfail(
-        reason="General map GPU compiler does not yet handle complex AD gradient expressions "
-               "(nested let bindings, index operations)",
+        reason="AD source transform produces combinatorially large HIRScatterAdd trees "
+               "with HIRMap targets; requires AD-level optimization or multi-kernel "
+               "gradient compilation to fit in a single GPU kernel",
         strict=False,
     )
     def test_ad_optimize_on_gpu(self, rt):

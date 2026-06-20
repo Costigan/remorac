@@ -34,6 +34,7 @@ from remora.hir import (
     HIRReshape,
     HIRReverse,
     HIRRotate,
+    HIRScatterAdd,
     HIRSlice,
     HIRSubarray,
     HIRTake,
@@ -384,11 +385,17 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
 
     # HIRLet
     if isinstance(expr, HIRLet):
+        saved_input_map = None
+        if isinstance(expr.value, HIRVar) and expr.value.name in ctx.input_map:
+            saved_input_map = dict(ctx.input_map)
+            ctx.input_map[expr.name] = ctx.input_map[expr.value.name]
         value_expr = _lower_hir(expr.value, ctx)
         saved_env = dict(ctx.let_env)
         ctx.let_env[expr.name] = _placeholder(expr.name)
         body_expr = _lower_hir(expr.body, ctx)
         ctx.let_env = saved_env
+        if saved_input_map is not None:
+            ctx.input_map = saved_input_map
         return _GpuLetExpr(expr.name, value_expr, body_expr)
 
     # HIRIota (standalone, inside a fold or map body)
@@ -448,6 +455,24 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
     # HIRWithShape — broadcast: drop leading coordinates
     if isinstance(expr, HIRWithShape):
         return _lower_with_shape(expr, ctx)
+
+    if isinstance(expr, HIRScatterAdd):
+        target_expr = _lower_hir(expr.target, ctx)
+        update_expr = _lower_hir(expr.update, ctx)
+        index_val = None
+        if isinstance(expr.index, HIRLit):
+            index_val = int(expr.index.value)
+        if isinstance(target_expr, GpuArrayExpr) and index_val is not None:
+            components = list(target_expr.components)
+            if 0 <= index_val < len(components):
+                components[index_val] = GpuBinaryOp(
+                    "+", components[index_val], update_expr, "f32",
+                )
+            return GpuArrayExpr(components, target_expr.shape)
+        raise GPUScaffoldError(
+            f"{ctx.context}: HIRScatterAdd requires GpuArrayExpr target "
+            f"with compile-time constant index"
+        )
 
     raise GPUScaffoldError(
         f"{ctx.context}: unsupported HIR node {type(expr).__name__}"
@@ -814,6 +839,12 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
 
     array_name = expr.array.name
     slot = ctx.input_map.get(array_name)
+    if slot is None and array_name in ctx.let_env:
+        bound = ctx.let_env[array_name]
+        if hasattr(bound, 'expr') and isinstance(bound.expr, GpuInputLoad):
+            slot = bound.expr.descriptor_index
+        elif isinstance(bound, GpuInputLoad):
+            slot = bound.descriptor_index
     if slot is None and isinstance(expr.array.type, ArrayType):
         raise GPUScaffoldError(
             f"{ctx.context}: index on non-input array '{array_name}'"
