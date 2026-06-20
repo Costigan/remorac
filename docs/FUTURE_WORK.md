@@ -61,13 +61,24 @@ serial single-thread fallback is used.
 
 ## Parallel Sort and Grade
 
-**Current state**: `HIRSort` and `HIRGrade` use serial insertion sort
-(single-thread, O(N²)).  Correct for any size but impractical for
-arrays larger than a few hundred elements.
+**Current state**: `HIRSort` uses parallel bitonic sort in shared memory
+for N ≤ 1024 (single block, O(N log²N)).  For N > 1024, a multi-block
+bitonic sort is used: each block sorts its 1024 elements locally, then
+global compare-swap kernels merge across blocks via an ``ExecutionPlan``
+with double-buffered global memory steps.  Supports up to ~1M elements.
 
-**Upgrade path**: bitonic sort in shared memory for small arrays
-(N ≤ 1024), or a radix sort for larger arrays.  Both are well-known
-GPU algorithms with O(N log²N) or O(N·W) work.
+`HIRGrade` (argsort) uses parallel bitonic sort with a paired index
+array for N ≤ 1024.  For N > 1024, grade falls back to serial insertion
+sort (extending grade to multi-block requires tracking paired
+value+index arrays across global steps).
+
+**Remaining work**: multi-block grade.  Each global compare-swap kernel
+needs to read and write both a value buffer and an index buffer.  This
+requires either extending ``KernelStep`` to support multiple output
+refs, or packing value+index into a single ``i64`` (bitcast f32 to
+upper 32 bits, i32 index in lower 32 bits) so a single buffer suffices.
+The packed approach avoids infrastructure changes and halves memory
+traffic.  Without this, grade for N > 1024 remains O(N²).
 
 ## Parallel Scatter-Add
 

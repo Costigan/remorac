@@ -28,6 +28,7 @@ from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep, LoopPla
 from remora.hir import HIRFunction, HIRParam, HIRProgram
 from remora.hir import HIRArrayLit, HIRFold, HIRIota, HIRLit, HIRVar
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
+from remora.types import ArrayType
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
@@ -36,6 +37,8 @@ from remora.pipeline import (
 )
 from remora.gpu_lowering import (
     GPUScaffoldError,
+    build_descriptor_abi_bitonic_grade_gpu_module,
+    build_descriptor_abi_bitonic_sort_gpu_module,
     build_descriptor_abi_bool_map_gpu_module,
     build_descriptor_abi_cell_fold_dot_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
@@ -48,6 +51,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_im2col_gpu_module,
     build_descriptor_abi_indices_of_gpu_module,
     build_descriptor_abi_matmul_gpu_module,
+    build_descriptor_abi_multiblock_bitonic_sort_gpu_module,
     build_descriptor_abi_multiblock_f32_scan_gpu_module,
     build_descriptor_abi_parallel_filter_gpu_module,
     build_descriptor_abi_parallel_replicate_gpu_module,
@@ -152,7 +156,7 @@ def generate_mlir_descriptor_abi_ptx(
     from remora.hir import HIRIm2col
 
     if isinstance(function.body, HIRIm2col):
-        from remora.types import ArrayType
+        from remora.types import ArrayType as _AT_unused
 
         im2col = function.body
         kh, kw = im2col.kernel_shape
@@ -286,6 +290,81 @@ def generate_mlir_descriptor_abi_ptx(
     if isinstance(function.body, (HIRSort, HIRGrade)):
         try:
             if isinstance(function.body, HIRSort):
+                gpu_module = build_descriptor_abi_bitonic_sort_gpu_module(function, kernel_name=name)
+                out_dtype = "float32"
+            else:
+                gpu_module = build_descriptor_abi_bitonic_grade_gpu_module(function, kernel_name=name)
+                out_dtype = "int32"
+            sg_result = function.body.result_type
+            sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+            sg_N = sg_shape[0] if sg_shape else 1
+            sg_NP = 1
+            while sg_NP < sg_N:
+                sg_NP *= 2
+            meta = KernelMeta(
+                name=name, grid_dims=1, block_size=sg_NP, num_inputs=1, num_outputs=1,
+                input_elem_types=["f32"],
+                output_elem_types=["f32" if out_dtype == "float32" else "i32"],
+                output_shape=sg_shape, output_dtype=out_dtype, grid_size=1,
+            )
+            device_module = extract_gpu_module_body_as_module(gpu_module.text)
+            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+            return ptx, [meta], None
+        except GPUScaffoldError:
+            pass
+
+        if isinstance(function.body, HIRSort):
+            try:
+                gpu_module = build_descriptor_abi_multiblock_bitonic_sort_gpu_module(function, kernel_name=name)
+                sg_result = function.body.result_type
+                sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+                mb_N = sg_shape[0] if sg_shape else 1
+                mb_NP = 1
+                while mb_NP < mb_N:
+                    mb_NP *= 2
+                mb_BS = 1024
+                mb_nblocks = mb_NP // mb_BS
+                mb_local_stages = 10
+                mb_num_stages = mb_NP.bit_length() - 1
+                mb_local_name = f"{name}_local"
+                mb_all_kernels = [KernelMeta(
+                    name=mb_local_name, grid_dims=1, block_size=mb_BS, num_inputs=1, num_outputs=1,
+                    input_elem_types=["f32"], output_elem_types=["f32"],
+                    output_shape=(mb_NP,), output_dtype="float32", grid_size=mb_nblocks,
+                )]
+                mb_steps_list: list[KernelStep] = [KernelStep(mb_local_name, ["input_0"], "sorted_a")]
+                mb_step_idx = 0
+                for mb_k in range(mb_local_stages, mb_num_stages):
+                    for mb_j in range(mb_k, -1, -1):
+                        sn = f"{name}_gstep_{mb_step_idx}"
+                        mb_all_kernels.append(KernelMeta(
+                            name=sn, grid_dims=1, block_size=0, num_inputs=1, num_outputs=1,
+                            input_elem_types=["f32"], output_elem_types=["f32"],
+                            output_shape=(mb_NP,), output_dtype="float32",
+                        ))
+                        if mb_step_idx % 2 == 0:
+                            mb_steps_list.append(KernelStep(sn, ["sorted_a"], "sorted_b"))
+                        else:
+                            mb_steps_list.append(KernelStep(sn, ["sorted_b"], "sorted_a"))
+                        mb_step_idx += 1
+                mb_final = "sorted_b" if mb_step_idx % 2 == 1 else "sorted_a"
+                mb_plan = ExecutionPlan(
+                    buffers=[BufferSpec("sorted_a", (mb_NP,), "f32"), BufferSpec("sorted_b", (mb_NP,), "f32")],
+                    steps=mb_steps_list,
+                    final_output=mb_final,
+                    output_shape=sg_shape,
+                    output_dtype="f32",
+                )
+                device_module = extract_gpu_module_body_as_module(gpu_module.text)
+                llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+                ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+                return ptx, mb_all_kernels, mb_plan
+            except GPUScaffoldError:
+                pass
+
+        try:
+            if isinstance(function.body, HIRSort):
                 gpu_module = build_descriptor_abi_sort_gpu_module(function, kernel_name=name)
                 out_dtype = "float32"
             else:
@@ -294,15 +373,10 @@ def generate_mlir_descriptor_abi_ptx(
             sg_result = function.body.result_type
             sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
             meta = KernelMeta(
-                name=name,
-                grid_dims=1,
-                block_size=1,
-                num_inputs=1,
-                num_outputs=1,
+                name=name, grid_dims=1, block_size=1, num_inputs=1, num_outputs=1,
                 input_elem_types=["f32"],
                 output_elem_types=["f32" if out_dtype == "float32" else "i32"],
-                output_shape=sg_shape,
-                output_dtype=out_dtype,
+                output_shape=sg_shape, output_dtype=out_dtype,
             )
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
@@ -461,7 +535,7 @@ def generate_mlir_descriptor_abi_ptx(
     # ── try GPU cell-fold dot-product (convolution) ──
     try:
         from remora.gpu_lowering import _cell_fold_dot_kernel
-        from remora.types import ArrayType
+        from remora.types import ArrayType as _AT_unused
 
         _, (kh, kw), stride = _cell_fold_dot_kernel(function)
         param_type2 = function.params[0].type
@@ -528,7 +602,7 @@ def generate_mlir_descriptor_abi_ptx(
             from remora.gpu_lowering import (
                 build_descriptor_abi_general_map_gpu_module,
             )
-            from remora.types import ArrayType
+            from remora.types import ArrayType as _AT_unused
 
             gpu_module = build_descriptor_abi_general_map_gpu_module(
                 function, kernel_name=name,
@@ -751,9 +825,8 @@ def generate_mlir_descriptor_abi_ptx(
                         except GPUScaffoldError:
                             pass
                         try:
-                            from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2
-                            if not (isinstance(function.body, _HIRMap2)
-                                    and isinstance(function.body.func, _HIRLambda2)):
+                            from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2, HIRApply as _HIRApply2
+                            if not isinstance(function.body, (_HIRMap2, _HIRApply2)):
                                 raise CodegenUnavailable(
                                     "general GPU fallback requires a HIRMap with HIRLambda"
                                 )
