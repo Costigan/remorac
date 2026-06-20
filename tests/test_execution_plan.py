@@ -11,7 +11,6 @@ from remora.execution_plan import (
     LoopPlan,
 )
 
-
 class TestBufferSpec:
 
     def test_construction(self):
@@ -189,3 +188,48 @@ class TestExecutionPlan:
             output_dtype="f32",
         )
         plan.validate()
+
+
+class TestBufferSpecInit:
+
+    def test_init_default_none(self):
+        b = BufferSpec("x", (3,), "f32")
+        assert b.init is None
+
+    def test_init_with_values(self):
+        b = BufferSpec("x", (3,), "f32", init=(1.0, 2.0, 3.0))
+        assert b.init == (1.0, 2.0, 3.0)
+
+
+class TestStateFoldDetection:
+
+    def test_detects_fold_over_iota(self):
+        from remora.compiler import compile_source
+        from remora.codegen import try_compile_state_fold_gpu
+
+        source = open("examples/ad_optimize.lisp").read()
+        art = compile_source(source, syntax="lisp", include_prelude=False, verify=False)
+        result = try_compile_state_fold_gpu(art.hir)
+        if result is None:
+            pytest.skip("GPU toolchain not available for PTX compilation")
+        ptx, kernels, plan = result
+        assert isinstance(plan, ExecutionPlan)
+        assert len(plan.steps) == 1
+        step = plan.steps[0]
+        assert isinstance(step, LoopPlan)
+        assert step.count == 200
+        assert len(step.body) == 1
+        assert step.swap_pairs == [("params", "params_new")]
+        assert plan.output_shape == (3,)
+        assert plan.final_output == "params"
+        init_buf = [b for b in plan.buffers if b.name == "params"][0]
+        assert init_buf.init == (0.0, 0.0, 0.0)
+
+    def test_non_fold_returns_none(self):
+        from remora.compiler import compile_source
+        from remora.codegen import try_compile_state_fold_gpu
+
+        source = "iota 5"
+        art = compile_source(source, syntax="ml", include_prelude=True, verify=False)
+        result = try_compile_state_fold_gpu(art.hir)
+        assert result is None

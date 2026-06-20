@@ -24,8 +24,9 @@ from remora._gpu_map_support import (
     I32MapOperation,
 )
 from remora.errors import RemoraError
-from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep
-from remora.hir import HIRFunction
+from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep, LoopPlan
+from remora.hir import HIRFunction, HIRParam, HIRProgram
+from remora.hir import HIRArrayLit, HIRFold, HIRIota, HIRLit, HIRVar
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
 from remora.pipeline import (
     PipelineToolchain,
@@ -792,3 +793,133 @@ def _direct_i32_map_kernel(function: HIRFunction) -> I32MapKernel:
             "literal i32 section constant",
         )
         raise CodegenUnavailable(message) from exc
+
+
+def _hir_uses_var(node: Any, var_name: str) -> bool:
+    """Check if a variable name is referenced anywhere in an HIR expression."""
+    if isinstance(node, HIRVar):
+        return node.name == var_name
+    if isinstance(node, HIRLit):
+        return False
+    for attr in ("body", "func", "array", "init", "value", "callable"):
+        child = getattr(node, attr, None)
+        if child is not None and _hir_uses_var(child, var_name):
+            return True
+    for attr in ("args", "arrays", "elements"):
+        children = getattr(node, attr, None)
+        if children is not None:
+            for child in children:
+                if hasattr(child, "__dataclass_fields__") or isinstance(child, (HIRVar, HIRLit)):
+                    if _hir_uses_var(child, var_name):
+                        return True
+    return False
+
+
+def try_compile_state_fold_gpu(
+    program: HIRProgram,
+    *,
+    toolchain: PipelineToolchain | None = None,
+) -> tuple[str, list[KernelMeta], ExecutionPlan] | None:
+    """Try to compile a state-fold-over-iota as a GPU loop plan.
+
+    Detects the pattern::
+
+        fold body_fn init (iota N)
+
+    where ``body_fn(accumulator, step)`` does not use ``step`` and
+    produces a result with the same type as the accumulator.  The body
+    is compiled as a single GPU kernel, and a ``LoopPlan`` iterates
+    it N times with buffer swapping.
+
+    Returns ``(ptx, kernels, plan)`` on success, or ``None`` if the
+    pattern does not match.
+    """
+    from remora.types import ArrayType
+
+    if program.main is None or not isinstance(program.main, HIRFold):
+        return None
+
+    fold = program.main
+    if not isinstance(fold.array, HIRIota):
+        return None
+
+    if not isinstance(fold.func, HIRVar):
+        return None
+
+    func_name = fold.func.name
+    body_func = None
+    for f in program.functions:
+        if f.name == func_name:
+            body_func = f
+            break
+    if body_func is None:
+        return None
+
+    if len(body_func.params) != 2:
+        return None
+    acc_param = body_func.params[0]
+    step_param = body_func.params[1]
+
+    if not isinstance(acc_param.type, ArrayType):
+        return None
+    if acc_param.type.element.name != "float":
+        return None
+
+    if _hir_uses_var(body_func.body, step_param.name):
+        return None
+
+    result_type = fold.result_type
+    if not isinstance(result_type, ArrayType):
+        return None
+    shape = tuple(int(d.value) for d in result_type.shape)
+    if result_type.rank != 1:
+        return None
+
+    init_values: tuple[float, ...] | None = None
+    if isinstance(fold.init, HIRArrayLit):
+        try:
+            init_values = tuple(float(e.value) for e in fold.init.elements if isinstance(e, HIRLit))
+            if len(init_values) != len(fold.init.elements):
+                return None
+        except (ValueError, AttributeError):
+            return None
+    else:
+        return None
+
+    N = int(fold.array.size.value)
+
+    step_func = HIRFunction(
+        name="__gpu_fold_step",
+        params=[acc_param],
+        body=body_func.body,
+        return_type=result_type,
+    )
+
+    try:
+        kernel_name = "fold_step"
+        ptx, kernels, _plan = generate_mlir_descriptor_abi_ptx(
+            step_func,
+            kernel_name=kernel_name,
+            toolchain=toolchain,
+        )
+    except (GPUScaffoldError, CodegenUnavailable):
+        return None
+
+    plan = ExecutionPlan(
+        buffers=[
+            BufferSpec("params", shape, "f32", init=init_values),
+            BufferSpec("params_new", shape, "f32"),
+        ],
+        steps=[
+            LoopPlan(
+                count=N,
+                body=[KernelStep(kernel_name, ["params"], "params_new")],
+                swap_pairs=[("params", "params_new")],
+            ),
+        ],
+        final_output="params",
+        output_shape=shape,
+        output_dtype="f32",
+    )
+
+    return ptx, kernels, plan

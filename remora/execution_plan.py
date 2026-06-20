@@ -27,11 +27,15 @@ class BufferSpec:
         Static shape of the buffer.
     dtype : str
         Element type: ``"f32"``, ``"i32"``, or ``"i1"``.
+    init : tuple[float, ...] | None
+        If provided, the buffer is pre-populated with these values
+        (via host-to-device copy) instead of being zero-initialized.
     """
 
     name: str
     shape: tuple[int, ...]
     dtype: str
+    init: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)

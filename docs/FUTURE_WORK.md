@@ -23,55 +23,20 @@ serial single-thread fallbacks are used.
 
 ## Host-Orchestrated Optimization Loops (GPU+CPU)
 
-**Current state**: `examples/ad_optimize.lisp` runs a 200-step gradient
-descent loop in pure Remora using `fold` with `(grad loss)`.  This works
-on the interpreter and compiled CPU (via the state-fold `scf.for` lowering
-with scalar decomposition).  On GPU, the fold loop has no lowering path —
-the GPU backend only handles individual map/reduce/scan kernels, not
-sequential state-carrying loops.
+**Current state**: `examples/ad_optimize.lisp` compiles to a GPU
+``LoopPlan`` via ``try_compile_state_fold_gpu`` in ``codegen.py``.
+The pattern detector recognises ``fold body init (iota N)`` where the
+body function does not use the step variable, compiles the body as a
+single GPU map kernel via ``generate_mlir_descriptor_abi_ptx``, and
+emits a ``LoopPlan`` with N iterations and double-buffer swapping.
+``execute_program_on_gpu`` tries this path first; if the pattern does
+not match or the GPU toolchain is unavailable, it falls back to the
+standard IREE pipeline.
 
-**Right architecture**: host-orchestrated heterogeneous execution, matching
-what PyTorch does.  The optimization loop runs on the **CPU host**.  Each
-iteration launches **GPU kernels** for the gradient computation and
-parameter update:
-
-```
-for step in range(N):                  # CPU loop
-    grad = gpu_kernel(grad_fn, params) # GPU: parallel gradient
-    params = params - lr * grad        # GPU or CPU: element-wise update
-```
-
-The parallelism is *within* each step (the gradient computation), not
-*across* steps (which are inherently sequential).
-
-**Implementation plan**:
-
-1. Compile the gradient function (`(grad loss)`) as a standalone GPU
-   kernel via the existing dispatch chain.
-2. Compile the parameter update (element-wise scale + subtract) as a
-   second GPU kernel.
-3. Add a **loop execution plan** to `RemoraExecutor`: a sequence of
-   kernel launches with CPU-side loop control and small tensor transfers
-   between steps.
-4. The fold lowering detects state folds whose bodies contain
-   GPU-compilable operations and emits a loop plan instead of a single
-   kernel.
-
-**Blocked on**: the same `RemoraExecutor` multi-kernel orchestration
-needed for parallel filter/replicate.  The executor needs to support
-launching multiple kernels per function call, with CPU-side control flow
-between them.
-
-**Status**: The ``ExecutionPlan`` infrastructure is now implemented with
-``LoopPlan`` support for host-side iteration and buffer swapping.  The
-next step is to compile the gradient function and parameter update as
-separate GPU kernels, then emit a ``LoopPlan``-based
-``ExecutionPlan`` from the state-fold lowering path.
-
-**Example**: `examples/ad_optimize.lisp` — gradient descent on a
-polynomial curve-fitting loss.  Currently produces
-`[0.512337, 0.433115, 0.911621]` on interpreter and compiled CPU.
-GPU execution would launch the gradient kernel 200 times from a CPU loop.
+The fold body's init values are pre-loaded to the device via
+``BufferSpec.init``.  On a CUDA-capable system, running
+``remorac --syntax lisp --target gpu examples/ad_optimize.lisp``
+executes the 200-step gradient descent on GPU.
 
 ## Tiled Shared-Memory Matmul
 

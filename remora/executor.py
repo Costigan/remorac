@@ -214,7 +214,11 @@ class RemoraExecutor:
                 n_elements = max(1, int(np.prod(buf_spec.shape, dtype=np.int64)))
                 nbytes = n_elements * dtype.itemsize
                 ptr = self._rt.alloc(nbytes)
-                self._rt.memset_d32(ptr, 0, max(1, nbytes // 4))
+                if buf_spec.init is not None:
+                    init_array = np.array(buf_spec.init, dtype=dtype)
+                    self._rt.copy_host_to_device(init_array, ptr)
+                else:
+                    self._rt.memset_d32(ptr, 0, max(1, nbytes // 4))
                 registry[buf_spec.name] = _DeviceBuffer(
                     ptr, buf_spec.shape, dtype,
                 )
@@ -358,10 +362,30 @@ def execute_program_on_gpu(
     include_prelude: bool = True,
     syntax: str = "ml",
 ) -> np.ndarray:
-    """Compile a Remora body program to GPU PTX and execute it."""
-    from remora.compiler import compile_source_to_ptx
+    """Compile a Remora body program to GPU PTX and execute it.
 
-    artifact = compile_source_to_ptx(source, include_prelude=include_prelude, syntax=syntax)
+    Tries a host-orchestrated loop plan for state-fold-over-iota
+    programs (e.g. gradient descent).  Falls back to the standard
+    IREE PTX pipeline for everything else.
+    """
+    from remora.compiler import compile_source, compile_source_to_ptx
+    from remora.codegen import try_compile_state_fold_gpu
+
+    art = compile_source(
+        source, include_prelude=include_prelude, syntax=syntax, verify=False,
+    )
+    fold_result = try_compile_state_fold_gpu(art.hir)
+    if fold_result is not None:
+        ptx, kernels, plan = fold_result
+        executor = RemoraExecutor(ptx, kernels)
+        try:
+            return executor.execute_plan(plan, [])
+        finally:
+            executor.close()
+
+    artifact = compile_source_to_ptx(
+        source, include_prelude=include_prelude, syntax=syntax,
+    )
     return execute_program_from_ptx(artifact)
 
 
