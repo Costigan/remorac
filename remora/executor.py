@@ -26,6 +26,39 @@ class _DeviceBuffer:
     dtype: np.dtype
 
 
+@dataclass
+class DeviceArray:
+    """A device-resident array bound to a RemoraExecutor.
+
+    Holds a device pointer plus shape/dtype/nbytes so kernels can be
+    chained on the GPU without round-tripping through host memory.
+    Allocations come from the executor's memory pool.
+    """
+    executor: "RemoraExecutor"
+    ptr: int
+    shape: tuple[int, ...]
+    dtype: np.dtype
+    nbytes: int
+    _freed: bool = False
+
+    def to_numpy(self) -> np.ndarray:
+        """Copy this device array back to host (D->H)."""
+        return self.executor.download(self.ptr, self.shape, self.dtype)
+
+    @classmethod
+    def from_numpy(cls, executor: "RemoraExecutor", array: np.ndarray) -> "DeviceArray":
+        """Upload a host array to the device (H->D)."""
+        arr = np.ascontiguousarray(array)
+        ptr = executor.alloc_and_upload(arr)
+        return cls(executor, ptr, tuple(arr.shape), arr.dtype, int(arr.nbytes))
+
+    def free(self) -> None:
+        """Return this array's device buffer to the pool."""
+        if not self._freed:
+            self.executor.free_device(self.ptr, self.nbytes)
+            self._freed = True
+
+
 def _contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
     """Compute C-contiguous element strides for a given shape."""
     if not shape:
@@ -75,10 +108,27 @@ class RemoraExecutor:
             for kernel in kernels
         }
         self._pool: dict[int, list[int]] = {}
+        self._pool_enabled = True
+
+    def set_pool_enabled(self, enabled: bool) -> None:
+        """Enable or disable the device memory pool.
+
+        When disabled, `_pool_alloc`/`_pool_free` route directly to the
+        runtime's `alloc`/`free`.  Disabling drains any pooled buffers so
+        the next allocations come straight from the driver.
+        """
+        if not enabled:
+            for ptrs in self._pool.values():
+                for ptr in ptrs:
+                    self._rt.free(ptr)
+            self._pool.clear()
+        self._pool_enabled = enabled
 
     def _pool_alloc(self, nbytes: int) -> int:
         """Allocate device memory, reusing a pooled buffer if available."""
         nbytes = max(4, nbytes)
+        if not self._pool_enabled:
+            return self._rt.alloc(nbytes)
         cached = self._pool.get(nbytes)
         if cached:
             return cached.pop()
@@ -87,6 +137,9 @@ class RemoraExecutor:
     def _pool_free(self, ptr: int, nbytes: int) -> None:
         """Return device memory to the pool for reuse."""
         nbytes = max(4, nbytes)
+        if not self._pool_enabled:
+            self._rt.free(ptr)
+            return
         self._pool.setdefault(nbytes, []).append(ptr)
 
     def add_module(self, ptx: str, kernels: list[KernelMeta]) -> None:
@@ -195,6 +248,132 @@ class RemoraExecutor:
                 self._pool_free(output_ptr, output_nbytes)
 
         return output
+
+    def alloc_and_upload(self, array: np.ndarray) -> int:
+        """Allocate device memory and upload an array; return the device pointer."""
+        arr = np.ascontiguousarray(array)
+        ptr = self._pool_alloc(arr.nbytes)
+        self._rt.copy_host_to_device(arr, ptr)
+        return ptr
+
+    def download(self, device_ptr: int, shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
+        """Copy device memory to a host numpy array."""
+        out = np.empty(shape, dtype=dtype)
+        self._rt.synchronize()
+        self._rt.copy_device_to_host(device_ptr, out)
+        return out
+
+    def free_device(self, ptr: int, nbytes: int) -> None:
+        """Release a device allocation managed outside execute()."""
+        self._pool_free(ptr, nbytes)
+
+    def execute_device(
+        self,
+        kernel_name: str,
+        device_inputs: list[int],
+        input_templates: list[np.ndarray],
+        *,
+        output_ptr: int | None = None,
+    ) -> int:
+        """Launch a kernel on device-resident data; return the output device ptr.
+
+        *device_inputs* are raw device pointers previously uploaded via
+        ``alloc_and_upload``.  *input_templates* are the corresponding
+        host arrays (used only for shape/dtype/strides, NOT uploaded).
+
+        Returns the output device pointer (allocated internally if
+        *output_ptr* is None, otherwise reused).  Does not free inputs
+        or the output — the caller owns all allocations.
+        """
+        meta = self._meta[kernel_name]
+        kernel = self._kernels[kernel_name]
+        if meta.num_outputs != 1:
+            raise RemoraExecutorError("execute_device supports single-output kernels only")
+        if len(device_inputs) != len(input_templates):
+            raise RemoraExecutorError(
+                f"mismatched device_inputs ({len(device_inputs)}) "
+                f"and templates ({len(input_templates)})"
+            )
+
+        input_kinds = meta.input_kinds or ["array"] * meta.num_inputs
+        if len(input_kinds) != len(device_inputs):
+            raise RemoraExecutorError(
+                f"kernel {kernel_name} reports {len(input_kinds)} input kinds "
+                f"for {len(device_inputs)} inputs"
+            )
+        host_inputs = [np.asarray(t) for t in input_templates]
+        scalar_values: list[Any] = []
+        array_indices: list[int] = []
+        for idx, kind in enumerate(input_kinds):
+            if kind == "array":
+                array_indices.append(idx)
+            elif kind == "scalar":
+                scalar_values.append(host_inputs[idx].item())
+            else:
+                raise RemoraExecutorError(f"unsupported input kind {kind!r}")
+        array_hosts = [host_inputs[i] for i in array_indices]
+        array_devices = [device_inputs[i] for i in array_indices]
+
+        output_shape = compute_output_shape(meta, array_hosts)
+        output_dtype = kernel_output_dtype(meta, array_hosts)
+        out_nbytes = max(1, int(np.prod(output_shape, dtype=np.int64))) * output_dtype.itemsize
+
+        own_output = output_ptr is None
+        if own_output:
+            output_ptr = self._pool_alloc(out_nbytes)
+        if meta.is_reduction:
+            self._rt.memset_d32(output_ptr, 0, max(1, out_nbytes // 4))
+
+        input_descs = [
+            make_memref_descriptor(ptr, arr.shape, element_strides(arr), arr.dtype)
+            for ptr, arr in zip(array_devices, array_hosts)
+        ]
+        tmp_out = np.empty(output_shape, dtype=output_dtype)
+        output_desc = make_memref_descriptor(
+            output_ptr, output_shape, element_strides(tmp_out), output_dtype,
+        )
+
+        block_size = int(meta.block_size or 256)
+        if meta.grid_size is not None:
+            grid_size = meta.grid_size
+        elif meta.is_reduction and host_inputs:
+            input_count = int(np.prod(array_hosts[0].shape, dtype=np.int64))
+            grid_size = int((input_count + block_size - 1) // block_size)
+        else:
+            element_count = max(1, int(np.prod(output_shape, dtype=np.int64)))
+            grid_size = int((element_count + block_size - 1) // block_size)
+
+        kernel.launch(
+            (grid_size, 1, 1),
+            (block_size, 1, 1),
+            [*input_descs, *scalar_values, output_desc],
+        )
+        self._rt.synchronize()
+        return output_ptr
+
+    def execute_to_device(
+        self,
+        kernel_name: str,
+        device_inputs: list[DeviceArray],
+    ) -> DeviceArray:
+        """Launch a kernel on device-resident ``DeviceArray`` inputs and
+        return the result as a new device-resident ``DeviceArray`` (no
+        host-device transfer)."""
+        meta = self._meta[kernel_name]
+        templates = [np.empty(da.shape, da.dtype) for da in device_inputs]
+        input_kinds = meta.input_kinds or ["array"] * meta.num_inputs
+        array_hosts = [t for t, k in zip(templates, input_kinds) if k == "array"]
+        output_shape = compute_output_shape(meta, array_hosts)
+        output_dtype = kernel_output_dtype(meta, array_hosts)
+        out_nbytes = max(1, int(np.prod(output_shape, dtype=np.int64))) * output_dtype.itemsize
+        out_ptr = self._pool_alloc(out_nbytes)
+        self.execute_device(
+            kernel_name,
+            [da.ptr for da in device_inputs],
+            templates,
+            output_ptr=out_ptr,
+        )
+        return DeviceArray(self, out_ptr, tuple(output_shape), output_dtype, out_nbytes)
 
     def execute_plan(
         self,

@@ -576,6 +576,10 @@ def _rewrite_children(
         return HIRCol2im(
             rewrite(node.columns, local_names), node.image_shape, node.kernel_shape, node.stride, node.result_type  # type: ignore[arg-type]
         )
+    if isinstance(node, HIRMatmul):
+        return HIRMatmul(
+            rewrite(node.left, local_names), rewrite(node.right, local_names), node.result_type  # type: ignore[arg-type]
+        )
     if isinstance(node, HIRAppend):
         return HIRAppend(
             rewrite(node.left, local_names), rewrite(node.right, local_names), node.result_type  # type: ignore[arg-type]
@@ -879,6 +883,8 @@ def _rewrite_children_hir(node, rewrite_fn):
             return HIRIm2col(rewrite_fn(node.image), node.kernel_shape, node.stride, node.result_type)  # type: ignore[arg-type]
         else:
             return HIRCol2im(rewrite_fn(node.columns), node.image_shape, node.kernel_shape, node.stride, node.result_type)  # type: ignore[arg-type]
+    if isinstance(node, HIRMatmul):
+        return HIRMatmul(rewrite_fn(node.left), rewrite_fn(node.right), node.result_type)
     if isinstance(node, HIRAppend):
         return HIRAppend(rewrite_fn(node.left), rewrite_fn(node.right), node.result_type)
     if isinstance(node, HIRPair):

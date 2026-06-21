@@ -7,7 +7,7 @@ from remora.compiler import (
     compile_function_source_to_mlir_gpu_ptx,
     compile_function_source_to_rank1_mlir_gpu_ptx,
 )
-from remora.executor import RemoraExecutor, RemoraExecutorError, compute_output_shape, kernel_output_dtype
+from remora.executor import DeviceArray, RemoraExecutor, RemoraExecutorError, compute_output_shape, kernel_output_dtype
 from remora.runtime import CUDARuntime, RuntimeUnavailable
 from remora.types import FLOAT, INT, ArrayType, RemoraTypeError, StaticDim
 from conftest import gpu_required_or_skip
@@ -947,3 +947,42 @@ def test_remora_executor_runs_heat_step_gpu_ptx_round_trip_when_available():
             ref[idx] = c + a * (u + d + lv + rv - 4*c)
             idx += 1
     np.testing.assert_allclose(result.ravel(), ref, rtol=1e-4, atol=1e-5)
+
+
+def test_device_array_round_trip_and_iteration_when_available():
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    n = 4096
+    try:
+        ptx, kernels, _artifact = compile_function_source_to_mlir_gpu_ptx(
+            "def f xs = map (+ 1.0) xs", "f",
+            (ArrayType(FLOAT, (StaticDim(n),)),),
+            include_prelude=False, kernel_name="step",
+        )
+        xs = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        try:
+            # Single device-resident step round-trips correctly.
+            src = DeviceArray.from_numpy(executor, xs)
+            out = executor.execute_to_device("step", [src])
+            np.testing.assert_allclose(out.to_numpy(), xs + 1.0, rtol=1e-5)
+            src.free()
+            out.free()
+
+            # Multi-step iteration stays on device; result is xs + steps.
+            steps = 10
+            cur = DeviceArray.from_numpy(executor, xs)
+            for _ in range(steps):
+                nxt = executor.execute_to_device("step", [cur])
+                cur.free()
+                cur = nxt
+            np.testing.assert_allclose(cur.to_numpy(), xs + steps, rtol=1e-4)
+            cur.free()
+        finally:
+            executor.close()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()

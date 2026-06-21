@@ -116,8 +116,66 @@ static void _remora_sort_i32_impl(int32_t* data, int64_t n) {
     qsort(data, (size_t)n, sizeof(int32_t), _cmp_i32_asc);
 }
 
+/* LSD radix sort for f32 (ascending).  Maps each float to a monotonic
+   uint32 key (flip sign bit for positives, flip all bits for negatives),
+   performs a 4-pass 8-bit radix sort, then maps the keys back to floats.
+   Falls back to qsort for tiny inputs where setup overhead dominates. */
+static inline uint32_t _f32_to_key(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+static inline float _key_to_f32(uint32_t k) {
+    uint32_t u = (k & 0x80000000u) ? (k & 0x7fffffffu) : ~k;
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static void _remora_radix_sort_f32(float* data, int64_t n) {
+    if (n < 64) {
+        qsort(data, (size_t)n, sizeof(float), _cmp_f32_asc);
+        return;
+    }
+    uint32_t* src = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+    uint32_t* tmp = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+    if (!src || !tmp) {
+        free(src);
+        free(tmp);
+        qsort(data, (size_t)n, sizeof(float), _cmp_f32_asc);
+        return;
+    }
+    for (int64_t i = 0; i < n; i++) src[i] = _f32_to_key(data[i]);
+
+    for (int shift = 0; shift < 32; shift += 8) {
+        int64_t count[256];
+        memset(count, 0, sizeof(count));
+        for (int64_t i = 0; i < n; i++) {
+            count[(src[i] >> shift) & 0xff]++;
+        }
+        int64_t total = 0;
+        for (int b = 0; b < 256; b++) {
+            int64_t c = count[b];
+            count[b] = total;
+            total += c;
+        }
+        for (int64_t i = 0; i < n; i++) {
+            uint32_t key = src[i];
+            tmp[count[(key >> shift) & 0xff]++] = key;
+        }
+        uint32_t* swap = src;
+        src = tmp;
+        tmp = swap;
+    }
+
+    for (int64_t i = 0; i < n; i++) data[i] = _key_to_f32(src[i]);
+    free(src);
+    free(tmp);
+}
+
 static void _remora_sort_f32_impl(float* data, int64_t n) {
-    qsort(data, (size_t)n, sizeof(float), _cmp_f32_asc);
+    _remora_radix_sort_f32(data, n);
 }
 
 void remora_sort_i32(
@@ -131,7 +189,7 @@ void remora_sort_f32(
     float* allocated, float* aligned, int64_t offset, int64_t size, int64_t stride
 ) {
     (void)allocated; (void)stride;
-    qsort(_mr_data(aligned, offset), (size_t)size, sizeof(float), _cmp_f32_asc);
+    _remora_radix_sort_f32((float*)_mr_data(aligned, offset), size);
 }
 
 /* ── Grade (argsort) ────────────────────────────────────────────────────── */
@@ -363,6 +421,97 @@ int64_t remora_replicate_f32(
         }
     }
     return out_n;
+}
+
+/* ── Matrix multiply (f32) ──────────────────────────────────────────────── */
+/* LLVM ABI flattens each rank-2 memref<MxNxf32> to:
+     (allocated, aligned, offset, size0, size1, stride0, stride1)
+   Computes C = A * B with A: MxK, B: KxN, C: MxN (row-major). */
+
+#ifdef REMORA_HAVE_BLAS
+enum REMORA_CBLAS_ORDER { RemoraCblasRowMajor = 101 };
+enum REMORA_CBLAS_TRANSPOSE { RemoraCblasNoTrans = 111 };
+extern void cblas_sgemm(
+    int order, int transa, int transb,
+    int m, int n, int k,
+    float alpha, const float* a, int lda,
+    const float* b, int ldb,
+    float beta, float* c, int ldc);
+#endif
+
+static void _remora_matmul_f32_fallback(
+    const float* a, int64_t lda,
+    const float* b, int64_t ldb,
+    float* c, int64_t ldc,
+    int64_t M, int64_t K, int64_t N
+) {
+    const int64_t BN = 256;
+    const int64_t BK = 128;
+    for (int64_t i = 0; i < M; i++) {
+        float* crow = c + i * ldc;
+        for (int64_t j = 0; j < N; j++) crow[j] = 0.0f;
+    }
+    for (int64_t jj = 0; jj < N; jj += BN) {
+        int64_t jmax = jj + BN < N ? jj + BN : N;
+        for (int64_t pp = 0; pp < K; pp += BK) {
+            int64_t pmax = pp + BK < K ? pp + BK : K;
+            int64_t i = 0;
+            for (; i + 4 <= M; i += 4) {
+                float* restrict c0 = c + (i + 0) * ldc;
+                float* restrict c1 = c + (i + 1) * ldc;
+                float* restrict c2 = c + (i + 2) * ldc;
+                float* restrict c3 = c + (i + 3) * ldc;
+                const float* restrict a0 = a + (i + 0) * lda;
+                const float* restrict a1 = a + (i + 1) * lda;
+                const float* restrict a2 = a + (i + 2) * lda;
+                const float* restrict a3 = a + (i + 3) * lda;
+                for (int64_t p = pp; p < pmax; p++) {
+                    float v0 = a0[p], v1 = a1[p], v2 = a2[p], v3 = a3[p];
+                    const float* restrict brow = b + p * ldb;
+                    for (int64_t j = jj; j < jmax; j++) {
+                        float bv = brow[j];
+                        c0[j] += v0 * bv;
+                        c1[j] += v1 * bv;
+                        c2[j] += v2 * bv;
+                        c3[j] += v3 * bv;
+                    }
+                }
+            }
+            for (; i < M; i++) {
+                float* restrict crow = c + i * ldc;
+                const float* restrict arow = a + i * lda;
+                for (int64_t p = pp; p < pmax; p++) {
+                    float aval = arow[p];
+                    const float* restrict brow = b + p * ldb;
+                    for (int64_t j = jj; j < jmax; j++) {
+                        crow[j] += aval * brow[j];
+                    }
+                }
+            }
+        }
+    }
+}
+
+void remora_matmul_f32(
+    float* a_alloc, float* a_align, int64_t a_off, int64_t a_s0, int64_t a_s1, int64_t a_st0, int64_t a_st1,
+    float* b_alloc, float* b_align, int64_t b_off, int64_t b_s0, int64_t b_s1, int64_t b_st0, int64_t b_st1,
+    float* c_alloc, float* c_align, int64_t c_off, int64_t c_s0, int64_t c_s1, int64_t c_st0, int64_t c_st1
+) {
+    (void)a_alloc; (void)a_st1; (void)b_alloc; (void)b_s0; (void)b_st1;
+    (void)c_alloc; (void)c_s0; (void)c_s1; (void)c_st1;
+    float* a = (float*)_mr_data(a_align, a_off);
+    float* b = (float*)_mr_data(b_align, b_off);
+    float* c = (float*)_mr_data(c_align, c_off);
+    int64_t M = a_s0, K = a_s1, N = b_s1;
+    int64_t lda = a_st0, ldb = b_st0, ldc = c_st0;
+#ifdef REMORA_HAVE_BLAS
+    cblas_sgemm(
+        RemoraCblasRowMajor, RemoraCblasNoTrans, RemoraCblasNoTrans,
+        (int)M, (int)N, (int)K,
+        1.0f, a, (int)lda, b, (int)ldb, 0.0f, c, (int)ldc);
+#else
+    _remora_matmul_f32_fallback(a, lda, b, ldb, c, ldc, M, K, N);
+#endif
 }
 
 /* ── Per-row aliases for rank > 1 lowering ─────────────────────────────── */

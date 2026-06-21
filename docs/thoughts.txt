@@ -1,0 +1,120 @@
+Are these benchmarks representative of real applications?
+Can the benchmarks be improved.
+How do you think remora is doing in these benchmarks?
+Can remora be improved?
+
+These are good questions. Let me address each.
+
+Are the benchmarks representative?
+
+Partially. They measure isolated operations, which is useful for
+compiler micro-benchmarking but misses what matters in real
+applications:
+
+- Missing operation chaining. Real programs chain operations (map → fold →
+  map). The stencil benchmark (im2col + fold-dot) is the only one that chains,
+  and it's where Remora shows its best result (2.5x over NumPy). A gradient
+  descent benchmark that chains many operations per iteration would be more
+  realistic.
+
+- GPU transfer overhead is overstated. Every call does alloc → copy H→D →
+  launch → copy D→H. Real GPU workloads keep data on-device between calls. The
+  benchmarks penalize Remora GPU for transfer overhead that wouldn't exist in
+  a device-resident workflow.
+
+- Sizes are small for GPU. Real GPU workloads operate on millions to billions
+  of elements. The benchmarks test up to 1M for most operations, which is
+  where GPU is just starting to amortize launch overhead.
+
+- No AD or iterative benchmarks. The ad_optimize.lisp gradient descent example
+  is exactly the kind of workload that would show whether the full compilation
+  pipeline (AD → CSE → state fold → GPU loop plan) is competitive.
+
+How can the benchmarks be improved?
+
+1. Add end-to-end application benchmarks: gradient descent convergence loop,
+   convolution pipeline, N-body step.
+
+2. Device-resident GPU benchmarks: pre-allocate data on GPU, measure only
+   kernel execution — shows pure compute without transfer noise.
+
+3. Larger sizes: extend to 10M+ for GPU operations.
+
+4. Fusion benchmarks: map (*2) (map (+1) xs) — test whether the compiler fuses
+   into a single pass.
+
+5. Futhark: would provide the most relevant comparison since Futhark is also a
+   rank-polymorphic array language with an MLIR-class compiler.
+
+6. Memory pool impact: benchmark with and without the pool to quantify
+   allocation savings.
+
+How is Remora doing?
+
+Good signs:
+
+- Stencil CPU beats NumPy 2.5x — the strongest result. MLIR loop fusion of
+  im2col + fold-dot produces better code than NumPy's strided views. This
+  validates that rank-polymorphic compilation can produce competitive code.
+
+- Scan CPU beats NumPy 1.5x at 100K — the scf.for scalar loop outperforms NumPy's cumsum.
+
+- GPU fold scales to 4G at 1M elements — half of NumPy's 8.9G, respectable for a research compiler.
+
+- GPU stencil reaches 1.07G — 45x faster than NumPy.
+
+Weak spots:
+
+- Matmul CPU is unusable — linalg.matmul lowers to naive nested loops (1.1M
+  elem/s at 512x512). NumPy calls BLAS (87M+), JAX calls cuBLAS (3.1G). This
+  is a 744x gap to Remora GPU on the same machine.
+
+- Sort is weak everywhere — CPU sort (11M at 1M) pays 30x copy overhead vs
+  NumPy (329M). GPU bitonic sort (68M) is 62x slower than JAX's radix sort
+  (4.2G).
+
+- GPU launch overhead — 40-60us per call makes GPU uncompetitive below ~50K
+  elements. JAX's XLA dispatch achieves ~20us.
+
+- No fusion — three separate remora.define() kernels in the Mandelbrot example
+  each pay full transfer cost.
+
+Context matters: Remora is a research compiler competing against NumPy
+(decades of BLAS/LAPACK tuning) and JAX (a Google-funded team with
+cuBLAS/CUB/cuDNN integration). Beating NumPy on stencil and scan with a
+generic rank-polymorphic compiler is a meaningful result.
+
+How can Remora be improved?
+
+Ordered by impact-to-effort ratio:
+
+1. CPU matmul — call BLAS. The MLIR linalg.matmul op can lower through
+   linalg-to-blas instead of linalg-to-loops. Alternatively, detect HIRMatmul
+   at the CPU lowering level and emit a direct cblas_sgemm call. This would
+   close the 744x gap overnight.
+
+2. GPU sort — radix sort. Replace bitonic (O(N log²N)) with radix sort
+   (O(N)). CUB's DeviceRadixSort does this in ~100us for 1M elements. Even a
+   hand-written 4-pass radix sort would close most of the 62x gap.
+
+3. Kernel fusion. When multiple element-wise maps are applied to the same
+   array, fuse them into a single kernel. This eliminates intermediate buffers
+   and transfer overhead. The stencil benchmark already shows that fusion
+   (im2col + fold-dot) is Remora's key advantage.
+
+4. GPU scan — multi-block. The infrastructure exists (multi_block_scan in the
+   sort/filter code). Wire it into the function-compilation path to support n
+   > 1024.
+
+5. Reduce launch overhead. The memory pool helps, but persistent
+   device-resident arrays would eliminate transfer overhead
+   entirely. RemoraFunction could accept device pointers and skip H→D/D→H
+   copies.
+
+6. CPU sort — in-place. The current path copies tensor → memref → sort →
+   tensor. If the bufferization pass can allocate the sort buffer directly
+   (skip the copy), performance would match NumPy's qsort.
+
+7. CPU vectorization. The MLIR linalg-to-loops lowering doesn't enable AVX/SSE
+   vectorization. Adding --vector-width=8 or tiling passes to the CPU pipeline
+   would improve map/fold/scan throughput.

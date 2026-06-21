@@ -586,6 +586,20 @@ def build_descriptor_abi_f32_scan_gpu_module(
     import math
     max_d = math.ceil(math.log2(N)) if N > 1 else 0
 
+    # Route the common inclusive left-to-right add scan through the
+    # multi-block plan (build_descriptor_abi_multiblock_f32_scan_gpu_module)
+    # when it can handle the size.  Other modes (exclusive/right/mul) and
+    # sizes beyond the multi-block limit fall back to the serial path below.
+    _NB = (N + 1024 - 1) // 1024
+    if (
+        N > 1024
+        and scan_op == "+"
+        and not is_exclusive
+        and not is_right
+        and _NB <= 1024
+    ):
+        raise GPUScaffoldError("Use multi-block scan for N > 1024")
+
     rank = 1
     desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))

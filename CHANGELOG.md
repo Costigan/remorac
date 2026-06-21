@@ -3,6 +3,80 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Benchmark Improvement Plan (Phases 1–3)
+
+Work driven by `docs/BENCHMARK_IMPROVEMENT_PLAN.md`.  New numbers in
+`benchmarks/results/REPORT.md` (RTX 5090 Laptop GPU).
+
+### CPU matmul — tiled C kernel (Phase 1.1)
+- Replaced the naive `linalg.matmul`→loops path with a C runtime call
+  `remora_matmul_f32` (`remora/remora_rt.c`): a register-tiled (4 rows
+  of C per A load), cache-blocked SGEMM compiled `-O3 -march=native`.
+  Calls `cblas_sgemm` when an optimized BLAS (OpenBLAS/BLIS) is found;
+  the reference Netlib BLAS is intentionally skipped (no faster than
+  the tiled C kernel).
+- `_lower_matmul_tensor_input` (`lowering/tensor_ops.py`) emits the
+  tensor→memref copies + `func.call @remora_matmul_f32` for rank-2 f32;
+  `_lower_function_descriptor_module` (`lowering/module.py`) auto-detects
+  the extern.  `runtime.py` adds `_find_optimized_blas`, `-march=native`,
+  and conditional `-DREMORA_HAVE_BLAS`/`-lopenblas` link.
+- 512×512: 248ms → 7.00ms (~34x; 1.1M → 37.4M elem/s; >50M up to 256).
+
+### CPU sort — LSD radix sort (Phase 1.2)
+- `remora_sort_f32` is now a 4-pass 8-bit LSD radix sort over a
+  monotonic uint32 key mapping (sign-bit/negative flip), replacing
+  `qsort`.  Profiling showed `qsort`'s indirect comparator — not the
+  tensor→memref copy (~0.01ms for 100K) — was the bottleneck.
+- 100K: 13.5M → 167.8M elem/s (~12.6x); 1M: 11.2M → 143.0M.
+
+### GPU scan — multi-block enabled (Phase 1.3)
+- The single-block scan builder (`build_descriptor_abi_f32_scan_gpu_module`)
+  now raises `GPUScaffoldError` for inclusive left-to-right add scans
+  with 1024 < N ≤ 1024², routing them to the existing four-kernel
+  multi-block `ExecutionPlan` (previously dead code masked by a serial
+  fallback).  Exclusive/right/mul/oversized scans keep the serial path.
+- `bench_scan_remora_gpu` now compiles to HIR then calls
+  `generate_mlir_descriptor_abi_ptx` directly, using `execute_plan`.
+- GPU scan now works for n > 1024: 1M reaches 1.50G elem/s.
+
+### Benchmark CLI: larger sizes, pool toggle (Phases 1.4–1.5)
+- `DEFAULT_SIZES` gains 10M; `MATMUL_SIZES`/`STENCIL_SIZES` gain 1024.
+- `RemoraExecutor.set_pool_enabled(bool)` + `remora-perf --no-pool`
+  bypass the device memory pool; measured ~53us/call allocator saving.
+
+### Benchmark coverage (Phase 2)
+- **Application benchmarks**: `grad_descent` (numpy/jax/remora-cpu/gpu;
+  all converge to `[0.512337, 0.433115, 0.911621]`), `conv_pipeline`
+  (conv→relu→sum-pool; numpy/jax/remora-cpu match within 5e-7),
+  `nbody` (all-pairs gravity; numpy/jax/remora-cpu match within 1e-3).
+- **Fusion benchmarks**: composed vs hand-fused op-chains (`mapchain`,
+  `triple`, `dot`); map_chain fuses perfectly, the 3-map `triple` chain
+  shows a 1.46x penalty at 100K (not fully fused).
+- New ops registered in `ALL_OPS`; per-op size lists added.
+
+### Device-resident execution (Phases 2.2, 3.2)
+- `RemoraExecutor`: `alloc_and_upload`, `download`, `free_device`,
+  `execute_device` (launch on device-resident pointers, no H↔D copy),
+  and `execute_to_device` returning a `DeviceArray`.
+- New `DeviceArray` class (ptr/shape/dtype/nbytes, pool-allocated) with
+  `from_numpy`, `to_numpy`, `free`.
+- `remora-perf --device-resident` isolates transfer overhead (map 1M:
+  690→86us; fold: 250→41us).  `examples/device_resident_iter.py`: a
+  100-step on-device recurrence runs 9.87ms vs 72.14ms with per-call
+  transfer (7.31x).
+- Test: `test_device_array_round_trip_and_iteration_when_available`.
+
+### Known limitations surfaced (documented, not fixed)
+- CPU lowering gap: a `/` division inside a `map` body drops the
+  `_mlir_ciface_remora_call` export symbol (blocks average pooling;
+  conv_pipeline uses sum pooling instead).
+- GPU general-map miscompile: a vector-valued (3-component) cell fold
+  collapses to a broadcast scalar, so the N-body GPU output is wrong
+  (`[s s s]` rows); `bench_nbody` omits remora-gpu.
+- Phase 3.1 (GPU radix sort) **deferred** — highest-risk raw-MLIR
+  effort; a validated split-based blueprint reusing the multi-block
+  scan + DeviceArrays is documented in the plan.
+
 ## GPU Device Memory Pool
 
 ### Buffer arena for `RemoraExecutor` (`remora/executor.py`)
@@ -12,6 +86,36 @@ feature area.  See also the per-phase changelog in the git history.
   instead of calling `cudaMalloc`/`cudaFree` on every kernel launch.
 - `close()` drains the pool, freeing all cached device pointers
   before closing modules and the CUDA runtime.
+
+## Benchmark Suite (`remora/benchmark_suite.py`)
+
+### Runtime performance benchmarks: Remora vs NumPy vs JAX
+- New `remora-perf` CLI (`remora/benchmark_suite.py`) measuring
+  execution time (not compilation time) for six array operations:
+  map, fold, scan, matmul, sort, and stencil (3×3 box blur via
+  im2col + fold-dot).
+- Four backends: NumPy (CPU), JAX (GPU/XLA), Remora compiled CPU
+  (MLIR), Remora compiled GPU (custom CUDA kernels).
+- Compile-once-execute-many pattern: compiled artifacts are reused
+  across warmup and timed iterations.
+- GPU sort and matmul benchmarks construct HIR directly
+  (`HIRSort`, `HIRMatmul`) and compile via
+  `generate_mlir_descriptor_abi_ptx`.
+- JSON output (`--json FILE`) and configurable `--ops`, `--backends`,
+  `--sizes`, `--warmup`, `--trials` flags.
+- Benchmark plan documented in `docs/BENCHMARK_PLAN.md`.
+- Full report with analysis in `benchmarks/results/REPORT.md`.
+
+### Key results (RTX 5090 Laptop GPU, 2026-06-20)
+- Remora CPU stencil outperforms NumPy 2.5× (58M vs 24M elem/s)
+  via MLIR loop fusion of im2col + fold-dot.
+- Remora GPU stencil scales to 1.14G elem/s at 512×512 (49×
+  faster than NumPy).
+- Remora GPU matmul (tiled TILE=16) reaches 735M elem/s at
+  512×512, within 6× of JAX/cuBLAS.
+- Remora GPU fold reaches 3.9G elem/s at 1M elements.
+- Remora GPU bitonic sort (62M elem/s at 1M) is the weakest
+  result, 120× slower than JAX's radix sort.
 
 ## Examples
 

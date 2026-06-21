@@ -16,6 +16,36 @@ import numpy as np
 
 _remora_rt_o_path: str | None = None
 _remora_rt_temp_dir: tempfile.TemporaryDirectory | None = None
+_blas_lib_cache: str | None | bool = False
+
+
+def _find_optimized_blas() -> str | None:
+    """Return an optimized BLAS library name to link, or None.
+
+    Only optimized implementations (OpenBLAS/BLIS) are used.  The reference
+    Netlib BLAS is intentionally ignored because it is no faster than the
+    `-O3 -march=native` C fallback in remora_rt.c.
+    """
+    global _blas_lib_cache
+    if _blas_lib_cache is not False:
+        return _blas_lib_cache  # type: ignore[return-value]
+    import ctypes.util
+
+    for name in ("openblas", "blis"):
+        if ctypes.util.find_library(name) is not None:
+            _blas_lib_cache = name
+            return name
+    _blas_lib_cache = None
+    return None
+
+
+def _have_blas() -> bool:
+    return _find_optimized_blas() is not None
+
+
+def _blas_link_args() -> list[str]:
+    lib = _find_optimized_blas()
+    return [f"-l{lib}"] if lib else []
 
 
 def _get_remora_rt_o() -> str:
@@ -34,8 +64,11 @@ def _get_remora_rt_o() -> str:
 
     _remora_rt_temp_dir = tempfile.TemporaryDirectory(prefix="remora-rt-")
     o_path = Path(_remora_rt_temp_dir.name) / "remora_rt.o"
+    compile_cmd = [cc, "-O3", "-march=native", "-fPIC", "-c", str(rt_c), "-o", str(o_path)]
+    if _have_blas():
+        compile_cmd.insert(1, "-DREMORA_HAVE_BLAS")
     _run_checked(
-        [cc, "-O2", "-fPIC", "-c", str(rt_c), "-o", str(o_path)],
+        compile_cmd,
         "failed to compile remora runtime",
         _remora_rt_temp_dir,
     )
@@ -103,6 +136,7 @@ from remora.typechecker import (
     TypedScatterAdd,
     TypedIm2col,
     TypedCol2im,
+    TypedMatmul,
 )
 from remora.types import ArrayType, BOOL, FLOAT, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim
 
@@ -884,6 +918,7 @@ def _compile_llvm_ir_to_shared_library(
             str(Path(_get_remora_rt_o())),
             "-o",
             str(so_path),
+            *_blas_link_args(),
             *_openmp_link_args(threaded),
         ],
         "system linker failed during compiled CPU execution",
@@ -1352,6 +1387,11 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
                 patch = columns[i * out_w + j, :].reshape(kh, kw)
                 result[i * stride : i * stride + kh, j * stride : j * stride + kw] += patch
         return _coerce_runtime_value(result, expr.type)
+
+    if isinstance(expr, TypedMatmul):
+        left = _eval_expr(expr.left, env)
+        right = _eval_expr(expr.right, env)
+        return _coerce_runtime_value(np.matmul(left, right), expr.type)
 
     if isinstance(expr, TypedPair):
         left = _eval_expr(expr.left, env)

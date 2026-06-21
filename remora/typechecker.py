@@ -64,6 +64,7 @@ from remora.ast_nodes import (
     ScatterAddExpr,
     Im2colExpr,
     Col2imExpr,
+    MatmulExpr,
     SecondExpr,
 )
 from remora.constraints import (
@@ -497,6 +498,13 @@ class TypedCol2im:
 
 
 @dataclass(frozen=True)
+class TypedMatmul:
+    left: TypedExpr
+    right: TypedExpr
+    type: ArrayType
+
+
+@dataclass(frozen=True)
 class TypedPair:
     """A typed pair construction."""
     expr: object  # PairExpr
@@ -618,6 +626,7 @@ TypedExpr: TypeAlias = (
     | TypedScatterAdd
     | TypedIm2col
     | TypedCol2im
+    | TypedMatmul
     | TypedPair
     | TypedFirst
     | TypedSecond
@@ -919,6 +928,8 @@ class TypeChecker:
             return self._infer_im2col(expr, env)
         if isinstance(expr, Col2imExpr):
             return self._infer_col2im(expr, env)
+        if isinstance(expr, MatmulExpr):
+            return self._infer_matmul(expr, env)
         if isinstance(expr, PairExpr):
             return self._infer_pair(expr, env)
         if isinstance(expr, FirstExpr):
@@ -1992,6 +2003,29 @@ class TypeChecker:
 
         result_type = ArrayType(FLOAT, (StaticDim(h), StaticDim(w)))
         return TypedCol2im(expr, typed_columns, result_type)
+
+    def _infer_matmul(self, expr: MatmulExpr, env: TypeEnv) -> TypedExpr:
+        typed_left = self._require_array(expr.left, "matmul", env)
+        typed_right = self._require_array(expr.right, "matmul", env)
+        if len(typed_left.type.shape) != 2:
+            raise RemoraTypeError("matmul expects a rank-2 left array", expr.loc)
+        if len(typed_right.type.shape) != 2:
+            raise RemoraTypeError("matmul expects a rank-2 right array", expr.loc)
+        if typed_left.type.element != FLOAT:
+            raise RemoraTypeError("matmul expects Float left array", expr.loc)
+        if typed_right.type.element != FLOAT:
+            raise RemoraTypeError("matmul expects Float right array", expr.loc)
+        m_dim, k_dim = typed_left.type.shape
+        k2_dim, n_dim = typed_right.type.shape
+        if not isinstance(k_dim, StaticDim) or not isinstance(k2_dim, StaticDim):
+            raise RemoraTypeError("matmul requires concrete inner dimensions", expr.loc)
+        if k_dim.value != k2_dim.value:
+            raise RemoraTypeError(
+                f"matmul inner dimensions do not match: {k_dim.value} vs {k2_dim.value}",
+                expr.loc,
+            )
+        result_type = ArrayType(FLOAT, (m_dim, n_dim))
+        return TypedMatmul(typed_left, typed_right, result_type)
 
     def _infer_pair(self, expr: PairExpr, env: TypeEnv) -> TypedExpr:
         typed_left = self.infer(expr.left, env)

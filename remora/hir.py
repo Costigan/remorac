@@ -59,6 +59,7 @@ from remora.typechecker import (
     TypedScatterAdd,
     TypedIm2col,
     TypedCol2im,
+    TypedMatmul,
     TypedPair,
     TypedFirst,
     TypedSecond,
@@ -635,6 +636,13 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
             (h, w),
             (kh, kw),
             stride,
+            expr.type,
+        )
+
+    if isinstance(expr, TypedMatmul):
+        return HIRMatmul(
+            lower_expr(expr.left),
+            lower_expr(expr.right),
             expr.type,
         )
 

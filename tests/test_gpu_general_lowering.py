@@ -1072,24 +1072,39 @@ class TestPhaseE1WrongResultRegressions:
         assert ".visible .entry test_lfilt" in ptx
 
     def test_scan_large_array_serial_fallback(self):
-        """E.2.3: scan for N > 1024 falls back to serial kernel."""
+        """E.2.3: large inclusive scan routes to multi-block; exclusive
+        scan for N > 1024 still falls back to a serial kernel."""
+        import pytest
         from remora.hir import HIRScan
-        from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module, extract_gpu_module_body_as_module
-        arr_type = ArrayType(FLOAT, (StaticDim(2048),))
-        hfunc = HIRFunction(
-            name='test_big_scan',
-            params=[HIRParam('xs', arr_type)],
-            body=HIRScan(
-                reduction_dim=StaticDim(2048),
-                func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
-                init=HIRLit(0.0, FLOAT),
-                array=HIRVar('xs', arr_type),
-                exclusive=False, right=False,
-                result_type=arr_type,
-            ),
-            return_type=arr_type,
+        from remora.gpu_lowering import (
+            build_descriptor_abi_f32_scan_gpu_module,
+            extract_gpu_module_body_as_module,
+            GPUScaffoldError,
         )
-        gpu_module = build_descriptor_abi_f32_scan_gpu_module(hfunc, kernel_name="test_big_scan")
+        arr_type = ArrayType(FLOAT, (StaticDim(2048),))
+
+        def make(exclusive):
+            return HIRFunction(
+                name='test_big_scan',
+                params=[HIRParam('xs', arr_type)],
+                body=HIRScan(
+                    reduction_dim=StaticDim(2048),
+                    func=HIRPrimCallable('+', (FLOAT, FLOAT), FLOAT),
+                    init=HIRLit(0.0, FLOAT),
+                    array=HIRVar('xs', arr_type),
+                    exclusive=exclusive, right=False,
+                    result_type=arr_type,
+                ),
+                return_type=arr_type,
+            )
+
+        # Inclusive left-to-right add scan now routes to the multi-block
+        # plan (the single-block builder rejects it).
+        with pytest.raises(GPUScaffoldError):
+            build_descriptor_abi_f32_scan_gpu_module(make(False), kernel_name="test_big_scan")
+
+        # Exclusive scan at N > 1024 still uses the serial fallback.
+        gpu_module = build_descriptor_abi_f32_scan_gpu_module(make(True), kernel_name="test_big_scan")
         device_module = extract_gpu_module_body_as_module(gpu_module.text)
         tc = detect_toolchain()
         llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=tc)

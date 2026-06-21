@@ -138,6 +138,13 @@ class Col2imExpr:
 
 
 @dataclass(frozen=True)
+class MatmulExpr:
+    left: Expr
+    right: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class PairExpr:
     left: Expr
     right: Expr
@@ -449,6 +456,7 @@ Expr: TypeAlias = (
     | ScatterAddExpr
     | Im2colExpr
     | Col2imExpr
+    | MatmulExpr
     | PairExpr
     | FirstExpr
     | SecondExpr

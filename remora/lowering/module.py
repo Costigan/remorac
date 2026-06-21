@@ -1137,8 +1137,28 @@ def _lower_function_descriptor_module(
     wrapper = _lower_descriptor_export_wrapper(
         function, internal_name, export_name
     )
+    externs: list[str] = []
+    import re
+    for match in re.finditer(r"func\.call @(remora_sort_(?:f32|i32))\(%\S+\) : \(memref<(\d+x(?:f32|i32))>\)", internal):
+        fname, memref_type = match.group(1), match.group(2)
+        decl = f"  func.func private @{fname}(memref<{memref_type}>)"
+        if decl not in externs:
+            externs.append(decl)
+    for match in re.finditer(
+        r"func\.call @remora_matmul_f32\(%\S+, %\S+, %\S+\) : \((memref<\d+x\d+xf32>), (memref<\d+x\d+xf32>), (memref<\d+x\d+xf32>)\) -> \(\)",
+        internal,
+    ):
+        decl = (
+            f"  func.func private @remora_matmul_f32("
+            f"{match.group(1)}, {match.group(2)}, {match.group(3)})"
+        )
+        if decl not in externs:
+            externs.append(decl)
+    extern_block = "\n".join(externs)
+    if extern_block:
+        extern_block += "\n\n"
     return f"""module {{
-{internal}
+{extern_block}{internal}
 
 {wrapper}
 }}"""

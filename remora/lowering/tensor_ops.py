@@ -227,7 +227,7 @@ def _lower_matmul_tensor_input(
     tensor_env: TensorEnv | None = None,
     scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str, str]:
-    """Lower ``HIRMatmul`` to ``linalg.matmul``."""
+    """Lower ``HIRMatmul`` to a BLAS runtime call (f32) or ``linalg.matmul``."""
     left = node.left
     right = node.right
     result_type = type_to_mlir(node.result_type)
@@ -241,18 +241,162 @@ def _lower_matmul_tensor_input(
         right, f"{prefix}_right", functions, tensor_env, scalar_env
     )
 
+    left_rtype = _expr_result_type(left)
+    right_rtype = _expr_result_type(right)
+    if (
+        result_elem == "f32"
+        and isinstance(left_rtype, ArrayType)
+        and isinstance(right_rtype, ArrayType)
+        and left_rtype.rank == 2
+        and right_rtype.rank == 2
+    ):
+        M = left_rtype.shape[0].value
+        K = left_rtype.shape[1].value
+        N = right_rtype.shape[1].value
+        p = prefix
+        a_mr = f"memref<{M}x{K}xf32>"
+        b_mr = f"memref<{K}x{N}xf32>"
+        c_mr = f"memref<{M}x{N}xf32>"
+        result_name = f"%{p}"
+        code = f"""{left_code}
+{right_code}
+    %{p}_c0 = arith.constant 0 : index
+    %{p}_c1 = arith.constant 1 : index
+    %{p}_cM = arith.constant {M} : index
+    %{p}_cK = arith.constant {K} : index
+    %{p}_cN = arith.constant {N} : index
+    %{p}_abuf = memref.alloc() : {a_mr}
+    scf.for %{p}_ai = %{p}_c0 to %{p}_cM step %{p}_c1 {{
+      scf.for %{p}_aj = %{p}_c0 to %{p}_cK step %{p}_c1 {{
+        %{p}_av = tensor.extract {left_name}[%{p}_ai, %{p}_aj] : {left_type}
+        memref.store %{p}_av, %{p}_abuf[%{p}_ai, %{p}_aj] : {a_mr}
+      }}
+    }}
+    %{p}_bbuf = memref.alloc() : {b_mr}
+    scf.for %{p}_bi = %{p}_c0 to %{p}_cK step %{p}_c1 {{
+      scf.for %{p}_bj = %{p}_c0 to %{p}_cN step %{p}_c1 {{
+        %{p}_bv = tensor.extract {right_name}[%{p}_bi, %{p}_bj] : {right_type}
+        memref.store %{p}_bv, %{p}_bbuf[%{p}_bi, %{p}_bj] : {b_mr}
+      }}
+    }}
+    %{p}_cbuf = memref.alloc() : {c_mr}
+    func.call @remora_matmul_f32(%{p}_abuf, %{p}_bbuf, %{p}_cbuf) : ({a_mr}, {b_mr}, {c_mr}) -> ()
+    {result_name} = bufferization.to_tensor %{p}_cbuf restrict writable : {c_mr}"""
+        return code, result_name, result_type, result_elem
+
     # Create an empty output tensor for linalg.matmul
     empty_name = f"%{prefix}_empty"
+    zero_name = f"%{prefix}_zero"
+    zero_val = f"%{prefix}_zv"
     result_name = f"%{prefix}"
 
     code = f"""{left_code}
 {right_code}
     {empty_name} = tensor.empty() : {result_type}
+    {zero_val} = arith.constant 0.0 : {result_elem}
+    {zero_name} = linalg.fill ins({zero_val} : {result_elem}) outs({empty_name} : {result_type}) -> {result_type}
     {result_name} = linalg.matmul
       ins({left_name}, {right_name} : {left_type}, {right_type})
-      outs({empty_name} : {result_type}) -> {result_type}"""
+      outs({zero_name} : {result_type}) -> {result_type}"""
 
     return code, result_name, result_type, result_elem
+
+
+def _lower_scan_tensor_input(
+    node: HIRScan,
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("scan tensor input requires array result type")
+    if node.result_type.rank != 1:
+        raise RemoraLoweringError("scan tensor input only supports rank 1")
+
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    init_value_str = _literal_value(node.init, result_elem)
+    op_name = _arith_op(node.func.op, result_elem)
+    N = node.reduction_dim.value
+    p = prefix
+
+    input_code, input_name, input_type, _input_elem = _lower_tensor_input(
+        node.array, f"{p}_in", functions, tensor_env, scalar_env
+    )
+
+    if node.exclusive:
+        loop = f"""\
+    %{p}_stored = tensor.insert %{p}_c into %{p}_acc[%{p}_i] : {result_type}
+      %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
+      %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}"""
+    elif node.right:
+        loop = f"""\
+    %{p}_rev = arith.subi %{p}_cNm1, %{p}_i : index
+      %{p}_elem = tensor.extract {input_name}[%{p}_rev] : {input_type}
+      %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}
+      %{p}_stored = tensor.insert %{p}_next into %{p}_acc[%{p}_rev] : {result_type}"""
+    else:
+        loop = f"""\
+    %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
+      %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}
+      %{p}_stored = tensor.insert %{p}_next into %{p}_acc[%{p}_i] : {result_type}"""
+
+    extra_consts = ""
+    if node.right:
+        extra_consts = f"\n    %{p}_cNm1 = arith.constant {N - 1} : index"
+
+    code = f"""{input_code}
+    %{p}_init = arith.constant {init_value_str} : {result_elem}
+    %{p}_c0 = arith.constant 0 : index
+    %{p}_c1 = arith.constant 1 : index
+    %{p}_cN = arith.constant {N} : index{extra_consts}
+    %{p}_empty = tensor.empty() : {result_type}
+    %{p}_filled = linalg.fill ins(%{p}_init : {result_elem}) outs(%{p}_empty : {result_type}) -> {result_type}
+    %{p}, %{p}_carry = "scf.for"(%{p}_c0, %{p}_cN, %{p}_c1, %{p}_filled, %{p}_init) ({{
+    ^bb0(%{p}_i: index, %{p}_acc: {result_type}, %{p}_c: {result_elem}):
+      {loop}
+      "scf.yield"(%{p}_stored, %{p}_next) : ({result_type}, {result_elem}) -> ()
+    }}) : (index, index, index, {result_type}, {result_elem}) -> ({result_type}, {result_elem})"""
+
+    return code, f"%{p}", result_type, result_elem
+
+
+def _lower_sort_tensor_input(
+    node: HIRSort,
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("sort tensor input requires array result type")
+    if node.result_type.rank != 1:
+        raise RemoraLoweringError("sort tensor input only supports rank 1")
+
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    N = node.result_type.shape[0].value
+    rt_func = _sort_runtime_func(result_elem)
+    p = prefix
+
+    input_code, input_name, input_type, _input_elem = _lower_tensor_input(
+        node.array, f"{p}_in", functions, tensor_env, scalar_env
+    )
+
+    code = f"""{input_code}
+    %{p}_c0 = arith.constant 0 : index
+    %{p}_c1 = arith.constant 1 : index
+    %{p}_cN = arith.constant {N} : index
+    %{p}_buf = memref.alloc() : memref<{N}x{result_elem}>
+    scf.for %{p}_i = %{p}_c0 to %{p}_cN step %{p}_c1 {{
+      %{p}_val = tensor.extract {input_name}[%{p}_i] : {input_type}
+      memref.store %{p}_val, %{p}_buf[%{p}_i] : memref<{N}x{result_elem}>
+    }}
+    func.call @{rt_func}(%{p}_buf) : (memref<{N}x{result_elem}>) -> ()
+    %{p} = bufferization.to_tensor %{p}_buf restrict writable : memref<{N}x{result_elem}>"""
+
+    return code, f"%{p}", result_type, result_elem
 
 
 def _lower_tensor_input(
@@ -481,6 +625,12 @@ def _lower_tensor_input(
 
     if isinstance(node, HIRMatmul):
         return _lower_matmul_tensor_input(node, prefix, functions, tensor_env, scalar_env)
+
+    if isinstance(node, HIRScan) and isinstance(node.result_type, ArrayType):
+        return _lower_scan_tensor_input(node, prefix, functions, tensor_env, scalar_env)
+
+    if isinstance(node, HIRSort) and isinstance(node.result_type, ArrayType):
+        return _lower_sort_tensor_input(node, prefix, functions, tensor_env, scalar_env)
 
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
