@@ -116,6 +116,7 @@ def test_remora_executor_launches_direct_abi_kernel_and_copies_output():
     assert len(args) == 2
     assert args[0].size0 == 5
     assert args[1].size0 == 5
+    executor.close()
     assert {ptr for ptr, _nbytes in runtime.allocations} == set(runtime.frees)
 
 

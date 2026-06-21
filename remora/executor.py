@@ -74,6 +74,20 @@ class RemoraExecutor:
             kernel.name: self._modules[0].get_function(kernel.name)
             for kernel in kernels
         }
+        self._pool: dict[int, list[int]] = {}
+
+    def _pool_alloc(self, nbytes: int) -> int:
+        """Allocate device memory, reusing a pooled buffer if available."""
+        nbytes = max(4, nbytes)
+        cached = self._pool.get(nbytes)
+        if cached:
+            return cached.pop()
+        return self._rt.alloc(nbytes)
+
+    def _pool_free(self, ptr: int, nbytes: int) -> None:
+        """Return device memory to the pool for reuse."""
+        nbytes = max(4, nbytes)
+        self._pool.setdefault(nbytes, []).append(ptr)
 
     def add_module(self, ptx: str, kernels: list[KernelMeta]) -> None:
         """Load additional kernels from a separate PTX module."""
@@ -124,17 +138,20 @@ class RemoraExecutor:
         output = np.empty(output_shape, dtype=output_dtype)
 
         device_inputs: list[int] = []
+        device_input_sizes: list[int] = []
         output_ptr: int | None = None
+        output_nbytes = output.nbytes
         try:
             for host_input in host_inputs:
-                ptr = self._rt.alloc(host_input.nbytes)
+                ptr = self._pool_alloc(host_input.nbytes)
                 self._rt.copy_host_to_device(host_input, ptr)
                 device_inputs.append(ptr)
+                device_input_sizes.append(host_input.nbytes)
 
             if arena is not None:
-                output_ptr = arena.alloc(output.nbytes)
+                output_ptr = arena.alloc(output_nbytes)
             else:
-                output_ptr = self._rt.alloc(output.nbytes)
+                output_ptr = self._pool_alloc(output_nbytes)
 
             if meta.is_reduction:
                 self._rt.memset_d32(output_ptr, 0, output.nbytes // 4)
@@ -172,10 +189,10 @@ class RemoraExecutor:
             self._rt.synchronize()
             self._rt.copy_device_to_host(output_ptr, output)
         finally:
-            for ptr in device_inputs:
-                self._rt.free(ptr)
+            for ptr, nbytes in zip(device_inputs, device_input_sizes):
+                self._pool_free(ptr, nbytes)
             if output_ptr is not None and arena is None:
-                self._rt.free(output_ptr)
+                self._pool_free(output_ptr, output_nbytes)
 
         return output
 
@@ -201,21 +218,21 @@ class RemoraExecutor:
             )
 
         registry: dict[str, _DeviceBuffer] = {}
-        allocated_ptrs: list[int] = []
+        allocated_bufs: list[tuple[int, int]] = []
 
         try:
             for i, inp in enumerate(inputs):
                 arr = np.ascontiguousarray(inp)
-                ptr = self._rt.alloc(arr.nbytes)
+                ptr = self._pool_alloc(arr.nbytes)
                 self._rt.copy_host_to_device(arr, ptr)
                 registry[f"input_{i}"] = _DeviceBuffer(ptr, arr.shape, arr.dtype)
-                allocated_ptrs.append(ptr)
+                allocated_bufs.append((ptr, arr.nbytes))
 
             for buf_spec in plan.buffers:
                 dtype = _plan_dtype(buf_spec.dtype)
                 n_elements = max(1, int(np.prod(buf_spec.shape, dtype=np.int64)))
                 nbytes = n_elements * dtype.itemsize
-                ptr = self._rt.alloc(nbytes)
+                ptr = self._pool_alloc(nbytes)
                 if buf_spec.init is not None:
                     init_array = np.array(buf_spec.init, dtype=dtype)
                     self._rt.copy_host_to_device(init_array, ptr)
@@ -224,7 +241,7 @@ class RemoraExecutor:
                 registry[buf_spec.name] = _DeviceBuffer(
                     ptr, buf_spec.shape, dtype,
                 )
-                allocated_ptrs.append(ptr)
+                allocated_bufs.append((ptr, nbytes))
 
             for step in plan.steps:
                 self._run_plan_step(step, registry)
@@ -236,8 +253,8 @@ class RemoraExecutor:
             self._rt.copy_device_to_host(final.ptr, output)
             return output
         finally:
-            for ptr in allocated_ptrs:
-                self._rt.free(ptr)
+            for ptr, nbytes in allocated_bufs:
+                self._pool_free(ptr, nbytes)
 
     def execute_main(self, inputs: list[Any] | None = None, *, arena: Any | None = None) -> np.ndarray:
         """Run the program entry kernel using the shared executor-style API."""
@@ -245,6 +262,10 @@ class RemoraExecutor:
         return self.execute(kernel_name, [] if inputs is None else inputs, arena=arena)
 
     def close(self) -> None:
+        for ptrs in self._pool.values():
+            for ptr in ptrs:
+                self._rt.free(ptr)
+        self._pool.clear()
         for mod in self._modules:
             mod.close()
         if self._owns_runtime:

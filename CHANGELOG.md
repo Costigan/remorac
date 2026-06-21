@@ -3,6 +3,55 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## GPU Device Memory Pool
+
+### Buffer arena for `RemoraExecutor` (`remora/executor.py`)
+- Added `_pool: dict[int, list[int]]` keyed by allocation size,
+  with `_pool_alloc()` and `_pool_free()` methods.
+- `execute()` and `execute_plan()` now reuse pooled device buffers
+  instead of calling `cudaMalloc`/`cudaFree` on every kernel launch.
+- `close()` drains the pool, freeing all cached device pointers
+  before closing modules and the CUDA runtime.
+
+## Examples
+
+- `examples/embedded_remora.py`: scale, dot product, and negate
+  functions compiled with `remora.define()` and called with NumPy.
+- `examples/mandelbrot.py`: 800×600 Mandelbrot set rendered with
+  three Remora-compiled kernels (`step_real`, `step_imag`, `mag_sq`)
+  driving the z = z² + c iteration from Python.
+
+## Removals
+
+### `# coding: remora` source codec removed
+- The custom Python source codec (`remora/codec.py`) and its
+  `# remora:begin` / `# remora:end` block markers have been removed.
+  The codec abused Python's encoding machinery for DSL embedding,
+  required a `.pth` file for direct script execution, and re-invoked
+  the Remora compiler on every module import.
+- Examples now use `remora.define()` for embedding Remora in Python.
+- Codec tests removed from `tests/test_api.py`.
+
+## Bug Fixes
+
+### N-body test fixes
+- Fixed extra `)` in `_nbody_source_compiled` (unbalanced parens
+  caused a Lisp parse error).
+- Added `exp`, `log`, `sqrt` to `_ARITH_OPS_F32` in `operators.py`
+  so math intrinsics compile in state-fold loop bodies.
+
+### Multi-block bitonic merge direction
+- Local sort kernels for multi-block sort and grade now reverse
+  odd blocks' output to form bitonic sequences at block boundaries.
+  Without this, the global merge produced per-block sorted output
+  but failed to merge across blocks.
+
+### HIRIota catch-all guard
+- Added explicit `isinstance(array_expr, HIRIota)` check before
+  the computed-expression CSE branch in the general map binding
+  loop.  Without this, iota arrays were intercepted by the CSE
+  handler instead of mapping to thread coordinates.
+
 ## GPU Expression Compiler (AD on GPU)
 
 ### `ad_optimize.lisp` runs on GPU
@@ -184,6 +233,8 @@ feature area.  See also the per-phase changelog in the git history.
   19 tests for plan construction, validation, and state-fold
   detection.
 - Python integration tests (`tests/test_api.py`, `tests/test_magics.py`):
-  27 tests for `RemoraFunction`, codec, `define()`, cell magic, and
+  22 tests for `RemoraFunction`, `define()`, cell magic, and
   REPL integration.
-- Total: 943 non-GPU + 13 GPU tests passing, 0 xfails, 0 regressions.
+- N-body tests (`tests/test_nbody.py`): 5 tests passing after
+  paren-balance and math-ops fixes.
+- Total: 938 non-GPU + 13 GPU tests passing, 0 xfails, 0 regressions.
