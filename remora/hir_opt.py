@@ -754,7 +754,14 @@ def hir_optimize(expr: HIRExpr) -> HIRExpr:
     Returns an expression where repeated pure subexpressions have been
     lifted into ``HIRLet`` bindings and dead bindings have been removed.
     """
-    rewritten, _bindings = hir_cse(expr)
+    rewritten, bindings = hir_cse(expr)
+    if bindings:
+        result = rewritten
+        body_rt = getattr(rewritten, 'result_type', None)
+        for name, value in reversed(bindings):
+            val_rt = getattr(value, 'result_type', body_rt)
+            result = HIRLet(name, val_rt, value, result, body_rt)
+        return hir_dce(result)
     return hir_dce(rewritten)
 
 

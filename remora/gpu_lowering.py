@@ -4078,6 +4078,15 @@ def build_descriptor_abi_general_map_gpu_module(
     _validate_scaffold_names(module_name, name)
 
     if not isinstance(function.body, (HIRMap, HIRApply)):
+        inner = function.body
+        while isinstance(inner, HIRLet):
+            inner = inner.body
+        if isinstance(inner, HIRVar):
+            raise GPUScaffoldError(
+                "general GPU map requires a HIRMap or HIRApply top-level body "
+                "(CSE reduced the body to a variable reference; the expression "
+                "is likely too complex for a single GPU kernel)"
+            )
         raise GPUScaffoldError(
             "general GPU map requires a HIRMap or HIRApply top-level body"
         )
@@ -4290,11 +4299,13 @@ def build_descriptor_abi_general_map_gpu_module(
                             input_adjustments[param_name] = (view_offsets, view_transforms)
                     elif hasattr(array_expr, 'result_type') and array_expr.result_type is not None:
                         from remora.hir import HIRLet as _HL
+                        from remora.hir_opt import hir_optimize as _hopt
+                        _optimized_arr = _hopt(array_expr)
                         _body_rt = getattr(lambda_body, 'result_type', body_map.result_type)
                         lambda_body = _HL(
                             name=param_name,
                             value_type=array_expr.result_type,
-                            value=array_expr,
+                            value=_optimized_arr,
                             body=lambda_body,
                             result_type=_body_rt,
                         )
@@ -4404,7 +4415,8 @@ def build_descriptor_abi_general_map_gpu_module(
     body_lines.extend(_linear_index_lines(out_prefix, frame_rank))
 
     # Emit the expression tree
-    result_ssa = _gpu_emit_expr(expr, body_lines, {})
+    _initial_env = {c: c for c in coords}
+    result_ssa = _gpu_emit_expr(expr, body_lines, _initial_env)
 
     # Store result — handle both scalar and array-valued results
     if isinstance(result_ssa, list):

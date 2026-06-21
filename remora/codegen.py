@@ -1073,21 +1073,11 @@ def try_compile_state_fold_gpu(
 
     try:
         kernel_name = "fold_step"
-        from remora.gpu_lowering import (
-            build_descriptor_abi_general_map_gpu_module as _build_general,
-            extract_gpu_module_body_as_module as _extract,
+        ptx, kernels, _plan = generate_mlir_descriptor_abi_ptx(
+            step_func,
+            kernel_name=kernel_name,
+            toolchain=toolchain,
         )
-        from remora.pipeline import translate_mlir_to_llvmir, translate_llvmir_to_nvptx_text
-        gpu_module = _build_general(step_func, kernel_name=kernel_name)
-        device_module = _extract(gpu_module.text)
-        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-        kernels = [KernelMeta(
-            name=kernel_name, grid_dims=1, block_size=0,
-            num_inputs=1, num_outputs=1,
-            input_elem_types=["f32"], output_elem_types=["f32"],
-            output_shape=shape, output_dtype="float32",
-        )]
     except (GPUScaffoldError, CodegenUnavailable):
         return None
 

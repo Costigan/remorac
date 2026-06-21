@@ -1,7 +1,40 @@
 # Changelog
 
-All notable changes to the RemoraC compiler since the start of the
-GPU/CPU parity, AD, Python integration, and multi-kernel work.
+All notable changes to RemoraC are documented here, organized by
+feature area.  See also the per-phase changelog in the git history.
+
+## GPU Expression Compiler (toward AD on GPU)
+
+### HIRScatterAdd support (`_gpu_expr_lowering.py`)
+- Static path: when the target is a `GpuArrayExpr` and the index is a
+  compile-time literal, the scatter-add modifies the component directly.
+- Dynamic path: when the target is a per-element expression, emits a
+  runtime `GpuSelect(coord == index, target + update, target)` using
+  the thread coordinate.
+
+### HIRLet input alias propagation
+- When `let coeffs = params` and `params` is in `input_map`, the let
+  name `coeffs` is added to `input_map` as an alias.  This allows
+  `HIRIndex(HIRVar('coeffs'), 0)` to resolve through the alias.
+- Save/restore ensures the alias doesn't leak outside the let scope.
+
+### `hir_optimize` bug fix (`hir_opt.py`)
+- `hir_optimize` was discarding the CSE bindings returned by `hir_cse`
+  — it passed only the rewritten expression (with dangling variable
+  references) to DCE.  Fixed to wrap bindings as nested `HIRLet` before
+  running DCE.
+
+### CSE on computed map operands (`gpu_lowering.py`)
+- When a map/apply operand is a non-trivial expression (not a variable,
+  literal, or view op), it is CSE-optimized via `hir_optimize` before
+  being wrapped as an `HIRLet` in the lambda body.
+- Coordinate env seeded in `_gpu_emit_expr` so `GpuIndexCoordinate`
+  resolves during MLIR emission.
+
+### Remaining blocker
+- The MLIR emission produces duplicate SSA value names when multiple
+  scatter-add patterns emit the same constant.  Fix: make the emit
+  counter apply to all generated names in `_gpu_emit_expr`.
 
 ## GPU Performance Kernels
 
@@ -89,7 +122,7 @@ GPU/CPU parity, AD, Python integration, and multi-kernel work.
 - `llvm.and` of `llvm.icmp` results uses `: i1` (not `: i64`) in
   the tiled matmul bounds-checking logic.
 
-## Python Integration (Phases 1–3)
+## Python Integration (Phases 1-3)
 
 ### Phase 1 — Source Codec and Core Wrapper
 - `RemoraFunction` callable wrapper with JIT rank/shape checking.
@@ -133,7 +166,7 @@ GPU/CPU parity, AD, Python integration, and multi-kernel work.
 - Pre-existing test failures fixed: restored `docs/DENSE_CORE.md`,
   `docs/ABI.md`, `docs/IMPLEMENTATION_NOTES.md`, and
   `docs/BENCHMARK_BASELINES.json` from `docs/old/`.
-- GPU integration tests (`tests/test_gpu_integration.py`): 9 tests
+- GPU integration tests (`tests/test_gpu_integration.py`): 11 tests
   verified on NVIDIA RTX 5090 (compute capability 12.0) covering
   map, sort, grade, matmul, and reduction kernels.
 - Execution plan unit tests (`tests/test_execution_plan.py`):
@@ -142,4 +175,4 @@ GPU/CPU parity, AD, Python integration, and multi-kernel work.
 - Python integration tests (`tests/test_api.py`, `tests/test_magics.py`):
   27 tests for `RemoraFunction`, codec, `define()`, cell magic, and
   REPL integration.
-- Total: 943 non-GPU + 9 GPU tests passing, 0 regressions.
+- Total: 943 non-GPU + 11 GPU tests passing, 0 regressions.

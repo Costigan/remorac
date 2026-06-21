@@ -469,9 +469,14 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
                     "+", components[index_val], update_expr, "f32",
                 )
             return GpuArrayExpr(components, target_expr.shape)
+        if index_val is not None and ctx.coords:
+            coord = GpuIndexCoordinate(ctx.coords[0])
+            index_const = GpuConstant(index_val, "i64")
+            cond = GpuCompareOp("eq", coord, index_const, "i64")
+            sum_val = GpuBinaryOp("+", target_expr, update_expr, "f32")
+            return GpuSelect(cond, sum_val, target_expr)
         raise GPUScaffoldError(
-            f"{ctx.context}: HIRScatterAdd requires GpuArrayExpr target "
-            f"with compile-time constant index"
+            f"{ctx.context}: HIRScatterAdd requires compile-time constant index"
         )
 
     raise GPUScaffoldError(
