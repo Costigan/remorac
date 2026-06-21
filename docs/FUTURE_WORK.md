@@ -1,81 +1,136 @@
 # Future Work
 
-Items that are correct today but have a clear upgrade path for performance
-or completeness.
+Items that have a clear upgrade path for performance or completeness.
+Completed items are marked; remaining items describe what is left.
 
-## Parallel GPU Filter and Replicate
+## High-Impact
 
-**Current state**: `HIRFilter` uses a parallel three-kernel plan for
-N ≤ 1024: predicate evaluation, Hillis-Steele i32 prefix sum in shared
-memory, and scatter-write.  `HIRReplicate` uses a parallel two-kernel
-plan for N ≤ 1024: prefix sum on counts followed by scatter-replicate.
-All kernels live in single PTX modules and are orchestrated by
-``ExecutionPlan`` objects.  For N > 1024 or unsupported predicates,
-serial single-thread fallbacks are used.
+### GPU buffer arena
+Every `RemoraExecutor.execute()` call currently does
+`alloc → copy H→D → launch → copy D→H → free`.  Iterative
+Python+Remora workflows pay this overhead per call: the Mandelbrot
+example does 240 alloc/free cycles (80 iterations × 3 kernels).
+`execute_plan()` pre-allocates plan buffers but frees them after
+each plan execution — no reuse across calls.
 
-**Remaining work**: Multi-block parallel versions for N > 1024
-(requires inter-block prefix propagation for scan).
+A device memory arena that persists across calls and recycles
+buffers by size class would eliminate allocation overhead for
+iterative algorithms.  The `GPUPtxContext` pool is a partial
+prototype but is only used by `execute_program_from_ptx`.
 
-**Where this is tracked**:
-- `docs/GPU_CPU_PARITY_PLAN.md` — Future Work section
-- Kernel docstrings in `remora/gpu_lowering.py`
-- This file
+### Kernel fusion
+The Mandelbrot iteration calls three separate kernels per step
+(`step_real`, `step_imag`, `mag_sq`), each writing to and reading
+from intermediate device buffers.  When multiple element-wise maps
+share the same inputs, fusing them into a single kernel eliminates
+intermediate allocation and memory traffic.
 
-## Host-Orchestrated Optimization Loops (GPU+CPU)
+Approach: detect chains of `remora.define()` calls applied to the
+same arrays and compile a fused kernel with multiple outputs.  Or,
+allow `remora.define()` to accept a multi-expression body that
+returns a tuple.
 
-**Current state**: `examples/ad_optimize.lisp` compiles to a GPU
-``LoopPlan`` via ``try_compile_state_fold_gpu`` in ``codegen.py``.
-The pattern detector recognises ``fold body init (iota N)`` where the
-body function does not use the step variable, compiles the body as a
-single GPU map kernel via ``generate_mlir_descriptor_abi_ptx``, and
-emits a ``LoopPlan`` with N iterations and double-buffer swapping.
-``execute_program_on_gpu`` tries this path first; if the pattern does
-not match or the GPU toolchain is unavailable, it falls back to the
-standard IREE pipeline.
+### Benchmarks vs NumPy / JAX / Futhark
+Systematic performance comparison of Remora-compiled code against
+hand-written NumPy, JAX `jit`, and Futhark for common array
+operations (map, fold, scan, matmul, sort, stencil).  This is the
+most publishable artifact and validates whether rank polymorphism
+compiles to competitive code.
 
-The fold body's init values are pre-loaded to the device via
-``BufferSpec.init``.  On a CUDA-capable system, running
-``remorac --syntax lisp --target gpu examples/ad_optimize.lisp``
-executes the 200-step gradient descent on GPU.
+### Float64 and int64 support
+Most GPU and CPU lowering paths are f32/i32-only.  Scientific
+computing workloads need double precision.  Extending the descriptor
+ABI, kernel generators, and type checker to support f64/i64 is
+straightforward but touches many files.
 
-## Tiled Shared-Memory Matmul
+### JIT shape specialization
+`remora.define()` requires static array sizes baked into the source.
+A JAX-style trace-and-specialize approach would let one definition
+work for any array size by compiling a specialized kernel on first
+call for each distinct shape signature, then caching it.
 
-**Current state**: `HIRMatmul` uses a tiled shared-memory kernel with
-TILE=16.  Each thread block cooperatively loads 16×16 tiles of A and B
-into shared memory, then computes a partial dot product from the tiles.
-This reduces global memory traffic by a factor of TILE compared to the
-naive per-thread dot-product.  Edge tiles are bounds-checked and
-zero-padded so non-TILE-aligned dimensions work correctly.  Falls back
-to the naive per-thread kernel if the tiled version fails to compile.
+### Better error messages
+Type errors and lowering failures produce compiler-internal messages
+(HIR node names, MLIR dialect errors).  Python users expect
+NumPy-quality diagnostics with source locations and suggestions.
 
-## Multi-block Parallel Scan
+### Persistent full-artifact cache
+`remora.define()` re-parses and re-typechecks every call even when
+the native `.so` is cached by `cache.py`.  Caching the full compiled
+artifact (typed AST, HIR, kernel metadata) by source hash would make
+repeated `define()` calls instant after the first compilation.
 
-**Current state**: The f32 scan uses a parallel Hillis-Steele kernel
-for N ≤ 1024 (single block).  For 1024 < N ≤ 1,048,576, a four-kernel
-multi-block scan is used: per-block local scan, extract block sums,
-scan block sums, propagate prefixes.  All four kernels are in one PTX
-module, orchestrated by an ``ExecutionPlan``.  For N > 1,048,576, the
-serial single-thread fallback is used.
+### Documentation for the PL community
+Remora was designed by Slepak, Shivers, and Mansky at Northeastern.
+The academic papers in `docs/remora-reference/` describe the
+semantics and type theory.  A companion document showing how rank
+polymorphism compiles through HIR → MLIR → GPU kernels, with
+concrete examples of implicit lifting and frame/cell decomposition,
+would bridge the gap between the theory papers and this
+implementation.
 
-**Remaining work**: extend to arbitrary N via recursive multi-level scan.
+## Completed
 
-## Parallel Sort and Grade
+### Parallel GPU Filter and Replicate (N ≤ 1024)
+- `HIRFilter`: three-kernel plan (predicate eval → i32 prefix sum →
+  scatter-write).
+- `HIRReplicate`: two-kernel plan (prefix sum on counts →
+  scatter-replicate).
+- All kernels orchestrated by `ExecutionPlan`.
 
-**Current state**: `HIRSort` and `HIRGrade` use parallel bitonic sort/grade
-in shared memory for N ≤ 1024 (single block).  For N > 1024, multi-block
-bitonic sort and grade use per-block local sorting followed by global
-compare-swap merge steps via ``ExecutionPlan`` with double-buffered
-global memory.  Odd blocks reverse their output to form bitonic sequences
-at block boundaries.  Multi-block grade uses i32 index buffers with
-value-lookup global merge steps.  Supports up to ~1M elements.
+### Host-Orchestrated GPU Optimization Loops
+- `ad_optimize.lisp` compiles to a GPU `LoopPlan` via
+  `try_compile_state_fold_gpu`.  200-step gradient descent runs on
+  GPU producing the correct result `[0.512337, 0.433115, 0.911621]`.
+- CSE collapses the AD source transform's 32,769-node gradient
+  expression before GPU compilation.
 
-## Parallel Scatter-Add
+### Tiled Shared-Memory Matmul
+- TILE=16 cooperative loading.  Falls back to naive per-thread
+  dot-product when the tiled version fails to compile.
 
-**Current state**: `HIRScatterAdd` uses a parallel single-block kernel
-for N ≤ 1024: all threads copy target to output in parallel, then
-thread 0 performs the scalar add after a barrier.  For N > 1024, the
-serial single-thread fallback is used.
+### Multi-Block Parallel Scan (up to 1M elements)
+- Four-kernel plan: per-block Hillis-Steele → extract block sums →
+  scan block sums → propagate prefixes.
 
-**Upgrade path**: for N > 1024, use a two-kernel ``ExecutionPlan``
-(parallel copy + single-thread add) or ``llvm.atomicrmw fadd`` for
-the add step.
+### Parallel Sort and Grade
+- Single-block bitonic sort/grade for N ≤ 1024.
+- Multi-block bitonic sort and grade for N > 1024 with odd-block
+  reversal, double-buffered global merge, and i32 value-lookup
+  grade.  Supports up to ~1M elements.
+
+### Parallel Scatter-Add (N ≤ 1024)
+- Single-block kernel: parallel copy + barrier + thread-0 add.
+
+## Remaining
+
+### Multi-block filter and replicate (N > 1024)
+Requires a multi-block i32 prefix sum.  The f32 multi-block scan
+infrastructure exists; an i32 variant and integration into the
+filter/replicate plans is the remaining work.
+
+### Multi-block scan (N > 1,048,576)
+Recursive multi-level scan for arrays exceeding 1024 blocks.
+The current implementation falls back to serial for N > 1M.
+
+### Parallel scatter-add (N > 1024)
+Use a two-kernel `ExecutionPlan` (parallel copy + single-thread add)
+or `llvm.atomicrmw fadd` for the add step.
+
+### PyTorch tensor interop
+Accept `torch.Tensor` inputs in `RemoraFunction.__call__`.  For CPU
+tensors, extract `data_ptr()`.  For CUDA tensors, pass the device
+pointer directly to GPU kernels.  Deferred to future work.
+
+### PyTorch autograd integration
+Register Remora's AD gradient functions as custom
+`torch.autograd.Function` backward passes.  Deferred to future work.
+
+## Abandoned
+
+### `# coding: remora` source codec
+Removed.  The codec abused Python's encoding machinery, required a
+`.pth` file for direct script execution, and re-invoked the Remora
+compiler on every module import.  Replaced by `remora.define()` which
+accepts Remora source as a Python string and returns a compiled
+callable.
