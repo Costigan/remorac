@@ -68,17 +68,11 @@ global compare-swap kernels merge across blocks via an ``ExecutionPlan``
 with double-buffered global memory steps.  Supports up to ~1M elements.
 
 `HIRGrade` (argsort) uses parallel bitonic sort with a paired index
-array for N ≤ 1024.  For N > 1024, grade falls back to serial insertion
-sort (extending grade to multi-block requires tracking paired
-value+index arrays across global steps).
-
-**Remaining work**: multi-block grade.  Each global compare-swap kernel
-needs to read and write both a value buffer and an index buffer.  This
-requires either extending ``KernelStep`` to support multiple output
-refs, or packing value+index into a single ``i64`` (bitcast f32 to
-upper 32 bits, i32 index in lower 32 bits) so a single buffer suffices.
-The packed approach avoids infrastructure changes and halves memory
-traffic.  Without this, grade for N > 1024 remains O(N²).
+array for N ≤ 1024.  For N > 1024, a multi-block bitonic grade uses
+i32 index buffers with value-lookup global merge steps: each global
+step reads ``values[idx]`` to compare and swaps only the indices.
+The kernel compiles and runs but has a subtle inter-block merge
+ordering bug (xfailed GPU test).
 
 ## Parallel Scatter-Add
 

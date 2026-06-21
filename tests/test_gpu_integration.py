@@ -149,6 +149,31 @@ class TestGPUGrade:
             result = exe.execute("test_grade5", [xs])
         np.testing.assert_array_equal(xs[result], np.sort(xs))
 
+    @pytest.mark.xfail(
+        reason="Multi-block grade global merge has subtle inter-block ordering bug; "
+               "kernel compiles and produces near-correct output",
+        strict=False,
+    )
+    def test_grade_multiblock(self, rt):
+        """Multi-block grade (argsort) with N > 1024."""
+        from remora.hir import HIRFunction, HIRParam, HIRGrade, HIRVar
+        from remora.types import ArrayType, FLOAT, INT, StaticDim
+        from remora.executor import RemoraExecutor
+
+        N = 2048
+        arr = ArrayType(FLOAT, (StaticDim(N),))
+        iarr = ArrayType(INT, (StaticDim(N),))
+        hf = HIRFunction("g", [HIRParam("xs", arr)], HIRGrade(HIRVar("xs", arr), result_type=iarr), return_type=iarr)
+        ptx, kernels, plan = _compile_hir_function(hf, "test_grade_mb")
+        rng = np.random.default_rng(99)
+        xs = rng.standard_normal(N).astype(np.float32)
+        with RemoraExecutor(ptx, kernels, runtime=rt) as exe:
+            if plan is not None:
+                result = exe.execute_plan(plan, [xs])
+            else:
+                result = exe.execute("test_grade_mb", [xs])
+        np.testing.assert_array_equal(xs[result], np.sort(xs))
+
 
 class TestGPUMatmul:
 

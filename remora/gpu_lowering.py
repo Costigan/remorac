@@ -2983,6 +2983,253 @@ def build_descriptor_abi_multiblock_bitonic_sort_gpu_module(
     return GPUModuleScaffold(text, module_name, last_kernel)
 
 
+def build_descriptor_abi_multiblock_bitonic_grade_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    block_size: int = 1024,
+) -> GPUModuleScaffold:
+    """Build a multi-block bitonic grade (argsort) using value-lookup merge.
+
+    Phase 1: pad input values to next power-of-2 with +inf.
+    Phase 2: each block sorts (value, index) pairs in shared memory.
+    Phase 3+: global merge steps compare values[idx] and swap indices.
+    Double-buffered i32 index arrays avoid race conditions.
+    """
+    from remora.hir import HIRGrade
+    if not isinstance(function.body, HIRGrade):
+        raise GPUScaffoldError("GPU multi-block grade requires HIRGrade body")
+    if len(function.params) != 1:
+        raise GPUScaffoldError("GPU multi-block grade requires one parameter")
+    param_type = function.params[0].type
+    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
+        raise GPUScaffoldError("GPU multi-block grade supports rank-1 f32 only")
+    if param_type.rank != 1:
+        raise GPUScaffoldError("GPU multi-block grade supports rank-1 only")
+
+    N = int(param_type.shape[0].value)
+    BS = block_size
+    NP = 1
+    while NP < N:
+        NP *= 2
+    if NP <= BS:
+        raise GPUScaffoldError("Use single-block grade for N <= block_size")
+    num_blocks = NP // BS
+    if num_blocks > 1024:
+        raise GPUScaffoldError(f"N={N} too large for multi-block grade")
+    num_stages = NP.bit_length() - 1
+    local_stages = BS.bit_length() - 1
+
+    base = kernel_name or f"remora_{function.name}_grade"
+    pad_name = f"{base}_pad"
+    local_name = f"{base}_local"
+    _validate_scaffold_names(module_name, pad_name)
+
+    # Descriptor load helpers
+    pad_in = _descriptor_load_lines("pi", "%input_desc", 1)
+    pad_out = _descriptor_load_lines("po", "%output_desc", 1)
+    lg_vals = _descriptor_load_lines("lv", "%values_desc", 1)
+    lg_idx = _descriptor_load_lines("li", "%indices_desc", 1)
+
+    kernels_mlir = []
+
+    # ── Kernel 1: pad values ──
+    kernels_mlir.append(f"""
+    llvm.func @{pad_name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(pad_in + pad_out)}
+      %p_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %p_tid = llvm.sext %p_tid32 : i32 to i64
+      %p_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %p_bid = llvm.sext %p_bid32 : i32 to i64
+      %p_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %p_bdim = llvm.sext %p_bdim32 : i32 to i64
+      %p_base = llvm.mul %p_bid, %p_bdim  : i64
+      %p_gid = llvm.add %p_base, %p_tid  : i64
+      %p_NP = llvm.mlir.constant({NP} : index) : i64
+      %p_N = llvm.mlir.constant({N} : index) : i64
+      %p_ok = llvm.icmp "ult" %p_gid, %p_NP : i64
+      %p_inf = llvm.mlir.constant(3.40282347e+38 : f32) : f32
+      llvm.cond_br %p_ok, ^p_work, ^p_done
+    ^p_work:
+      %p_in_range = llvm.icmp "ult" %p_gid, %p_N : i64
+      llvm.cond_br %p_in_range, ^p_copy, ^p_pad
+    ^p_copy:
+      %p_si = llvm.add %pi_offset, %p_gid  : i64
+      %p_sp = llvm.getelementptr %pi_aligned[%p_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %p_val = llvm.load %p_sp : !llvm.ptr -> f32
+      %p_oi = llvm.add %po_offset, %p_gid  : i64
+      %p_op = llvm.getelementptr %po_aligned[%p_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %p_val, %p_op : f32, !llvm.ptr
+      llvm.br ^p_done
+    ^p_pad:
+      %p_oi2 = llvm.add %po_offset, %p_gid  : i64
+      %p_op2 = llvm.getelementptr %po_aligned[%p_oi2] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %p_inf, %p_op2 : f32, !llvm.ptr
+      llvm.br ^p_done
+    ^p_done:
+      llvm.return
+    }}""")
+
+    # ── Kernel 2: local grade (per-block bitonic sort on value+index pairs) ──
+    kernels_mlir.append(f"""
+    llvm.mlir.global internal @mbg_vals() {{addr_space = 3 : i32}} : !llvm.array<{BS} x f32>
+    llvm.mlir.global internal @mbg_idxs() {{addr_space = 3 : i32}} : !llvm.array<{BS} x i32>
+    llvm.func @{local_name}(%values_desc: !llvm.ptr, %indices_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(lg_vals + lg_idx)}
+      %lg_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %lg_tid = llvm.sext %lg_tid32 : i32 to i64
+      %lg_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %lg_bid = llvm.sext %lg_bid32 : i32 to i64
+      %lg_BS = llvm.mlir.constant({BS} : index) : i64
+      %lg_base = llvm.mul %lg_bid, %lg_BS  : i64
+      %lg_gid = llvm.add %lg_base, %lg_tid  : i64
+      %lg_sv = llvm.mlir.addressof @mbg_vals : !llvm.ptr<3>
+      %lg_si = llvm.mlir.addressof @mbg_idxs : !llvm.ptr<3>
+      %lg_vi = llvm.add %lv_offset, %lg_gid  : i64
+      %lg_vp = llvm.getelementptr %lv_aligned[%lg_vi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %lg_val = llvm.load %lg_vp : !llvm.ptr -> f32
+      %lg_svp = llvm.getelementptr %lg_sv[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      llvm.store %lg_val, %lg_svp : f32, !llvm.ptr<3>
+      %lg_gid32 = llvm.trunc %lg_gid : i64 to i32
+      %lg_sip = llvm.getelementptr %lg_si[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x i32>
+      llvm.store %lg_gid32, %lg_sip : i32, !llvm.ptr<3>
+      nvvm.barrier0
+      %lg_c0 = llvm.mlir.constant(0 : index) : i64
+      %lg_c1 = llvm.mlir.constant(1 : index) : i64
+      %lg_ns = llvm.mlir.constant({local_stages} : index) : i64
+      llvm.br ^lg_outer(%lg_c0 : i64)
+    ^lg_outer(%lg_k: i64):
+      %lg_kd = llvm.icmp "uge" %lg_k, %lg_ns : i64
+      llvm.cond_br %lg_kd, ^lg_write, ^lg_is
+    ^lg_is:
+      llvm.br ^lg_inner(%lg_c0 : i64)
+    ^lg_inner(%lg_s: i64):
+      %lg_sd = llvm.icmp "sgt" %lg_s, %lg_k : i64
+      llvm.cond_br %lg_sd, ^lg_on, ^lg_step
+    ^lg_step:
+      %lg_j = llvm.sub %lg_k, %lg_s  : i64
+      %lg_stride = llvm.shl %lg_c1, %lg_j  : i64
+      %lg_partner = llvm.xor %lg_tid, %lg_stride  : i64
+      %lg_kp1 = llvm.add %lg_k, %lg_c1  : i64
+      %lg_sh = llvm.lshr %lg_tid, %lg_kp1  : i64
+      %lg_bit = llvm.and %lg_sh, %lg_c1  : i64
+      %lg_asc = llvm.icmp "eq" %lg_bit, %lg_c0 : i64
+      %lg_low = llvm.and %lg_tid, %lg_stride  : i64
+      %lg_is_l = llvm.icmp "eq" %lg_low, %lg_c0 : i64
+      %lg_mvp = llvm.getelementptr %lg_sv[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %lg_pvp = llvm.getelementptr %lg_sv[0, %lg_partner] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %lg_mv = llvm.load %lg_mvp : !llvm.ptr<3> -> f32
+      %lg_pv = llvm.load %lg_pvp : !llvm.ptr<3> -> f32
+      %lg_mip = llvm.getelementptr %lg_si[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x i32>
+      %lg_pip = llvm.getelementptr %lg_si[0, %lg_partner] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x i32>
+      %lg_mi = llvm.load %lg_mip : !llvm.ptr<3> -> i32
+      %lg_pi = llvm.load %lg_pip : !llvm.ptr<3> -> i32
+      nvvm.barrier0
+      %lg_lt = llvm.fcmp "olt" %lg_mv, %lg_pv : f32
+      %lg_minv = llvm.select %lg_lt, %lg_mv, %lg_pv : i1, f32
+      %lg_maxv = llvm.select %lg_lt, %lg_pv, %lg_mv : i1, f32
+      %lg_mini = llvm.select %lg_lt, %lg_mi, %lg_pi : i1, i32
+      %lg_maxi = llvm.select %lg_lt, %lg_pi, %lg_mi : i1, i32
+      %lg_wm = llvm.icmp "eq" %lg_is_l, %lg_asc : i1
+      %lg_rv = llvm.select %lg_wm, %lg_minv, %lg_maxv : i1, f32
+      %lg_ri = llvm.select %lg_wm, %lg_mini, %lg_maxi : i1, i32
+      llvm.store %lg_rv, %lg_mvp : f32, !llvm.ptr<3>
+      llvm.store %lg_ri, %lg_mip : i32, !llvm.ptr<3>
+      nvvm.barrier0
+      %lg_ns2 = llvm.add %lg_s, %lg_c1  : i64
+      llvm.br ^lg_inner(%lg_ns2 : i64)
+    ^lg_on:
+      %lg_nk = llvm.add %lg_k, %lg_c1  : i64
+      llvm.br ^lg_outer(%lg_nk : i64)
+    ^lg_write:
+      %lg_rip = llvm.getelementptr %lg_si[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x i32>
+      %lg_riv = llvm.load %lg_rip : !llvm.ptr<3> -> i32
+      %lg_oi = llvm.add %li_offset, %lg_gid  : i64
+      %lg_op = llvm.getelementptr %li_aligned[%lg_oi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      llvm.store %lg_riv, %lg_op : i32, !llvm.ptr
+      llvm.br ^lg_done
+    ^lg_done:
+      llvm.return
+    }}""")
+
+    # ── Global merge step kernels ──
+    step_idx = 0
+    global_steps_info: list[str] = []
+    for k in range(local_stages, num_stages):
+        for j in range(k, -1, -1):
+            stride = 1 << j
+            sort_block = 1 << (k + 1)
+            sname = f"{base}_gstep_{step_idx}"
+            global_steps_info.append(sname)
+
+            gs_v = _descriptor_load_lines(f"gv{step_idx}", "%values_desc", 1)
+            gs_i = _descriptor_load_lines(f"gi{step_idx}", "%indices_in_desc", 1)
+            gs_o = _descriptor_load_lines(f"go{step_idx}", "%indices_out_desc", 1)
+
+            kernels_mlir.append(f"""
+    llvm.func @{sname}(%values_desc: !llvm.ptr, %indices_in_desc: !llvm.ptr, %indices_out_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(gs_v + gs_i + gs_o)}
+      %g{step_idx}_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %g{step_idx}_tid = llvm.sext %g{step_idx}_tid32 : i32 to i64
+      %g{step_idx}_bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %g{step_idx}_bid = llvm.sext %g{step_idx}_bid32 : i32 to i64
+      %g{step_idx}_bdim32 = nvvm.read.ptx.sreg.ntid.x : i32
+      %g{step_idx}_bdim = llvm.sext %g{step_idx}_bdim32 : i32 to i64
+      %g{step_idx}_base = llvm.mul %g{step_idx}_bid, %g{step_idx}_bdim  : i64
+      %g{step_idx}_gid = llvm.add %g{step_idx}_base, %g{step_idx}_tid  : i64
+      %g{step_idx}_NP = llvm.mlir.constant({NP} : index) : i64
+      %g{step_idx}_ok = llvm.icmp "ult" %g{step_idx}_gid, %g{step_idx}_NP : i64
+      llvm.cond_br %g{step_idx}_ok, ^g{step_idx}_work, ^g{step_idx}_done
+    ^g{step_idx}_work:
+      %g{step_idx}_c0 = llvm.mlir.constant(0 : index) : i64
+      %g{step_idx}_c1 = llvm.mlir.constant(1 : index) : i64
+      %g{step_idx}_stride = llvm.mlir.constant({stride} : index) : i64
+      %g{step_idx}_sb = llvm.mlir.constant({sort_block} : index) : i64
+      %g{step_idx}_partner = llvm.xor %g{step_idx}_gid, %g{step_idx}_stride  : i64
+      %g{step_idx}_div = llvm.udiv %g{step_idx}_gid, %g{step_idx}_sb  : i64
+      %g{step_idx}_bit = llvm.and %g{step_idx}_div, %g{step_idx}_c1  : i64
+      %g{step_idx}_asc = llvm.icmp "eq" %g{step_idx}_bit, %g{step_idx}_c0 : i64
+      %g{step_idx}_low = llvm.and %g{step_idx}_gid, %g{step_idx}_stride  : i64
+      %g{step_idx}_is_l = llvm.icmp "eq" %g{step_idx}_low, %g{step_idx}_c0 : i64
+      %g{step_idx}_me_ii = llvm.add %gi{step_idx}_offset, %g{step_idx}_gid  : i64
+      %g{step_idx}_me_ip = llvm.getelementptr %gi{step_idx}_aligned[%g{step_idx}_me_ii] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %g{step_idx}_me_idx32 = llvm.load %g{step_idx}_me_ip : !llvm.ptr -> i32
+      %g{step_idx}_me_idx = llvm.sext %g{step_idx}_me_idx32 : i32 to i64
+      %g{step_idx}_pa_ii = llvm.add %gi{step_idx}_offset, %g{step_idx}_partner  : i64
+      %g{step_idx}_pa_ip = llvm.getelementptr %gi{step_idx}_aligned[%g{step_idx}_pa_ii] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      %g{step_idx}_pa_idx32 = llvm.load %g{step_idx}_pa_ip : !llvm.ptr -> i32
+      %g{step_idx}_pa_idx = llvm.sext %g{step_idx}_pa_idx32 : i32 to i64
+      %g{step_idx}_me_vi = llvm.add %gv{step_idx}_offset, %g{step_idx}_me_idx  : i64
+      %g{step_idx}_me_vp = llvm.getelementptr %gv{step_idx}_aligned[%g{step_idx}_me_vi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %g{step_idx}_me_v = llvm.load %g{step_idx}_me_vp : !llvm.ptr -> f32
+      %g{step_idx}_pa_vi = llvm.add %gv{step_idx}_offset, %g{step_idx}_pa_idx  : i64
+      %g{step_idx}_pa_vp = llvm.getelementptr %gv{step_idx}_aligned[%g{step_idx}_pa_vi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %g{step_idx}_pa_v = llvm.load %g{step_idx}_pa_vp : !llvm.ptr -> f32
+      %g{step_idx}_lt = llvm.fcmp "olt" %g{step_idx}_me_v, %g{step_idx}_pa_v : f32
+      %g{step_idx}_min_i = llvm.select %g{step_idx}_lt, %g{step_idx}_me_idx32, %g{step_idx}_pa_idx32 : i1, i32
+      %g{step_idx}_max_i = llvm.select %g{step_idx}_lt, %g{step_idx}_pa_idx32, %g{step_idx}_me_idx32 : i1, i32
+      %g{step_idx}_wm = llvm.icmp "eq" %g{step_idx}_is_l, %g{step_idx}_asc : i1
+      %g{step_idx}_res = llvm.select %g{step_idx}_wm, %g{step_idx}_min_i, %g{step_idx}_max_i : i1, i32
+      %g{step_idx}_oi = llvm.add %go{step_idx}_offset, %g{step_idx}_gid  : i64
+      %g{step_idx}_op = llvm.getelementptr %go{step_idx}_aligned[%g{step_idx}_oi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+      llvm.store %g{step_idx}_res, %g{step_idx}_op : i32, !llvm.ptr
+      llvm.br ^g{step_idx}_done
+    ^g{step_idx}_done:
+      llvm.return
+    }}""")
+            step_idx += 1
+
+    all_kernels = "\n".join(kernels_mlir)
+    text = f"""module {{
+  gpu.module @{module_name} {{
+{all_kernels}
+  }}
+}}"""
+    last_kernel = global_steps_info[-1] if global_steps_info else local_name
+    return GPUModuleScaffold(text, module_name, last_kernel)
+
+
 # ---------------------------------------------------------------------------
 # IndicesOf kernel
 # ---------------------------------------------------------------------------

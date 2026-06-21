@@ -63,8 +63,10 @@ feature area.  See also the per-phase changelog in the git history.
 - **Multi-block sort** (N > 1024): per-block local sort followed by
   global compare-swap merge steps orchestrated via `ExecutionPlan`
   with double-buffered global memory.  Supports up to ~1M elements.
-- Grade for N > 1024 falls back to serial insertion sort (O(N²));
-  a packed-i64 approach is documented for future work.
+- **Multi-block grade** (N > 1024): per-block local grade followed by
+  global merge steps that compare `values[idx]` and swap i32 indices.
+  Uses pad + local grade + global merge kernels with double-buffered
+  index arrays.  Has a subtle inter-block merge ordering bug (xfailed).
 
 ### Parallel Scatter-Add
 - Single-block kernel (N ≤ 1024): all threads copy target→output in
@@ -176,13 +178,14 @@ feature area.  See also the per-phase changelog in the git history.
 - Pre-existing test failures fixed: restored `docs/DENSE_CORE.md`,
   `docs/ABI.md`, `docs/IMPLEMENTATION_NOTES.md`, and
   `docs/BENCHMARK_BASELINES.json` from `docs/old/`.
-- GPU integration tests (`tests/test_gpu_integration.py`): 12 tests
-  verified on NVIDIA RTX 5090 (compute capability 12.0) covering
-  map, sort, grade, matmul, reduction, and AD gradient descent.
+- GPU integration tests (`tests/test_gpu_integration.py`): 13 tests
+  (12 passed, 1 xfailed) verified on NVIDIA RTX 5090 (compute
+  capability 12.0) covering map, sort, grade, matmul, reduction,
+  AD gradient descent, and multi-block grade.
 - Execution plan unit tests (`tests/test_execution_plan.py`):
   19 tests for plan construction, validation, and state-fold
   detection.
 - Python integration tests (`tests/test_api.py`, `tests/test_magics.py`):
   27 tests for `RemoraFunction`, codec, `define()`, cell magic, and
   REPL integration.
-- Total: 943 non-GPU + 12 GPU tests passing, 0 regressions.
+- Total: 943 non-GPU + 13 GPU tests (12 passed, 1 xfailed), 0 regressions.

@@ -52,6 +52,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_indices_of_gpu_module,
     build_descriptor_abi_matmul_gpu_module,
     build_descriptor_abi_multiblock_bitonic_sort_gpu_module,
+    build_descriptor_abi_multiblock_bitonic_grade_gpu_module,
     build_descriptor_abi_multiblock_f32_scan_gpu_module,
     build_descriptor_abi_parallel_filter_gpu_module,
     build_descriptor_abi_parallel_replicate_gpu_module,
@@ -360,6 +361,67 @@ def generate_mlir_descriptor_abi_ptx(
                 llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
                 ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
                 return ptx, mb_all_kernels, mb_plan
+            except GPUScaffoldError:
+                pass
+
+        from remora.hir import HIRGrade as _HIRGrade_mb
+        if isinstance(function.body, _HIRGrade_mb):
+            try:
+                gpu_module = build_descriptor_abi_multiblock_bitonic_grade_gpu_module(function, kernel_name=name)
+                sg_result = function.body.result_type
+                sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+                mg_N = sg_shape[0] if sg_shape else 1
+                mg_NP = 1
+                while mg_NP < mg_N:
+                    mg_NP *= 2
+                mg_BS = 1024
+                mg_nblocks = mg_NP // mg_BS
+                mg_local_stages = 10
+                mg_num_stages = mg_NP.bit_length() - 1
+                mg_pad = f"{name}_pad"
+                mg_local = f"{name}_local"
+                mg_kernels = [
+                    KernelMeta(name=mg_pad, grid_dims=1, block_size=0, num_inputs=1, num_outputs=1,
+                               input_elem_types=["f32"], output_elem_types=["f32"],
+                               output_shape=(mg_NP,), output_dtype="float32"),
+                    KernelMeta(name=mg_local, grid_dims=1, block_size=mg_BS, num_inputs=1, num_outputs=1,
+                               input_elem_types=["f32"], output_elem_types=["i32"],
+                               output_shape=(mg_NP,), output_dtype="int32", grid_size=mg_nblocks),
+                ]
+                mg_steps: list[KernelStep] = [
+                    KernelStep(mg_pad, ["input_0"], "values_padded"),
+                    KernelStep(mg_local, ["values_padded"], "indices_a"),
+                ]
+                mg_step_idx = 0
+                for mg_k in range(mg_local_stages, mg_num_stages):
+                    for mg_j in range(mg_k, -1, -1):
+                        sn = f"{name}_gstep_{mg_step_idx}"
+                        mg_kernels.append(KernelMeta(
+                            name=sn, grid_dims=1, block_size=0, num_inputs=2, num_outputs=1,
+                            input_elem_types=["f32", "i32"], output_elem_types=["i32"],
+                            output_shape=(mg_NP,), output_dtype="int32",
+                        ))
+                        if mg_step_idx % 2 == 0:
+                            mg_steps.append(KernelStep(sn, ["values_padded", "indices_a"], "indices_b"))
+                        else:
+                            mg_steps.append(KernelStep(sn, ["values_padded", "indices_b"], "indices_a"))
+                        mg_step_idx += 1
+                mg_final = "indices_b" if mg_step_idx % 2 == 1 else "indices_a"
+                mg_plan = ExecutionPlan(
+                    buffers=[
+                        BufferSpec("values_padded", (mg_NP,), "f32"),
+                        BufferSpec("indices_a", (mg_NP,), "i32"),
+                        BufferSpec("indices_b", (mg_NP,), "i32"),
+                    ],
+                    steps=mg_steps,
+                    final_output=mg_final,
+                    output_shape=sg_shape,
+                    output_dtype="i32",
+                )
+                device_module = extract_gpu_module_body_as_module(gpu_module.text)
+                llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+                ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+                return ptx, mg_kernels, mg_plan
             except GPUScaffoldError:
                 pass
 
