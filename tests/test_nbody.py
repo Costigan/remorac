@@ -33,7 +33,7 @@ def _nbody_source_compiled(N: int, eps: float = 0.01) -> str:
         f" (let* ((D (- (index pos j) (index pos i)))"
         f" (dsq (fold + 0.0 (* D D)))"
         f" (sd (exp (* 1.5 (log (+ dsq {eps}))))))"
-        f" (map (lambda (v) (/ v sd)) D))))"
+        f" (map (lambda (v) (/ v sd)) D)))"
         f" (iota {N}))))"
         f" (iota {N})))"
     )
