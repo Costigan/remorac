@@ -2907,7 +2907,13 @@ def build_descriptor_abi_multiblock_bitonic_sort_gpu_module(
     ^sl_write:
       %sl_rp = llvm.getelementptr %sl_shmem[0, %sl_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
       %sl_rv = llvm.load %sl_rp : !llvm.ptr<3> -> f32
-      %sl_oi = llvm.add %sl_out_offset, %sl_gidx  : i64
+      %sl_is_odd = llvm.and %sl_bid, %sl_c1  : i64
+      %sl_odd = llvm.icmp "ne" %sl_is_odd, %sl_c0 : i64
+      %sl_bsm1 = llvm.mlir.constant({BS - 1} : index) : i64
+      %sl_rev = llvm.sub %sl_bsm1, %sl_tid  : i64
+      %sl_wt = llvm.select %sl_odd, %sl_rev, %sl_tid : i1, i64
+      %sl_wg = llvm.add %sl_base, %sl_wt  : i64
+      %sl_oi = llvm.add %sl_out_offset, %sl_wg  : i64
       %sl_op = llvm.getelementptr %sl_out_aligned[%sl_oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
       llvm.store %sl_rv, %sl_op : f32, !llvm.ptr
       llvm.br ^sl_done
@@ -3145,7 +3151,13 @@ def build_descriptor_abi_multiblock_bitonic_grade_gpu_module(
     ^lg_write:
       %lg_rip = llvm.getelementptr %lg_si[0, %lg_tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x i32>
       %lg_riv = llvm.load %lg_rip : !llvm.ptr<3> -> i32
-      %lg_oi = llvm.add %li_offset, %lg_gid  : i64
+      %lg_is_odd = llvm.and %lg_bid, %lg_c1  : i64
+      %lg_odd = llvm.icmp "ne" %lg_is_odd, %lg_c0 : i64
+      %lg_bsm1 = llvm.mlir.constant({BS - 1} : index) : i64
+      %lg_rev = llvm.sub %lg_bsm1, %lg_tid  : i64
+      %lg_wt = llvm.select %lg_odd, %lg_rev, %lg_tid : i1, i64
+      %lg_wg = llvm.add %lg_base, %lg_wt  : i64
+      %lg_oi = llvm.add %li_offset, %lg_wg  : i64
       %lg_op = llvm.getelementptr %li_aligned[%lg_oi] : (!llvm.ptr, i64) -> !llvm.ptr, i32
       llvm.store %lg_riv, %lg_op : i32, !llvm.ptr
       llvm.br ^lg_done

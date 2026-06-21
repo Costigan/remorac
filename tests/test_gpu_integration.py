@@ -149,11 +149,6 @@ class TestGPUGrade:
             result = exe.execute("test_grade5", [xs])
         np.testing.assert_array_equal(xs[result], np.sort(xs))
 
-    @pytest.mark.xfail(
-        reason="Multi-block grade global merge has subtle inter-block ordering bug; "
-               "kernel compiles and produces near-correct output",
-        strict=False,
-    )
     def test_grade_multiblock(self, rt):
         """Multi-block grade (argsort) with N > 1024."""
         from remora.hir import HIRFunction, HIRParam, HIRGrade, HIRVar

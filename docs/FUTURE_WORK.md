@@ -61,18 +61,13 @@ serial single-thread fallback is used.
 
 ## Parallel Sort and Grade
 
-**Current state**: `HIRSort` uses parallel bitonic sort in shared memory
-for N ≤ 1024 (single block, O(N log²N)).  For N > 1024, a multi-block
-bitonic sort is used: each block sorts its 1024 elements locally, then
-global compare-swap kernels merge across blocks via an ``ExecutionPlan``
-with double-buffered global memory steps.  Supports up to ~1M elements.
-
-`HIRGrade` (argsort) uses parallel bitonic sort with a paired index
-array for N ≤ 1024.  For N > 1024, a multi-block bitonic grade uses
-i32 index buffers with value-lookup global merge steps: each global
-step reads ``values[idx]`` to compare and swaps only the indices.
-The kernel compiles and runs but has a subtle inter-block merge
-ordering bug (xfailed GPU test).
+**Current state**: `HIRSort` and `HIRGrade` use parallel bitonic sort/grade
+in shared memory for N ≤ 1024 (single block).  For N > 1024, multi-block
+bitonic sort and grade use per-block local sorting followed by global
+compare-swap merge steps via ``ExecutionPlan`` with double-buffered
+global memory.  Odd blocks reverse their output to form bitonic sequences
+at block boundaries.  Multi-block grade uses i32 index buffers with
+value-lookup global merge steps.  Supports up to ~1M elements.
 
 ## Parallel Scatter-Add
 
