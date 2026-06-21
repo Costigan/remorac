@@ -18,6 +18,7 @@ dependencies = [
 remorac = "remora.cli:main"
 remora = "remora.repl:main"
 remora-bench = "remora.benchmark:main"
+remora-perf = "remora.benchmark_suite:main"
 
 [dependency-groups]
 dev = [

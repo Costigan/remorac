@@ -1,0 +1,794 @@
+[
+  {
+    "operation": "map",
+    "backend": "jax-gpu",
+    "size": 1000,
+    "median_s": 2.475250221323222e-05,
+    "min_s": 1.9152997992932796e-05,
+    "std_s": 0.0001628866764162878,
+    "throughput_elem_per_s": 40399955.987698846
+  },
+  {
+    "operation": "map",
+    "backend": "jax-gpu",
+    "size": 10000,
+    "median_s": 2.0751002011820674e-05,
+    "min_s": 1.896798494271934e-05,
+    "std_s": 9.303255508898151e-05,
+    "throughput_elem_per_s": 481904439.8098735
+  },
+  {
+    "operation": "map",
+    "backend": "jax-gpu",
+    "size": 100000,
+    "median_s": 2.1309504518285394e-05,
+    "min_s": 1.960800727829337e-05,
+    "std_s": 9.438047173575125e-05,
+    "throughput_elem_per_s": 4692741678.446412
+  },
+  {
+    "operation": "map",
+    "backend": "jax-gpu",
+    "size": 1000000,
+    "median_s": 2.0007006241939962e-05,
+    "min_s": 1.9047001842409372e-05,
+    "std_s": 7.049839927976134e-05,
+    "throughput_elem_per_s": 49982490528.92963
+  },
+  {
+    "operation": "map",
+    "backend": "numpy",
+    "size": 1000,
+    "median_s": 4.5499473344534636e-07,
+    "min_s": 4.220055416226387e-07,
+    "std_s": 1.1218221408838277e-06,
+    "throughput_elem_per_s": 2197827637.3172994
+  },
+  {
+    "operation": "map",
+    "backend": "numpy",
+    "size": 10000,
+    "median_s": 1.1949887266382575e-06,
+    "min_s": 1.1500087566673756e-06,
+    "std_s": 5.464368595959532e-08,
+    "throughput_elem_per_s": 8368279781.293001
+  },
+  {
+    "operation": "map",
+    "backend": "numpy",
+    "size": 100000,
+    "median_s": 5.9745070757344365e-06,
+    "min_s": 5.872978363186121e-06,
+    "std_s": 5.453009592756239e-07,
+    "throughput_elem_per_s": 16737782503.623056
+  },
+  {
+    "operation": "map",
+    "backend": "numpy",
+    "size": 1000000,
+    "median_s": 0.00016889401013031602,
+    "min_s": 0.00016670802142471075,
+    "std_s": 1.4350477530013215e-06,
+    "throughput_elem_per_s": 5920873092.115081
+  },
+  {
+    "operation": "map",
+    "backend": "remora-cpu",
+    "size": 1000,
+    "median_s": 1.3958488125354052e-05,
+    "min_s": 1.1975003872066736e-05,
+    "std_s": 2.089494988734847e-06,
+    "throughput_elem_per_s": 71640996.57638498
+  },
+  {
+    "operation": "map",
+    "backend": "remora-cpu",
+    "size": 10000,
+    "median_s": 2.663701889105141e-05,
+    "min_s": 2.5782996090129018e-05,
+    "std_s": 1.0736201998627171e-06,
+    "throughput_elem_per_s": 375417385.8907108
+  },
+  {
+    "operation": "map",
+    "backend": "remora-cpu",
+    "size": 100000,
+    "median_s": 0.00010582999675534666,
+    "min_s": 0.00010462899808771908,
+    "std_s": 1.769239213218712e-05,
+    "throughput_elem_per_s": 944911679.7308027
+  },
+  {
+    "operation": "map",
+    "backend": "remora-cpu",
+    "size": 1000000,
+    "median_s": 0.001894083499792032,
+    "min_s": 0.0016508249973412603,
+    "std_s": 0.00014809880178117242,
+    "throughput_elem_per_s": 527959828.6505314
+  },
+  {
+    "operation": "map",
+    "backend": "remora-gpu",
+    "size": 1000,
+    "median_s": 4.247401375323534e-05,
+    "min_s": 3.870599903166294e-05,
+    "std_s": 3.340457294700266e-06,
+    "throughput_elem_per_s": 23543807.416218765
+  },
+  {
+    "operation": "map",
+    "backend": "remora-gpu",
+    "size": 10000,
+    "median_s": 4.968749999534339e-05,
+    "min_s": 4.822900518774986e-05,
+    "std_s": 1.8346248090319326e-06,
+    "throughput_elem_per_s": 201257861.6540816
+  },
+  {
+    "operation": "map",
+    "backend": "remora-gpu",
+    "size": 100000,
+    "median_s": 0.0001026130048558116,
+    "min_s": 9.902199963107705e-05,
+    "std_s": 7.060546118839678e-06,
+    "throughput_elem_per_s": 974535344.1361228
+  },
+  {
+    "operation": "map",
+    "backend": "remora-gpu",
+    "size": 1000000,
+    "median_s": 0.0006324399873847142,
+    "min_s": 0.0006146059895399958,
+    "std_s": 4.120309328166785e-05,
+    "throughput_elem_per_s": 1581177692.661768
+  },
+  {
+    "operation": "fold",
+    "backend": "jax-gpu",
+    "size": 1000,
+    "median_s": 3.1910502002574503e-05,
+    "min_s": 1.999098458327353e-05,
+    "std_s": 0.00012814260010659236,
+    "throughput_elem_per_s": 31337645.516179003
+  },
+  {
+    "operation": "fold",
+    "backend": "jax-gpu",
+    "size": 10000,
+    "median_s": 2.086650056298822e-05,
+    "min_s": 1.9884988432750106e-05,
+    "std_s": 7.848074238383988e-05,
+    "throughput_elem_per_s": 479237041.6790161
+  },
+  {
+    "operation": "fold",
+    "backend": "jax-gpu",
+    "size": 100000,
+    "median_s": 3.255049523431808e-05,
+    "min_s": 2.2277003154158592e-05,
+    "std_s": 2.0965828625193417e-05,
+    "throughput_elem_per_s": 3072149879.1382356
+  },
+  {
+    "operation": "fold",
+    "backend": "jax-gpu",
+    "size": 1000000,
+    "median_s": 3.28780006384477e-05,
+    "min_s": 2.0936975488439202e-05,
+    "std_s": 0.00011903625148302501,
+    "throughput_elem_per_s": 30415474803.25172
+  },
+  {
+    "operation": "fold",
+    "backend": "numpy",
+    "size": 1000,
+    "median_s": 1.1740048648789525e-06,
+    "min_s": 1.08100357465446e-06,
+    "std_s": 4.962180822351048e-07,
+    "throughput_elem_per_s": 851785226.7188914
+  },
+  {
+    "operation": "fold",
+    "backend": "numpy",
+    "size": 10000,
+    "median_s": 2.2024905774742365e-06,
+    "min_s": 2.0700099412351847e-06,
+    "std_s": 1.2630595833307953e-07,
+    "throughput_elem_per_s": 4540314543.124066
+  },
+  {
+    "operation": "fold",
+    "backend": "numpy",
+    "size": 100000,
+    "median_s": 1.5845493180677295e-05,
+    "min_s": 1.575198257341981e-05,
+    "std_s": 1.9812571886643958e-07,
+    "throughput_elem_per_s": 6310942730.513714
+  },
+  {
+    "operation": "fold",
+    "backend": "numpy",
+    "size": 1000000,
+    "median_s": 0.00011206800991203636,
+    "min_s": 0.0001116239873226732,
+    "std_s": 1.0073725624700318e-06,
+    "throughput_elem_per_s": 8923153010.25612
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-cpu",
+    "size": 1000,
+    "median_s": 1.924348180182278e-05,
+    "min_s": 1.8394988728687167e-05,
+    "std_s": 1.4170097011048145e-06,
+    "throughput_elem_per_s": 51965647.91644296
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-cpu",
+    "size": 10000,
+    "median_s": 3.914900298696011e-05,
+    "min_s": 3.827200271189213e-05,
+    "std_s": 1.0232519849093772e-06,
+    "throughput_elem_per_s": 255434346.65068826
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-cpu",
+    "size": 100000,
+    "median_s": 0.0002371729933656752,
+    "min_s": 0.00023530199541710317,
+    "std_s": 2.2721967174398425e-06,
+    "throughput_elem_per_s": 421633165.6522933
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-cpu",
+    "size": 1000000,
+    "median_s": 0.0022049734834581614,
+    "min_s": 0.0018892119987867773,
+    "std_s": 0.0002571154746536656,
+    "throughput_elem_per_s": 453520193.1007596
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-gpu",
+    "size": 1000,
+    "median_s": 4.473548324313015e-05,
+    "min_s": 4.3365987949073315e-05,
+    "std_s": 1.6954402711566515e-06,
+    "throughput_elem_per_s": 22353620.157966353
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-gpu",
+    "size": 10000,
+    "median_s": 4.675000673159957e-05,
+    "min_s": 4.526000702753663e-05,
+    "std_s": 1.9421833732914215e-05,
+    "throughput_elem_per_s": 213903712.5152056
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-gpu",
+    "size": 100000,
+    "median_s": 6.167749234009534e-05,
+    "min_s": 5.818801582790911e-05,
+    "std_s": 1.1239603316537105e-06,
+    "throughput_elem_per_s": 1621336993.5436227
+  },
+  {
+    "operation": "fold",
+    "backend": "remora-gpu",
+    "size": 1000000,
+    "median_s": 0.00025580450892448425,
+    "min_s": 0.0002481820120010525,
+    "std_s": 1.2666619663383021e-05,
+    "throughput_elem_per_s": 3909235236.7221518
+  },
+  {
+    "operation": "scan",
+    "backend": "jax-gpu",
+    "size": 1000,
+    "median_s": 2.4160995963029563e-05,
+    "min_s": 2.258300082758069e-05,
+    "std_s": 2.9204331748563358e-06,
+    "throughput_elem_per_s": 41389022.27086045
+  },
+  {
+    "operation": "scan",
+    "backend": "jax-gpu",
+    "size": 10000,
+    "median_s": 6.821499846410006e-05,
+    "min_s": 3.230199217796326e-05,
+    "std_s": 0.0006614699919178158,
+    "throughput_elem_per_s": 146595326.90985492
+  },
+  {
+    "operation": "scan",
+    "backend": "jax-gpu",
+    "size": 100000,
+    "median_s": 3.3239994081668556e-05,
+    "min_s": 2.5242014089599252e-05,
+    "std_s": 8.119608885709424e-05,
+    "throughput_elem_per_s": 3008424121.686254
+  },
+  {
+    "operation": "scan",
+    "backend": "jax-gpu",
+    "size": 1000000,
+    "median_s": 5.0941482186317444e-05,
+    "min_s": 4.465199890546501e-05,
+    "std_s": 0.00011604133607502131,
+    "throughput_elem_per_s": 19630367179.787193
+  },
+  {
+    "operation": "scan",
+    "backend": "numpy",
+    "size": 1000,
+    "median_s": 2.9674993129447103e-06,
+    "min_s": 2.6710040401667356e-06,
+    "std_s": 6.241794949418833e-07,
+    "throughput_elem_per_s": 336984071.28110826
+  },
+  {
+    "operation": "scan",
+    "backend": "numpy",
+    "size": 10000,
+    "median_s": 2.0546518499031663e-05,
+    "min_s": 2.020099782384932e-05,
+    "std_s": 2.3869165125249113e-07,
+    "throughput_elem_per_s": 486700459.76262546
+  },
+  {
+    "operation": "scan",
+    "backend": "numpy",
+    "size": 100000,
+    "median_s": 0.00018823800201062113,
+    "min_s": 0.00018673099111765623,
+    "std_s": 7.119376989061193e-06,
+    "throughput_elem_per_s": 531242357.71668255
+  },
+  {
+    "operation": "scan",
+    "backend": "numpy",
+    "size": 1000000,
+    "median_s": 0.0019115089962724596,
+    "min_s": 0.0018760130042210221,
+    "std_s": 3.0007972196001125e-05,
+    "throughput_elem_per_s": 523146897.0065279
+  },
+  {
+    "operation": "scan",
+    "backend": "remora-gpu",
+    "size": 1000,
+    "median_s": 4.529299621935934e-05,
+    "min_s": 4.303597961552441e-05,
+    "std_s": 0.004321289591051804,
+    "throughput_elem_per_s": 22078468.714166794
+  },
+  {
+    "operation": "matmul",
+    "backend": "jax-gpu",
+    "size": 1024,
+    "median_s": 0.00012491000234149396,
+    "min_s": 3.729699528776109e-05,
+    "std_s": 0.00017704786737597256,
+    "throughput_elem_per_s": 8197902.336119295
+  },
+  {
+    "operation": "matmul",
+    "backend": "jax-gpu",
+    "size": 4096,
+    "median_s": 0.0003274079936090857,
+    "min_s": 2.2330990759655833e-05,
+    "std_s": 0.00015441800415086444,
+    "throughput_elem_per_s": 12510384.840788245
+  },
+  {
+    "operation": "matmul",
+    "backend": "jax-gpu",
+    "size": 16384,
+    "median_s": 0.00029324149363674223,
+    "min_s": 4.867400275543332e-05,
+    "std_s": 0.00020814902744999275,
+    "throughput_elem_per_s": 55872038.424057245
+  },
+  {
+    "operation": "matmul",
+    "backend": "jax-gpu",
+    "size": 65536,
+    "median_s": 4.671848728321493e-05,
+    "min_s": 2.9768998501822352e-05,
+    "std_s": 0.00012210662972569203,
+    "throughput_elem_per_s": 1402785145.9040253
+  },
+  {
+    "operation": "matmul",
+    "backend": "jax-gpu",
+    "size": 262144,
+    "median_s": 5.919649265706539e-05,
+    "min_s": 5.508697358891368e-05,
+    "std_s": 4.6139792210928395e-05,
+    "throughput_elem_per_s": 4428370469.829041
+  },
+  {
+    "operation": "matmul",
+    "backend": "numpy",
+    "size": 1024,
+    "median_s": 1.9939907360821962e-06,
+    "min_s": 1.9260041881352663e-06,
+    "std_s": 1.4745150584234355e-07,
+    "throughput_elem_per_s": 513543007.7333061
+  },
+  {
+    "operation": "matmul",
+    "backend": "numpy",
+    "size": 4096,
+    "median_s": 7.7594886533916e-06,
+    "min_s": 7.68899917602539e-06,
+    "std_s": 5.451830005098841e-08,
+    "throughput_elem_per_s": 527869835.6250159
+  },
+  {
+    "operation": "matmul",
+    "backend": "numpy",
+    "size": 16384,
+    "median_s": 1.3219498214311898e-05,
+    "min_s": 1.2488017091527581e-05,
+    "std_s": 6.561944353446932e-06,
+    "throughput_elem_per_s": 1239381384.5567982
+  },
+  {
+    "operation": "matmul",
+    "backend": "numpy",
+    "size": 65536,
+    "median_s": 0.008999593002954498,
+    "min_s": 0.004010550997918472,
+    "std_s": 0.0011806083675356663,
+    "throughput_elem_per_s": 7282107.088452226
+  },
+  {
+    "operation": "matmul",
+    "backend": "numpy",
+    "size": 262144,
+    "median_s": 0.003000696495291777,
+    "min_s": 0.0004157040093559772,
+    "std_s": 0.0034556691754867074,
+    "throughput_elem_per_s": 87361051.14639728
+  },
+  {
+    "operation": "matmul",
+    "backend": "remora-gpu",
+    "size": 1024,
+    "median_s": 5.943949508946389e-05,
+    "min_s": 5.670101381838322e-05,
+    "std_s": 1.843002217790867e-06,
+    "throughput_elem_per_s": 17227602.597544808
+  },
+  {
+    "operation": "matmul",
+    "backend": "remora-gpu",
+    "size": 4096,
+    "median_s": 5.496249650605023e-05,
+    "min_s": 5.383999086916447e-05,
+    "std_s": 1.585378394555452e-06,
+    "throughput_elem_per_s": 74523543.51387797
+  },
+  {
+    "operation": "matmul",
+    "backend": "remora-gpu",
+    "size": 16384,
+    "median_s": 8.060999971348792e-05,
+    "min_s": 7.778100552968681e-05,
+    "std_s": 2.4320495922415137e-06,
+    "throughput_elem_per_s": 203250217.8170654
+  },
+  {
+    "operation": "matmul",
+    "backend": "remora-gpu",
+    "size": 65536,
+    "median_s": 0.00012514299305621535,
+    "min_s": 0.00011716000153683126,
+    "std_s": 3.3867791040032807e-05,
+    "throughput_elem_per_s": 523688928.9563391
+  },
+  {
+    "operation": "matmul",
+    "backend": "remora-gpu",
+    "size": 262144,
+    "median_s": 0.00035684499016497284,
+    "min_s": 0.0003513730189297348,
+    "std_s": 3.56339053549489e-05,
+    "throughput_elem_per_s": 734615889.8820698
+  },
+  {
+    "operation": "sort",
+    "backend": "jax-gpu",
+    "size": 1000,
+    "median_s": 6.504850171040744e-05,
+    "min_s": 5.023000994697213e-05,
+    "std_s": 0.0001514001385998239,
+    "throughput_elem_per_s": 15373144.249377921
+  },
+  {
+    "operation": "sort",
+    "backend": "jax-gpu",
+    "size": 10000,
+    "median_s": 7.54830107325688e-05,
+    "min_s": 7.399398600682616e-05,
+    "std_s": 4.231610721481862e-05,
+    "throughput_elem_per_s": 132480142.2591545
+  },
+  {
+    "operation": "sort",
+    "backend": "jax-gpu",
+    "size": 100000,
+    "median_s": 0.00010482101060915738,
+    "min_s": 9.661898366175592e-05,
+    "std_s": 2.1562565481410827e-05,
+    "throughput_elem_per_s": 954007211.1388687
+  },
+  {
+    "operation": "sort",
+    "backend": "jax-gpu",
+    "size": 1000000,
+    "median_s": 0.00013217100058682263,
+    "min_s": 0.0001248569751624018,
+    "std_s": 0.0006851611037856009,
+    "throughput_elem_per_s": 7565956189.785397
+  },
+  {
+    "operation": "sort",
+    "backend": "numpy",
+    "size": 1000,
+    "median_s": 3.2400130294263363e-06,
+    "min_s": 3.135006409138441e-06,
+    "std_s": 5.799567747119982e-07,
+    "throughput_elem_per_s": 308640734.1321883
+  },
+  {
+    "operation": "sort",
+    "backend": "numpy",
+    "size": 10000,
+    "median_s": 2.9606992029584944e-05,
+    "min_s": 2.9552989872172475e-05,
+    "std_s": 1.1913553910289874e-07,
+    "throughput_elem_per_s": 337758053.57084054
+  },
+  {
+    "operation": "sort",
+    "backend": "numpy",
+    "size": 100000,
+    "median_s": 0.0003708989970618859,
+    "min_s": 0.00036623000050894916,
+    "std_s": 2.786493266369098e-06,
+    "throughput_elem_per_s": 269615180.3918592
+  },
+  {
+    "operation": "sort",
+    "backend": "numpy",
+    "size": 1000000,
+    "median_s": 0.0030328025022754446,
+    "min_s": 0.003016991016920656,
+    "std_s": 2.377898020549506e-05,
+    "throughput_elem_per_s": 329728031.82855535
+  },
+  {
+    "operation": "sort",
+    "backend": "remora-gpu",
+    "size": 1000,
+    "median_s": 4.1583014535717666e-05,
+    "min_s": 3.990999539382756e-05,
+    "std_s": 2.5624925867221075e-06,
+    "throughput_elem_per_s": 24048280.557943955
+  },
+  {
+    "operation": "sort",
+    "backend": "remora-gpu",
+    "size": 10000,
+    "median_s": 0.001299020485021174,
+    "min_s": 0.0012726979912258685,
+    "std_s": 0.00010880741748283466,
+    "throughput_elem_per_s": 7698108.00931057
+  },
+  {
+    "operation": "sort",
+    "backend": "remora-gpu",
+    "size": 100000,
+    "median_s": 0.002557383995736018,
+    "min_s": 0.0024274969764519483,
+    "std_s": 0.0006904253189253658,
+    "throughput_elem_per_s": 39102457.88928537
+  },
+  {
+    "operation": "sort",
+    "backend": "remora-gpu",
+    "size": 1000000,
+    "median_s": 0.016027920501073822,
+    "min_s": 0.01283230201806873,
+    "std_s": 0.001967132852025487,
+    "throughput_elem_per_s": 62391125.53203661
+  },
+  {
+    "operation": "stencil",
+    "backend": "jax-gpu",
+    "size": 900,
+    "median_s": 2.5266999728046358e-05,
+    "min_s": 2.385300467722118e-05,
+    "std_s": 7.46093494363397e-05,
+    "throughput_elem_per_s": 35619583.23848797
+  },
+  {
+    "operation": "stencil",
+    "backend": "jax-gpu",
+    "size": 3844,
+    "median_s": 0.00012540350144263357,
+    "min_s": 2.474599750712514e-05,
+    "std_s": 0.0002333827413932911,
+    "throughput_elem_per_s": 30653051.595680173
+  },
+  {
+    "operation": "stencil",
+    "backend": "jax-gpu",
+    "size": 15876,
+    "median_s": 2.347199188079685e-05,
+    "min_s": 2.2236985387280583e-05,
+    "std_s": 4.799788795393473e-06,
+    "throughput_elem_per_s": 676380602.0650781
+  },
+  {
+    "operation": "stencil",
+    "backend": "jax-gpu",
+    "size": 64516,
+    "median_s": 2.715249138418585e-05,
+    "min_s": 2.3250991944223642e-05,
+    "std_s": 7.909825238459767e-05,
+    "throughput_elem_per_s": 2376061890.1282625
+  },
+  {
+    "operation": "stencil",
+    "backend": "jax-gpu",
+    "size": 260100,
+    "median_s": 4.018199979327619e-05,
+    "min_s": 3.838201519101858e-05,
+    "std_s": 5.12395062345517e-06,
+    "throughput_elem_per_s": 6473047666.570432
+  },
+  {
+    "operation": "stencil",
+    "backend": "numpy",
+    "size": 900,
+    "median_s": 4.804501077160239e-05,
+    "min_s": 4.6900007873773575e-05,
+    "std_s": 1.297438412102713e-06,
+    "throughput_elem_per_s": 18732434.139279168
+  },
+  {
+    "operation": "stencil",
+    "backend": "numpy",
+    "size": 3844,
+    "median_s": 0.00017292500706389546,
+    "min_s": 0.0001705939939711243,
+    "std_s": 2.3399776058772276e-06,
+    "throughput_elem_per_s": 22229289.246636543
+  },
+  {
+    "operation": "stencil",
+    "backend": "numpy",
+    "size": 15876,
+    "median_s": 0.0007034650043351576,
+    "min_s": 0.0006688970024697483,
+    "std_s": 3.17622702993991e-05,
+    "throughput_elem_per_s": 22568286.840372898
+  },
+  {
+    "operation": "stencil",
+    "backend": "numpy",
+    "size": 64516,
+    "median_s": 0.0027675965102389455,
+    "min_s": 0.0026841759972739965,
+    "std_s": 3.0192022604603005e-05,
+    "throughput_elem_per_s": 23311201.528589115
+  },
+  {
+    "operation": "stencil",
+    "backend": "numpy",
+    "size": 260100,
+    "median_s": 0.011066599006881006,
+    "min_s": 0.010829383012605831,
+    "std_s": 8.15700168539786e-05,
+    "throughput_elem_per_s": 23503155.742633726
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-cpu",
+    "size": 900,
+    "median_s": 3.498399746604264e-05,
+    "min_s": 3.2526004360988736e-05,
+    "std_s": 0.0005001016300118312,
+    "throughput_elem_per_s": 25726048.055931535
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-cpu",
+    "size": 3844,
+    "median_s": 7.991449092514813e-05,
+    "min_s": 7.755900151096284e-05,
+    "std_s": 4.52719024710844e-05,
+    "throughput_elem_per_s": 48101413.842459194
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-cpu",
+    "size": 15876,
+    "median_s": 0.00028687251324299723,
+    "min_s": 0.0002837719803210348,
+    "std_s": 1.4719766055626304e-06,
+    "throughput_elem_per_s": 55341656.196082234
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-cpu",
+    "size": 64516,
+    "median_s": 0.0010933759913314134,
+    "min_s": 0.0010816819849424064,
+    "std_s": 1.6250172364863595e-05,
+    "throughput_elem_per_s": 59006234.3708849
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-cpu",
+    "size": 260100,
+    "median_s": 0.004465662001166493,
+    "min_s": 0.004407048982102424,
+    "std_s": 0.0005327639425155447,
+    "throughput_elem_per_s": 58244443.92165334
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-gpu",
+    "size": 900,
+    "median_s": 6.32224982837215e-05,
+    "min_s": 6.0794001910835505e-05,
+    "std_s": 2.4823860734650424e-05,
+    "throughput_elem_per_s": 14235438.719316341
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-gpu",
+    "size": 3844,
+    "median_s": 6.0246995417401195e-05,
+    "min_s": 5.799398059025407e-05,
+    "std_s": 1.8889861452903384e-06,
+    "throughput_elem_per_s": 63804011.691672415
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-gpu",
+    "size": 15876,
+    "median_s": 7.546899723820388e-05,
+    "min_s": 7.25860008969903e-05,
+    "std_s": 1.7992368634295574e-06,
+    "throughput_elem_per_s": 210364528.2299214
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-gpu",
+    "size": 64516,
+    "median_s": 0.00010276299144607037,
+    "min_s": 9.972901898436248e-05,
+    "std_s": 5.889589012306998e-06,
+    "throughput_elem_per_s": 627813564.9044213
+  },
+  {
+    "operation": "stencil",
+    "backend": "remora-gpu",
+    "size": 260100,
+    "median_s": 0.0002277604944538325,
+    "min_s": 0.00022282000281848013,
+    "std_s": 9.063853333705875e-06,
+    "throughput_elem_per_s": 1141989090.8812668
+  }
+]
