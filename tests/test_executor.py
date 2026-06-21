@@ -986,3 +986,37 @@ def test_device_array_round_trip_and_iteration_when_available():
         gpu_required_or_skip(str(exc))
     finally:
         runtime.close()
+
+
+def test_gpu_radix_sort_matches_numpy_when_available():
+    from remora.codegen import generate_mlir_descriptor_abi_ptx
+    from remora.hir import HIRFunction, HIRParam, HIRSort, HIRVar
+    try:
+        runtime = CUDARuntime()
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    try:
+        for N, gen in [
+            (2048, lambda n: np.random.default_rng(0).standard_normal(n).astype(np.float32)),
+            (5000, lambda n: np.random.default_rng(1).integers(0, 6, n).astype(np.float32)),
+            (100000, lambda n: np.concatenate([
+                np.random.default_rng(2).standard_normal(n // 2).astype(np.float32),
+                -np.random.default_rng(3).standard_normal(n - n // 2).astype(np.float32)])),
+        ]:
+            arr_type = ArrayType(FLOAT, (StaticDim(N),))
+            hf = HIRFunction("s", [HIRParam("xs", arr_type)],
+                             HIRSort(HIRVar("xs", arr_type), result_type=arr_type),
+                             return_type=arr_type)
+            ptx, kernels, plan = generate_mlir_descriptor_abi_ptx(hf, kernel_name="rxsort")
+            assert plan is not None, f"radix plan expected for N={N}"
+            xs = gen(N)
+            executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+            try:
+                out = np.asarray(executor.execute_plan(plan, [xs]))
+            finally:
+                executor.close()
+            np.testing.assert_array_equal(out, np.sort(xs))
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        runtime.close()

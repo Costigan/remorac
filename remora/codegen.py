@@ -289,6 +289,16 @@ def generate_mlir_descriptor_abi_ptx(
 
     # ── try GPU sort / grade ──
     if isinstance(function.body, (HIRSort, HIRGrade)):
+        if isinstance(function.body, HIRSort):
+            try:
+                from remora._gpu_radix_sort import build_radix_sort_gpu_module
+                rx_text, rx_metas, rx_plan = build_radix_sort_gpu_module(function, kernel_name=name)
+                rx_dev = extract_gpu_module_body_as_module(rx_text)
+                rx_ir = translate_mlir_to_llvmir(rx_dev, toolchain=toolchain)
+                rx_ptx = translate_llvmir_to_nvptx_text(rx_ir, toolchain=toolchain)
+                return rx_ptx, rx_metas, rx_plan
+            except GPUScaffoldError:
+                pass
         try:
             if isinstance(function.body, HIRSort):
                 gpu_module = build_descriptor_abi_bitonic_sort_gpu_module(function, kernel_name=name)

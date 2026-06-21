@@ -70,10 +70,11 @@ supports n > 1024 via a multi-block 4-kernel plan (up to 1M).
    `qsort`'s indirect comparator, not the memref copy (~0.01ms for
    100K), was the bottleneck.
 
-9. **Remora GPU sort needs work.**  Bitonic sort at 1M: 68M elem/s
-   vs JAX's 4.2G (62x gap).  O(N log^2 N) bitonic with global
-   memory compare-swap is inherently slower than JAX/CUB's O(N)
-   radix sort.
+9. **Remora GPU sort uses a 256-bin radix sort.**  At 1M it reaches
+   607M elem/s (official path, with transfer) / ~1.35G device-resident
+   — ~9x the old bitonic (68M), above the 500M target, within ~3x of
+   JAX's 4.2G.  The O(N) 4-pass radix (warp-intrinsic stable scatter)
+   replaced O(N log²N) bitonic for 1024 < N ≤ 1M.
 
 ## Map
 
@@ -202,19 +203,19 @@ Sort a 1D float32 array.
 
 |           Size |        jax-gpu |          numpy |     remora-cpu |     remora-gpu |
 |----------------|----------------|----------------|----------------|----------------|
-|           1000 |         57.1us |          1.9us |         26.9us |         46.1us |
-|          10000 |        286.0us |         18.4us |         94.6us |         1.94ms |
-|         100000 |         82.3us |        233.2us |        596.1us |         2.64ms |
-|        1000000 |        238.4us |         3.04ms |         6.99ms |        14.63ms |
+|           1000 |         57.1us |          1.9us |         26.9us |         48.7us |
+|          10000 |        286.0us |         18.4us |         94.6us |        696.5us |
+|         100000 |         82.3us |        233.2us |        596.1us |        764.9us |
+|        1000000 |        238.4us |         3.04ms |         6.99ms |         1.65ms |
 
 Throughput (elem/s):
 
 |           Size |        jax-gpu |          numpy |     remora-cpu |     remora-gpu |
 |----------------|----------------|----------------|----------------|----------------|
-|           1000 |          17.5M |         517.6M |          37.2M |          21.7M |
-|          10000 |          35.0M |         544.0M |         105.7M |           5.2M |
-|         100000 |          1.22G |         428.8M |         167.8M |          37.9M |
-|        1000000 |          4.19G |         328.7M |         143.0M |          68.4M |
+|           1000 |          17.5M |         517.6M |          37.2M |          20.5M |
+|          10000 |          35.0M |         544.0M |         105.7M |          14.4M |
+|         100000 |          1.22G |         428.8M |         167.8M |         130.7M |
+|        1000000 |          4.19G |         328.7M |         143.0M |         607.0M |
 
 Remora CPU sort calls the C runtime `remora_sort_f32`, now an LSD
 radix sort (4-pass, 8-bit) over a monotonic uint32 key mapping of
@@ -222,8 +223,17 @@ the floats.  This replaced the old `qsort`, whose per-comparison
 function-pointer indirect call — not the tensor→memref copy
 (profiled at ~0.01ms for 100K) — was the real bottleneck.  Sort
 throughput rose ~12.6x at 100K (13.5M → 167.8M) and ~12.8x at 1M
-(11.2M → 143.0M), now within ~2.3x of NumPy's introsort.  Remora
-GPU bitonic sort still trails (radix sort for the GPU is Phase 3).
+(11.2M → 143.0M), now within ~2.3x of NumPy's introsort.
+
+Remora GPU sort is now a **256-bin (8-bit-digit, 4-pass) radix sort**
+(`remora/_gpu_radix_sort.py`) for 1024 < N ≤ 1M, replacing bitonic
+(which remains the fallback below 1024).  At 1M it reaches **607M
+elem/s** through the official benchmark (with H↔D transfer + per-step
+syncs) and ~1.35G device-resident — **~9x the old bitonic (68M)**.
+The stable per-digit local rank uses warp intrinsics
+(`match.any.sync(digit) & lanemask.lt → popc`, aggregated across
+warps); each kernel was validated against a NumPy oracle.  Small-N
+throughput is fixed-overhead-bound (18 per-step plan syncs).
 
 ## Stencil
 

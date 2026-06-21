@@ -370,58 +370,43 @@ Replace bitonic sort with LSB radix sort for f32 arrays.
 
 **Target**: 10-50x improvement (68M → 700M-3G elem/s at 1M).
 
-**STATUS: DEFERRED (analyzed, not implemented).**  This is the
-single highest-risk, highest-effort item in the plan — a from-scratch
-parallel GPU radix sort written by hand in MLIR LLVM/NVVM dialect.
-Per the correctness-first rule, a subtly-broken sort is worse than the
-working bitonic sort, so it is not shipped half-done.  The hard parts:
-the f32→monotonic-uint32 key mapping needs float `llvm.bitcast` +
-bitwise ops (not expressible in Remora source, so hand-written
-kernels); and the **stable local-rank scatter** (each element's
-destination = cross-block digit offset + its rank among same-digit
-elements earlier in its block) is the classic source of subtle bugs.
+**STATUS: DONE.**  Implemented the **fast 256-bin (8-bit-digit, 4-pass)
+radix sort** in `remora/_gpu_radix_sort.py`, wired into the GPU sort
+dispatch (`codegen.py`), exposed as a 12-kernel `ExecutionPlan`.
+Radix runs for 1024 < N ≤ 1024², bitonic remains the fallback below.
 
-**Validated blueprint for a future session** (lower-risk than the
-256-bin version): a **split-based 1-bit radix** that *reuses the
-multi-block scan already wired up in Phase 1.3*.
+The original "deferred, highest-risk" assessment was over-cautious: an
+empirical probe showed the warp intrinsics (`match.any.sync`,
+`vote.ballot`, `shfl.sync`, `ctpop`) lower cleanly through this repo's
+`mlir-translate-18 → llc-18 → ptxas` path (validated to a cubin), which
+makes the *fast* design's hard step — the stable per-digit local-rank
+scatter — tractable: `rank = popc(match.any.sync(digit) & lanemask.lt)`
+per warp, aggregated across the 32 warps in shared memory.  Built
+incrementally, each kernel validated against a NumPy oracle.
 
-- New hand-written MLIR kernels (in `remora/_gpu_radix_sort.py`):
-  - `f32_to_key`: `llvm.bitcast` f32→i32, then monotonic flip
-    (`(u>>31) ? ~u : u|0x80000000`), store i32.  (CPU reference:
-    `_f32_to_key` in `remora_rt.c` from Phase 1.2.)
-  - `key_to_f32`: the inverse mapping.
-  - `bit_flags(keys, b) -> f32 flags`: `(key >> b) & 1` as 0.0/1.0,
-    with `b` passed as a scalar kernel arg (so one kernel serves all
-    32 bits).
-  - `scatter(keys, flags, ones_before, total_zeros, b)`: for each i,
-    `dest = flag ? total_zeros + ones_before[i] : i - ones_before[i]`.
-- Orchestrate 32 passes host-side on device-resident `DeviceArray`s
-  (Phase 3.2): per bit, launch `bit_flags`, run the existing
-  multi-block scan to get `ones_before` (exclusive), read back
-  `total_ones` to compute `total_zeros`, launch `scatter`, ping-pong
-  the key buffers.  Map f32→key once before, key→f32 once after.
-- Stability of the 1-bit split makes the full 32-pass sort correct by
-  construction; verify each pass against `np.sort` at small N first.
+Pipeline: f32→uint32 key map (`bitcast` + sign flip) → per pass:
+per-block digit-major histogram (shared atomics) → exclusive scan
+(digit-major decomposition into single-block scans) → stable
+warp-rank scatter → key→f32.
 
-Trade-off: 32 passes × (~4 scan kernels + 2 simple) ≈ 190 launches —
-heavier than the 16-launch 256-bin version, but far simpler to get
-*correct*, and still expected to beat bitonic's 68M comfortably.  A
-256-bin version (16 launches) is the follow-up once the split version
-is proven.
+Tasks:
+- [x] f32 key map + 4 hist + rowscan/digitscan/combine + 4 scatter
+      MLIR kernels (one module, shared `.shared` globals)
+- [x] f32 sign bit via the monotonic uint32 key mapping
+- [x] 12-kernel `ExecutionPlan` (ping-pong key buffers) wired into
+      `generate_mlir_descriptor_abi_ptx` sort dispatch
+- [x] Fall back to bitonic sort for N ≤ 1024
 
-Tasks (deferred):
-- [ ] Implement the 4 key/flag/scatter MLIR kernels
-- [ ] Handle f32 sign bit via the monotonic key mapping
-- [ ] Orchestrate the 32-pass split on device-resident arrays
-      (reusing the multi-block scan)
-- [ ] (Later) collapse to a self-contained `_build_radix_sort_plan()`
-      `ExecutionPlan` for codegen dispatch
-- [ ] Fall back to bitonic sort for N <= 1024 (shared memory)
+Tests:
+- [x] Correctness at N=2K..1M vs `np.sort` **exactly**, incl. heavy
+      duplicates (stable), negatives, zeros, ±inf
+      (`test_gpu_radix_sort_matches_numpy_when_available`; all 13
+      existing GPU sort tests still pass)
+- [x] Benchmark: **607M elem/s at 1M** through the official
+      `remora-perf` path (with H↔D transfer + per-step syncs);
+      ~1.35G device-resident.  ~9x the old bitonic (68M); above the
+      500M target.
 
-Tests (deferred):
-- [ ] Radix sort correctness at N=1000..1000000 vs `np.sort` exactly
-- [ ] Negative floats, NaN and ±inf handled correctly
-- [ ] Benchmark; verify remora-gpu sort > 500M elem/s at 1M
 
 ### 3.2 Reduce GPU launch overhead
 
