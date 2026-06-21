@@ -1,10 +1,9 @@
-"""Tests for the Python integration API (remora.api and remora.codec)."""
+"""Tests for the Python integration API (remora.api)."""
 
 import numpy as np
 import pytest
 
 from remora.api import RemoraFunction, RemoraRankMismatchError, compile_all, compile_function, define
-from remora.codec import _transform_source
 from remora.types import FLOAT, ArrayType, StaticDim
 
 
@@ -108,55 +107,6 @@ class TestCompileAll:
             fns["negate"](np.array([1, 2, 3], dtype=np.float32)),
             [-1, -2, -3],
         )
-
-
-class TestCodecTransform:
-
-    def test_transform_replaces_coding_line(self):
-        source = "# coding: remora\nx = 1\n"
-        result = _transform_source(source)
-        assert "# coding: utf-8" in result
-        assert "# coding: remora" not in result
-
-    def test_transform_replaces_remora_block(self):
-        source = """# coding: remora
-# remora:begin
-(define/pi () (f [x (Array Float 3)] (Array Float 3)) (map (* 2.0) x))
-# remora:end
-"""
-        result = _transform_source(source)
-        assert "remora_api" in result
-        assert "compile_all" in result
-        assert "# remora:begin" not in result
-
-    def test_transform_preserves_python_code(self):
-        source = """# coding: remora
-import numpy as np
-# remora:begin
-(define/pi () (f [x (Array Float 3)] (Array Float 3)) x)
-# remora:end
-y = 42
-"""
-        result = _transform_source(source)
-        assert "import numpy as np" in result
-        assert "y = 42" in result
-
-    def test_transform_end_to_end_execution(self):
-        source = """# coding: remora
-import numpy as np
-# remora:begin
-(define/pi () (scale [xs (Array Float 4)] (Array Float 4)) (map (* 2.0) xs))
-# remora:end
-__test_result__ = scale(np.array([1.0, 2.0, 3.0, 4.0]))
-"""
-        ns: dict = {}
-        exec(compile(_transform_source(source), "<test>", "exec"), ns)
-        np.testing.assert_array_equal(ns["__test_result__"], [2.0, 4.0, 6.0, 8.0])
-
-    def test_unmatched_begin_raises(self):
-        source = "# coding: remora\n# remora:begin\n(+ 1 2)\n"
-        with pytest.raises(SyntaxError, match="without matching"):
-            _transform_source(source)
 
 
 class TestDefine:

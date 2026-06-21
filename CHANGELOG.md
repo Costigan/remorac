@@ -136,11 +136,9 @@ feature area.  See also the per-phase changelog in the git history.
 
 ## Python Integration (Phases 1-3)
 
-### Phase 1 — Source Codec and Core Wrapper
+### Phase 1 — Core Wrapper
 - `RemoraFunction` callable wrapper with JIT rank/shape checking.
-- `# coding: remora` codec with `# remora:begin` / `# remora:end`
-  block delimiters.
-- `compile_function()` and `compile_all()` APIs.
+- `compile_function()`, `compile_all()`, and `remora.define()` APIs.
 - `RemoraRankMismatchError` for clear boundary violations.
 
 ### Phase 2 — Jupyter Cell Magic

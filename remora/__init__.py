@@ -22,7 +22,6 @@ from remora.abi import (
 from remora.executor import RemoraExecutor
 from remora.runtime import CUDAKernel, CUDAModule, CUDARuntime, CPUExecutor, CPUFunctionExecutor
 from remora.api import RemoraFunction, RemoraRankMismatchError, compile_function, compile_all, define
-import remora.codec  # noqa: F401 — registers # coding: remora
 
 __all__ = [
     "CUDAKernel",
