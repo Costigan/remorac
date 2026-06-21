@@ -232,12 +232,6 @@ class TestGPUReduction:
 
 class TestGPUStateFold:
 
-    @pytest.mark.xfail(
-        reason="AD source transform produces combinatorially large HIRScatterAdd trees "
-               "with HIRMap targets; requires AD-level optimization or multi-kernel "
-               "gradient compilation to fit in a single GPU kernel",
-        strict=False,
-    )
     def test_ad_optimize_on_gpu(self, rt):
         from remora.executor import execute_program_on_gpu
         source = open("examples/ad_optimize.lisp").read()

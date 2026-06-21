@@ -4605,10 +4605,11 @@ def _gpu_emit_expr(
             left = emit(expr.left, env)
             right = emit(expr.right, env)
             ssa = _fresh_ssa()
-            et = getattr(expr, 'element_type', 'f32')
-            if et == "i32":
-                from remora.operators import comparison_predicate
-                pred = comparison_predicate(expr.op, "i32")
+            et = getattr(expr, 'dtype', getattr(expr, 'element_type', 'f32'))
+            if et in ("i32", "i64"):
+                int_preds = {"<": "slt", "<=": "sle", ">": "sgt",
+                             ">=": "sge", "==": "eq", "!=": "ne"}
+                pred = int_preds.get(expr.op, "eq")
                 lines.append(
                     f'      {ssa} = llvm.icmp "{pred}" {left}, {right} : {et}'
                 )
@@ -4789,12 +4790,13 @@ def _gpu_emit_expr(
                     current = sum_name
 
                 linear_name = _fresh_ssa()
+                zidx_name = _fresh_ssa()
                 lines.append(
-                    f"      {linear_name} = llvm.add {current}, %gen_zidx_{expr.index} : i64"
+                    f"      {linear_name} = llvm.add {current}, {zidx_name} : i64"
                 )
                 lines.insert(
                     -2 if len(lines) >= 2 else len(lines),
-                    f"      %gen_zidx_{expr.index} = llvm.mlir.constant(0 : index) : i64",
+                    f"      {zidx_name} = llvm.mlir.constant(0 : index) : i64",
                 )
 
                 ptr_name = _fresh_ssa()

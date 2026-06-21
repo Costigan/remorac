@@ -3,7 +3,13 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
-## GPU Expression Compiler (toward AD on GPU)
+## GPU Expression Compiler (AD on GPU)
+
+### `ad_optimize.lisp` runs on GPU
+- 200-step gradient descent executes entirely on GPU via `LoopPlan`,
+  producing the same result as CPU: `[0.512337, 0.433115, 0.911621]`.
+- The AD source transform's 32,769-node gradient expression is
+  collapsed by CSE before GPU compilation.
 
 ### HIRScatterAdd support (`_gpu_expr_lowering.py`)
 - Static path: when the target is a `GpuArrayExpr` and the index is a
@@ -31,10 +37,14 @@ feature area.  See also the per-phase changelog in the git history.
 - Coordinate env seeded in `_gpu_emit_expr` so `GpuIndexCoordinate`
   resolves during MLIR emission.
 
-### Remaining blocker
-- The MLIR emission produces duplicate SSA value names when multiple
-  scatter-add patterns emit the same constant.  Fix: make the emit
-  counter apply to all generated names in `_gpu_emit_expr`.
+### SSA name uniqueness fix
+- `%gen_zidx_N` constants replaced with `_fresh_ssa()` counter to
+  avoid duplicate SSA definitions when multiple scatter-adds emit
+  the same zero-index constant.
+
+### `GpuCompareOp` i64 support
+- Integer comparisons (`i32`, `i64`) now emit `llvm.icmp` with
+  signed predicates instead of `llvm.fcmp`.
 
 ## GPU Performance Kernels
 
@@ -149,7 +159,7 @@ feature area.  See also the per-phase changelog in the git history.
 - Five AD example files: `ad_polynomial`, `ad_circle`, `ad_spring`,
   `ad_softmax`, `ad_optimize`.
 - `ad_optimize.lisp`: 200-step gradient descent on polynomial
-  curve-fitting loss; works on interpreter and compiled CPU
+  curve-fitting loss; works on interpreter, compiled CPU, and GPU
   (result: `[0.512337, 0.433115, 0.911621]`).
 - Grad-lifting pass (`_rewrite_applied_source_gradient`):
   `(grad f)` resolved at any depth via `_collect_typed_grads`.
@@ -166,13 +176,13 @@ feature area.  See also the per-phase changelog in the git history.
 - Pre-existing test failures fixed: restored `docs/DENSE_CORE.md`,
   `docs/ABI.md`, `docs/IMPLEMENTATION_NOTES.md`, and
   `docs/BENCHMARK_BASELINES.json` from `docs/old/`.
-- GPU integration tests (`tests/test_gpu_integration.py`): 11 tests
+- GPU integration tests (`tests/test_gpu_integration.py`): 12 tests
   verified on NVIDIA RTX 5090 (compute capability 12.0) covering
-  map, sort, grade, matmul, and reduction kernels.
+  map, sort, grade, matmul, reduction, and AD gradient descent.
 - Execution plan unit tests (`tests/test_execution_plan.py`):
   19 tests for plan construction, validation, and state-fold
   detection.
 - Python integration tests (`tests/test_api.py`, `tests/test_magics.py`):
   27 tests for `RemoraFunction`, codec, `define()`, cell magic, and
   REPL integration.
-- Total: 943 non-GPU + 11 GPU tests passing, 0 regressions.
+- Total: 943 non-GPU + 12 GPU tests passing, 0 regressions.
