@@ -23,7 +23,7 @@ from remora._gpu_map_support import (
 from remora.errors import RemoraError
 from remora.hir import HIRFold, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRVar
 from remora.hir import HIRApply
-from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
+from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
 from remora.types import FLOAT, ArrayType
 
@@ -4556,6 +4556,11 @@ def build_descriptor_abi_general_map_gpu_module(
                         input_map[param_name] = input_map[base_name]
                         if view_offsets or view_transforms:
                             input_adjustments[param_name] = (view_offsets, view_transforms)
+                    elif isinstance(array_expr, HIRIota):
+                        for axis_idx in range(len(body_map.func.params)):
+                            pname = body_map.func.params[axis_idx].name
+                            if axis_idx < len(coords):
+                                coord_map[pname] = coords[axis_idx]
                     elif hasattr(array_expr, 'result_type') and array_expr.result_type is not None:
                         from remora.hir import HIRLet as _HL
                         from remora.hir_opt import hir_optimize as _hopt
