@@ -19,6 +19,48 @@ Reference throughput at the largest tested size per operation:
 
 ---
 
+## Strategy: rough parity on representative programs
+
+The goal is **rough parity with NumPy / JAX-XLA on benchmarks that
+represent real programs** — i.e. *pipelines* of several operations —
+not just single-op microbenchmarks.  Single-op numbers (Phases 1, 3,
+4) matter, but real programs chain ops, and two things dominate there:
+
+1. **Keep data on the GPU across the whole pipeline.**  A host
+   round-trip between every op costs hundreds of us per op (Phase 2.2
+   measured ~605us H↔D for a 1M map) and dwarfs kernel time.
+2. **Reduce per-op overhead** — kernel-launch latency and global-memory
+   materialization of intermediates — by **fusing** consecutive ops
+   (Phase 5).  This is XLA's main advantage and the primary parity
+   lever for element-wise-heavy chains.
+
+The runtime foundation already exists: `RemoraExecutor.execute_plan`
+runs an arbitrary multi-kernel plan **fully device-resident**, keeping
+all intermediate buffers on the GPU and downloading only the final
+output.  The remaining gaps are launch-overhead and *composition*
+(Phase 7) plus *fusion* (Phase 5):
+
+- (a) per-step `synchronize()` in `execute_plan` — cheap, broad
+  (Phase 7.1).
+- Axis 1 — a device-resident plan entry point for host-orchestrated
+  chaining of separately compiled artifacts (Phase 7.2).
+- Axis 2 — compiler composition of a sub-expression op (e.g.
+  `map f (sort xs)`) into one device-resident plan (Phase 7.3).
+- Fusion — merge element-wise chains into single kernels (Phase 5).
+
+Important distinction: **Axis 2 is composition, not fusion.**  It keeps
+intermediates on-device but still launches separate kernels and
+materializes them in global memory; it removes host round-trips for
+source-level pipelines but is *not* sufficient for parity on its own.
+Fusion (Phase 5) is the parity lever; data-on-device (Phases 7.1–7.3)
+is the prerequisite that makes it pay off.
+
+To *measure* this, add a representative **pipeline benchmark** (e.g.
+normalize → sort → prefix-sum, or sort → segmented reduce) run
+end-to-end device-resident vs JAX, once Phase 7 lands.
+
+---
+
 ## Phase 1: Quick Wins
 
 Low effort, high impact.  No architectural changes required.
@@ -597,6 +639,97 @@ Tests:
 - [ ] Benchmark: `uv run remora-perf --ops map,fold,scan,sort
       --backends futhark-cpu,futhark-gpu,remora-cpu,remora-gpu`
 - [ ] Results included in updated `REPORT.md`
+
+---
+
+## Phase 7: Device-Resident Composition & Launch Overhead
+
+Make multi-op programs run device-resident with low per-op overhead.
+The executor already runs multi-kernel plans on-device; this phase
+removes the remaining host round-trips and launch overhead.  Lower
+risk than Phase 5 fusion, and a prerequisite for representative
+pipeline parity.
+
+### 7.1 Reduce per-step synchronization in `execute_plan`  (a)
+
+`_run_kernel_step` calls `self._rt.synchronize()` after *every* kernel
+launch.  On a single CUDA stream, kernels already serialize, so one
+sync before the final D→H copy suffices.
+
+**Target**: lower fixed overhead for every multi-kernel plan (radix
+sort = 18 launches, scan, filter, replicate); helps small/medium N
+most.  Low risk.
+
+Tasks:
+- [x] Drop the post-launch `synchronize()` in `_run_kernel_step`
+- [x] Add one `synchronize()` in `execute_plan` before the final
+      `copy_device_to_host`
+- [x] Confirm no host read of intermediate buffers exists mid-plan
+      (LoopPlan only does host-side dict pointer swaps; kernel steps
+      only memset+launch)
+- [x] Verify: `uv run python -m compileall -q remora`
+
+Tests:
+- [x] GPU sort/scan/filter/replicate still exact
+      (`REMORA_TEST_GPU=1 pytest -k "sort or scan or filter or replicate"`:
+      58 passed)
+- [x] Benchmark sort/scan at 100K–1M: time improves — **sort 1M
+      1.65ms → 1.24ms (607M → 806M elem/s, ~33%)**; scan 1M
+      1.50G → 1.56G; smaller-N cases also faster.  100K sort flat
+      (transfer-bound, not sync-bound).
+
+### 7.2 Device-resident plan output — `execute_plan_to_device` (Axis 1)
+
+**Target**: host-orchestrated device-resident chaining of separately
+compiled artifacts (`op → sort → op` from Python, no host round-trip).
+Quick, low risk — mirrors `execute_to_device`.
+
+Tasks:
+- [ ] Add `RemoraExecutor.execute_plan_to_device(plan, device_inputs:
+      list[DeviceArray]) -> DeviceArray`: register device inputs
+      (no upload), run steps, return `final_output` as a `DeviceArray`
+      (do not download; do not free the returned buffer)
+- [ ] Free all *other* plan buffers; transfer ownership of the output
+- [ ] Reuse `_run_plan_step`; same pool/runtime as the rest (no
+      foreign-runtime seam — sort/scan/filter all live here already)
+
+Tests:
+- [ ] Round-trip a `DeviceArray` through the radix-sort plan; result
+      matches the host `execute_plan` path
+- [ ] Chain sort → map device-resident; matches `f(np.sort(xs))`
+
+### 7.3 Compiler plan composition (Axis 2)
+
+**Target**: a single Remora program with a multi-kernel op as a
+sub-expression (e.g. `map f (sort xs)`) lowers to one combined,
+device-resident `ExecutionPlan`.
+
+Generalize the GPU dispatch (currently "whole function body is one
+op") to recursively lower a sub-expression op into a sub-plan, thread
+its output buffer as an internal intermediate into the consumer's
+kernel(s), and merge buffers/steps/metas/modules (with name
+disambiguation) into one plan.  Only the final result is downloaded.
+The runtime side is already done (`execute_plan` keeps intermediates
+on-device), so the work is in codegen.  Moderate risk/effort.
+
+Tasks:
+- [ ] Recursive sub-expression lowering → (module, metas, sub-plan
+      with a named final buffer)
+- [ ] Plan merge with buffer-name prefixing; multi-module kernel
+      loading via `RemoraExecutor.add_module`
+- [ ] First target: single-array sub-expr → single consumer
+      (`map f (sort xs)`, `fold + 0 (scan + 0 xs)`)
+- [ ] Verify: `uv run python -m compileall -q remora`
+
+Tests:
+- [ ] `map f (sort xs)` compiles to one plan; result == `f(np.sort)`
+- [ ] Sorted intermediate never touches the host (single final D→H)
+
+**NOTE**: this is *composition*, not *fusion* — it removes host
+round-trips for source-level pipelines but still launches separate
+kernels and materializes intermediates in global memory.  Merging
+element-wise chains into one kernel is Phase 5; Axis 2 alone is not
+parity.
 
 ---
 

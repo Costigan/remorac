@@ -3,6 +3,40 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## GPU Radix Sort (256-bin, 4-pass)
+
+New `remora/_gpu_radix_sort.py`: a device-resident LSD radix sort for
+f32 arrays that replaces the O(N log²N) bitonic GPU sort for
+1024 < N ≤ 1024² (bitonic remains the fallback below 1024).  Built and
+validated kernel-by-kernel against a NumPy oracle before integration.
+
+- **12-kernel `ExecutionPlan`**, wired into the GPU sort dispatch in
+  `generate_mlir_descriptor_abi_ptx` (`codegen.py`) ahead of bitonic.
+  Pipeline per sort: f32→uint32 monotonic key map (`llvm.bitcast` +
+  sign flip) → 4 × [ per-block digit-major histogram (shared-memory
+  `atomicrmw`) → exclusive prefix scan (digit-major decomposition into
+  single-block Hillis-Steele scans) → stable scatter ] → key→f32, with
+  ping-pong key buffers.
+- **Stable per-digit local rank via warp intrinsics**:
+  `rank = ctpop(match.any.sync(digit) & lanemask.lt)` per warp,
+  aggregated across the 32 warps in shared memory; out-of-range lanes
+  use a sentinel digit.  This is the O(N) equivalent of CUB/XLA's
+  approach and is correct on duplicate-heavy input (stability verified).
+- **Performance**: **607M elem/s at 1M** through the official
+  `remora-perf` path (with H↔D transfer + 18 per-step plan syncs),
+  **~1.35G elem/s device-resident** — **~9× the old bitonic (68M)**,
+  above the 500M target and within ~3× of JAX/XLA.
+- **Correctness**: bit-exact vs `np.sort` for N = 2K–1M across random,
+  heavy-duplicate, negative, zero, and ±inf inputs.  New test
+  `test_gpu_radix_sort_matches_numpy_when_available`; all 13 existing
+  GPU sort tests and 87 executor/GPU-lowering tests still pass.
+- **De-risking note**: the fast 256-bin design was initially deferred
+  as "highest-risk" (hand-written warp-intrinsic MLIR).  A 5-minute
+  empirical probe proved the warp intrinsics (`match.any.sync`,
+  `vote.ballot`, `shfl.sync`, `ctpop`) lower cleanly through the repo's
+  `mlir-translate-18 → llc-18 → ptxas` path (validated to a cubin),
+  retiring the core risk and making the design tractable.
+
 ## Benchmark Improvement Plan (Phases 1–3)
 
 Work driven by `docs/BENCHMARK_IMPROVEMENT_PLAN.md`.  New numbers in
@@ -66,6 +100,28 @@ Work driven by `docs/BENCHMARK_IMPROVEMENT_PLAN.md`.  New numbers in
   transfer (7.31x).
 - Test: `test_device_array_round_trip_and_iteration_when_available`.
 
+### GPU radix sort (Phase 3.1, `remora/_gpu_radix_sort.py`)
+- New 256-bin (8-bit-digit, 4-pass) LSD radix sort for f32 arrays,
+  exposed as a 12-kernel `ExecutionPlan` and wired into the GPU sort
+  dispatch (`codegen.py`) for 1024 < N ≤ 1024²; bitonic remains the
+  fallback below 1024.
+- Pipeline: f32→uint32 monotonic key map (`llvm.bitcast` + sign flip)
+  → per pass: per-block digit-major histogram (shared `atomicrmw`) →
+  exclusive scan (digit-major decomposition) → stable scatter, with
+  the per-digit local rank from warp intrinsics
+  (`match.any.sync(digit) & lanemask.lt → ctpop`, aggregated across
+  warps) → key→f32.  Built and validated kernel-by-kernel against a
+  NumPy oracle.
+- **607M elem/s at 1M** through the official benchmark (with H↔D
+  transfer + per-step syncs), ~1.35G device-resident — ~9x the old
+  bitonic (68M), above the 500M target.
+- An empirical probe confirmed the warp intrinsics lower cleanly
+  through the repo's `mlir-translate-18 → llc-18 → ptxas` path (to a
+  cubin), which made the fast 256-bin design tractable; the original
+  "deferred, highest-risk" assessment was over-cautious.
+- Test: `test_gpu_radix_sort_matches_numpy_when_available` (N=2K..100K,
+  random/duplicates/negatives, exact vs `np.sort`).
+
 ### Known limitations surfaced (documented, not fixed)
 - CPU lowering gap: a `/` division inside a `map` body drops the
   `_mlir_ciface_remora_call` export symbol (blocks average pooling;
@@ -73,9 +129,6 @@ Work driven by `docs/BENCHMARK_IMPROVEMENT_PLAN.md`.  New numbers in
 - GPU general-map miscompile: a vector-valued (3-component) cell fold
   collapses to a broadcast scalar, so the N-body GPU output is wrong
   (`[s s s]` rows); `bench_nbody` omits remora-gpu.
-- Phase 3.1 (GPU radix sort) **deferred** — highest-risk raw-MLIR
-  effort; a validated split-based blueprint reusing the multi-block
-  scan + DeviceArrays is documented in the plan.
 
 ## GPU Device Memory Pool
 

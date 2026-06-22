@@ -429,6 +429,7 @@ class RemoraExecutor:
             out_shape = plan.output_shape
             out_dtype = _plan_dtype(plan.output_dtype)
             output = np.empty(out_shape, dtype=out_dtype)
+            self._rt.synchronize()
             self._rt.copy_device_to_host(final.ptr, output)
             return output
         finally:
@@ -523,7 +524,9 @@ class RemoraExecutor:
             (block_size, 1, 1),
             [*input_descs, output_desc],
         )
-        self._rt.synchronize()
+        # No per-step synchronize: kernels serialize on the default
+        # stream, and intermediate buffers are never read on the host
+        # mid-plan.  execute_plan syncs once before the final D->H copy.
 
 
 class GPUPtxContext:
