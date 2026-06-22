@@ -922,18 +922,6 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
     # (cell) axes into one GpuInputLoad per element, in row-major order, so the
     # store writes them at successive output offsets.
     if isinstance(result_type, ArrayType):
-        if result_type.rank >= 2:
-            # The *indexing* itself is fine, but consuming a rank->=2 cell (folding
-            # it, or emitting it as the map output) is not yet implemented in the
-            # reduce / output-store paths (it surfaces as multi-reduce IndexErrors
-            # and "expected N offset values" MLIR errors). Refuse loudly until
-            # those paths support it, rather than crash cryptically.
-            raise GPUScaffoldError(
-                f"{ctx.context}: indexing that yields a rank-{result_type.rank} "
-                f"sub-array is not yet supported in a GPU map body (the cell "
-                f"cannot yet be folded or emitted); only scalar or rank-1 "
-                f"sub-array index results are lowered"
-            )
         import itertools
         dims = [int(d.value) for d in result_type.shape]
         if not dims or any(d <= 0 for d in dims):
@@ -1057,8 +1045,24 @@ def _lower_fold_to_gpu(
         # Unwrap single let layer (map-over-iota wraps param in _GpuLetExpr)
         inner = inner.body
 
+    # Materialized rank->=2 array fold: the body is a fully-materialized
+    # GpuArrayExpr holding dim*K elements (e.g. folding (index m i) where the
+    # cell is rank->=2). Folding reduces the *leading* axis, so reduce it at
+    # compile time into K grouped accumulators — no scf.for loop is needed since
+    # every element is already known. result[b] = init[b] op_a flat[a*K + b]
+    # (row-major: the reduced leading axis has stride K in the flat layout).
     if isinstance(inner, GpuArrayExpr):
-        component_bodies = _flatten_gpu_exprs(list(inner.components))
+        flat = _flatten_gpu_exprs(list(inner.components))
+        if dim >= 1 and len(flat) == dim * K and len(flat) > K:
+            elem_type = _scalar_type_to_mlir(result_type.element)
+            grouped: list[GpuExpr] = []
+            for b in range(K):
+                acc: GpuExpr = init_exprs[b] if b < len(init_exprs) else init_exprs[0]
+                for a in range(dim):
+                    acc = GpuBinaryOp(op, acc, flat[a * K + b], elem_type)
+                grouped.append(acc)
+            return GpuArrayExpr(components=grouped, element_type=elem_type)
+        component_bodies = flat
     else:
         for k in range(K):
             component_bodies.append(GpuExtractComponent(body_expr, k))

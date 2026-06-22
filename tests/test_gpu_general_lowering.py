@@ -1459,21 +1459,45 @@ class TestGPUNumericParity:
             src, "g", (ArrayType(FLOAT, (StaticDim(3),)),), [v], syntax="lisp",
         )
 
-    def test_rank2_subarray_index_in_map_rejected_not_silent(self):
-        """Indexing that yields a rank->=2 sub-array inside a map body used to
-        emit invalid MLIR (undeclared stride SSA). It must now be refused at
-        compile time, not silently miscompiled."""
+    # ------------------------------------------------------------------
+    # Rank->=2 sub-array indexing consumed by a fold. Indexing a rank-3 input
+    # once yields a 2-D cell; folding it reduces the leading cell axis. This
+    # used to emit invalid MLIR / crash; now lowered as a compile-time grouped
+    # reduction. Compared against the interpreter oracle.
+    # ------------------------------------------------------------------
+
+    def test_rank2_subarray_fold_to_scalar_parity(self):
+        # (fold + 0.0 (fold + [0 0] (index m i))) sums each 2x2 cell to a scalar.
         src = (
             "(define/pi () (f [m (Array Float 4 2 2)] (Array Float 4))"
             " (map (lambda (i) (fold + 0.0 (fold + [0.0 0.0] (index m i))))"
             " (iota 4)))"
         )
-        with pytest.raises((CodegenUnavailable, GPUScaffoldError)):
-            compile_function_source_to_mlir_gpu_ptx(
-                src, "f",
-                (ArrayType(FLOAT, (StaticDim(4), StaticDim(2), StaticDim(2))),),
-                include_prelude=False, syntax="lisp",
-            )
+        m = np.arange(16, dtype=np.float32).reshape(4, 2, 2)
+        self._run_parity(
+            src, "f",
+            (ArrayType(FLOAT, (StaticDim(4), StaticDim(2), StaticDim(2))),),
+            [m], syntax="lisp",
+        )
+
+    def test_rank2_subarray_fold_to_vector_parity(self):
+        # (fold + [0 0] (index m i)) reduces the leading axis of each 2x2 cell.
+        src = (
+            "(define/pi () (f [m (Array Float 3 2 2)] (Array Float 3 2))"
+            " (map (lambda (i) (fold + [0.0 0.0] (index m i))) (iota 3)))"
+        )
+        m = np.arange(12, dtype=np.float32).reshape(3, 2, 2)
+        self._run_parity(
+            src, "f",
+            (ArrayType(FLOAT, (StaticDim(3), StaticDim(2), StaticDim(2))),),
+            [m], syntax="lisp",
+        )
+
+    # NOTE: the i32 variant and emitting a rank->=2 cell *as the map output*
+    # currently hit separate bugs in the dense MLIR lowering (an i32 fold init
+    # emitted as a float constant; a rank-3 tensor.insert_slice given too few
+    # offsets), invoked by the GPU compile's verification pre-pass. Those live
+    # in remora/lowering/ (CPU path too) and are tracked as follow-ups.
 
 
 def test_scan_builder_rejects_non_scan_body():
