@@ -954,10 +954,100 @@ def bench_fusion_dot(n: int, warmup: int, trials: int) -> BenchResult | None:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline benchmark: cumsum(sort(xs)) — a representative multi-op chain
+# ---------------------------------------------------------------------------
+#
+# sort -> prefix-sum is a real idiom (CDF/quantiles).  Measures end-to-end
+# pipeline parity, and isolates the device-residency win: `remora-gpu`
+# chains the two GPU plans on-device (execute_plan_to_device); `remora-gpu-htod`
+# runs the naive host-round-trip between the two ops.
+
+PIPELINE_SIZES = (100_000, 1_000_000)
+
+
+def _build_pipeline_exe(rt, N):
+    from remora.compiler import compile_function_source
+    from remora.codegen import generate_mlir_descriptor_abi_ptx
+    from remora.executor import RemoraExecutor
+    from remora.hir import HIRFunction, HIRParam, HIRSort, HIRVar
+    from remora.types import FLOAT, ArrayType, StaticDim
+    at = ArrayType(FLOAT, (StaticDim(N),))
+    hf = HIRFunction("s", [HIRParam("xs", at)], HIRSort(HIRVar("xs", at), result_type=at), return_type=at)
+    sptx, skern, splan = generate_mlir_descriptor_abi_ptx(hf, kernel_name="psort")
+    art = compile_function_source("def sc xs = iscan (+) 0.0 xs", "sc", (at,), verify=False, include_prelude=False)
+    cptx, ckern, cplan = generate_mlir_descriptor_abi_ptx(art.hir_function, kernel_name="pscan")
+    exe = RemoraExecutor(sptx, skern, runtime=rt)
+    exe.add_module(cptx, ckern)
+    return exe, splan, cplan
+
+
+def bench_pipeline_numpy(n: int, warmup: int, trials: int) -> BenchResult:
+    xs = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+    return _result("pipeline", "numpy", n, _measure(lambda: np.cumsum(np.sort(xs)), warmup, trials))
+
+
+def bench_pipeline_jax(n: int, warmup: int, trials: int) -> BenchResult | None:
+    jax, jnp = _try_import_jax()
+    if jax is None:
+        return None
+    f = jax.jit(lambda x: jnp.cumsum(jnp.sort(x)))
+    xj = jnp.array(np.random.default_rng(0).standard_normal(n).astype(np.float32))
+
+    def run():
+        f(xj).block_until_ready()
+
+    backend = f"jax-{jax.devices()[0].platform}"
+    return _result("pipeline", backend, n, _measure(run, warmup, trials))
+
+
+def bench_pipeline_remora_gpu(n: int, warmup: int, trials: int) -> BenchResult | None:
+    from remora.executor import DeviceArray
+    rt = _get_gpu_runtime()
+    if rt is None:
+        return None
+    try:
+        exe, splan, cplan = _build_pipeline_exe(rt, n)
+        _apply_pool(exe)
+        xs = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+
+        def run():
+            xd = DeviceArray.from_numpy(exe, xs)
+            sd = exe.execute_plan_to_device(splan, [xd]); xd.free()
+            rd = exe.execute_plan_to_device(cplan, [sd]); sd.free()
+            rd.to_numpy(); rd.free()
+
+        return _result("pipeline", "remora-gpu", n, _measure(run, warmup, trials))
+    except Exception:
+        return None
+    finally:
+        rt.close()
+
+
+def bench_pipeline_remora_gpu_htod(n: int, warmup: int, trials: int) -> BenchResult | None:
+    rt = _get_gpu_runtime()
+    if rt is None:
+        return None
+    try:
+        exe, splan, cplan = _build_pipeline_exe(rt, n)
+        _apply_pool(exe)
+        xs = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+
+        def run():
+            s = np.asarray(exe.execute_plan(splan, [xs]))
+            np.asarray(exe.execute_plan(cplan, [s]))
+
+        return _result("pipeline", "remora-gpu-htod", n, _measure(run, warmup, trials))
+    except Exception:
+        return None
+    finally:
+        rt.close()
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-ALL_OPS = ("map", "fold", "scan", "matmul", "sort", "stencil", "grad_descent", "conv_pipeline", "nbody", "fusion")
+ALL_OPS = ("map", "fold", "scan", "matmul", "sort", "stencil", "grad_descent", "conv_pipeline", "nbody", "fusion", "pipeline")
 
 DEFAULT_SIZES = (1_000, 10_000, 100_000, 1_000_000, 10_000_000)
 MATMUL_SIZES = (32, 64, 128, 256, 512, 1024)
@@ -1004,6 +1094,10 @@ BENCHMARKS: dict[tuple[str, str], Callable[..., BenchResult | None]] = {
     ("fusion", "triple-composed"): _make_fusion_bench("triple-composed", _FUSION_SOURCES["triple-composed"]),
     ("fusion", "triple-manual"): _make_fusion_bench("triple-manual", _FUSION_SOURCES["triple-manual"]),
     ("fusion", "dot-composed"): bench_fusion_dot,
+    ("pipeline", "numpy"): bench_pipeline_numpy,
+    ("pipeline", "jax"): bench_pipeline_jax,
+    ("pipeline", "remora-gpu"): bench_pipeline_remora_gpu,
+    ("pipeline", "remora-gpu-htod"): bench_pipeline_remora_gpu_htod,
 }
 
 
@@ -1020,6 +1114,8 @@ def _sizes_for_op(op: str) -> tuple[int, ...]:
         return NBODY_SIZES
     if op == "fusion":
         return FUSION_SIZES
+    if op == "pipeline":
+        return PIPELINE_SIZES
     return DEFAULT_SIZES
 
 

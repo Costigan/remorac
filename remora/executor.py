@@ -436,6 +436,59 @@ class RemoraExecutor:
             for ptr, nbytes in allocated_bufs:
                 self._pool_free(ptr, nbytes)
 
+    def execute_plan_to_device(
+        self,
+        plan: ExecutionPlan,
+        device_inputs: list["DeviceArray"],
+    ) -> "DeviceArray":
+        """Run a multi-kernel plan on device-resident inputs, returning the
+        result as a device-resident ``DeviceArray`` (no host transfer).
+
+        Inputs are existing ``DeviceArray``s (registered as ``input_0``..).
+        Plan intermediate buffers are pool-allocated and freed afterwards,
+        except the ``final_output`` buffer, whose ownership transfers to the
+        returned ``DeviceArray`` (the caller must ``free()`` it).
+        """
+        plan.validate()
+        missing_kernels = plan.kernel_names() - set(self._kernels)
+        if missing_kernels:
+            raise RemoraExecutorError(
+                f"Plan references unknown kernels: {sorted(missing_kernels)}"
+            )
+        if plan.final_output.startswith("input_"):
+            raise RemoraExecutorError(
+                "execute_plan_to_device requires final_output to be a plan buffer"
+            )
+
+        registry: dict[str, _DeviceBuffer] = {}
+        for i, da in enumerate(device_inputs):
+            registry[f"input_{i}"] = _DeviceBuffer(da.ptr, tuple(da.shape), da.dtype)
+
+        owned: list[tuple[str, int, int]] = []
+        for buf_spec in plan.buffers:
+            dtype = _plan_dtype(buf_spec.dtype)
+            n_elements = max(1, int(np.prod(buf_spec.shape, dtype=np.int64)))
+            nbytes = n_elements * dtype.itemsize
+            ptr = self._pool_alloc(nbytes)
+            if buf_spec.init is not None:
+                self._rt.copy_host_to_device(np.array(buf_spec.init, dtype=dtype), ptr)
+            else:
+                self._rt.memset_d32(ptr, 0, max(1, nbytes // 4))
+            registry[buf_spec.name] = _DeviceBuffer(ptr, buf_spec.shape, dtype)
+            owned.append((buf_spec.name, ptr, nbytes))
+
+        for step in plan.steps:
+            self._run_plan_step(step, registry)
+        self._rt.synchronize()
+
+        final = registry[plan.final_output]
+        out_dtype = _plan_dtype(plan.output_dtype)
+        out_nbytes = max(1, int(np.prod(plan.output_shape, dtype=np.int64))) * out_dtype.itemsize
+        for name, ptr, nbytes in owned:
+            if name != plan.final_output:
+                self._pool_free(ptr, nbytes)
+        return DeviceArray(self, final.ptr, tuple(plan.output_shape), out_dtype, out_nbytes)
+
     def execute_main(self, inputs: list[Any] | None = None, *, arena: Any | None = None) -> np.ndarray:
         """Run the program entry kernel using the shared executor-style API."""
         kernel_name = self._main_kernel_name()
