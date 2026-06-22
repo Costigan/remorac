@@ -4713,12 +4713,12 @@ def build_descriptor_abi_general_map_gpu_module(
             ptr = f"%out_elem_ptr{k}" if k > 0 else "%out_elem_ptr"
             # Always emit getelementptr for each component
             store_lines.append(f"      {ptr} = llvm.getelementptr %out_aligned[{k_offset}] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}")
-            store_lines.append(f"      llvm.store {result_ssa[k]}, {ptr} : f32, !llvm.ptr")
+            store_lines.append(f"      llvm.store {result_ssa[k]}, {ptr} : {result_elem_type}, !llvm.ptr")
         body_lines.extend(store_lines)
     else:
         body_lines.extend([
             f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}",
-            f"      llvm.store {result_ssa}, %out_elem_ptr : f32, !llvm.ptr",
+            f"      llvm.store {result_ssa}, %out_elem_ptr : {result_elem_type}, !llvm.ptr",
         ])
 
     body_lines.extend([
@@ -4872,9 +4872,27 @@ def _gpu_emit_expr(
         if isinstance(expr, GpuBinaryOp):
             left = emit(expr.left, env)
             right = emit(expr.right, env)
-            ssa = _fresh_ssa()
             et = getattr(expr, 'element_type', 'f32')
             llvm = llvm_op(expr.op, et)
+            l_list = isinstance(left, list)
+            r_list = isinstance(right, list)
+            if l_list or r_list:
+                # Array-valued (multi-component) operand: apply elementwise,
+                # broadcasting a scalar operand across the components.
+                if l_list and r_list and len(left) != len(right):
+                    raise GPUScaffoldError(
+                        f"binary op on mismatched vector widths {len(left)} vs {len(right)}"
+                    )
+                width = len(left) if l_list else len(right)
+                out_ssas: list[str] = []
+                for k in range(width):
+                    lk = left[k] if l_list else left
+                    rk = right[k] if r_list else right
+                    ck = _fresh_ssa()
+                    lines.append(f"      {ck} = {llvm} {lk}, {rk}  : {et}")
+                    out_ssas.append(ck)
+                return out_ssas
+            ssa = _fresh_ssa()
             lines.append(f"      {ssa} = {llvm} {left}, {right}  : {et}")
             return ssa
 
@@ -4961,11 +4979,11 @@ def _gpu_emit_expr(
         if isinstance(expr, _GpuLetExpr):
             val_ssa = emit(expr.value, env)
             new_env = dict(env)
-            # If multi-value, store only the first component name
-            if isinstance(val_ssa, list):
-                new_env[expr.name] = val_ssa[0]
-            else:
-                new_env[expr.name] = val_ssa
+            # Bind the full value, preserving array-valued (multi-component)
+            # bindings.  Collapsing to val_ssa[0] here silently dropped all
+            # but the first component of a let-bound vector (e.g. the N-body
+            # `let D = (3-vector) in D` produced [c0, c0, c0]).
+            new_env[expr.name] = val_ssa
             return emit(expr.body, new_env)
 
         # GpuArrayExpr: emit all components, return list of SSA names
@@ -5325,6 +5343,21 @@ def _gpu_emit_expr(
                     elem_ssa = sel_ssa
         else:
             elem_ssa = emit(expr.body_expr, body_env)
+            if isinstance(elem_ssa, list):
+                # Producer is a register-resident vector (e.g. fold + 0 (* D D)
+                # where D is a let-bound 3-vector).  Select the idx-th
+                # component each iteration so the loop sums the components.
+                comps = elem_ssa
+                sel = comps[0]
+                for k in range(1, len(comps)):
+                    k_ssa = _fresh_ssa()
+                    lines.append(f"      {k_ssa} = llvm.mlir.constant({k} : index) : i64")
+                    eq_ssa = _fresh_ssa()
+                    lines.append(f"      {eq_ssa} = llvm.icmp \"eq\" {idx_ssa}, {k_ssa} : i64")
+                    sel_ssa = _fresh_ssa()
+                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comps[k]}, {sel} : i1, f32")
+                    sel = sel_ssa
+                elem_ssa = sel
 
         acc_next_ssa = _fresh_ssa()
         fold_llvm = llvm_op(expr.op, "f32")

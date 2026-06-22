@@ -671,11 +671,6 @@ def generate_mlir_descriptor_abi_ptx(
         if (isinstance(function.body, HIRMap)
                 and isinstance(function.body.func, HIRLambda)
                 and _body_needs_tensor_lowering(function.body.func.body)):
-            from remora.gpu_lowering import (
-                build_descriptor_abi_general_map_gpu_module,
-            )
-            from remora.types import ArrayType as _AT_unused
-
             gpu_module = build_descriptor_abi_general_map_gpu_module(
                 function, kernel_name=name,
             )
@@ -717,6 +712,14 @@ def generate_mlir_descriptor_abi_ptx(
                 else:
                     input_elem_types.append("f32")
 
+            _out_elem_name = getattr(result_type.element, "name", "float")
+            if _out_elem_name == "int":
+                _out_et, _out_dtype = "i32", "int32"
+            elif _out_elem_name == "bool":
+                _out_et, _out_dtype = "i8", "bool"
+            else:
+                _out_et, _out_dtype = "f32", "float32"
+
             meta = KernelMeta(
                 name=name,
                 grid_dims=1,
@@ -724,9 +727,9 @@ def generate_mlir_descriptor_abi_ptx(
                 num_inputs=total_inputs,
                 num_outputs=1,
                 input_elem_types=input_elem_types,
-                output_elem_types=["f32"],
+                output_elem_types=[_out_et],
                 output_shape=output_shape,
-                output_dtype="float32",
+                output_dtype=_out_dtype,
             )
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
@@ -936,6 +939,13 @@ def generate_mlir_descriptor_abi_ptx(
                                         input_elem_types2.append("f32")
                                 else:
                                     input_elem_types2.append("f32")
+                            _out_elem_name2 = getattr(result_type2.element, "name", "float")
+                            if _out_elem_name2 == "int":
+                                _out_et2, _out_dtype2 = "i32", "int32"
+                            elif _out_elem_name2 == "bool":
+                                _out_et2, _out_dtype2 = "i8", "bool"
+                            else:
+                                _out_et2, _out_dtype2 = "f32", "float32"
                             meta = KernelMeta(
                                 name=name,
                                 grid_dims=1,
@@ -943,9 +953,9 @@ def generate_mlir_descriptor_abi_ptx(
                                 num_inputs=num_array_inputs2 + num_scalar_inputs2,
                                 num_outputs=1,
                                 input_elem_types=input_elem_types2,
-                                output_elem_types=["f32"],
+                                output_elem_types=[_out_et2],
                                 output_shape=output_shape2,
-                                output_dtype="float32",
+                                output_dtype=_out_dtype2,
                             )
                         except (GPUScaffoldError, CodegenUnavailable) as general_error:
                             raise CodegenUnavailable(str(bool_map_error)) from general_error

@@ -503,19 +503,54 @@ def _lower_iota(expr: HIRIota, ctx: _CompileCtx) -> GpuExpr:
     )
 
 
+def _maybe_expand_rank1_cell(inner: GpuExpr, array: HIRExpr) -> "GpuArrayExpr | None":
+    """Expand a per-cell rank-1 array reference into component loads.
+
+    Inside a general GPU map, a reference to an array-typed *cell* parameter
+    lowers to a single ``GpuInputLoad`` carrying only the *frame* coordinates.
+    A view op (reverse/rotate/drop) applied to it must act on the *cell* axis,
+    not the frame axis.  This helper expands that single load into a
+    ``GpuArrayExpr`` of ``K`` component loads — one per cell element, each
+    appending the cell index as a trailing coordinate — so the view op can be
+    applied component-wise (the correct, frame-agnostic path).
+
+    Returns ``None`` when expansion does not apply (not a plain input load,
+    already carries coord offsets/transforms, or the cell is not rank-1).
+    """
+    if not isinstance(inner, GpuInputLoad):
+        return None
+    if inner.coord_offsets or inner.coord_transforms:
+        return None
+    cell_type = getattr(array, "type", None)
+    if cell_type is None:
+        cell_type = getattr(array, "result_type", None)
+    if not isinstance(cell_type, ArrayType) or cell_type.rank != 1:
+        return None
+    K = int(cell_type.shape[0].value)
+    if K <= 0:
+        return None
+    comps: list[GpuExpr] = [
+        GpuInputLoad(
+            inner.index,
+            list(inner.coords) + [str(k)],
+            element_type=inner.element_type,
+        )
+        for k in range(K)
+    ]
+    return GpuArrayExpr(components=comps, element_type=inner.element_type)
+
+
 def _apply_offset_to_load(
     inner: GpuExpr,
     offsets: tuple[int, ...],
     ctx: _CompileCtx,
 ) -> GpuExpr:
     if isinstance(inner, GpuInputLoad):
-        base = list(inner.coord_offsets or (0,) * len(inner.coords))
-        while len(base) < len(inner.coords):
-            base.append(0)
-        for k, off in enumerate(offsets):
-            if k < len(base):
-                base[k] += off
-        return GpuInputLoad(inner.index, inner.coords, tuple(base), inner.coord_transforms)
+        raise GPUScaffoldError(
+            f"{ctx.context}: view-with-offset (drop/subarray) inside a map body is "
+            f"not supported on a per-cell array reference; the offset would target "
+            f"the frame axis instead of the cell axis"
+        )
     if isinstance(inner, GpuArrayExpr):
         start = offsets[0] if offsets else 0
         return GpuArrayExpr(
@@ -537,6 +572,9 @@ def _lower_view_offset(
     inner = _lower_hir(array, ctx)
     if per_axis_offsets is not None:
         return _apply_offset_to_load(inner, per_axis_offsets, ctx)
+    expanded = _maybe_expand_rank1_cell(inner, array)
+    if expanded is not None:
+        inner = expanded
     return _apply_offset_to_load(inner, (dim0_offset,), ctx)
 
 
@@ -552,11 +590,11 @@ def _apply_transform_to_load(
     ctx: _CompileCtx,
 ) -> GpuExpr:
     if isinstance(inner, GpuInputLoad):
-        transforms = list(inner.coord_transforms or ("",) * len(inner.coords))
-        while len(transforms) < len(inner.coords):
-            transforms.append("")
-        transforms[0] = dim0_transform
-        return GpuInputLoad(inner.index, inner.coords, inner.coord_offsets, tuple(transforms))
+        raise GPUScaffoldError(
+            f"{ctx.context}: view-transform (reverse/rotate) inside a map body is "
+            f"not supported on a per-cell array reference; the transform would target "
+            f"the frame axis instead of the cell axis"
+        )
     if isinstance(inner, GpuArrayExpr):
         if dim0_transform.startswith("reverse:"):
             return GpuArrayExpr(
@@ -585,29 +623,20 @@ def _lower_view_transform(
     dim0_transform: str,
 ) -> GpuExpr:
     inner = _lower_hir(array, ctx)
+    expanded = _maybe_expand_rank1_cell(inner, array)
+    if expanded is not None:
+        inner = expanded
     return _apply_transform_to_load(inner, dim0_transform, ctx)
 
 
 def _lower_transpose(expr: HIRTranspose, ctx: _CompileCtx) -> GpuExpr:
     inner = _lower_hir(expr.array, ctx)
     if isinstance(inner, GpuInputLoad):
-        if len(inner.coords) < 2:
-            raise GPUScaffoldError(
-                f"{ctx.context}: transpose requires at least rank-2 input"
-            )
-        new_coords = list(inner.coords)
-        new_coords[0], new_coords[1] = new_coords[1], new_coords[0]
-        offsets = list(inner.coord_offsets or ())
-        if len(offsets) >= 2:
-            offsets[0], offsets[1] = offsets[1], offsets[0]
-        elif len(offsets) == 1:
-            offsets = [0, offsets[0]]
-        transforms = list(inner.coord_transforms or ())
-        if len(transforms) >= 2:
-            transforms[0], transforms[1] = transforms[1], transforms[0]
-        elif len(transforms) == 1:
-            transforms = ["", transforms[0]]
-        return GpuInputLoad(inner.index, new_coords, tuple(offsets), tuple(transforms))
+        raise GPUScaffoldError(
+            f"{ctx.context}: transpose inside a map body is not supported on a "
+            f"per-cell array reference; the axis swap would target the frame axes "
+            f"instead of the cell axes"
+        )
     raise GPUScaffoldError(
         f"{ctx.context}: transpose on non-input-load expression ({type(inner).__name__})"
     )

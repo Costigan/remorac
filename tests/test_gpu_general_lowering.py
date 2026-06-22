@@ -1267,7 +1267,7 @@ class TestGPUNumericParity:
     def _run_parity(self, src, name, param_types, inputs, include_prelude=False, syntax="ml"):
         """Compile on CPU and GPU, execute both, assert close match."""
         # CPU: use interpreter for reference
-        formatted = [self._format_input(v) for v in inputs]
+        formatted = [self._format_input(v, syntax) for v in inputs]
         if syntax == "ml":
             arg_str = " ".join(f"({a})" for a in formatted)
             call_expr = f"{name} {arg_str}"
@@ -1299,28 +1299,28 @@ class TestGPUNumericParity:
         )
 
     @staticmethod
-    def _format_input(v):
-        if isinstance(v, np.ndarray):
-            if v.ndim == 1:
-                if v.dtype == np.float32:
-                    return "[" + ", ".join(f"{x:.6f}" for x in v) + "]"
-                elif v.dtype == np.int32:
-                    return "[" + ", ".join(str(int(x)) for x in v) + "]"
-                return str(list(v))
-            if v.ndim == 2:
-                if v.dtype == np.float32:
-                    rows = ["[" + ", ".join(f"{x:.6f}" for x in row) + "]" for row in v]
-                elif v.dtype == np.int32:
-                    rows = ["[" + ", ".join(str(int(x)) for x in row) + "]" for row in v]
-                else:
-                    rows = [str(list(row)) for row in v]
-                return "[" + ", ".join(rows) + "]"
-            return str(v.tolist())
-        elif isinstance(v, (np.floating, float)):
+    def _format_input(v, syntax="ml"):
+        sep = ", " if syntax == "ml" else " "
+
+        def fmt(x):
+            x = np.asarray(x)
+            if x.ndim == 0:
+                if x.dtype.kind == "f":
+                    return f"{float(x):.6f}"
+                if x.dtype.kind in ("i", "u"):
+                    return str(int(x))
+                if x.dtype.kind == "b":
+                    if syntax == "ml":
+                        return "true" if bool(x) else "false"
+                    return "#t" if bool(x) else "#f"
+                return str(x)
+            return "[" + sep.join(fmt(e) for e in x) + "]"
+
+        if isinstance(v, (np.floating, float)):
             return f"{float(v):.6f}"
-        elif isinstance(v, (np.integer, int)):
+        if isinstance(v, (np.integer, int)):
             return str(int(v))
-        return str(v)
+        return fmt(v)
 
     def test_unary_map_parity(self):
         """scale by 2.0"""
@@ -1377,3 +1377,54 @@ class TestGPUNumericParity:
             [x, y],
             include_prelude=False,
         )
+
+    # ------------------------------------------------------------------
+    # Regression net: view ops applied to a per-cell array inside a map
+    # body.  These previously *silently miscompiled* (the transform was
+    # applied to the frame axis instead of the cell axis), producing
+    # garbage that compile-only tests never caught.  We now sweep both
+    # element types and several shapes/shifts against the interpreter
+    # oracle, so a re-introduced silent miscompile fails loudly here.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "op_body,elem_name,elem,n",
+        [
+            ("(reverse row)", "Float", FLOAT, 3),
+            ("(reverse row)", "Float", FLOAT, 5),
+            ("(reverse row)", "Int", INT, 3),
+            ("(reverse row)", "Int", INT, 5),
+            ("(rotate row 1)", "Float", FLOAT, 4),
+            ("(rotate row 2)", "Float", FLOAT, 5),
+            ("(rotate row 1)", "Int", INT, 4),
+            ("(rotate row 3)", "Int", INT, 5),
+        ],
+    )
+    def test_view_in_map_parity(self, op_body, elem_name, elem, n):
+        rows = 2
+        src = (
+            f"(define/pi () (f [m (Array {elem_name} {rows} {n})]"
+            f" (Array {elem_name} {rows} {n}))"
+            f" (map (lambda (row) {op_body}) m))"
+        )
+        base = np.arange(rows * n).reshape(rows, n)
+        m = base.astype(np.float32 if elem is FLOAT else np.int32)
+        self._run_parity(
+            src, "f",
+            (ArrayType(elem, (StaticDim(rows), StaticDim(n))),),
+            [m], syntax="lisp",
+        )
+
+    @pytest.mark.parametrize("src,name,elem,shape", [
+        ("(define/pi () (t [m (Array Float 3 2 2)] (Array Float 3 2 2))"
+         " (map (lambda (c) (transpose c)) m))", "t", FLOAT, (3, 2, 2)),
+    ])
+    def test_unsupported_view_in_map_rejected_not_silent(self, src, name, elem, shape):
+        """Constructs we do not yet lower correctly must fail loudly at
+        compile time rather than emit a kernel that silently miscompiles."""
+        with pytest.raises((CodegenUnavailable, GPUScaffoldError)):
+            compile_function_source_to_mlir_gpu_ptx(
+                src, name,
+                (ArrayType(elem, tuple(StaticDim(d) for d in shape)),),
+                include_prelude=False, syntax="lisp",
+            )

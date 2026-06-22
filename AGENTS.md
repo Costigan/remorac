@@ -15,8 +15,12 @@ end goal is a full implementation.
 # Install / sync deps
 uv sync
 
-# Run all tests
+# Run the whole suite — CPU tests AND GPU tests (GPU runs when a CUDA runtime is present)
 uv run pytest
+
+# Same suite, but tolerate a missing GPU: GPU-unavailable degrades to skip, not failure
+# (on a machine that HAS a GPU this still runs the GPU tests)
+REMORA_TEST_GPU=0 uv run pytest
 
 # Run a single test file
 uv run pytest tests/test_parser.py
@@ -80,10 +84,55 @@ Entry points: `remorac` (CLI, `remora/cli.py`), `remora` (REPL, `remora/repl.py`
 ## Testing
 
 - **Framework:** pytest only, no plugins. Config is in `pyproject.toml` (`testpaths = ["tests"]`).
-- **GPU tests are opt-in.** Set `REMORA_TEST_GPU=1` to require GPU tests to pass; otherwise they skip. GPU tests need `iree-compiler` and CUDA.
+- **GPU is a first-class target. `uv run pytest` exercises the GPU path by default.**
+  `tests/conftest.py` defaults `REMORA_TEST_GPU=1` when unset, so locally the GPU path
+  gets the *same emphasis as the CPU path*: GPU tests run, and a missing/broken GPU or
+  toolchain is a **hard failure** (one clear error at startup), never a silent skip.
+  - Run everything (CPU + GPU): `uv run pytest` exercises both paths in one run.
+  - Tolerate a missing GPU: `REMORA_TEST_GPU=0 uv run pytest` — GPU-unavailable then
+    degrades to a skip instead of a failure. This does **not** disable GPU tests: on a
+    machine that has a GPU they still run (there is no CPU-only switch).
+  - GPU tests need `iree-compiler` and CUDA (installed by `uv sync` + a working driver).
+  - On a GPU machine, GPU tests run regardless of the flag (the runtime simply
+    succeeds); the flag only controls what happens when the GPU is *unavailable*
+    (fail vs skip). The point of the default is that lost GPU coverage is loud.
 - **Acceptance tests** use `tests/acceptance/manifest.json`. Each case declares a `.remora` file, target, expected exit code, and optional stdout/stderr checks. Categories: `supported`, `rejected`, `deferred`.
 - **Golden MLIR files** in `tests/golden_mlir/` are used by lowering tests for output comparison.
 - CPU compiled tests typically use `CPUFunctionExecutor.compile_source()` or `evaluate_source_compiled()`.
+
+### Coverage rules (learned the hard way)
+
+Silent miscompiles — code that *compiles cleanly but computes the wrong values* — are
+the worst failure mode here and have shipped before (e.g. a vector cell-fold and
+several view ops inside `map` bodies on GPU). Follow these rules to avoid them:
+
+- **"Compiles" is not "correct".** A test like `assert ".visible .entry" in ptx`
+  proves nothing about results. Every GPU op / lowering path needs a **numeric-parity**
+  test that runs the kernel and compares against an oracle. Compile-only tests are
+  acceptable only as a secondary smoke check, never as the sole coverage for an op.
+- **Oracle = the interpreter.** `evaluate_source(...)` (the reference interpreter) is
+  the most capable oracle and supports more constructs than the CPU-compiled backend
+  (which `deferred`s some ops, e.g. `drop`). Prefer it for parity. Existing GPU-vs-oracle
+  harnesses: `TestGPUNumericParity._run_parity` in `tests/test_gpu_general_lowering.py`
+  and `tests/test_gpu_numeric_parity.py`. Add new cases there.
+- **Sweep element types and shapes.** Cover `f32` *and* `i32` (and `bool` where
+  relevant) at non-trivial sizes — not just one f32 example. Real bugs hid in i32-only
+  paths (hardcoded `f32` stores / `output_dtype`). Use parametrized tests.
+- **Test ops in compound contexts, not just standalone.** An op at the top level and
+  the same op *inside a `map`/`fold` body* take different lowering paths (top-level
+  linalg vs the general-expr emitter in `remora/_gpu_expr_lowering.py`). Cover both.
+- **Prefer end-to-end source compilation over hand-built HIR.** Tests that construct
+  HIR directly and call one specific builder bypass the `codegen.py` routing cascade,
+  so whole code paths (and crashes within them) go untested. Use `compile_function_source*`
+  / `evaluate_source` for coverage; reserve direct-HIR tests for unit-testing one builder.
+- **Unsupported constructs must fail loudly, never silently.** When a path can't
+  guarantee a correct result, raise `GPUScaffoldError`/`CodegenUnavailable` rather than
+  emitting a kernel. Lock this in with a "rejected-not-silent" test (see
+  `test_unsupported_view_in_map_rejected_not_silent`).
+- **When you add or change a GPU op or lowering path, add a parity test in the same
+  change.** Locally `uv run pytest` runs it on the GPU by default; it only proves
+  something where a GPU is present (it does on the dev machine). Don't rely on CI for
+  GPU coverage — CI sets `REMORA_TEST_GPU=0` and skips it (see CI).
 
 ## External toolchain
 
@@ -114,3 +163,11 @@ uv run python tools/validate_mlir_toolchain.py
 ## CI
 
 The `python-tests` job in `.github/workflows/ci.yml` runs `uv sync` then `uv run pytest -q`. The rest of the CI workflow is for an unrelated .NET (ILGPU) project and does not apply to this Python codebase.
+
+> **Coverage gap:** CI sets `REMORA_TEST_GPU=0` (`.github/workflows/ci.yml`), so every
+> GPU test **skips** in CI — whereas locally it defaults to `1` and GPU runs. GPU
+> silent-miscompiles (the worst failure mode — see "Coverage rules") therefore cannot be
+> caught by CI today. Until a CUDA-capable CI runner exists, GPU parity tests must be run
+> **locally** (the default `uv run pytest` on the GPU dev machine does this) before
+> merging any change to a GPU lowering path (`gpu_lowering.py`, `codegen.py`,
+> `_gpu_expr_lowering.py`, `_gpu_*`). State in the PR that you did so.
