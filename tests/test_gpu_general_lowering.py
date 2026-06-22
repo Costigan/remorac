@@ -1444,6 +1444,21 @@ class TestGPUNumericParity:
             include_prelude=False,
         )
 
+    def test_scatter_add_in_map_parity(self):
+        """scatter-add into a register-vector cell inside a map over iota,
+        where the update reads an input at the per-thread coordinate. This
+        silently miscompiled (every row got v[0]) until input descriptors were
+        loaded at the input's true rank rather than the output rank."""
+        src = (
+            "(define/pi () (g [v (Array Float 3)] (Array Float 3 3))"
+            " (map (lambda (i) (scatter-add [0.0 0.0 0.0] 1 (index v i)))"
+            " (iota 3)))"
+        )
+        v = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        self._run_parity(
+            src, "g", (ArrayType(FLOAT, (StaticDim(3),)),), [v], syntax="lisp",
+        )
+
     def test_rank2_subarray_index_in_map_rejected_not_silent(self):
         """Indexing that yields a rank->=2 sub-array inside a map body used to
         emit invalid MLIR (undeclared stride SSA). It must now be refused at

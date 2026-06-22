@@ -916,27 +916,35 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
     result_type = expr.result_type
     if isinstance(result_type, ScalarType):
         # Scalar result: single GpuInputLoad
-        return GpuInputLoad(slot, index_coords)
+        return GpuInputLoad(slot, index_coords, element_type=_scalar_type_to_mlir(result_type))
 
-    # Array result: fewer indices than source rank → unroll trailing dims
+    # Array result: fewer indices than the source rank. Unroll the remaining
+    # (cell) axes into one GpuInputLoad per element, in row-major order, so the
+    # store writes them at successive output offsets.
     if isinstance(result_type, ArrayType):
         if result_type.rank >= 2:
+            # The *indexing* itself is fine, but consuming a rank->=2 cell (folding
+            # it, or emitting it as the map output) is not yet implemented in the
+            # reduce / output-store paths (it surfaces as multi-reduce IndexErrors
+            # and "expected N offset values" MLIR errors). Refuse loudly until
+            # those paths support it, rather than crash cryptically.
             raise GPUScaffoldError(
                 f"{ctx.context}: indexing that yields a rank-{result_type.rank} "
-                f"sub-array is not supported in a GPU map body; only scalar or "
-                f"rank-1 sub-array index results are lowered correctly"
+                f"sub-array is not yet supported in a GPU map body (the cell "
+                f"cannot yet be folded or emitted); only scalar or rank-1 "
+                f"sub-array index results are lowered"
             )
-        K = int(result_type.shape[0].value) if result_type.shape else 0
-        if K <= 0:
+        import itertools
+        dims = [int(d.value) for d in result_type.shape]
+        if not dims or any(d <= 0 for d in dims):
             raise GPUScaffoldError(
                 f"{ctx.context}: array index result has zero-size dimension"
             )
-        # For each trailing dimension index, create a GpuInputLoad
-        components: list[GpuExpr] = []
-        for k in range(K):
-            full_coords = list(index_coords) + [str(k)]
-            components.append(GpuInputLoad(slot, full_coords))
         elem_type = _scalar_type_to_mlir(result_type.element)
+        components: list[GpuExpr] = []
+        for multi in itertools.product(*(range(d) for d in dims)):
+            full_coords = list(index_coords) + [str(x) for x in multi]
+            components.append(GpuInputLoad(slot, full_coords, element_type=elem_type))
         return GpuArrayExpr(components=components, element_type=elem_type)
 
     raise GPUScaffoldError(

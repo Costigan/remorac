@@ -4653,12 +4653,20 @@ def build_descriptor_abi_general_map_gpu_module(
     body_lines: list[str] = []
 
     # Descriptor load lines — use per-input ranks when available
+    array_param_ranks = [
+        p.type.rank for p in function.params if isinstance(p.type, ArrayType)
+    ]
     prefixes = []
     for idx in range(num_array_inputs):
         prefix = f"in{idx}"
         prefixes.append(prefix)
         desc_name = f"%input{idx}_desc"
-        desc_rank = input_desc_ranks.get(idx, rank)
+        # Default a descriptor's rank to the *input's* true rank, not the output
+        # rank. Loading at the output rank silently used wrong strides whenever
+        # the input and output ranks differed (e.g. indexing a rank-3 input down
+        # to a scalar, or a rank-1 input feeding a rank-2 output).
+        default_rank = array_param_ranks[idx] if idx < len(array_param_ranks) else rank
+        desc_rank = input_desc_ranks.get(idx, default_rank)
         body_lines.extend(_descriptor_load_lines(prefix, desc_name, desc_rank))
 
     # Output descriptor
