@@ -682,21 +682,28 @@ Tests:
 
 **Target**: host-orchestrated device-resident chaining of separately
 compiled artifacts (`op → sort → op` from Python, no host round-trip).
-Quick, low risk — mirrors `execute_to_device`.
+**STATUS: DONE.**
 
 Tasks:
-- [ ] Add `RemoraExecutor.execute_plan_to_device(plan, device_inputs:
+- [x] Add `RemoraExecutor.execute_plan_to_device(plan, device_inputs:
       list[DeviceArray]) -> DeviceArray`: register device inputs
       (no upload), run steps, return `final_output` as a `DeviceArray`
-      (do not download; do not free the returned buffer)
-- [ ] Free all *other* plan buffers; transfer ownership of the output
-- [ ] Reuse `_run_plan_step`; same pool/runtime as the rest (no
-      foreign-runtime seam — sort/scan/filter all live here already)
+      (do not download; transfer ownership of the output buffer)
+- [x] Free all *other* plan buffers; reuse `_run_plan_step`; same
+      pool/runtime as the rest (no foreign-runtime seam)
+- [x] Add a representative `pipeline` benchmark — `cumsum(sort(xs))`
+      — with `remora-gpu` (device-resident chain), `remora-gpu-htod`
+      (host round-trip between ops), `jax`, `numpy` backends
 
 Tests:
-- [ ] Round-trip a `DeviceArray` through the radix-sort plan; result
-      matches the host `execute_plan` path
-- [ ] Chain sort → map device-resident; matches `f(np.sort(xs))`
+- [x] Round-trip through the radix-sort plan is **bit-identical** to
+      the host `execute_plan` path; `map(*2)(sort)` device-resident
+      is exact vs `2·np.sort`
+- [x] Pipeline parity measured (cumsum∘sort, 1M): **remora-gpu
+      device-resident 1.73ms / 579M, host-chained 2.31ms / 434M, jax
+      207us / 4.82G**.  Chaining saves ~1.3–1.5x over the host
+      round-trip, but we are **~8x behind JAX** — the gap is now
+      per-kernel quality + 26 launches + no fusion (see Phase 8).
 
 ### 7.3 Compiler plan composition (Axis 2)
 
@@ -730,6 +737,72 @@ round-trips for source-level pipelines but still launches separate
 kernels and materializes intermediates in global memory.  Merging
 element-wise chains into one kernel is Phase 5; Axis 2 alone is not
 parity.
+
+---
+
+## Phase 8: Profiling & IR Introspection
+
+Attribute pipeline gaps to specific causes — per-kernel time, launch
+overhead, and kernel resource limits — so we know whether to invest in
+kernel quality, launch reduction (Phase 7), or fusion (Phase 5).
+Concrete motivating gap: `cumsum(sort)` at 1M is **remora-gpu 1.73ms /
+579M vs jax 207us / 4.82G (~8x)** with 26 kernel launches.  Pure
+tooling; no behavior change.  Low risk.
+
+### 8.1 Per-kernel plan profiling
+
+Time each kernel in a plan, separating compute from launch overhead.
+
+Files: `remora/executor.py`, `remora/benchmark_suite.py`.
+
+Tasks:
+- [ ] Add optional per-step timing to plan execution — CUDA events
+      around each `_run_kernel_step` launch (or host timing with a
+      per-step sync gated behind a flag) → record `(kernel_name, us)`
+- [ ] Add `RemoraExecutor.profile_plan(plan, inputs) ->
+      list[(name, calls, total_us, median_us)]`
+- [ ] Measure the per-launch floor: time a trivial no-op kernel
+      launch; report `launches × floor` vs measured total (how much
+      of the pipeline is launch overhead vs compute)
+- [ ] Add `remora-perf --profile` that, for plan-based GPU ops
+      (sort, scan, filter, replicate, pipeline), prints a per-kernel
+      table (name, calls, us, % of total) + the launch-overhead split
+
+Tests:
+- [ ] Profiling a sort/pipeline plan reports a per-kernel breakdown
+      whose sum ≈ the measured pipeline time
+- [ ] Attribution for `cumsum(sort)` at 1M: report sort-us vs
+      scan-us vs launch-overhead-us (so we know which to attack)
+
+### 8.2 IR / PTX dump + resource report
+
+Dump generated MLIR/PTX and per-kernel resource usage to explain slow
+kernels.
+
+Files: `remora/benchmark_suite.py` (or a `tools/inspect_gpu.py`),
+`remora/pipeline.py`.
+
+Tasks:
+- [ ] Add `remora-perf --emit-mlir FILE` / `--emit-ptx FILE` for an
+      op+size: dump the device MLIR and the generated PTX
+- [ ] Run `ptxas --verbose` on the PTX; parse per-kernel
+      registers/thread, shared-mem/block, spill loads/stores, and
+      theoretical occupancy; print a table
+- [ ] Surface a per-op summary: #kernels, #launches/execute,
+      grid/block dims, shared mem, registers
+
+Tests:
+- [ ] `--emit-ptx` produces valid PTX that `ptxas` accepts
+- [ ] Resource table flags register spills / low occupancy (e.g. is
+      the multi-block scan register-bound? does the radix scatter
+      spill with its 8192-entry shared table? — these would explain
+      our scan being ~12x behind JAX's)
+
+### 8.3 (optional) Nsight ground-truth
+
+- [ ] Document running an op under `nsys`/`ncu` for ground-truth
+      kernel time and DRAM throughput; cross-check against 8.1 so the
+      host-side numbers are trustworthy
 
 ---
 

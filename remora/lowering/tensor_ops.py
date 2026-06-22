@@ -1022,6 +1022,28 @@ def _lower_map_cell_result(
             scalar_env=scalar_env, prefix=prefix,
         )
 
+    # Cell body = scalar prim-op combining a fold-over-the-cell with a literal
+    # (e.g. average pooling: ``(/ (fold + 0.0 row) 4.0)``).  Lower the inner
+    # fold to a per-cell scalar, then apply the op elementwise over the frame.
+    if (
+        isinstance(function.body, HIRPrimOp)
+        and len(function.body.args) == 2
+        and isinstance(node.result_type, ArrayType)
+    ):
+        a0, a1 = function.body.args
+        if (isinstance(a0, (HIRFold, HIRReduce)) and isinstance(a1, HIRLit)
+                and _reduces_param(a0.array, param_name)):
+            return _lower_map_cell_fold_scalar_op_result(
+                node, function, a0, a1, function.body.op, True,
+                param_name, functions, tensor_env, scalar_env=scalar_env, prefix=prefix,
+            )
+        if (isinstance(a1, (HIRFold, HIRReduce)) and isinstance(a0, HIRLit)
+                and _reduces_param(a1.array, param_name)):
+            return _lower_map_cell_fold_scalar_op_result(
+                node, function, a1, a0, function.body.op, False,
+                param_name, functions, tensor_env, scalar_env=scalar_env, prefix=prefix,
+            )
+
     return _lower_map_cell_index_result(
         node, function, param_name, functions, tensor_env,
         scalar_env=scalar_env, prefix=prefix,
@@ -1127,6 +1149,67 @@ def _lower_map_cell_fold_result(
     }} -> {result_type}
 """
     return body.rstrip(), mapped, result_type
+
+
+def _lower_map_cell_fold_scalar_op_result(
+    node: HIRMap | HIRApply,
+    cell_function: HIRFunction,
+    fold_arg: HIRFold | HIRReduce,
+    lit_arg: HIRLit,
+    op: str,
+    fold_on_left: bool,
+    param_name: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    *,
+    scalar_env: dict[str, _Operand] | None = None,
+    prefix: str = "",
+) -> tuple[str, str, str]:
+    """Lower a cell-map whose body is ``op(fold-over-cell, literal)``.
+
+    Lowers the inner fold-over-the-cell to a per-cell scalar tensor via the
+    existing cell-fold path, then applies the scalar ``op`` (with the literal)
+    elementwise over the frame.  Used by e.g. average pooling
+    ``(map (lambda (row) (/ (fold + 0.0 row) C)) grid)``.
+    """
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("cell-map fold-scalar-op result must be an array")
+    fold_fn = HIRFunction(
+        name="__cell_fold",
+        params=list(cell_function.params),
+        body=fold_arg,
+        return_type=node.result_type.element,
+    )
+    fold_code, fold_name, rt = _lower_map_cell_fold_result(
+        node, fold_fn, param_name, functions, tensor_env,
+        scalar_env=scalar_env, prefix=_join_prefix(prefix, "cf"),
+    )
+    elem = type_to_mlir(node.result_type.element)
+    arith = _arith_op(op[0], elem)
+    litval = _literal_value(lit_arg, elem)
+    frame_rank = len(node.frame_shape)
+    idmap = _identity_affine_map(frame_rank)
+    iters = _parallel_iterators(frame_rank)
+    p = prefix
+    lit_name = f"%{_join_prefix(p, 'polit')}"
+    empty = f"%{_join_prefix(p, 'poempty')}"
+    out = f"%{_join_prefix(p, 'po')}"
+    v = f"%{_join_prefix(p, 'pov')}"
+    r = f"%{_join_prefix(p, 'por')}"
+    o = f"%{_join_prefix(p, 'poo')}"
+    operands = f"{v}, {lit_name}" if fold_on_left else f"{lit_name}, {v}"
+    code = f"""{fold_code}
+    {lit_name} = arith.constant {litval} : {elem}
+    {empty} = tensor.empty() : {rt}
+    {out} = linalg.generic {{
+      indexing_maps = [{idmap}, {idmap}],
+      iterator_types = {iters}
+    }} ins({fold_name} : {rt}) outs({empty} : {rt}) {{
+    ^bb0({v}: {elem}, {o}: {elem}):
+      {r} = {arith} {operands} : {elem}
+      linalg.yield {r} : {elem}
+    }} -> {rt}"""
+    return code, out, rt
 
 
 def _lower_cell_fold_producer_result(
