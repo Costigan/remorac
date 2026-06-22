@@ -2209,10 +2209,17 @@ def _lower_map_body_with_loops(
     )
 
     updated = f"%{_join_prefix(prefix, 'lp_updated')}"
-    if node.result_type.rank > 1:
+    rank = node.result_type.rank
+    if rank > 1:
+        # Write the rank-(rank-1) cell produced for row {idx} into the output.
+        # Offsets/sizes/strides must match the full result rank, not just 2.
+        cell_dims = [str(d.value) for d in node.result_type.shape[1:]]
+        offsets = ", ".join([idx] + ["0"] * (rank - 1))
+        sizes = ", ".join(["1"] + cell_dims)
+        strides = ", ".join(["1"] * rank)
         insert = (
             f"      {updated} = tensor.insert_slice {body_val}"
-            f" into {acc}[{idx}, 0] [1, {outer}] [1, 1]"
+            f" into {acc}[{offsets}] [{sizes}] [{strides}]"
             f" : {body_mlir} into {result_mlir}"
         )
     else:
@@ -2223,11 +2230,14 @@ def _lower_map_body_with_loops(
 
     loop_body = loop_body_prefix + "\n" + "\n".join(lines) + "\n" + insert
 
+    # The fill value initialises the output accumulator; its literal must match
+    # the element type (a float literal is invalid for an integer/bool type).
+    zero_lit = "0.000000e+00" if elem_mlir.startswith("f") else "0"
     code = f"""{arr_code}
     {cN} = arith.constant {N_val} : index
     {c0} = arith.constant 0 : index
     {c1} = arith.constant 1 : index
-    {zero} = arith.constant 0.000000e+00 : {elem_mlir}
+    {zero} = arith.constant {zero_lit} : {elem_mlir}
     {empty} = tensor.empty() : {result_mlir}
     {filled} = linalg.fill ins({zero} : {elem_mlir}) outs({empty} : {result_mlir}) -> {result_mlir}
     {result} = scf.for {idx} = {c0} to {cN} step {c1} iter_args({acc} = {filled}) -> {result_mlir} {{

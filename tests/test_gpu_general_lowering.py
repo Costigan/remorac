@@ -1493,11 +1493,34 @@ class TestGPUNumericParity:
             [m], syntax="lisp",
         )
 
-    # NOTE: the i32 variant and emitting a rank->=2 cell *as the map output*
-    # currently hit separate bugs in the dense MLIR lowering (an i32 fold init
-    # emitted as a float constant; a rank-3 tensor.insert_slice given too few
-    # offsets), invoked by the GPU compile's verification pre-pass. Those live
-    # in remora/lowering/ (CPU path too) and are tracked as follow-ups.
+    def test_rank2_subarray_fold_to_vector_i32_parity(self):
+        # i32 variant: exercises the dense loop-map fill (was emitting a float
+        # constant for an i32 accumulator) plus the GPU grouped reduction.
+        src = (
+            "(define/pi () (f [m (Array Int 3 2 2)] (Array Int 3 2))"
+            " (map (lambda (i) (fold + [0 0] (index m i))) (iota 3)))"
+        )
+        m = np.arange(12, dtype=np.int32).reshape(3, 2, 2)
+        self._run_parity(
+            src, "f",
+            (ArrayType(INT, (StaticDim(3), StaticDim(2), StaticDim(2))),),
+            [m], syntax="lisp",
+        )
+
+    def test_rank2_cell_as_map_output_parity(self):
+        # Emitting a rank->=2 cell directly as the map output: the dense loop-map
+        # insert_slice must use offsets/sizes matching the full result rank
+        # (was hardcoded to 2, breaking the rank-3 result).
+        src = (
+            "(define/pi () (f [m (Array Float 3 2 2)] (Array Float 3 2 2))"
+            " (map (lambda (i) (index m i)) (iota 3)))"
+        )
+        m = np.arange(12, dtype=np.float32).reshape(3, 2, 2)
+        self._run_parity(
+            src, "f",
+            (ArrayType(FLOAT, (StaticDim(3), StaticDim(2), StaticDim(2))),),
+            [m], syntax="lisp",
+        )
 
 
 def test_scan_builder_rejects_non_scan_body():
