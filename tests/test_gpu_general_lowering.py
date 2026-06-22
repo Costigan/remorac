@@ -1428,3 +1428,49 @@ class TestGPUNumericParity:
                 (ArrayType(elem, tuple(StaticDim(d) for d in shape)),),
                 include_prelude=False, syntax="lisp",
             )
+
+    # ------------------------------------------------------------------
+    # Scan: previously only compile-checked. Now executed and compared to
+    # the interpreter oracle (single-block path). The multi-block path
+    # (N > 1024) emits a 4-kernel execution plan that _run_parity's
+    # execute_main does not drive; its builder is covered by compile tests.
+    # ------------------------------------------------------------------
+
+    def test_scan_parity_single_block(self):
+        src = "def f xs = iscan (+) 0.0 xs"
+        x = np.arange(1, 9, dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(8),)),), [x],
+            include_prelude=False,
+        )
+
+    def test_rank2_subarray_index_in_map_rejected_not_silent(self):
+        """Indexing that yields a rank->=2 sub-array inside a map body used to
+        emit invalid MLIR (undeclared stride SSA). It must now be refused at
+        compile time, not silently miscompiled."""
+        src = (
+            "(define/pi () (f [m (Array Float 4 2 2)] (Array Float 4))"
+            " (map (lambda (i) (fold + 0.0 (fold + [0.0 0.0] (index m i))))"
+            " (iota 4)))"
+        )
+        with pytest.raises((CodegenUnavailable, GPUScaffoldError)):
+            compile_function_source_to_mlir_gpu_ptx(
+                src, "f",
+                (ArrayType(FLOAT, (StaticDim(4), StaticDim(2), StaticDim(2))),),
+                include_prelude=False, syntax="lisp",
+            )
+
+
+def test_scan_builder_rejects_non_scan_body():
+    """The f32 scan builder must not turn an arbitrary single rank-1 f32-array
+    function into a prefix-sum. Without the HIRScan-body guard, any function
+    that fell through to it was silently miscompiled into a cumsum."""
+    from remora.gpu_lowering import build_descriptor_abi_f32_scan_gpu_module
+    from remora.hir import HIRFunction, HIRParam, HIRVar
+
+    t = ArrayType(FLOAT, (StaticDim(8),))
+    non_scan = HIRFunction(
+        "idf", [HIRParam("xs", t)], HIRVar("xs", t), return_type=t,
+    )
+    with pytest.raises(GPUScaffoldError):
+        build_descriptor_abi_f32_scan_gpu_module(non_scan, kernel_name="idf")

@@ -559,6 +559,16 @@ def build_descriptor_abi_f32_scan_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU scan supports rank-1 input only")
 
+    # Refuse to emit a prefix-sum kernel for a function that is not actually a
+    # scan. Without this, any single rank-1 f32-array function that fell through
+    # the earlier builders was silently miscompiled into a cumsum (e.g. a map
+    # whose body was a scatter-add).
+    from remora.hir import HIRScan as _HIRScan
+    if not isinstance(function.body, _HIRScan):
+        raise GPUScaffoldError(
+            "GPU scan builder requires a scan (iscan/escan) body"
+        )
+
     shape = _validate_shape(tuple(int(d.value) for d in param_type.shape))
     N = shape[0]
     name = kernel_name or f"remora_{function.name}_f32_scan"
@@ -776,6 +786,14 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
         raise GPUScaffoldError("GPU multi-block scan supports f32 only")
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU multi-block scan supports rank-1 only")
+
+    # Same guard as the single-block scan: do not emit a prefix-sum kernel for a
+    # function that is not actually a scan (would silently miscompile).
+    from remora.hir import HIRScan as _HIRScan
+    if not isinstance(function.body, _HIRScan):
+        raise GPUScaffoldError(
+            "GPU multi-block scan builder requires a scan (iscan/escan) body"
+        )
 
     N = int(param_type.shape[0].value)
     BS = block_size

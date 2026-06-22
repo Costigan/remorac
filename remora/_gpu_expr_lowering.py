@@ -468,7 +468,7 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
                 components[index_val] = GpuBinaryOp(
                     "+", components[index_val], update_expr, "f32",
                 )
-            return GpuArrayExpr(components, target_expr.shape)
+            return GpuArrayExpr(components, element_type=target_expr.element_type)
         if index_val is not None and ctx.coords:
             coord = GpuIndexCoordinate(ctx.coords[0])
             index_const = GpuConstant(index_val, "i64")
@@ -920,6 +920,12 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
 
     # Array result: fewer indices than source rank → unroll trailing dims
     if isinstance(result_type, ArrayType):
+        if result_type.rank >= 2:
+            raise GPUScaffoldError(
+                f"{ctx.context}: indexing that yields a rank-{result_type.rank} "
+                f"sub-array is not supported in a GPU map body; only scalar or "
+                f"rank-1 sub-array index results are lowered correctly"
+            )
         K = int(result_type.shape[0].value) if result_type.shape else 0
         if K <= 0:
             raise GPUScaffoldError(
