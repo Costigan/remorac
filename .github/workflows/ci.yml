@@ -18,7 +18,9 @@ jobs:
   # RemoraC is a Python project (uv + hatchling). This is the entire CI.
   python-tests:
     name: Python tests
-    runs-on: ubuntu-latest
+    # Pinned for reproducibility; the LLVM repo codename below adapts via
+    # lsb_release, so a future bump still resolves the right apt.llvm.org repo.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +30,26 @@ jobs:
 
       - name: Install Python 3.11
         run: uv python install 3.11
+
+      # The Python deps (iree-compiler) provide IREE's tools but NOT the
+      # standalone mlir-opt / mlir-translate / llc that the CPU pipeline and
+      # tools/validate_mlir_toolchain.py require, nor the OpenMP runtime the
+      # compiled CPU path needs. Install the LLVM/MLIR 18 toolchain from
+      # apt.llvm.org. detect_toolchain() finds them via PATH (it tries both the
+      # bare and -18-suffixed names); libomp-18-dev lands at the exact path
+      # remora/runtime.py probes (/usr/lib/llvm-18/lib/libomp.so).
+      - name: Install LLVM/MLIR 18 toolchain
+        run: |
+          set -euxo pipefail
+          codename=$(lsb_release -cs)
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          sudo add-apt-repository -y \
+            "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-18 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-tools mlir-18-tools libomp-18-dev
+          # Expose the unsuffixed tools (mlir-opt, mlir-translate, llc) on PATH.
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: uv sync
