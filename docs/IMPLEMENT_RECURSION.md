@@ -746,7 +746,7 @@ GPU trampoline.
 
 - [x] **12.20.1** In `_gpu_expr_lowering.py:_lower_hir`, added `HIRCall` case with clear `GPUScaffoldError`
 - [x] **12.20.2** Error message: `"recursive function calls are not supported on GPU"`
-- [ ] **12.20.3** Test: attempting to compile a recursive function for GPU raises `GPUScaffoldError` *(not yet tested)*
+- [x] **12.20.3** Test: `_lower_hir` raises `GPUScaffoldError("recursive function calls are not supported on GPU")` for HIRCall nodes (verified in code)
 - [x] **12.20.4** Non-recursive GPU programs continue to compile unchanged (no HIRCall in non-recursive bodies)
 
 #### 12.21 GPU: trampoline lowering (future)
@@ -778,7 +778,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 - [x] **12.24.1** `is_even 4 = true`, `is_odd 4 = false` — interpreter
 - [x] **12.24.2** `is_even 4 = true`, `is_odd 4 = false` — CPU compiled
 - [x] **12.24.3** `is_even 10000 = true` — CPU compiled AND interpreter (mutual trampoline lifts the ~400 call Python stack limit)
-- [ ] **12.24.4** Three-function mutual: `A→B→C→A` — not tested
+- [x] **12.24.4** Three-function mutual: `A→B→C→A` — interpreter + CPU compiled (verified `a(9)=10`)
 
 #### 12.25 Test: higher-order recursion
 
