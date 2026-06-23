@@ -1129,13 +1129,55 @@ def _output_descriptor_store_lines(
 # ---------------------------------------------------------------------------
 
 
+def _has_self_hir_call(expr: HIRExpr, func_name: str) -> bool:
+    """Check if an HIR expression contains a self-recursive HIRCall."""
+    if isinstance(expr, HIRCall) and expr.func_name == func_name:
+        return True
+    for attr in ("body", "then_branch", "else_branch", "value", "condition",
+                 "left", "right", "array", "init", "func"):
+        child = getattr(expr, attr, None)
+        if child is not None and hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+            if _has_self_hir_call(child, func_name):
+                return True
+    for attr in ("args", "arrays", "elements"):
+        children = getattr(expr, attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+                    if _has_self_hir_call(child, func_name):
+                        return True
+    return False
+
+
 def _lower_function_descriptor_module(
     function: HIRFunction, export_name: str
 ) -> str:
-    internal_name = "__remora_entry"
-    internal = _lower_descriptor_internal_function(
-        function, internal_name
-    )
+    is_recursive = _has_self_hir_call(function.body, function.name)
+    if is_recursive:
+        funcs = {function.name: function}
+        internal_name = "__remora_entry"
+        target_def = _lower_function(function, funcs)
+        result_type = type_to_mlir(function.return_type)
+        param_decls = ", ".join(
+            f"%arg{index}: {type_to_mlir(param.type)}"
+            for index, param in enumerate(function.params)
+        )
+        call_args = ", ".join(
+            f"%arg{index}" for index in range(len(function.params))
+        )
+        param_types = ", ".join(
+            type_to_mlir(param.type) for param in function.params
+        )
+        internal = f"""  func.func private @{internal_name}({param_decls}) -> {result_type} {{
+    %result = func.call @{function.name}({call_args}) : ({param_types}) -> {result_type}
+    return %result : {result_type}
+  }}
+{target_def}"""
+    else:
+        internal_name = "__remora_entry"
+        internal = _lower_descriptor_internal_function(
+            function, internal_name
+        )
     wrapper = _lower_descriptor_export_wrapper(
         function, internal_name, export_name
     )
