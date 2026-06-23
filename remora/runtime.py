@@ -366,17 +366,31 @@ class CUDARuntime:
         self._ctx: Any | None = None
         self._deferred_frees: list[int] = []
         self._memory_pool: "DeviceMemoryPool | None" = None
-        _cuda_check(self._cuda, self._cuda.cuInit(0), "cuInit failed")
-        self._device = _cuda_value(
-            self._cuda,
-            self._cuda.cuDeviceGet(device_idx),
-            "cuDeviceGet failed",
-        )
-        self._ctx = _cuda_value(
-            self._cuda,
-            self._cuda.cuCtxCreate(None, 0, self._device),
-            "cuCtxCreate failed",
-        )
+        try:
+            _cuda_check(self._cuda, self._cuda.cuInit(0), "cuInit failed")
+            self._device = _cuda_value(
+                self._cuda,
+                self._cuda.cuDeviceGet(device_idx),
+                "cuDeviceGet failed",
+            )
+            self._ctx = _cuda_value(
+                self._cuda,
+                self._cuda.cuCtxCreate(None, 0, self._device),
+                "cuCtxCreate failed",
+            )
+        except RuntimeUnavailable:
+            # CUDAError (a RuntimeUnavailable) from a real driver error code, or
+            # an explicit unavailability — propagate as-is so callers can skip.
+            raise
+        except Exception as exc:
+            # The CUDA bindings import fine even with no driver installed; the
+            # actual libcuda.so.1 dlopen happens lazily on the first driver call
+            # (cuInit) and raises a plain RuntimeError. Surface that as
+            # RuntimeUnavailable so GPU tests/callers degrade to a skip rather
+            # than a hard error (e.g. CI runners with no GPU driver).
+            raise RuntimeUnavailable(
+                f"CUDA driver is not available: {exc}"
+            ) from exc
 
     @property
     def memory_pool(self) -> "DeviceMemoryPool":

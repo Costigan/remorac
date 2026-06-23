@@ -76,3 +76,22 @@ def test_cuda_runtime_initialization_skips_without_live_driver():
         gpu_required_or_skip(str(exc))
     else:
         runtime.close()
+
+
+def test_driver_dlopen_failure_surfaces_as_runtime_unavailable(monkeypatch):
+    """When the CUDA bindings import but the real libcuda.so cannot be loaded,
+    the dlopen failure happens lazily at cuInit and arrives as a plain
+    RuntimeError.  CUDARuntime() must re-raise it as RuntimeUnavailable so GPU
+    tests/callers degrade to a skip instead of a hard error (e.g. CI runners
+    with no GPU driver).
+    """
+    import remora.runtime as rt_mod
+
+    class _NoDriver:
+        def cuInit(self, _flags):
+            raise RuntimeError("Failed to dlopen libcuda.so.1")
+
+    monkeypatch.setattr(rt_mod, "_load_cuda_driver", lambda: _NoDriver())
+    with pytest.raises(RuntimeUnavailable):
+        rt_mod.CUDARuntime()
+
