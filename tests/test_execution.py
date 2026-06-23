@@ -863,3 +863,97 @@ def test_cpu_function_executor_rejects_input_and_output_mismatches():
             )
     finally:
         artifact.close()
+
+
+# ---------------------------------------------------------------------------
+# Recursion tests (per docs/IMPLEMENT_RECURSION.md checklist)
+# ---------------------------------------------------------------------------
+
+
+def test_array_valued_recursion_compiled():
+    """12.26.2: array-valued self-recursion compiles and runs on CPU."""
+    result = evaluate_source_compiled(
+        "def double arr n = if n <= 0 then arr else double (map (* 2) arr) (n - 1)\n"
+        "double (iota 3) 2",
+        strict=True,
+    )
+    np.testing.assert_array_equal(result.value, [0, 4, 8])
+
+
+def test_array_valued_recursion_with_multiple_params():
+    """12.26.3: array-valued recursion with scalar + array params."""
+    result = evaluate_source_compiled(
+        "def scale_mult arr s n = if n <= 0 then arr else scale_mult (map (* s) arr) s (n - 1)\n"
+        "scale_mult (iota 3) 3 2",
+        strict=True,
+    )
+    np.testing.assert_array_equal(result.value, [0, 9, 18])
+
+
+def test_array_valued_recursion_deeper():
+    """12.26: array-valued recursion with depth > 2."""
+    result = evaluate_source_compiled(
+        "def triple arr n = if n <= 0 then arr else triple (map (* 3) arr) (n - 1)\n"
+        "triple (iota 3) 3",
+        strict=True,
+    )
+    np.testing.assert_array_equal(result.value, [0, 27, 54])
+
+
+def test_ackermann_compiled():
+    """12.23.4: Ackermann function ack(3,3) compiles and runs."""
+    result = evaluate_source_compiled(
+        "def ack m n ="
+        "  if m == 0 then n + 1"
+        "  else if n == 0 then ack (m - 1) 1"
+        "  else ack (m - 1) (ack m (n - 1))\n"
+        "ack 3 3",
+        strict=True,
+    )
+    assert result.value == 61, f"expected 61, got {result.value}"
+
+
+def test_scalar_recursion_regression_fac():
+    """12.23: scalar self-recursion regression — factorial."""
+    result = evaluate_source_compiled(
+        "def fac n = if n <= 1 then 1 else n * fac (n - 1)\nfac 7",
+        strict=True,
+    )
+    assert result.value == 5040
+
+
+def test_scalar_recursion_regression_fib():
+    """12.23: scalar self-recursion regression — fibonacci."""
+    result = evaluate_source_compiled(
+        "def fib n = if n <= 1 then n else fib (n - 1) + fib (n - 2)\nfib 10",
+        strict=True,
+    )
+    assert result.value == 55
+
+
+def test_tail_recursion_regression_sum_to():
+    """12.22: scalar tail-recursion regression."""
+    result = evaluate_source_compiled(
+        "def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)\n"
+        "sum_to 100 0",
+        strict=True,
+    )
+    assert result.value == 5050
+
+
+def test_mutual_recursion_regression_even_odd():
+    """12.24: scalar mutual recursion regression."""
+    result = evaluate_source_compiled(
+        "def is_even n = if n == 0 then true else is_odd (n - 1)\n"
+        "def is_odd  n = if n == 0 then false else is_even (n - 1)\n"
+        "is_even 4",
+        strict=True,
+    )
+    assert result.value is True
+    result = evaluate_source_compiled(
+        "def is_even n = if n == 0 then true else is_odd (n - 1)\n"
+        "def is_odd  n = if n == 0 then false else is_even (n - 1)\n"
+        "is_odd 4",
+        strict=True,
+    )
+    assert result.value is False

@@ -16,8 +16,13 @@ The original plan (§3-§10) describes a trampoline state machine via
 - **CPU compilation:** `lower_to_hir` / `erase_to_hir` emit `HIRFunction`
   per `FuncDef`; `_has_recursive_call` drives `HIRCall` vs inline; `HIRCall`
   lowers to `func.call @name` (MLIR natively supports recursion); `scf.if`
-  replaces `arith.select` for correct control flow; functions dict
-  propagated through lowering and descriptor ABI export.
+  replaces `arith.select` for correct control flow; branch computations
+  placed *inside* `scf.if` regions for control-dependence; functions dict
+  propagated through lowering and descriptor ABI export.  Array-valued
+  recursive functions use a manual bufferization wrapper
+  (`_lower_recursive_tensor_function` + `_lower_mref_call`) that emits a
+  memref-interface internal function `@__{name}_mref` to break the
+  callgraph cycle for `bufferize-function-boundaries`.
 - **GPU:** `GPUScaffoldError` for `HIRCall` (clean rejection).
 
 The state-machine approach (§3-§10) is preserved below as reference for
@@ -628,15 +633,15 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.2.3** After body inference, `_substitute_type_var` resolves TypeVar in body to concrete type; `_require` skips TypeVar comparisons
 - [x] **12.2.4** Test: `def fac n = if n <= 1 then 1 else n * fac (n - 1)` infers `Int → Int`
 - [x] **12.2.5** Test: `def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)` infers `Int → Int → Int`
-- [ ] **12.2.6** Test: polymorphic recursive `def` with `define/forall` infers correctly *(not yet verified)*
+- [x] **12.2.6** Test: polymorphic recursive `def` with `define/forall` infers correctly — `(define/forall (t) (countdown [x t n Int] t) ...)` typechecks to `Int` (`tests/test_phase7_dependent_functions.py::test_recursive_define_forall_typechecks`)
 
 #### 12.3 Typechecker: mutual recursion
 
 - [x] **12.3.1** Mutual recursion works automatically via fixpoint chain (f → g → f re-enters `_typed_top_level_function` and hits `_active_functions` check)
 - [x] **12.3.2** No explicit SCC detection needed; each function's body inference extends the chain naturally
 - [x] **12.3.4** Test: `def is_even n = ... is_odd (n-1)` / `def is_odd n = ... is_even (n-1)` infers both types
-- [ ] **12.3.5** Test: mutual recursion with `define/pi` explicit annotations *(not yet verified)*
-- [ ] **12.3.6** Test: three-function mutual recursion (A→B→C→A) *(not yet verified)*
+- [~] **12.3.5** Test: mutual recursion with `define/pi` explicit annotations — blocked: `define/pi` index-binder inference cannot resolve dimension variables across mutually recursive call sites when no array params carry the dimension
+- [x] **12.3.6** Test: three-function mutual recursion (A→B→C→A) — interpreter + CPU compiled, `a(9)=0` (`tests/test_phase7_dependent_functions.py::test_three_function_mutual_recursion_interpreted_and_compiled`)
 
 #### 12.4 Typechecker: higher-order recursion
 
@@ -658,7 +663,7 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.6.2** `_eval_expr_tail` detects self-calls in tail position (TypedIf branches, TypedLet body)
 - [x] **12.6.3** `_trampoline_closure` wraps body evaluation in `while True: try/except _TailCall`
 - [x] **12.6.4** Test: `sum_to 10000 0` returns `50005000` (no Python recursion limit); verified at 50k calls
-- [ ] **12.6.5** `forever x = forever x` — diverging recursion, not tested
+- [~] **12.6.5** `forever x = forever x` — diverging recursion; intentionally excluded from testing (infinite loop by design)
 
 #### 12.7 Interpreter: mutual recursion trampoline
 
@@ -763,7 +768,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 - [x] **12.22.1** `sum_to 10000 0 = 50005000` — interpreter (trampoline, O(1) stack)
 - [x] **12.22.2** `sum_to 500 0 = 125250` — CPU compiled (MLIR `func.call`)
-- [ ] **12.22.3** `map (sum_to 5) [0.0, 10.0, 20.0]` — not tested (map over recursive function)
+- [~] **12.22.3** `map (sum_to 5) [0.0, 10.0, 20.0]` — blocked: ML-syntax `map` does not accept named functions (only inline lambdas/operators); interpreter works with lambda form
 - [x] **12.22.4** Tail-call optimization: interpreter trampoline uses O(1) Python stack; compiled uses native `func.call`
 
 #### 12.23 Test: self-recursion, non-tail
@@ -771,7 +776,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 - [x] **12.23.1** `fib 10 = 55` — interpreter
 - [x] **12.23.2** `fib 10 = 55` — CPU compiled
 - [x] **12.23.3** `fib 16 = 987` — CPU compiled; deeper `fib 20` hits Python recursion limit in interpreter (non-tail uses Python stack)
-- [ ] **12.23.4** `ack 3 3` — not tested
+- [x] **12.23.4** `ack 3 3 = 61` — interpreter + CPU compiled (`tests/test_execution.py::test_ackermann_compiled`)
 
 #### 12.24 Test: mutual recursion
 
@@ -787,12 +792,12 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 #### 12.26 Test: array-valued recursion
 
 - [x] **12.26.1** `double (iota 3) 2 = [0, 4, 8]` — interpreter works
-- [~] **12.26.2** CPU compiled — MLIR generation succeeds (`verify=False` passes). Blocked: CPU pipeline's `bufferize-function-boundaries` rejects the callgraph cycle (`@double → @double`). Fix requires pipeline change (split bufferization or pre-inline non-recursive calls), not a lowering change.
-- [~] **12.26.3** `map`/`fold` in recursive body — HIRCall in tensor path correctly lowers via `_lower_tensor_input` with scalar arg support. Same pipeline block as 12.26.2.
+- [x] **12.26.2** CPU compiled — manual bufferization wrapper (`_lower_recursive_tensor_function` + `_lower_mref_call`) eliminates the `bufferize-function-boundaries` callgraph cycle by emitting a memref-interface `@__double_mref` function and a tensor-wrapper `@double`; `scf.if` branch computations placed inside regions for correct control-dependence (`tests/test_execution.py::test_array_valued_recursion_compiled`)
+- [x] **12.26.3** `map`/`fold` in recursive body — HIRCall in tensor path lowers correctly with both scalar and array args; verified with `scale_mult (iota 3) 3 2 = [0, 9, 18]` and `triple (iota 3) 3 = [0, 27, 54]`
 
 #### 12.27 Test: Thomas algorithm (heat1d)
 
-- [ ] **12.27.1–12.27.4** Blocked by array-valued recursion (12.26)
+- [ ] **12.27.1–12.27.4** Not yet tested.  Array-valued recursion (12.26) is no longer a blocker; Thomas algorithm implementation is separate work.
 
 #### 12.28 Test: non-tail recursion rejection (none — accepted now)
 

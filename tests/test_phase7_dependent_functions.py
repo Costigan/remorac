@@ -751,3 +751,50 @@ def test_combined_forall_pi_different_element_type():
     r = evaluate_source(src, syntax="lisp", include_prelude=False)
     import numpy as np
     np.testing.assert_array_equal(r.value, [1.0, 2.0])
+
+
+# ---------------------------------------------------------------------------
+# Recursion tests (per docs/IMPLEMENT_RECURSION.md checklist)
+# ---------------------------------------------------------------------------
+
+
+def test_recursive_define_forall_typechecks():
+    """12.2.6: polymorphic recursive def with define/forall infers correctly."""
+    src = (
+        "(define/forall (t) "
+        "  (countdown [x t n Int] t) "
+        "  (if (<= n 0) x (countdown x (- n 1)))) "
+        "(countdown 42 3)"
+    )
+    typed = check_lisp(src)
+    from remora.types import INT
+    assert typed.type == INT
+
+
+def test_three_function_mutual_recursion_interpreted_and_compiled():
+    """12.3.6 / 12.24.4: three-function mutual recursion A→B→C→A."""
+    src = (
+        "(define (a [x]) (if (<= x 0) 0 (b (- x 1)))) "
+        "(define (b [x]) (if (<= x 0) 1 (c (- x 1)))) "
+        "(define (c [x]) (if (<= x 0) 2 (a (- x 1)))) "
+        "(a 9)"
+    )
+    interpreted = evaluate_source(src, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert interpreted.value == 0
+    assert compiled.value == 0
+
+
+def test_mutual_recursion_deep_interpreted_and_compiled():
+    """12.24.3: deep mutual recursion (10k alternating calls) via trampoline."""
+    src = (
+        "(define (is_even [x]) "
+        "  (if (== x 0) #t (is_odd (- x 1)))) "
+        "(define (is_odd [x]) "
+        "  (if (== x 0) #f (is_even (- x 1)))) "
+        "(is_even 10000)"
+    )
+    interpreted = evaluate_source(src, include_prelude=False, syntax="lisp")
+    compiled = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert interpreted.value is True
+    assert compiled.value is True
