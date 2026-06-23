@@ -573,6 +573,17 @@ def _lower_main_module(
         _expr_result_type(node.condition), ArrayType
     ):
         return _lower_tensor_if_module(node)
+    if isinstance(node, HIRCall) and isinstance(node.result_type, ArrayType):
+        from remora.lowering.tensor_ops import _lower_tensor_input
+        from remora.lowering.module import _MLIRMainModuleBuilder
+        func = functions.get(node.func_name)
+        if func is not None:
+            code, result_name, lowered_result_type, _element_type = _lower_tensor_input(
+                node, "result", functions, {}
+            )
+            builder = _MLIRMainModuleBuilder(lowered_result_type)
+            builder.add_block(code)
+            return builder.render(result_name)
     if isinstance(
         node,
         (HIRLit, HIRCast, HIRPrimOp, HIRLet, HIRCall, HIRIf),

@@ -632,6 +632,31 @@ def _lower_tensor_input(
     if isinstance(node, HIRSort) and isinstance(node.result_type, ArrayType):
         return _lower_sort_tensor_input(node, prefix, functions, tensor_env, scalar_env)
 
+    if isinstance(node, HIRCall):
+        func = functions.get(node.func_name)
+        if func is not None:
+            arg_lines: list[str] = []
+            arg_names: list[str] = []
+            arg_types: list[str] = []
+            for i, arg in enumerate(node.args):
+                arg_code, arg_name, arg_type, arg_elem = _lower_tensor_input(
+                    arg, _join_prefix(prefix, f"a{i}"), functions, tensor_env, scalar_env
+                )
+                arg_lines.append(arg_code)
+                arg_names.append(arg_name)
+                arg_types.append(arg_type)
+            result_type = type_to_mlir(node.result_type)
+            result_elem = type_to_mlir(node.result_type.element) if isinstance(node.result_type, ArrayType) else result_type
+            call_name = f"%{prefix}"
+            arg_list = ", ".join(arg_names)
+            type_list = ", ".join(arg_types)
+            call_line = (
+                f"    {call_name} = func.call @{node.func_name}({arg_list})"
+                f" : ({type_list}) -> {result_type}"
+            )
+            code = "\n".join([*arg_lines, call_line])
+            return code, call_name, result_type, result_elem
+
     raise RemoraLoweringError(
         "only tensor literals and iota values lower as tensor inputs so far"
     )
