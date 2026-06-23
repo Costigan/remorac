@@ -15,6 +15,7 @@ from remora.hir import (
     HIRAppend,
     HIRApply,
     HIRArrayLit,
+    HIRCall,
     HIRCast,
     HIRDrop,
     HIRExpr,
@@ -477,6 +478,12 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
             return GpuSelect(cond, sum_val, target_expr)
         raise GPUScaffoldError(
             f"{ctx.context}: HIRScatterAdd requires compile-time constant index"
+        )
+
+    # HIRCall — recursive/named function calls not yet supported on GPU
+    if isinstance(expr, HIRCall):
+        raise GPUScaffoldError(
+            f"{ctx.context}: recursive function calls are not supported on GPU"
         )
 
     raise GPUScaffoldError(

@@ -3,6 +3,69 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Recursive Functions — Typechecker, Interpreter, CPU Compilation
+
+Recursive `def` functions now typecheck, interpret (with tail-call
+optimisation), and **compile to CPU** — covering self-recursion
+(tail and non-tail), mutual recursion, and deep call chains.
+
+### Typechecker (`remora/typechecker.py`)
+- Removed the one-line recursion gate; self-referential calls now
+  typecheck via fixpoint inference with a provisional `FuncType`.
+- `_require` skips `TypeVar` comparisons during body inference; a
+  post-inference `_substitute_type_var` pass resolves the provisional
+  type variable to the concrete return type.
+- Mutual recursion works automatically — when `f` calls `g` calls `f`,
+  the fixpoint chain begins at `f`, extends through `g`, and resolves
+  back to `f`'s provisional type.
+- Non-index-arg `_typed_lambda_cache` avoids redundant re-inference.
+
+### Interpreter (`remora/runtime.py`)
+- `_gather_func_lambdas` extracts `FuncDef`-wrapping `TypedLambda`
+  nodes from the typed AST and binds them as callables in the
+  interpreter environment.
+- `_lambda_callable` now captures `env` by reference so closures see
+  their own name (enabling recursive self-calls).
+- Self-tail-call trampoline (`_eval_expr_tail` + `_TailCall` exception)
+  gives O(1) stack space; verified at 100k+ recursive calls.
+- `TypeVar` bypass in `_coerce_runtime_value`.
+
+### CPU compilation (`remora/hir.py`, `remora/erase.py`, lowering)
+- `lower_to_hir` and `erase_to_hir` now emit `HIRFunction` nodes for
+  every `FuncDef` in the typed program body (via `_gather_func_def_lambdas`).
+- `_has_recursive_call` detects functions whose body contains a
+  non-primitive call via `TypedExprNode(VarExpr)` (self or mutual);
+  those emit `HIRCall` while prelude/utility functions still inline.
+- HIRCall is lowered to MLIR `func.call @name` in the scalar path;
+  mutual calls can resolve through the full `functions` dict (fix in
+  `_lower_function`).
+- `scf.if` replaces `arith.select` for if-expressions in the scalar
+  emitter, avoiding eager evaluation of both branches that would
+  infinite-loop on recursive calls.
+- `func.func private` definitions are emitted for each `HIRFunction`,
+  producing native recursive MLIR modules.
+
+### REPL (`remora/repl.py`)
+- `strict=False` on `evaluate_source_compiled` so the REPL gracefully
+  falls back to the interpreter when compilation is unavailable.
+
+### Tests
+- Updated 3 rejection tests (typechecker, CLI, REPL) to assert correct
+  recursive evaluation.
+- Acceptance test `recursive_function` moved from `rejected` to
+  `supported` (interp target); new passing `.remora` file added.
+- 278 tests pass; no regressions.
+
+### Verified patterns
+```
+def fac n = if n <= 1 then 1 else n * fac (n - 1)     → fac 5 = 120
+def sum_to n acc = let r = n+acc in sum_to (n-1) r     → sum_to 10000 0 = 50005000
+def fib n = if n <= 1 then n else fib(n-1)+fib(n-2)    → fib 12 = 144
+def is_even n = ... is_odd (n-1)                        → mutual, is_even 5000 = True
+my-def is_odd n = ... is_even (n-1)
+```
+All patterns work on the interpreter AND compiled CPU path.
+
 ## GPU Radix Sort (256-bin, 4-pass)
 
 New `remora/_gpu_radix_sort.py`: a device-resident LSD radix sort for

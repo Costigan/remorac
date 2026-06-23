@@ -395,7 +395,7 @@
     "name": "recursive_function",
     "category": "supported",
     "path": "pass/recursive_function.remora",
-    "target": "interp",
+    "target": "cpu",
     "expect_exit": 0
   },
   {
