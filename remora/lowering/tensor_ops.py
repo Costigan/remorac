@@ -635,16 +635,32 @@ def _lower_tensor_input(
     if isinstance(node, HIRCall):
         func = functions.get(node.func_name)
         if func is not None:
+            from remora.lowering.scalar import _RegionEmitter, _Operand as _ScOperand
+            from remora.types import ScalarType as _ScalarType
             arg_lines: list[str] = []
             arg_names: list[str] = []
             arg_types: list[str] = []
             for i, arg in enumerate(node.args):
-                arg_code, arg_name, arg_type, arg_elem = _lower_tensor_input(
-                    arg, _join_prefix(prefix, f"a{i}"), functions, tensor_env, scalar_env
-                )
-                arg_lines.append(arg_code)
-                arg_names.append(arg_name)
-                arg_types.append(arg_type)
+                arg_remora = _expr_result_type(arg)
+                if isinstance(arg_remora, _ScalarType):
+                    arg_prefix = _join_prefix(prefix, f"a{i}")
+                    sc_em = _RegionEmitter(
+                        input_name=arg_prefix, input_type="",
+                        functions=functions,
+                        prefix=arg_prefix,
+                    )
+                    sc_op = sc_em.emit_expr(arg, scalar_env or {})
+                    arg_lines.extend(sc_em.lines)
+                    arg_names.append(sc_op.value)
+                    arg_types.append(sc_op.type)
+                else:
+                    arg_code, arg_name, arg_type, arg_elem = _lower_tensor_input(
+                        arg, _join_prefix(prefix, f"a{i}"), functions, tensor_env, scalar_env
+                    )
+                    if arg_code:
+                        arg_lines.append(arg_code)
+                    arg_names.append(arg_name)
+                    arg_types.append(arg_type)
             result_type = type_to_mlir(node.result_type)
             result_elem = type_to_mlir(node.result_type.element) if isinstance(node.result_type, ArrayType) else result_type
             call_name = f"%{prefix}"
@@ -654,7 +670,7 @@ def _lower_tensor_input(
                 f"    {call_name} = func.call @{node.func_name}({arg_list})"
                 f" : ({type_list}) -> {result_type}"
             )
-            code = "\n".join([*arg_lines, call_line])
+            code = "\n".join(arg_lines + [call_line]) if arg_lines else call_line
             return code, call_name, result_type, result_elem
 
     raise RemoraLoweringError(
@@ -663,7 +679,14 @@ def _lower_tensor_input(
 
 
 def _lower_if_tensor_input(node, functions, prefix, tensor_env, scalar_env=None):
-    """Lower an array-typed HIRIf as a tensor input via linalg.generic select."""
+    """Lower an array-typed HIRIf as a tensor input."""
+    from remora.types import ScalarType as _ScalarType
+
+    if isinstance(node.condition.result_type, _ScalarType):
+        return _lower_if_tensor_input_scalar_cond(
+            node, functions, prefix, tensor_env, scalar_env
+        )
+
     cond_code, cond_name, cond_type, cond_elem = _lower_tensor_input(
         node.condition, f"{prefix}_cond", functions, tensor_env, scalar_env
     )
@@ -696,6 +719,42 @@ def _lower_if_tensor_input(node, functions, prefix, tensor_env, scalar_env=None)
       %sel = arith.select %c, %t, %e : {result_elem}
       linalg.yield %sel : {result_elem}
     }} -> {result_type}"""
+    return code, result_name, result_type, result_elem
+
+
+def _lower_if_tensor_input_scalar_cond(
+    node, functions, prefix, tensor_env, scalar_env=None
+):
+    """Lower an array-typed HIRIf with a scalar condition via scf.if."""
+    from remora.lowering.scalar import _RegionEmitter as _ScRegionEmitter
+
+    cond_prefix = _join_prefix(prefix, "cond")
+    sc_emitter = _ScRegionEmitter(
+        input_name=cond_prefix, input_type="", functions=functions,
+        prefix=cond_prefix,
+    )
+    cond_op = sc_emitter.emit_expr(node.condition, scalar_env or {})
+    cond_lines = "\n".join(sc_emitter.lines)
+    cond_val = cond_op.value
+
+    then_code, then_name, then_type, then_elem = _lower_tensor_input(
+        node.then_branch, f"{prefix}_then", functions, tensor_env, scalar_env
+    )
+    else_code, else_name, else_type, else_elem = _lower_tensor_input(
+        node.else_branch, f"{prefix}_else", functions, tensor_env, scalar_env
+    )
+    result_type = type_to_mlir(node.result_type)
+    result_elem = type_to_mlir(node.result_type.element)
+    result_name = f"%{prefix}"
+
+    code = f"""{cond_lines}
+{then_code}
+{else_code}
+    {result_name} = scf.if {cond_val} -> ({result_type}) {{
+      scf.yield {then_name} : {result_type}
+    }} else {{
+      scf.yield {else_name} : {result_type}
+    }}"""
     return code, result_name, result_type, result_elem
 
 

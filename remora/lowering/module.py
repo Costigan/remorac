@@ -581,7 +581,7 @@ def _lower_main_module(
             code, result_name, lowered_result_type, _element_type = _lower_tensor_input(
                 node, "result", functions, {}
             )
-            builder = _MLIRMainModuleBuilder(lowered_result_type)
+            builder = _MLIRMainModuleBuilder(lowered_result_type, functions=functions)
             builder.add_block(code)
             return builder.render(result_name)
     if isinstance(
@@ -944,6 +944,7 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
                 "result",
                 {function.name: function},
                 tensor_env,
+                scalar_env,
             )
         )
         if lowered_result_type != result_type:

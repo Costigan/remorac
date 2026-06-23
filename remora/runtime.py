@@ -156,8 +156,9 @@ class EvaluationError(RemoraError):
 class _TailCall(Exception):
     """Raised internally to signal a tail-recursive call in the trampoline."""
 
-    def __init__(self, args: list) -> None:
+    def __init__(self, func_name: str, args: list) -> None:
         super().__init__()
+        self.func_name = func_name
         self.args = args
 
 
@@ -735,7 +736,7 @@ def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
     if program.body is not None:
         func_lambdas = _gather_func_lambdas(program.body)
         for name, typed_lam in func_lambdas.items():
-            env[name] = _trampoline_closure(typed_lam, env, name)
+            env[name] = _trampoline_closure(typed_lam, env, name, func_lambdas)
     for definition in program.definitions:
         _bind_definition(definition, env)
     return EvaluationResult(_eval_expr(program.body, env), program.type)
@@ -1699,45 +1700,67 @@ def _lambda_callable(expr: TypedLambda, env: Env) -> CallableValue:
     return call
 
 
-def _trampoline_closure(expr: TypedLambda, env: Env, func_name: str) -> CallableValue:
-    """Create a closure with tail-call optimization for recursive calls."""
+def _trampoline_closure(expr: TypedLambda, env: Env, func_name: str,
+                        all_func_lams: dict[str, TypedLambda] | None = None) -> CallableValue:
+    """Create a closure with tail-call optimization for recursive calls.
+
+    When all_func_lams is provided, tail calls to ANY function in the
+    dict are trampolined, enabling O(1)-stack mutual recursion.
+    """
 
     def call(*args: Value) -> Value:
+        current_name = func_name
+        current_lam = expr
         _args = args
         while True:
+            if current_name == func_name:
+                lam = expr
+            else:
+                lam = all_func_lams[current_name] if all_func_lams else expr
             inner_env = dict(env)
-            for (name, _param_type), arg in zip(expr.params, _args):
+            for (name, _param_type), arg in zip(lam.params, _args):
                 inner_env[name] = arg
             try:
-                return _eval_expr_tail(expr.body, inner_env, func_name)
+                return _eval_expr_tail(
+                    lam.body, inner_env,
+                    lam.expr.name if hasattr(lam.expr, 'name') else func_name,
+                    set(all_func_lams.keys()) if all_func_lams else {func_name},
+                )
             except _TailCall as tc:
+                current_name = tc.func_name
                 _args = tc.args
 
     return call
 
 
-def _eval_expr_tail(expr: TypedExpr, env: Env, func_name: str) -> Value:
-    """Like _eval_expr but propagates tail position for func_name recursion."""
+def _eval_expr_tail(expr: TypedExpr, env: Env, func_name: str,
+                    all_func_names: set[str] | None = None) -> Value:
+    """Like _eval_expr but propagates tail position for recursion."""
+    _names = all_func_names if all_func_names is not None else {func_name}
     if isinstance(expr, TypedIf):
         condition = _eval_expr(expr.condition, env)
         if isinstance(condition, np.ndarray) and condition.dtype == bool:
-            then_val = _eval_expr_tail(expr.then_branch, env, func_name)
-            else_val = _eval_expr_tail(expr.else_branch, env, func_name)
+            then_val = _eval_expr_tail(expr.then_branch, env, func_name, _names)
+            else_val = _eval_expr_tail(expr.else_branch, env, func_name, _names)
             return np.where(condition, then_val, else_val)
         if bool(condition):
-            return _eval_expr_tail(expr.then_branch, env, func_name)
-        return _eval_expr_tail(expr.else_branch, env, func_name)
+            return _eval_expr_tail(expr.then_branch, env, func_name, _names)
+        return _eval_expr_tail(expr.else_branch, env, func_name, _names)
     if isinstance(expr, TypedLet):
         inner_env = dict(env)
         inner_env[expr.name] = _eval_expr(expr.value, env)
-        return _eval_expr_tail(expr.body, inner_env, func_name)
+        return _eval_expr_tail(expr.body, inner_env, func_name, _names)
     if isinstance(expr, TypedApp):
         fname = _typed_node_var_name_tail(expr.func)
-        if fname == func_name and fname not in ALL_PRIMITIVE_OPS:
+        if fname is None and isinstance(expr.func, TypedLambda):
+            from remora.ast_nodes import FuncDef as _FuncDef
+            if isinstance(expr.func.expr, _FuncDef):
+                fname = expr.func.expr.name
+        if fname is not None and fname in _names and fname not in ALL_PRIMITIVE_OPS:
             args = [_eval_expr(arg, env) for arg in expr.args]
-            raise _TailCall(args)
+            raise _TailCall(fname, args)
     if isinstance(expr, TypedCast):
-        return _cast_scalar(_eval_expr_tail(expr.value, env, func_name), expr.to_type)
+        return _cast_scalar(_eval_expr_tail(expr.value, env, func_name, _names), expr.to_type)
     return _eval_expr(expr, env)
 
 
