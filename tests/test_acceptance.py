@@ -22,7 +22,7 @@ def test_acceptance_manifest_cases(capsys):
         assert case["category"] in {"supported", "rejected", "deferred"}, case["name"]
         source = ACCEPTANCE_DIR / case["path"]
 
-        if case["target"] == "gpu" and not _GPU_REQUIRED:
+        if case["target"].startswith("gpu") and not _GPU_REQUIRED:
             continue
 
         args = ["--target", case["target"], str(source)]
