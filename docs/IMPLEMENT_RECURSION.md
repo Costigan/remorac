@@ -645,9 +645,9 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 
 #### 12.4 Typechecker: higher-order recursion
 
-- [ ] **12.4.1** `def apply_twice f x = f (f x)` — blocked: typechecker does not support function values as arguments
-- [ ] **12.4.2** `fix`-style recursion — blocked: same limitation
-- [ ] **12.4.3** Polymorphic recursive HOF — blocked: same limitation
+- [ ] **12.4.1** `def apply_twice f x = f (f x)` — planned: see Milestone 6 (§12.33–12.38)
+- [ ] **12.4.2** `fix`-style recursion — planned: same as 12.4.1
+- [ ] **12.4.3** Polymorphic recursive HOF — planned: same as 12.4.1
 
 #### 12.5 Interpreter: bind function names
 
@@ -655,7 +655,7 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.5.2** `_lambda_callable` captures `env` by reference (not copy at creation time) so closures see their own name
 - [x] **12.5.3** Test: `evaluate_source("def fac n = if n <= 1 then 1 else n * fac (n - 1) ; fac 5")` returns `120`
 - [x] **12.5.4** Test: mutual `is_even`/`is_odd` returns correct results in interpreter
-- [ ] **12.5.5** `apply_twice inc 5` — blocked by typechecker (12.4)
+- [ ] **12.5.5** `apply_twice inc 5` — planned: see Milestone 6 (§12.33–12.38)
 
 #### 12.6 Interpreter: trampoline for deep recursion
 
@@ -787,7 +787,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 #### 12.25 Test: higher-order recursion
 
-- [ ] **12.25.1–12.25.4** Blocked: typechecker does not support function values as arguments (pre-existing limitation)
+- [ ] **12.25.1–12.25.4** Planned: see Milestone 6 (§12.33–12.38)
 
 #### 12.26 Test: array-valued recursion
 
@@ -858,6 +858,88 @@ All of the following tests reside in `tests/test_execution.py` and
 | 3 | CPU MLIR Lowering | 12.16–12.19 | Very Hard |
 | 4 | GPU | 12.20–12.21 | Easy now, Hard future |
 | 5 | Integration / Acceptance Tests | 12.22–12.30 | Medium |
+| **6** | **Higher-Order Recursion** | **12.33–12.38** | **Medium–High** |
+
+---
+
+### Milestone 6 — Higher-Order Recursion (Function Values as Arguments)
+
+Goal: `def apply_twice f x = f (f x)` typechecks, interprets, and compiles to CPU.
+
+The typechecker fallthrough path at `_infer_app:1138-1148` already
+produces valid `TypedApp` nodes for calls through local `FuncType`
+variables.  The gap is downstream: HIR lowering cannot resolve calls
+through variables, lambdas are rejected outside HOF slots, and closure
+conversion is missing.  This milestone fixes those three gaps.
+
+#### 12.33 Phase 1: recognise function-typed variables in HIR lowering
+
+Goal: `(let (g f) (g 1 2))` where `f` is a top-level function compiles.
+
+- [ ] **12.33.1** `lower_callable` accepts `TypedExprNode(FuncType)` — when the `FuncType` maps to a known top-level function (via name lookup), return `HIRVar(original_name, FuncType)`.  For local aliases created by `let`, propagate the underlying function name.  (`remora/hir.py:828-855`)
+
+- [ ] **12.33.2** `lower_expr` for `TypedApp` handles indirect calls — when `expr.func` is a `TypedExprNode` (not `TypedLambda`), resolve it through `lower_callable`.  If it resolves to a `HIRVar` referencing a top-level function, emit `HIRCall(function_name, args, type)`.  If it resolves to a lambda, inline as usual.  (`remora/hir.py:744-763`)
+
+- [ ] **12.33.3** `HIRLambda` as a pass-through value — lambdas stored in `let` bindings should pass through to the call site.  Defunctionalization already lifts lambdas at HOF call sites (map/fold); extend it to also lift lambdas at `let` bindings, producing `HIRVar` references.  Remove the `"dynamic higher-order functions are deferred"` rejection.  (`remora/hir.py:828-855`, `remora/defunc.py:240-241`)
+
+- [ ] **12.33.4** Closure conversion for lambdas with captures — replace the `"lambda captures outer variables; closure conversion is deferred"` rejection with environment-capture closure conversion: the defunctionalizer creates a specialized `HIRFunction` with the captured variables as extra parameters, and the call site passes them.  (`remora/defunc.py:328-329`)
+
+#### 12.34 Phase 2: monomorphization pass
+
+Goal: `def apply_twice f x = f (f x)` compiles and runs on CPU.
+
+- [ ] **12.34.1** Global monomorphization — before MLIR lowering, scan all `HIRCall` nodes whose callee has `FuncType` params.  For each concrete call site, clone the callee's `HIRFunction`, substitute the `FuncType` param with the concrete function (either a named function reference or an inlined lambda body), and add the clone to the program.  Replace the original `HIRCall` with a call to the clone.  This is the same pattern as `_try_monomorphize` in `compiler.py:315-377`, but applied to all call sites.  (new pass in `remora/hir_opt.py` or `remora/compiler.py`)
+
+- [ ] **12.34.2** Primitive-operator-as-argument — handle `(map f arr)` where `f` is a function variable referencing a primitive like `(+)`.  The monomorphization substitutes the primitive callable into the body, which already works via `HIRPrimCallable`.
+
+#### 12.35 Phase 3: remove typechecker gates
+
+Goal: standalone lambdas, function-typed let bindings, and function-valued map/fold results typecheck.
+
+- [ ] **12.35.1** Remove `"lambda expressions require an expected function type"` rejection — allow standalone lambdas with inferred `FuncType`.  (`remora/typechecker.py:969-972`)
+
+- [ ] **12.35.2** Remove `"standalone lambda bindings are only supported for direct application"` restriction in `_infer_let_lambda`.  (`remora/typechecker.py:2945-2947`)
+
+- [ ] **12.35.3** Remove `"function-valued map results are deferred"` gate.  (`remora/typechecker.py:1477-1478`)
+
+- [ ] **12.35.4** Remove `"map over function values is deferred"` gate.  (`remora/frame.py:117-121`)
+
+- [ ] **12.35.5** Remove `"arrays of functions are deferred"` gate.  (`remora/typechecker.py:1104-1105`)
+
+#### 12.36 Tests
+
+- [ ] **12.36.1** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (typecheck + interpreter)
+- [ ] **12.36.2** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (CPU compiled)
+- [ ] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter + CPU)
+- [ ] **12.36.4** `let f = inc in map f (iota 3)` → [1, 2, 3] (typecheck + interpreter + CPU)
+- [ ] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works)
+
+#### 12.37 Files to change
+
+| File | Phase | Change |
+|------|-------|--------|
+| `remora/hir.py` | 12.33.1–3 | `lower_callable`, `lower_expr` for indirect calls, HIRLambda passthrough |
+| `remora/defunc.py` | 12.33.3–4 | Lift lambdas at let bindings, closure conversion |
+| `remora/hir_opt.py` (new pass) | 12.34.1 | Monomorphization pass |
+| `remora/compiler.py` | 12.34.1 | Call monomorphization before lowering |
+| `remora/typechecker.py` | 12.35.1–3,5 | Remove gates at lines 969, 1104, 1477, 2945 |
+| `remora/frame.py` | 12.35.4 | Remove `"map over function values"` gate |
+| `tests/test_phase7_dependent_functions.py` | 12.36 | Add HOF tests |
+| `tests/test_execution.py` | 12.36 | Add HOF compiled tests |
+| `docs/IMPLEMENT_RECURSION.md` | — | Update 12.4/12.5/12.25, 12.33–12.38 |
+
+#### 12.38 Difficulty and GPU impact
+
+| Phase | Difficulty | Rationale |
+|-------|-----------|-----------|
+| 12.33.1–3 | Low | Extending existing dispatch; `lower_callable` already has the plumbing |
+| 12.33.4 | Medium | Closure conversion is well-understood but touches defunc IR rewriting |
+| 12.34.1 | **High** | The core monomorphization pass must correctly clone, substitute, and deduplicate functions across all call sites; similar to `_try_monomorphize` but generalized |
+| 12.35.1–5 | Low | Removing error-raising lines and verifying downstream passes handle the new types |
+
+GPU: After monomorphization eliminates `FuncType` params, call sites become
+direct `HIRCall` to concrete named functions, which the GPU path continues
+to reject with its existing `GPUScaffoldError`.  No GPU changes needed.
 
 ---
 
