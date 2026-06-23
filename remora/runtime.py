@@ -1215,10 +1215,61 @@ def format_value(value: object) -> str:
 
 def _bind_definition(definition: TypedDefinition, env: Env) -> None:
     if isinstance(definition.definition, FuncDef):
+        # Only bind as a callable value if not already in env (e.g.
+        # from _gather_func_lambdas).  This allows function names to
+        # be passed as arguments to higher-order functions.
+        name = definition.definition.name
+        if name not in env:
+            env[name] = _make_func_def_callable(
+                definition.definition, env
+            )
         return
     if definition.value is None:
         raise EvaluationError("function definitions are deferred")
     env[definition.definition.name] = _eval_expr(definition.value, env)
+
+
+def _make_func_def_callable(func_def: FuncDef, env: Env) -> CallableValue:
+    """Create an interpreter callable from a FuncDef that lazily typechecks."""
+    from remora.typechecker import TypeChecker as _TC, TypeEnv as _TypeEnv
+
+    tc = _TC()
+
+    def call(*args: Value) -> Value:
+        # Typecheck the body with the given argument types
+        arg_types = tuple(_remora_type_of(arg) for arg in args)
+        typed_lam = tc.specialize_top_level_function(
+            func_def, arg_types, _TypeEnv()
+        )
+        inner_env = dict(env)
+        for (name, _param_type), arg in zip(typed_lam.params, args):
+            inner_env[name] = arg
+        return _eval_expr(typed_lam.body, inner_env)
+
+    return call
+
+
+def _remora_type_of(value: Value) -> RemoraType:
+    """Infer the RemoraType of a runtime value."""
+    if isinstance(value, np.ndarray):
+        if value.dtype == np.int32:
+            elem = INT
+        elif value.dtype == np.float32:
+            elem = FLOAT
+        elif value.dtype == bool:
+            elem = BOOL
+        else:
+            raise EvaluationError(f"unsupported array dtype {value.dtype}")
+        return ArrayType(elem, tuple(StaticDim(s) for s in value.shape))
+    if isinstance(value, bool):
+        return BOOL
+    if isinstance(value, int):
+        return INT
+    if isinstance(value, float):
+        return FLOAT
+    if callable(value):
+        raise EvaluationError("cannot determine Remora type of callable value")
+    raise EvaluationError(f"unsupported runtime value type {type(value).__name__}")
 
 
 def _eval_expr(expr: TypedExpr, env: Env) -> Value:

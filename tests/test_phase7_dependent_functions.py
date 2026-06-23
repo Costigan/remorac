@@ -831,3 +831,40 @@ def test_mutual_recursion_define_pi_executes_interpreter():
     assert result.value is True
     result = evaluate_source(src.replace("(is_even 4 [1 2])", "(is_odd 3 [1])"), include_prelude=False, syntax="lisp")
     assert result.value is True   # 3 is odd
+
+
+# ---------------------------------------------------------------------------
+# Higher-order function tests (Milestone 6, interpreter)
+# ---------------------------------------------------------------------------
+
+
+def test_hof_apply_twice_interpreter():
+    """12.36.1: apply_twice inc 5 = 7 (interpreter)."""
+    src = (
+        "(define (inc [x]) (+ x 1)) "
+        "(define (apply_twice [f x]) (f (f x))) "
+        "(apply_twice inc 5)"
+    )
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    assert result.value == 7
+
+
+def test_hof_compose_interpreter():
+    """12.36.3: compose inc inc 5 = 7 (interpreter)."""
+    src = (
+        "(define (inc [x]) (+ x 1)) "
+        "(define (compose [f g x]) (f (g x))) "
+        "(compose inc inc 5)"
+    )
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    assert result.value == 7
+
+
+def test_hof_let_function_value_interpreter():
+    """12.36.4: let f = inc in f(f 5) = 7 (interpreter)."""
+    src = (
+        "(define (inc [x]) (+ x 1)) "
+        "(let ((f inc)) (f (f 5)))"
+    )
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    assert result.value == 7

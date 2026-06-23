@@ -804,7 +804,34 @@ class TypeChecker:
         if isinstance(expr, BoolLit):
             return TypedExprNode(expr, BOOL)
         if isinstance(expr, VarExpr):
-            return TypedExprNode(expr, env.lookup(expr.name))
+            try:
+                return TypedExprNode(expr, env.lookup(expr.name))
+            except RemoraTypeError:
+                if expr.name in self._functions:
+                    func_def = self._functions[expr.name]
+                    declared = self._declared_function_type(func_def)
+                    if isinstance(declared, FuncType):
+                        return TypedExprNode(expr, declared)
+                    if isinstance(declared, (PiType, ForallType)):
+                        body = declared.body
+                        while isinstance(body, (PiType, ForallType)):
+                            body = body.body
+                        if isinstance(body, FuncType):
+                            return TypedExprNode(expr, body)
+                    # Plain (define (name [params]) body) — create a
+                    # polymorphic FuncType with TypeVar params/result.
+                    param_types = tuple(
+                        TypeVar(f"${expr.name}_{p}")
+                        for p in func_def.params
+                    )
+                    return TypedExprNode(
+                        expr,
+                        FuncType(
+                            param_types,
+                            TypeVar(f"${expr.name}_ret"),
+                        ),
+                    )
+                raise
         if isinstance(expr, ArrayLit):
             return self._infer_array(expr, env)
         if isinstance(expr, IotaExpr):
@@ -1136,6 +1163,19 @@ class TypeChecker:
             return self._infer_top_level_function_app(expr, env)
 
         typed_func = self.infer(expr.func, env)
+        if isinstance(typed_func.type, TypeVar):
+            # Function-typed variable with an unresolved polymorphic
+            # type — generate a fresh FuncType with TypeVar params
+            # and result, then continue inference.
+            param_tvs = tuple(
+                TypeVar(f"$call_p{i}")
+                for i in range(len(expr.args))
+            )
+            result_tv = TypeVar("$call_ret")
+            typed_func = TypedExprNode(
+                expr.func,
+                FuncType(param_tvs, result_tv),
+            )
         if not isinstance(typed_func.type, FuncType):
             raise RemoraTypeError(f"not a function: {typed_func.type}", expr.loc)
         if len(expr.args) != len(typed_func.type.params):
@@ -1348,7 +1388,9 @@ class TypeChecker:
             result_type = sig.result
             # /: force Float; && / ||: force Bool
             if op == "/":
-                if not is_numeric(left.type) or not is_numeric(right.type):
+                if not _contains_type_var(left.type) and not is_numeric(left.type):
+                    raise RemoraTypeError("division expects numeric operands", expr.loc)
+                if not _contains_type_var(right.type) and not is_numeric(right.type):
                     raise RemoraTypeError("division expects numeric operands", expr.loc)
                 return TypedApp(
                     expr,
@@ -2361,6 +2403,11 @@ class TypeChecker:
                         "Forall function annotation must contain a function type",
                         definition.loc,
                     )
+            if declared_type is None:
+                # Plain (define (name [params]) body) — no pre-inference
+                # needed.  The FuncType is created on-demand when the
+                # function is used as a value (see VarExpr handler).
+                pass
             return TypedDefinition(
                 definition,
                 None,
@@ -2994,6 +3041,8 @@ class TypeChecker:
             raise RemoraTypeError(f"{operator} of function values is deferred", loc)
 
     def _require_numeric(self, value_type: RemoraType, loc) -> None:
+        if _contains_type_var(value_type):
+            return
         if not is_numeric(value_type):
             raise RemoraTypeError(f"expected numeric type, got {value_type}", loc)
 

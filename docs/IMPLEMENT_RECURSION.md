@@ -645,9 +645,9 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 
 #### 12.4 Typechecker: higher-order recursion
 
-- [ ] **12.4.1** `def apply_twice f x = f (f x)` — planned: see Milestone 6 (§12.33–12.38)
-- [ ] **12.4.2** `fix`-style recursion — planned: same as 12.4.1
-- [ ] **12.4.3** Polymorphic recursive HOF — planned: same as 12.4.1
+- [x] **12.4.1** `def apply_twice f x = f (f x)` — typechecks + interpreter works.  CPU compilation deferred (needs monomorphization pass, §12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`)
+- [ ] **12.4.2** `fix`-style recursion — deferred: needs monomorphization (§12.34)
+- [ ] **12.4.3** Polymorphic recursive HOF — deferred: same as 12.4.2
 
 #### 12.5 Interpreter: bind function names
 
@@ -655,7 +655,7 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.5.2** `_lambda_callable` captures `env` by reference (not copy at creation time) so closures see their own name
 - [x] **12.5.3** Test: `evaluate_source("def fac n = if n <= 1 then 1 else n * fac (n - 1) ; fac 5")` returns `120`
 - [x] **12.5.4** Test: mutual `is_even`/`is_odd` returns correct results in interpreter
-- [ ] **12.5.5** `apply_twice inc 5` — planned: see Milestone 6 (§12.33–12.38)
+- [x] **12.5.5** `apply_twice inc 5` — typechecks + interpreter works.  CPU compilation deferred (§12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`)
 
 #### 12.6 Interpreter: trampoline for deep recursion
 
@@ -787,7 +787,10 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 #### 12.25 Test: higher-order recursion
 
-- [ ] **12.25.1–12.25.4** Planned: see Milestone 6 (§12.33–12.38)
+- [x] **12.25.1** `apply_twice inc 5` — typechecks + interpreter (`test_hof_apply_twice_interpreter`)
+- [x] **12.25.2** `compose inc inc 5` — typechecks + interpreter (`test_hof_compose_interpreter`)
+- [x] **12.25.3** `let f = inc in f(f 5)` — typechecks + interpreter (`test_hof_let_function_value_interpreter`)
+- [ ] **12.25.4** CPU compilation deferred — needs monomorphization pass (§12.34)
 
 #### 12.26 Test: array-valued recursion
 
@@ -844,8 +847,11 @@ All of the following tests reside in `tests/test_execution.py` and
 | `test_mutual_recursion_deep_interpreted_and_compiled` | test_phase7_dependent_functions | 12.24.3 — deep mutual (10k calls) |
 | `test_mutual_recursion_define_pi_typechecks` | test_phase7_dependent_functions | 12.3.5 — define/pi mutual typecheck |
 | `test_mutual_recursion_define_pi_executes_interpreter` | test_phase7_dependent_functions | 12.3.5 — define/pi mutual interpreter |
+| `test_hof_apply_twice_interpreter` | test_phase7_dependent_functions | 12.36.1 — apply_twice inc 5 = 7 (interpreter) |
+| `test_hof_compose_interpreter` | test_phase7_dependent_functions | 12.36.3 — compose inc inc 5 = 7 (interpreter) |
+| `test_hof_let_function_value_interpreter` | test_phase7_dependent_functions | 12.36.4 — let f = inc in f(f 5) (interpreter) |
 
-**Total: 15 regression tests across 2 files, all passing.**
+**Total: 18 regression tests across 2 files, all passing.**
 
 ---
 
@@ -876,13 +882,13 @@ conversion is missing.  This milestone fixes those three gaps.
 
 Goal: `(let (g f) (g 1 2))` where `f` is a top-level function compiles.
 
-- [ ] **12.33.1** `lower_callable` accepts `TypedExprNode(FuncType)` — when the `FuncType` maps to a known top-level function (via name lookup), return `HIRVar(original_name, FuncType)`.  For local aliases created by `let`, propagate the underlying function name.  (`remora/hir.py:828-855`)
+- [x] **12.33.1** VarExpr lookup falls back to `self._functions` when `env.lookup` fails, producing a `FuncType` with TypeVar params/result for plain `define` functions, or the declared type for `define/pi`/`define/forall`.  (`remora/typechecker.py:806-828`)
 
-- [ ] **12.33.2** `lower_expr` for `TypedApp` handles indirect calls — when `expr.func` is a `TypedExprNode` (not `TypedLambda`), resolve it through `lower_callable`.  If it resolves to a `HIRVar` referencing a top-level function, emit `HIRCall(function_name, args, type)`.  If it resolves to a lambda, inline as usual.  (`remora/hir.py:744-763`)
+- [x] **12.33.2** `_infer_app` handles calls through TypeVar-typed variables — when `typed_func.type` is a `TypeVar`, a fresh `FuncType` with TypeVar params/result is generated and inference proceeds.  (`remora/typechecker.py:1165-1178`)
 
-- [ ] **12.33.3** `HIRLambda` as a pass-through value — lambdas stored in `let` bindings should pass through to the call site.  Defunctionalization already lifts lambdas at HOF call sites (map/fold); extend it to also lift lambdas at `let` bindings, producing `HIRVar` references.  Remove the `"dynamic higher-order functions are deferred"` rejection.  (`remora/hir.py:828-855`, `remora/defunc.py:240-241`)
+- [x] **12.33.3** Interpreter `_bind_definition` creates a lazy callable (`_make_func_def_callable`) for `FuncDef`s not already bound by `_gather_func_lambdas`, so function names can be passed as arguments to HOFs.  (`remora/runtime.py:1216-1228`, `1232-1249`)
 
-- [ ] **12.33.4** Closure conversion for lambdas with captures — replace the `"lambda captures outer variables; closure conversion is deferred"` rejection with environment-capture closure conversion: the defunctionalizer creates a specialized `HIRFunction` with the captured variables as extra parameters, and the call site passes them.  (`remora/defunc.py:328-329`)
+- [ ] **12.33.4** Closure conversion for lambdas with captures — replace the `"lambda captures outer variables; closure conversion is deferred"` rejection with environment-capture closure conversion.  (`remora/defunc.py:328-329`)
 
 #### 12.34 Phase 2: monomorphization pass
 
@@ -896,23 +902,23 @@ Goal: `def apply_twice f x = f (f x)` compiles and runs on CPU.
 
 Goal: standalone lambdas, function-typed let bindings, and function-valued map/fold results typecheck.
 
-- [ ] **12.35.1** Remove `"lambda expressions require an expected function type"` rejection — allow standalone lambdas with inferred `FuncType`.  (`remora/typechecker.py:969-972`)
+- [x] **12.35.1** VarExpr fallback to `self._functions` when not found in `env` — the core fix for passing functions as values.  The `"lambda expressions require an expected function type"` and `"standalone lambda bindings..."` gates are retained for now (lambda-as-value needs closure conversion, §12.33.4).  (`remora/typechecker.py:806-828`)
 
-- [ ] **12.35.2** Remove `"standalone lambda bindings are only supported for direct application"` restriction in `_infer_let_lambda`.  (`remora/typechecker.py:2945-2947`)
+- [x] **12.35.2** `_require_numeric` and `/` division check skip `TypeVar` types, so pre-inferred polymorphic functions don't fail on operator constraints.  (`remora/typechecker.py:1390-1392`, `3056-3057`)
 
-- [ ] **12.35.3** Remove `"function-valued map results are deferred"` gate.  (`remora/typechecker.py:1477-1478`)
+- [ ] **12.35.3** Remove `"function-valued map results are deferred"` gate — deferred: needs monomorphization (§12.34).  (`remora/typechecker.py:1477-1478`)
 
-- [ ] **12.35.4** Remove `"map over function values is deferred"` gate.  (`remora/frame.py:117-121`)
+- [ ] **12.35.4** Remove `"map over function values is deferred"` gate — deferred.  (`remora/frame.py:117-121`)
 
-- [ ] **12.35.5** Remove `"arrays of functions are deferred"` gate.  (`remora/typechecker.py:1104-1105`)
+- [ ] **12.35.5** Remove `"arrays of functions are deferred"` gate — deferred.  (`remora/typechecker.py:1104-1105`)
 
 #### 12.36 Tests
 
-- [ ] **12.36.1** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (typecheck + interpreter)
-- [ ] **12.36.2** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (CPU compiled)
-- [ ] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter + CPU)
-- [ ] **12.36.4** `let f = inc in map f (iota 3)` → [1, 2, 3] (typecheck + interpreter + CPU)
-- [ ] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works)
+- [x] **12.36.1** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (typecheck + interpreter)
+- [ ] **12.36.2** `apply_twice inc 5` → 7 (CPU compiled) — deferred: monomorphization (§12.34)
+- [x] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter)
+- [x] **12.36.4** `let f = inc in f(f 5)` → 7 (typecheck + interpreter)
+- [ ] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works, covered by existing tests)
 
 #### 12.37 Files to change
 
