@@ -5,18 +5,25 @@ Completed items are marked; remaining items describe what is left.
 
 ## High-Impact
 
-### GPU buffer arena
-Every `RemoraExecutor.execute()` call currently does
-`alloc → copy H→D → launch → copy D→H → free`.  Iterative
-Python+Remora workflows pay this overhead per call: the Mandelbrot
-example does 240 alloc/free cycles (80 iterations × 3 kernels).
-`execute_plan()` pre-allocates plan buffers but frees them after
-each plan execution — no reuse across calls.
+### Host-side output arena for compiled-CPU iterative loops
+The CPU analogue of the GPU buffer arena, with a much smaller payoff.
+On the compiled-CPU path the per-call allocation cost is already low —
+inputs are passed **zero-copy by pointer** (`array.ctypes.data`) and there
+is no host↔device transfer — but `CPUFunctionExecutor.execute()` still
+allocates a **fresh output array** (`_empty_output_value` → host `malloc`)
+on every call.  For tight iterative loops (e.g. a stencil or optimizer that
+calls one compiled function thousands of times with the same output shape),
+reusing the output buffer avoids that per-call allocation and the associated
+GC churn.
 
-A device memory arena that persists across calls and recycles
-buffers by size class would eliminate allocation overhead for
-iterative algorithms.  The `GPUPtxContext` pool is a partial
-prototype but is only used by `execute_program_from_ptx`.
+The building block already exists: a host `Arena` (a bump allocator over a
+`bytearray` with `reset()`) can be passed via `execute(..., arena=...)`.
+What is missing is an *ergonomic, automatic* mode — e.g. an executor option
+that keeps a right-sized output arena and `reset()`s it each call, or a
+size-classed host pool mirroring the GPU `DeviceMemoryPool` — so callers get
+reuse without manually managing an arena.  Modest payoff (host `malloc` /
+numpy allocation is already cheap and the OS allocator pools memory), so this
+is a low-priority ergonomic win, mainly useful for very hot CPU loops.
 
 ### Kernel fusion
 The Mandelbrot iteration calls three separate kernels per step
@@ -47,7 +54,75 @@ straightforward but touches many files.
 `remora.define()` requires static array sizes baked into the source.
 A JAX-style trace-and-specialize approach would let one definition
 work for any array size by compiling a specialized kernel on first
-call for each distinct shape signature, then caching it.
+call for each distinct shape signature, then caching it. (This is the
+*specialize-per-shape* alternative to true dynamic shapes — see below.)
+
+### Dynamic shapes (runtime array dimensions)
+Today the implementation is **static-shapes-only at the lowering boundary**.
+The type front-end is genuinely dependent — index/dimension variables, `Π`
+types (`define/pi`), `Σ` types, `dependent_types.py` / `index.py` — but
+`compile_function_source` *specializes* (monomorphizes) every function to
+concrete dimensions and then refuses to lower anything with a free dimension
+variable (`compiler.py`: "compiled function … has unspecialized index
+variables"). Every emitted artifact bakes the sizes in: tensor/memref types
+(`tensor<3x2x2xf32>`), `scf.for` bounds, buffer sizes, GPU grid/block, and the
+descriptor ranks all come from `StaticDim` constants.
+
+Dynamic shapes means compiling a **single** function/kernel that accepts array
+dimensions as *runtime* values and works for any size — true shape polymorphism,
+matching Remora's semantics. Concretely:
+- Thread dimension variables through to lowering instead of resolving them to
+  constants (relax the "no free index variables" gate; discharge equality
+  constraints from the dependent-type checker, with residual runtime checks for
+  what can't be proven statically).
+- Emit dynamic-shape MLIR: `tensor<?x…>` / `memref<?x…>`, `tensor.empty(%n)`
+  with dynamic operands, runtime `scf.for` bounds, dynamic `linalg` ops. MLIR
+  and linalg already support this, so the target is capable.
+- GPU: kernels read dimensions from arguments / the descriptor ABI (which
+  *already* carries runtime sizes and strides) and compute indices, loop bounds,
+  and grid/block dynamically instead of from baked constants.
+- Runtime: compute buffer/allocation sizes from runtime dimensions.
+
+This is foundational but a large, cross-cutting lift (typechecker → elaborate →
+HIR → lowering → runtime). A tractable on-ramp is to keep widening
+compound-expression lowering coverage on static shapes first (the recent GPU
+general-map and rank-≥2-cell work is part of this), so more valid dense programs
+compile robustly before dimensions go dynamic.
+
+**Relationship to JIT shape specialization (above):** these are the two ends of
+a spectrum. JIT specialization keeps the static-shape compiler and compiles +
+caches a *new* kernel per concrete shape at runtime — cheap to build on what
+exists, but causes per-shape recompiles and code bloat. Dynamic shapes compiles
+*one* kernel for all shapes — no bloat, single compile, true polymorphism, but a
+much larger change that may forgo optimizations which depend on knowing sizes.
+A mature system typically wants both.
+
+### Boxes / irregular (ragged) nested arrays
+Remora's regular `Array` type is **rectangular** — every sub-array along a given
+axis has the same shape — which is exactly what makes implicit rank-polymorphic
+lifting (frame/cell decomposition) well-defined. *Irregular* nested data — "an
+array of arrays where each inner array has a different, possibly runtime,
+length" — therefore cannot be a rectangular `Array`. Remora expresses it with
+**boxes**: a `box` is an atom that existentially packages a value together with
+its dimension witnesses (`Σ` / `SigmaType`, the dependent *sum*). You build a
+regular array *of boxes*, and `unbox` opens one (binding its hidden dimensions)
+before use.
+
+The front-end plumbing already exists — `SigmaType`, `box`/`unbox` surface
+syntax, `BoxExpr`/`UnboxExpr`, `HIRBox`/`HIRUnbox` — but `box`/`unbox` are
+currently implemented as **type erasure with no runtime effect**. That is only
+sound today because every shape is static: the existentially-hidden dimension is
+actually a known constant, so the box carries no real runtime information.
+Genuinely ragged data needs a box to carry a *runtime* dimension witness, which
+only becomes meaningful once dynamic shapes exist.
+
+So the two dependent-type features are complementary: **dynamic shapes** is the
+`Π` (universal-over-dimensions) side — one function for any size — and **boxes**
+are the `Σ` (existential-over-dimensions) side — irregular collections. Dynamic
+shapes is the natural prerequisite: a box is essentially "a value plus its
+runtime dimensions," so real box support builds directly on runtime dimensions.
+Sequence: dynamic shapes first, then make `box`/`unbox` carry and recover
+runtime dimensions for true ragged arrays-of-arrays.
 
 ### Better error messages
 Type errors and lowering failures produce compiler-internal messages
@@ -70,6 +145,19 @@ would bridge the gap between the theory papers and this
 implementation.
 
 ## Completed
+
+### GPU buffer arena (device memory pool)
+- `DeviceMemoryPool` recycles device buffers by power-of-two size class, so
+  `RemoraExecutor.execute()` reuses allocations instead of doing a
+  `cuMemAlloc`/`cuMemFree` on every call.
+- Lives on the `CUDARuntime` as a shared pool — buffers are reused across
+  `execute()` calls *and* across executors that share the runtime (the
+  iterative multi-kernel case) — and is drained (`cuMemFree`) when the runtime
+  is closed.
+- Runtimes without a shared pool (lightweight test fakes) get a local
+  executor-owned pool drained on `close()`.  Steady-state memory is bounded by
+  (distinct size classes) × (peak concurrent buffers per class), not by call
+  count.
 
 ### Parallel GPU Filter and Replicate (N ≤ 1024)
 - `HIRFilter`: three-kernel plan (predicate eval → i32 prefix sum →
