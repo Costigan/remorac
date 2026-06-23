@@ -25,6 +25,7 @@ from remora.pipeline import PipelineUnavailable
 from remora.runtime import (
     CPUFunctionExecutor,
     CUDAError,
+    RuntimeUnavailable,
     cuda_available,
     evaluate_source,
     evaluate_source_compiled,
@@ -572,7 +573,7 @@ def test_generated_gradient_executes_on_gpu():
 
     try:
         executor = RemoraExecutor(artifact.ptx_text, artifact.kernels)
-    except CUDAError as exc:
+    except RuntimeUnavailable as exc:
         pytest.skip(f"live CUDA device is not available: {exc}")
     with executor:
         gpu_gradient = executor.execute_main([x])
@@ -648,7 +649,7 @@ def test_fused_nested_gradient_executes_on_gpu(case):
     }[case]
     try:
         executor = RemoraExecutor(artifact.gpu.ptx_text, artifact.gpu.kernels)
-    except CUDAError as exc:
+    except RuntimeUnavailable as exc:
         pytest.skip(f"live CUDA device is not available: {exc}")
     with executor:
         result = executor.execute_main([x])

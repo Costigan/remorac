@@ -3,6 +3,22 @@ from pathlib import Path
 
 from remora.cli import main
 
+try:
+    from remora.runtime import CUDARuntime, RuntimeUnavailable
+except RuntimeUnavailable:
+    pass  # bindings not installed
+
+
+def _gpu_available() -> bool:
+    try:
+        CUDARuntime().close()
+    except (RuntimeUnavailable, Exception):
+        return False
+    return True
+
+
+_GPU_AVAILABLE = _gpu_available()
+
 
 ACCEPTANCE_DIR = Path(__file__).parent / "acceptance"
 
@@ -12,9 +28,13 @@ def load_cases():
 
 
 def test_acceptance_manifest_cases(capsys):
-    for case in load_cases():
+    for case_num, case in enumerate(load_cases()):
         assert case["category"] in {"supported", "rejected", "deferred"}, case["name"]
         source = ACCEPTANCE_DIR / case["path"]
+
+        if case["target"] == "gpu" and not _GPU_AVAILABLE:
+            continue
+
         args = ["--target", case["target"], str(source)]
 
         exit_code = main(args)
