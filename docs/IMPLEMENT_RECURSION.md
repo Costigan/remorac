@@ -768,7 +768,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 - [x] **12.22.1** `sum_to 10000 0 = 50005000` — interpreter (trampoline, O(1) stack)
 - [x] **12.22.2** `sum_to 500 0 = 125250` — CPU compiled (MLIR `func.call`)
-- [~] **12.22.3** `map (sum_to 5) [0.0, 10.0, 20.0]` — blocked: ML-syntax `map` does not accept named functions (only inline lambdas/operators); interpreter works with lambda form
+- [x] **12.22.3** `map (sum_to 5) [0.0, 10.0, 20.0]` — interpreter + CPU compiled.  Lisp syntax (`map (lambda (x) (sum_to 5 x)) [0 10 20]`) and ML syntax (`map (\\x -> sum_to 5 x) (iota 3)`) both work.  ML-syntax map still requires an inline lambda/operator (named functions not accepted by the parser, pre-existing limitation).  (`tests/test_execution.py::test_map_over_recursive_function_lisp`, `test_map_over_recursive_function_ml`)
 - [x] **12.22.4** Tail-call optimization: interpreter trampoline uses O(1) Python stack; compiled uses native `func.call`
 
 #### 12.23 Test: self-recursion, non-tail
@@ -783,7 +783,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 - [x] **12.24.1** `is_even 4 = true`, `is_odd 4 = false` — interpreter
 - [x] **12.24.2** `is_even 4 = true`, `is_odd 4 = false` — CPU compiled
 - [x] **12.24.3** `is_even 10000 = true` — CPU compiled AND interpreter (mutual trampoline lifts the ~400 call Python stack limit)
-- [x] **12.24.4** Three-function mutual: `A→B→C→A` — interpreter + CPU compiled (verified `a(9)=10`)
+- [x] **12.24.4** Three-function mutual: `A→B→C→A` — interpreter + CPU compiled, `a(9)=0` (`tests/test_phase7_dependent_functions.py::test_three_function_mutual_recursion_interpreted_and_compiled`)
 
 #### 12.25 Test: higher-order recursion
 
@@ -815,6 +815,35 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 - [x] **12.30.1** `docs/IMPLEMENT_RECURSION.md` — updated with actual implementation notes
 - [x] **12.30.2** Example programs: `examples/factorial.remora`, `examples/fibonacci.remora`, `examples/tail_recursion.remora`
 - [x] **12.30.3** `CHANGELOG.md` — entry added
+
+#### 12.31 Module builder: `functions` propagation to map/fold builders
+
+- [x] **12.31.1** `_lower_iota_scalar_map_module`, `_lower_binary_map_module`, `_lower_map_cell_module` pass `functions` to `_MLIRMainModuleBuilder` so named functions referenced from map bodies are included in the module
+- [x] **12.31.2** `_lower_functions` filters output to only include texts starting with `func.func` (scalar-returning fold/reduce bodies that produce raw code are already inlined into their callers and must not appear at module scope)
+- [x] **12.31.3** Test: `map (lambda (x) (sum_to 5 x)) [0 10 20]` compiles and runs (Lisp + ML syntax)
+
+#### 12.32 Regression guard tests
+
+All of the following tests reside in `tests/test_execution.py` and
+`tests/test_phase7_dependent_functions.py` and run on every `uv run pytest`.
+
+| Test function | File | Covers |
+|---|---|---|
+| `test_array_valued_recursion_compiled` | test_execution | 12.26.2 — `double (iota 3) 2 = [0,4,8]` |
+| `test_array_valued_recursion_with_multiple_params` | test_execution | 12.26.3 — `scale_mult` with scalar+array params |
+| `test_array_valued_recursion_deeper` | test_execution | 12.26 — deep recursion `triple (iota 3) 3` |
+| `test_ackermann_compiled` | test_execution | 12.23.4 — `ack 3 3 = 61` |
+| `test_scalar_recursion_regression_fac` | test_execution | 12.23 — `fac 7 = 5040` |
+| `test_scalar_recursion_regression_fib` | test_execution | 12.23 — `fib 10 = 55` |
+| `test_tail_recursion_regression_sum_to` | test_execution | 12.22 — `sum_to 100 0 = 5050` |
+| `test_mutual_recursion_regression_even_odd` | test_execution | 12.24 — `is_even 4 = true` |
+| `test_map_over_recursive_function_lisp` | test_execution | 12.22.3 — Lisp map over recursive |
+| `test_map_over_recursive_function_ml` | test_execution | 12.22.3 — ML map over recursive |
+| `test_recursive_define_forall_typechecks` | test_phase7_dependent_functions | 12.2.6 — `define/forall` recursive typecheck |
+| `test_three_function_mutual_recursion_interpreted_and_compiled` | test_phase7_dependent_functions | 12.3.6 — three-function mutual |
+| `test_mutual_recursion_deep_interpreted_and_compiled` | test_phase7_dependent_functions | 12.24.3 — deep mutual (10k calls) |
+
+**Total: 13 regression tests across 2 files, all passing.**
 
 ---
 

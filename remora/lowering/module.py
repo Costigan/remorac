@@ -855,9 +855,16 @@ def _lower_tensor_if_result(
 
 
 def _lower_functions(functions: dict[str, HIRFunction]) -> str:
-    lowered = [
-        _lower_function(function, functions) for function in functions.values()
-    ]
+    lowered: list[str] = []
+    for function in functions.values():
+        text = _lower_function(function, functions)
+        # Only include functions whose lowering produces a proper
+        # func.func definition.  Scalar-returning fold/reduce bodies
+        # are emitted as raw code (for descriptor inlining) and must
+        # not be placed at module scope — they are already inlined
+        # into their callers.
+        if text.strip().startswith("func.func"):
+            lowered.append(text)
     return "\n\n".join(lowered)
 
 

@@ -987,7 +987,7 @@ def _lower_iota_scalar_map_module(
         tensor_env,
         scalar_env=scalar_env,
     )
-    builder = _MLIRMainModuleBuilder(result_type)
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
     builder.add_block(body)
     return builder.render(result_value)
 
@@ -1054,7 +1054,7 @@ def _lower_binary_map_module(
     body, result_value, result_type = _lower_binary_map_result(
         node, functions, tensor_env, scalar_env=scalar_env
     )
-    builder = _MLIRMainModuleBuilder(result_type)
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
     builder.add_block(body)
     return builder.render(result_value)
 
@@ -1177,7 +1177,7 @@ def _lower_map_cell_module(
     body, result_value, result_type = _lower_map_cell_result(
         node, functions, tensor_env, scalar_env=scalar_env
     )
-    builder = _MLIRMainModuleBuilder(result_type)
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
     builder.add_block(body)
     return builder.render(result_value)
 

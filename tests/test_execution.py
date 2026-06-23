@@ -957,3 +957,27 @@ def test_mutual_recursion_regression_even_odd():
         strict=True,
     )
     assert result.value is False
+
+
+def test_map_over_recursive_function_lisp():
+    """12.22.3: map over recursive function (Lisp syntax) — regression."""
+    src = (
+        "(define (sum_to [n acc]) "
+        "  (if (== n 0) acc (sum_to (- n 1) (+ acc n)))) "
+        "(map (lambda (x) (sum_to 5 x)) [0 10 20])"
+    )
+    from remora.runtime import evaluate_source_compiled
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    np.testing.assert_array_equal(result.value, [15, 25, 35])
+
+
+def test_map_over_recursive_function_ml():
+    """12.22.3: map over recursive function (ML syntax, lambda) — regression."""
+    # ML-syntax map requires an inline lambda/operator, not a named function.
+    result = evaluate_source_compiled(
+        "def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)\n"
+        "map (\\x -> sum_to 5 x) (iota 3)",
+        include_prelude=False,
+        strict=True,
+    )
+    np.testing.assert_array_equal(result.value, [15, 16, 17])  # sum_to 5 [0,1,2]
