@@ -662,8 +662,8 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 
 #### 12.7 Interpreter: mutual recursion trampoline
 
-- [ ] **12.7.1** Mutual trampoline not implemented — cross-function calls still use Python stack (~400 call depth before RecursionError)
-- [ ] **12.7.2** Deep mutual recursion needs the state-machine approach (Milestone 2) or merged trampoline
+- [x] **12.7.1** `_trampoline_closure` extended with `all_func_lams` dict; `_TailCall` carries `func_name`; `_eval_expr_tail` checks all functions in the group and also detects `TypedLambda(FuncDef)` calls
+- [x] **12.7.2** Test: `is_even 10000 = true` — deep mutual recursion via trampoline (verified at 10k+ alternating calls)
 
 #### 12.8 Update existing rejection tests
 
@@ -777,7 +777,7 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 - [x] **12.24.1** `is_even 4 = true`, `is_odd 4 = false` — interpreter
 - [x] **12.24.2** `is_even 4 = true`, `is_odd 4 = false` — CPU compiled
-- [x] **12.24.3** `is_even 5000 = true` — CPU compiled; interpreter limited to ~400 mutual calls (Python stack)
+- [x] **12.24.3** `is_even 10000 = true` — CPU compiled AND interpreter (mutual trampoline lifts the ~400 call Python stack limit)
 - [ ] **12.24.4** Three-function mutual: `A→B→C→A` — not tested
 
 #### 12.25 Test: higher-order recursion
@@ -787,8 +787,8 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 #### 12.26 Test: array-valued recursion
 
 - [x] **12.26.1** `double (iota 3) 2 = [0, 4, 8]` — interpreter works
-- [ ] **12.26.2** CPU compiled — blocked: tensor lowering path (`_lower_if_tensor_input`) assumes array-typed conditions but recursive functions have scalar conditions with array branches
-- [ ] **12.26.3** `map`/`fold` in recursive body — blocked by same tensor lowering limitation
+- [~] **12.26.2** CPU compiled — MLIR generation succeeds (`verify=False` passes). Blocked: CPU pipeline's `bufferize-function-boundaries` rejects the callgraph cycle (`@double → @double`). Fix requires pipeline change (split bufferization or pre-inline non-recursive calls), not a lowering change.
+- [~] **12.26.3** `map`/`fold` in recursive body — HIRCall in tensor path correctly lowers via `_lower_tensor_input` with scalar arg support. Same pipeline block as 12.26.2.
 
 #### 12.27 Test: Thomas algorithm (heat1d)
 

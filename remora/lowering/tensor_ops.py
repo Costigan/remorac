@@ -667,7 +667,7 @@ def _lower_tensor_input(
             arg_list = ", ".join(arg_names)
             type_list = ", ".join(arg_types)
             call_line = (
-                f"    {call_name} = func.call @{node.func_name}({arg_list})"
+                f"    {call_name} = func.call @{func.name}({arg_list})"
                 f" : ({type_list}) -> {result_type}"
             )
             code = "\n".join(arg_lines + [call_line]) if arg_lines else call_line
@@ -2398,7 +2398,7 @@ def _lower_body_in_loop(
             arg_list = ", ".join(arg_vals)
             type_list = ", ".join(arg_types)
             lines.append(
-                f"    {call_result} = func.call @{expr.func_name}({arg_list})"
+                f"    {call_result} = func.call @{func.name}({arg_list})"
                 f" : ({type_list}) -> {result_mlir}"
             )
             return call_result, result_mlir
