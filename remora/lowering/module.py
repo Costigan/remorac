@@ -938,6 +938,9 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
             )
 
     if isinstance(function.return_type, ArrayType):
+        if _has_self_hir_call(function.body, function.name):
+            return _lower_recursive_tensor_function(function)
+
         code, result_name, lowered_result_type, _element_type = (
             _lower_tensor_input(
                 function.body,
@@ -1056,6 +1059,15 @@ def _output_descriptor_export_function(
     return "\n".join(lines)
 
 
+def _plain_memref_type(array_type: ArrayType) -> str:
+    """Plain memref type for memref.alloc (no strided layout)."""
+    dims = "x".join(str(d.value) for d in array_type.shape)
+    elem = type_to_mlir(array_type.element)
+    if dims:
+        return f"memref<{dims}x{elem}>"
+    return f"memref<{elem}>"
+
+
 def _output_memref_type(return_type: RemoraType) -> str:
     if isinstance(return_type, ScalarType):
         return f"memref<{type_to_mlir(return_type)}>"
@@ -1136,6 +1148,150 @@ def _output_descriptor_store_lines(
         indent = "    " + "  " * axis
         lines.append(f"{indent}}}")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Recursive tensor function lowering
+# ---------------------------------------------------------------------------
+
+
+def _lower_recursive_tensor_function(function: HIRFunction) -> str:
+    """Create a manual bufferization wrapper for recursive tensor functions.
+
+    Produces two function definitions:
+    1. @__{name}_mref – memref-interface internal function (no tensor args/results)
+    2. @{name} – thin tensor wrapper that copies to/from memrefs and delegates
+
+    The memref interface means the ``bufferize-function-boundaries`` pipeline
+    pass sees a memref→memref function and skips it, breaking the callgraph
+    self-loop for *all* recursion forms (tail, non-tail, mutual).
+    """
+    impl_name = f"__{function.name}_mref"
+
+    # Memref shim HIRFunction so _lower_tensor_input resolves recursive
+    # HIRCalls to @__{name}_mref and the HIRCall handler emits memref callees.
+    impl_function = HIRFunction(
+        name=impl_name,
+        params=function.params,
+        body=function.body,
+        return_type=function.return_type,
+    )
+
+    mref_out = _plain_memref_type(function.return_type)
+    result_type_mlir = type_to_mlir(function.return_type)
+
+    # ── impl function @__{name}_mref ──────────────────────────────────
+    impl_params: list[str] = [f"%out: {mref_out}"]
+    for i, param in enumerate(function.params):
+        if isinstance(param.type, ArrayType):
+            impl_params.append(f"%in{i}: {_plain_memref_type(param.type)}")
+        else:
+            impl_params.append(f"%arg{i}: {type_to_mlir(param.type)}")
+
+    impl_lines: list[str] = []
+    tensor_env: TensorEnv = {}
+    scalar_env: dict[str, _Operand] = {}
+
+    for i, param in enumerate(function.params):
+        mlir_type = type_to_mlir(param.type)
+        if isinstance(param.type, ArrayType):
+            tn = f"%in_tensor_{i}"
+            impl_lines.append(
+                f"    {tn} = bufferization.to_tensor %in{i} restrict"
+                f" : {_plain_memref_type(param.type)}"
+            )
+            tensor_env[param.name] = _TensorValue(
+                tn, mlir_type, type_to_mlir(param.type.element)
+            )
+        else:
+            scalar_env[param.name] = _Operand(f"%arg{i}", [], mlir_type)
+            tensor_env[param.name] = _TensorValue(
+                f"%arg{i}", mlir_type, mlir_type
+            )
+
+    body_code, result_name, lowered_type, _elem = _lower_tensor_input(
+        function.body,
+        "result",
+        {function.name: impl_function},
+        tensor_env,
+        scalar_env,
+    )
+
+    if lowered_type != result_type_mlir:
+        raise RemoraLoweringError(
+            "lowered recursive function result type mismatch: "
+            f"{lowered_type} != {result_type_mlir}"
+        )
+
+    impl_lines.append(body_code)
+
+    store_lines = _output_descriptor_store_lines(
+        function.return_type,
+        result_type_mlir,
+        mref_out,
+        result_name=result_name,
+        out_name="%out",
+    )
+    impl_lines.extend(store_lines)
+    impl_lines.append("    return")
+
+    impl_body = "\n".join(impl_lines)
+    impl_text = (
+        f"  func.func private @{impl_name}"
+        f"({', '.join(impl_params)}) {{\n"
+        f"{impl_body}\n"
+        f"  }}"
+    )
+
+    # ── tensor wrapper @{name} ────────────────────────────────────────
+    wrapper_params = [
+        f"%arg{i}: {type_to_mlir(param.type)}"
+        for i, param in enumerate(function.params)
+    ]
+    wrapper_lines: list[str] = []
+    wrapper_lines.append(f"    %out = memref.alloc() : {mref_out}")
+
+    call_args = ["%out"]
+    call_types = [mref_out]
+
+    for i, param in enumerate(function.params):
+        if isinstance(param.type, ArrayType):
+            mt = _plain_memref_type(param.type)
+            wrapper_lines.append(f"    %inw{i} = memref.alloc() : {mt}")
+            cl = _output_descriptor_store_lines(
+                param.type,
+                type_to_mlir(param.type),
+                mt,
+                result_name=f"%arg{i}",
+                out_name=f"%inw{i}",
+                const_prefix=f"_w{i}",
+            )
+            wrapper_lines.extend(cl)
+            call_args.append(f"%inw{i}")
+            call_types.append(mt)
+        else:
+            call_args.append(f"%arg{i}")
+            call_types.append(type_to_mlir(param.type))
+
+    wrapper_lines.append(
+        f"    func.call @{impl_name}({', '.join(call_args)})"
+        f" : ({', '.join(call_types)}) -> ()"
+    )
+    wrapper_lines.append(
+        f"    %result = bufferization.to_tensor %out restrict writable"
+        f" : {mref_out}"
+    )
+    wrapper_lines.append(f"    return %result : {result_type_mlir}")
+
+    wrapper_body = "\n".join(wrapper_lines)
+    wrapper_text = (
+        f"  func.func private @{function.name}"
+        f"({', '.join(wrapper_params)}) -> {result_type_mlir} {{\n"
+        f"{wrapper_body}\n"
+        f"  }}"
+    )
+
+    return f"{impl_text}\n\n{wrapper_text}"
 
 
 # ---------------------------------------------------------------------------

@@ -679,7 +679,7 @@ def evaluate_source_compiled(
                 strict=True,
             )
         except Exception as e:
-            if type(e).__name__ == "RemoraLoweringError":
+            if type(e).__name__ in ("RemoraLoweringError", "PipelineUnavailable"):
                 return evaluate_source(
                     source, include_prelude=include_prelude, syntax=syntax
                 )

@@ -106,6 +106,116 @@ def _tensor_rank_from_mlir_type(mlir_type: str) -> int:
     return dim_count
 
 
+# ---------------------------------------------------------------------------
+# Memref-interface call lowering (manual bufferization for recursion)
+# ---------------------------------------------------------------------------
+
+
+def _lower_mref_call(
+    node: HIRCall,
+    func: HIRFunction,
+    prefix: str,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    """Lower a HIRCall to a memref-interface function (``__mref`` suffix).
+
+    Tensor-typed args are wrapped in ``memref.alloc`` + copy before the
+    call and the result is read back via ``bufferization.to_tensor``
+    afterwards.  This keeps the call boundary purely memref→memref so the
+    bufferize-function-boundaries pipeline pass sees no tensor loopback.
+    """
+    from remora.lowering.module import (
+        _plain_memref_type,
+        _output_descriptor_store_lines,
+    )
+    from remora.lowering.scalar import (
+        _RegionEmitter,
+        _Operand as _ScOperand,
+    )
+    from remora.types import ScalarType as _ScalarType
+
+    result_type = type_to_mlir(node.result_type)
+    result_elem = (
+        type_to_mlir(node.result_type.element)
+        if isinstance(node.result_type, ArrayType)
+        else result_type
+    )
+
+    arg_lines: list[str] = []
+    call_args: list[str] = []   # SSA names passed to func.call
+    call_types: list[str] = []  # MLIR types for call signature
+
+    # Output memref (allocated first; callee stores result into it)
+    mref_out_type = _plain_memref_type(node.result_type)
+    out_memref = f"%{prefix}_out"
+    arg_lines.append(f"    {out_memref} = memref.alloc() : {mref_out_type}")
+    call_args.append(out_memref)
+    call_types.append(mref_out_type)
+
+    for i, arg in enumerate(node.args):
+        arg_remora = _expr_result_type(arg)
+        if isinstance(arg_remora, ArrayType):
+            arg_code, arg_name, arg_type, arg_elem = _lower_tensor_input(
+                arg,
+                _join_prefix(prefix, f"a{i}"),
+                functions,
+                tensor_env,
+                scalar_env,
+            )
+            if arg_code:
+                arg_lines.append(arg_code)
+
+            # Wrap tensor in a fresh memref
+            in_mref_type = _plain_memref_type(arg_remora)
+            in_memref = f"%{prefix}_in{i}"
+            arg_lines.append(
+                f"    {in_memref} = memref.alloc() : {in_mref_type}"
+            )
+            copy_lines = _output_descriptor_store_lines(
+                arg_remora,
+                arg_type,
+                in_mref_type,
+                result_name=arg_name,
+                out_name=in_memref,
+                const_prefix=f"_c{prefix}_{i}",
+            )
+            arg_lines.extend(copy_lines)
+            call_args.append(in_memref)
+            call_types.append(in_mref_type)
+        else:
+            arg_prefix = _join_prefix(prefix, f"a{i}")
+            sc_em = _RegionEmitter(
+                input_name=arg_prefix,
+                input_type="",
+                functions=functions,
+                prefix=arg_prefix,
+            )
+            sc_op = sc_em.emit_expr(arg, scalar_env or {})
+            arg_lines.extend(sc_em.lines)
+            call_args.append(sc_op.value)
+            call_types.append(sc_op.type)
+
+    call_name = f"%{prefix}"
+    arg_list = ", ".join(call_args)
+    type_list = ", ".join(call_types)
+
+    # The memref function returns void — result is written into %out_memref
+    arg_lines.append(
+        f"    func.call @{func.name}({arg_list})"
+        f" : ({type_list}) -> ()"
+    )
+    # Read result tensor from the output memref
+    arg_lines.append(
+        f"    {call_name} = bufferization.to_tensor {out_memref}"
+        f" restrict writable : {mref_out_type}"
+    )
+
+    code = "\n".join(arg_lines)
+    return code, call_name, result_type, result_elem
+
+
 def _fold_iterators(rank: int) -> str:
     if rank < 1:
         raise RemoraLoweringError("fold rank must be at least 1")
@@ -635,6 +745,12 @@ def _lower_tensor_input(
     if isinstance(node, HIRCall):
         func = functions.get(node.func_name)
         if func is not None:
+            # ── memref-interface call (manual bufferization wrapper) ──
+            if func.name.startswith("__") and func.name.endswith("_mref"):
+                return _lower_mref_call(
+                    node, func, prefix, functions, tensor_env, scalar_env
+                )
+
             from remora.lowering.scalar import _RegionEmitter, _Operand as _ScOperand
             from remora.types import ScalarType as _ScalarType
             arg_lines: list[str] = []
@@ -747,12 +863,26 @@ def _lower_if_tensor_input_scalar_cond(
     result_elem = type_to_mlir(node.result_type.element)
     result_name = f"%{prefix}"
 
+    # Put branch computations *inside* the scf.if regions so that
+    # recursive / side-effecting operations are guarded by the
+    # condition (control-dependent), not executed unconditionally.
+    def _indent_block(text: str, spaces: int = 6) -> str:
+        prefix = " " * spaces
+        return "\n".join(
+            prefix + line.lstrip()
+            for line in text.split("\n")
+            if line.strip()
+        )
+
+    _inthen = _indent_block(then_code)
+    _inelse = _indent_block(else_code)
+
     code = f"""{cond_lines}
-{then_code}
-{else_code}
     {result_name} = scf.if {cond_val} -> ({result_type}) {{
+{_inthen}
       scf.yield {then_name} : {result_type}
     }} else {{
+{_inelse}
       scf.yield {else_name} : {result_type}
     }}"""
     return code, result_name, result_type, result_elem
