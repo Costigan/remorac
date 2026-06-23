@@ -1,26 +1,16 @@
 import json
+import os
 from pathlib import Path
 
 from remora.cli import main
 
-try:
-    from remora.runtime import CUDARuntime, RuntimeUnavailable
-except RuntimeUnavailable:
-    pass  # bindings not installed
-
-
-def _gpu_available() -> bool:
-    try:
-        CUDARuntime().close()
-    except (RuntimeUnavailable, Exception):
-        return False
-    return True
-
-
-_GPU_AVAILABLE = _gpu_available()
-
 
 ACCEPTANCE_DIR = Path(__file__).parent / "acceptance"
+
+# GPU acceptance cases require a live CUDA runtime. When REMORA_TEST_GPU is
+# not explicitly "1" (CI sets it to "0"), degrade GPU cases to a skip rather
+# than a failure — consistent with the conftest GPU-gating policy.
+_GPU_REQUIRED = os.environ.get("REMORA_TEST_GPU") == "1"
 
 
 def load_cases():
@@ -32,7 +22,7 @@ def test_acceptance_manifest_cases(capsys):
         assert case["category"] in {"supported", "rejected", "deferred"}, case["name"]
         source = ACCEPTANCE_DIR / case["path"]
 
-        if case["target"] == "gpu" and not _GPU_AVAILABLE:
+        if case["target"] == "gpu" and not _GPU_REQUIRED:
             continue
 
         args = ["--target", case["target"], str(source)]
