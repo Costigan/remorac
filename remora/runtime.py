@@ -208,6 +208,89 @@ class Arena:
             self._ptr = 0
 
 
+class DeviceMemoryPool:
+    """Recycle device buffers by size class to kill the per-call alloc/free tax.
+
+    A request for ``n`` bytes is rounded up to a power-of-two size class and
+    served from a free list for that class, falling back to a real
+    ``cuMemAlloc`` only when the class is empty.  Buffers returned via
+    ``free`` are kept for reuse (not freed) until ``clear``/``close``.
+
+    Because over-allocating to the class size never shrinks the usable region
+    (descriptors and copies use the real array extent), the extra bytes are
+    simply unused — so a buffer of class C serves any request that maps to C.
+
+    The pool persists across ``RemoraExecutor.execute`` calls and, when shared
+    via a ``CUDARuntime``, across executors — so iterative Python+Remora loops
+    stop paying alloc/free on every step.  Steady-state memory is bounded by
+    (number of distinct size classes) x (peak concurrent buffers per class),
+    not by the number of calls.
+    """
+
+    _MIN_CLASS = 256
+
+    def __init__(self, runtime: "CUDARuntime", *, enabled: bool = True) -> None:
+        self._runtime = runtime
+        self._enabled = enabled
+        self._free: dict[int, list[int]] = {}
+        self._reserved_bytes = 0
+        self._device_allocs = 0  # real cuMemAlloc calls
+        self._reuses = 0         # requests served from the free lists
+
+    @classmethod
+    def size_class(cls, nbytes: int) -> int:
+        """Round a byte count up to its power-of-two size class."""
+        n = max(cls._MIN_CLASS, int(nbytes))
+        return 1 << (n - 1).bit_length()
+
+    def alloc(self, nbytes: int) -> int:
+        cls = self.size_class(nbytes)
+        if self._enabled:
+            bucket = self._free.get(cls)
+            if bucket:
+                self._reuses += 1
+                return bucket.pop()
+        ptr = self._runtime.alloc(cls)
+        self._device_allocs += 1
+        self._reserved_bytes += cls
+        return ptr
+
+    def free(self, ptr: int, nbytes: int) -> None:
+        cls = self.size_class(nbytes)
+        if not self._enabled:
+            self._runtime.free(ptr)
+            self._reserved_bytes -= cls
+            return
+        self._free.setdefault(cls, []).append(ptr)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable/disable recycling.  Disabling drains the free lists so the
+        next allocations come straight from the driver."""
+        if not enabled:
+            self.clear()
+        self._enabled = enabled
+
+    def clear(self) -> None:
+        """Return all pooled buffers to the driver (real ``cuMemFree``)."""
+        for cls, bucket in self._free.items():
+            for ptr in bucket:
+                self._runtime.free(ptr)
+                self._reserved_bytes -= cls
+        self._free.clear()
+
+    # ``close`` is an alias so the pool composes with other close()-able owners.
+    close = clear
+
+    def stats(self) -> dict[str, object]:
+        return {
+            "device_allocs": self._device_allocs,
+            "reuses": self._reuses,
+            "reserved_bytes": self._reserved_bytes,
+            "pooled_buffers": sum(len(b) for b in self._free.values()),
+            "size_classes": {c: len(b) for c, b in self._free.items() if b},
+        }
+
+
 @dataclass(frozen=True)
 class CompiledCPUArtifact:
     library_path: Path
@@ -282,6 +365,7 @@ class CUDARuntime:
         self._cuda = _load_cuda_driver()
         self._ctx: Any | None = None
         self._deferred_frees: list[int] = []
+        self._memory_pool: "DeviceMemoryPool | None" = None
         _cuda_check(self._cuda, self._cuda.cuInit(0), "cuInit failed")
         self._device = _cuda_value(
             self._cuda,
@@ -293,6 +377,18 @@ class CUDARuntime:
             self._cuda.cuCtxCreate(None, 0, self._device),
             "cuCtxCreate failed",
         )
+
+    @property
+    def memory_pool(self) -> "DeviceMemoryPool":
+        """Shared device buffer pool for this runtime (lazily created).
+
+        Executors recycle device buffers through this pool, so allocations are
+        reused across ``execute`` calls and across executors that share the
+        runtime.  Drained when the runtime is closed.
+        """
+        if self._memory_pool is None:
+            self._memory_pool = DeviceMemoryPool(self)
+        return self._memory_pool
 
     def load_ptx(self, ptx: str) -> "CUDAModule":
         module = _cuda_value(
@@ -349,6 +445,9 @@ class CUDARuntime:
 
     def close(self) -> None:
         self._free_deferred()
+        if self._memory_pool is not None:
+            self._memory_pool.clear()
+            self._memory_pool = None
         if self._ctx is not None:
             _cuda_check(self._cuda, self._cuda.cuCtxDestroy(self._ctx), "cuCtxDestroy failed")
             self._ctx = None

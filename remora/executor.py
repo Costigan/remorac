@@ -11,7 +11,7 @@ from remora.abi import element_strides, make_memref_descriptor
 from remora.codegen import KernelMeta
 from remora.errors import RemoraError
 from remora.execution_plan import ExecutionPlan, KernelStep, LoopPlan, PlanStep
-from remora.runtime import CUDARuntime
+from remora.runtime import CUDARuntime, DeviceMemoryPool
 
 
 class RemoraExecutorError(RemoraError):
@@ -107,40 +107,34 @@ class RemoraExecutor:
             kernel.name: self._modules[0].get_function(kernel.name)
             for kernel in kernels
         }
-        self._pool: dict[int, list[int]] = {}
-        self._pool_enabled = True
+        # Prefer the runtime's shared buffer pool so allocations are recycled
+        # across execute() calls and across executors that share the runtime.
+        # Runtimes without one (e.g. lightweight test fakes) get a local pool
+        # that this executor owns and drains on close().
+        shared_pool = getattr(self._rt, "memory_pool", None)
+        if shared_pool is not None:
+            self._pool = shared_pool
+            self._owns_pool = False
+        else:
+            self._pool = DeviceMemoryPool(self._rt)
+            self._owns_pool = True
 
     def set_pool_enabled(self, enabled: bool) -> None:
         """Enable or disable the device memory pool.
 
-        When disabled, `_pool_alloc`/`_pool_free` route directly to the
-        runtime's `alloc`/`free`.  Disabling drains any pooled buffers so
-        the next allocations come straight from the driver.
+        Delegates to the runtime's shared :class:`DeviceMemoryPool`.  When
+        disabled, allocations go straight to the driver and any pooled buffers
+        are drained.
         """
-        if not enabled:
-            for ptrs in self._pool.values():
-                for ptr in ptrs:
-                    self._rt.free(ptr)
-            self._pool.clear()
-        self._pool_enabled = enabled
+        self._pool.set_enabled(enabled)
 
     def _pool_alloc(self, nbytes: int) -> int:
-        """Allocate device memory, reusing a pooled buffer if available."""
-        nbytes = max(4, nbytes)
-        if not self._pool_enabled:
-            return self._rt.alloc(nbytes)
-        cached = self._pool.get(nbytes)
-        if cached:
-            return cached.pop()
-        return self._rt.alloc(nbytes)
+        """Allocate device memory, reusing a pooled buffer of the same size class."""
+        return self._pool.alloc(max(4, nbytes))
 
     def _pool_free(self, ptr: int, nbytes: int) -> None:
         """Return device memory to the pool for reuse."""
-        nbytes = max(4, nbytes)
-        if not self._pool_enabled:
-            self._rt.free(ptr)
-            return
-        self._pool.setdefault(nbytes, []).append(ptr)
+        self._pool.free(ptr, max(4, nbytes))
 
     def add_module(self, ptx: str, kernels: list[KernelMeta]) -> None:
         """Load additional kernels from a separate PTX module."""
@@ -495,10 +489,11 @@ class RemoraExecutor:
         return self.execute(kernel_name, [] if inputs is None else inputs, arena=arena)
 
     def close(self) -> None:
-        for ptrs in self._pool.values():
-            for ptr in ptrs:
-                self._rt.free(ptr)
-        self._pool.clear()
+        # A pool we own (no shared runtime pool) must be drained here; a shared
+        # runtime pool is left intact for reuse and freed when the runtime is
+        # closed (below, if we own the runtime).
+        if self._owns_pool:
+            self._pool.clear()
         for mod in self._modules:
             mod.close()
         if self._owns_runtime:
