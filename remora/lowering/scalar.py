@@ -249,16 +249,16 @@ class _RegionEmitter:
             return _lower_let(self, expr, env)
         if isinstance(expr, HIRIf):
             condition = self.emit_expr(expr.condition, env)
-            then_branch = self.emit_expr(expr.then_branch, env)
-            else_branch = self.emit_expr(expr.else_branch, env)
-            condition = self._coerce(condition, "i1")
             result_type = type_to_mlir(expr.result_type)
-            then_branch = self._coerce(then_branch, result_type)
-            else_branch = self._coerce(else_branch, result_type)
+            condition = self._coerce(condition, "i1")
             result = self.temp()
             self.lines.append(
-                f"      {result} = arith.select {condition.value}, {then_branch.value}, {else_branch.value} : {result_type}"
+                f"      {result} = scf.if {condition.value} -> ({result_type}) {{"
             )
+            self.lines.append(f"        scf.yield {self._coerce(self.emit_expr(expr.then_branch, env), result_type).value} : {result_type}")
+            self.lines.append("      } else {")
+            self.lines.append(f"        scf.yield {self._coerce(self.emit_expr(expr.else_branch, env), result_type).value} : {result_type}")
+            self.lines.append("      }")
             return _Operand(result, [], result_type)
         if isinstance(expr, HIRCall):
             return self._emit_call(expr, env)

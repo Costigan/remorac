@@ -493,6 +493,38 @@ class HIRLoweringError(RemoraError):
     """Raised when typed AST to HIR lowering hits deferred syntax."""
 
 
+_current_func_names: set[str] | None = None
+
+
+def _gather_func_def_lambdas(expr: TypedExpr, seen: set[int] | None = None) -> dict[str, TypedLambda]:
+    """Walk a typed expression and collect TypedLambda nodes wrapping FuncDef entries."""
+    from remora.ast_nodes import FuncDef as _FuncDef
+    result: dict[str, TypedLambda] = {}
+    if seen is None:
+        seen = set()
+    eid = id(expr)
+    if eid in seen:
+        return result
+    seen.add(eid)
+    if isinstance(expr, TypedLambda) and isinstance(expr.expr, _FuncDef):
+        result[expr.expr.name] = expr
+    for attr in ("func", "body", "condition", "then_branch", "else_branch",
+                 "value", "left", "right", "array", "init",
+                 "source", "predicate", "image", "columns",
+                 "pair", "box_value", "target", "index", "update",
+                 "function", "function_body", "count", "start", "end"):
+        child = getattr(expr, attr, None)
+        if child is not None and hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+            result.update(_gather_func_def_lambdas(child, seen))
+    for attr in ("args", "arrays", "elements", "definitions", "indices"):
+        children = getattr(expr, attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+                    result.update(_gather_func_def_lambdas(child, seen))
+    return result
+
+
 def lower_to_hir(program: TypedProgram) -> HIRProgram:
     main = program.body
     if main is None:
@@ -502,13 +534,30 @@ def lower_to_hir(program: TypedProgram) -> HIRProgram:
             )
         return HIRProgram([], None, None)
 
-    lowered_main = lower_expr(main)
-    for definition in reversed(program.definitions):
-        if definition.value is None:
-            continue
-        lowered_main = _wrap_value_definition(definition, lowered_main)
+    func_lambdas = _gather_func_def_lambdas(main)
+    global _current_func_names
+    _current_func_names = set(func_lambdas.keys())
+    try:
+        lowered_main = lower_expr(main)
+        for definition in reversed(program.definitions):
+            if definition.value is None:
+                continue
+            lowered_main = _wrap_value_definition(definition, lowered_main)
 
-    return HIRProgram([], lowered_main, program.type)
+        hir_functions: list[HIRFunction] = []
+        for name, typed_lam in func_lambdas.items():
+            hir_fn_body = lower_expr(typed_lam.body)
+            hir_fn = HIRFunction(
+                name,
+                [HIRParam(p_name, p_type) for p_name, p_type in typed_lam.params],
+                hir_fn_body,
+                typed_lam.type.result,
+            )
+            hir_functions.append(hir_fn)
+
+        return HIRProgram(hir_functions, lowered_main, program.type)
+    finally:
+        _current_func_names = None
 
 
 def lower_expr(expr: TypedExpr) -> HIRExpr:
@@ -700,6 +749,11 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
                 expr.type,
             )
         if isinstance(expr.func, TypedLambda):
+            if isinstance(expr.func.expr, LambdaExpr):
+                return _inline_lambda_call(expr.func, expr.args, expr.type)
+            func_name = _func_def_name(expr.func)
+            if func_name is not None and _has_recursive_call(expr.func):
+                return HIRCall(func_name, [lower_expr(arg) for arg in expr.args], expr.type)
             return _inline_lambda_call(expr.func, expr.args, expr.type)
         if isinstance(expr.func, TypedIndexApp):
             return _inline_lambda_call(expr.func.function, expr.args, expr.type)
@@ -913,6 +967,49 @@ def _typed_node_var_name(expr: TypedExpr) -> str | None:
     if isinstance(expr, TypedExprNode) and isinstance(expr.expr, VarExpr):
         return expr.expr.name
     return None
+
+
+def _func_def_name(typed_lam: TypedLambda) -> str | None:
+    from remora.ast_nodes import FuncDef as _FuncDef
+    if isinstance(typed_lam.expr, _FuncDef):
+        return typed_lam.expr.name
+    return None
+
+
+def _has_recursive_call(typed_lam: TypedLambda, seen: set[int] | None = None) -> bool:
+    """Check if a TypedLambda's body contains a recursive call to itself
+    or a call to another named function (indicating mutual recursion)."""
+    from remora.ast_nodes import FuncDef as _FuncDef, VarExpr as _VarExpr
+    if not isinstance(typed_lam.expr, _FuncDef):
+        return False
+    if seen is None:
+        seen = set()
+    eid = id(typed_lam)
+    if eid in seen:
+        return False
+    seen.add(eid)
+
+    def _check(expr) -> bool:
+        if isinstance(expr, TypedApp):
+            if isinstance(expr.func, TypedExprNode) and isinstance(expr.func.expr, _VarExpr):
+                if expr.func.expr.name not in ALL_PRIMITIVE_OPS:
+                    return True
+        for attr in ("func", "body", "condition", "then_branch", "else_branch",
+                     "value", "left", "right", "array", "init"):
+            child = getattr(expr, attr, None)
+            if child is not None and hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+                if _check(child):
+                    return True
+        for attr in ("args", "arrays", "elements"):
+            children = getattr(expr, attr, None)
+            if isinstance(children, (list, tuple)):
+                for child in children:
+                    if hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+                        if _check(child):
+                            return True
+        return False
+
+    return _check(typed_lam.body)
 
 
 def _operator_like_expr(expr: TypedExprNode) -> str | None:

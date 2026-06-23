@@ -845,12 +845,14 @@ def _lower_tensor_if_result(
 
 def _lower_functions(functions: dict[str, HIRFunction]) -> str:
     lowered = [
-        _lower_function(function) for function in functions.values()
+        _lower_function(function, functions) for function in functions.values()
     ]
     return "\n\n".join(lowered)
 
 
-def _lower_function(function: HIRFunction) -> str:
+def _lower_function(
+    function: HIRFunction, functions: dict[str, HIRFunction]
+) -> str:
     has_array_params = any(
         isinstance(param.type, ArrayType)
         for param in function.params
@@ -876,7 +878,7 @@ def _lower_function(function: HIRFunction) -> str:
     emitter = _RegionEmitter(
         input_name="",
         input_type="",
-        functions={function.name: function},
+        functions=functions,
     )
     value = emitter.emit_expr(function.body, env)
     lines = [
