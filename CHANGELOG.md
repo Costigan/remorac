@@ -66,6 +66,57 @@ my-def is_odd n = ... is_even (n-1)
 ```
 All patterns work on the interpreter AND compiled CPU path.
 
+### Array-valued recursive functions — CPU compilation
+
+Array-typed recursive functions (e.g. `double arr n = ... double
+(map (* 2) arr) (n - 1)`) previously failed in the CPU pipeline:
+`bufferize-function-boundaries` rejected the `@double → @double`
+callgraph cycle.  Fixed via manual bufferization:
+
+- **`_lower_recursive_tensor_function`** (`module.py`): emits two
+  functions — `@__{name}_mref` (memref-interface internal function,
+  no tensor args/results) and a thin tensor wrapper `@{name}` that
+  copies tensors→memrefs before the call and reads back after.
+- **`_lower_mref_call`** (`tensor_ops.py`): detects memref-interface
+  callees (name starts with `__`, ends with `_mref`) and wraps
+  tensor args in `memref.alloc` + copy loops before the call.
+- **`scf.if` branch placement**: `_lower_if_tensor_input_scalar_cond`
+  now puts branch computations *inside* `scf.if` regions (not eagerly
+  before them), so recursive calls are control-dependent and don't
+  infinite-loop.
+- **Module builder**: `_lower_iota_scalar_map_module` and friends
+  pass `functions` to `_MLIRMainModuleBuilder` so recursive functions
+  referenced from map bodies are included in the module.
+- **`_lower_functions` filter**: only emits texts starting with
+  `func.func` — scalar-returning fold/reduce bodies (raw code) stay
+  inlined via callers.
+- Verified: `double (iota 3) 2 = [0, 4, 8]`, `triple (iota 3) 3`,
+  `scale_mult (iota 3) 3 2`, `ack 3 3 = 61`.
+
+### `define/pi` mutual recursion — typechecker fix
+
+Mutual recursion with `define/pi` failed because dimension-variable
+binders matched trivially across call sites (both sides `DimVar("n")`)
+but the constraint solver short-circuited without recording a binding.
+- **Fix**: `_infer_index_bindings` now accepts remaining unbound
+  binders when their name appears in the free index variables of the
+  actual parameter types (dimension already resolved by caller context).
+
+### Runtime: PipelineUnavailable fallback
+
+- `evaluate_source_compiled(..., strict=False)` now catches
+  `PipelineUnavailable` in addition to `RemoraLoweringError`, falling
+  back to the interpreter when the MLIR toolchain is missing.
+
+### Regression tests
+
+- 15 regression tests across `test_execution.py` and
+  `test_phase7_dependent_functions.py` covering scalar recursion,
+  array-valued recursion, mutual recursion (2-way, 3-way, deep),
+  `define/forall` recursive typecheck, `define/pi` mutual typecheck
+  and interpreter, map-over-recursive (Lisp + ML), and Ackermann.
+- 545 tests pass; no regressions.
+
 ## GPU Radix Sort (256-bin, 4-pass)
 
 New `remora/_gpu_radix_sort.py`: a device-resident LSD radix sort for

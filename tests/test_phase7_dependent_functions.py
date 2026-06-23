@@ -798,3 +798,36 @@ def test_mutual_recursion_deep_interpreted_and_compiled():
     compiled = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
     assert interpreted.value is True
     assert compiled.value is True
+
+
+def test_mutual_recursion_define_pi_typechecks():
+    """12.3.5: mutual recursion with define/pi explicit annotations typechecks."""
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (is_even [x Int dummy (Array Int n)] Bool) "
+        "  (if (== x 0) #t (is_odd (- x 1) dummy))) "
+        "(define/pi ([n Dim]) "
+        "  (is_odd [x Int dummy (Array Int n)] Bool) "
+        "  (if (== x 0) #f (is_even (- x 1) dummy))) "
+        "(is_even 4 [1 2])"
+    )
+    typed = check_lisp(src)
+    from remora.types import BOOL
+    assert typed.type == BOOL
+
+
+def test_mutual_recursion_define_pi_executes_interpreter():
+    """12.3.5: define/pi mutual recursion runs in interpreter."""
+    src = (
+        "(define/pi ([n Dim]) "
+        "  (is_even [x Int dummy (Array Int n)] Bool) "
+        "  (if (== x 0) #t (is_odd (- x 1) dummy))) "
+        "(define/pi ([n Dim]) "
+        "  (is_odd [x Int dummy (Array Int n)] Bool) "
+        "  (if (== x 0) #f (is_even (- x 1) dummy))) "
+        "(is_even 4 [1 2])"
+    )
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    assert result.value is True
+    result = evaluate_source(src.replace("(is_even 4 [1 2])", "(is_odd 3 [1])"), include_prelude=False, syntax="lisp")
+    assert result.value is True   # 3 is odd

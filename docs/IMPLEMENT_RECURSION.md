@@ -640,7 +640,7 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.3.1** Mutual recursion works automatically via fixpoint chain (f → g → f re-enters `_typed_top_level_function` and hits `_active_functions` check)
 - [x] **12.3.2** No explicit SCC detection needed; each function's body inference extends the chain naturally
 - [x] **12.3.4** Test: `def is_even n = ... is_odd (n-1)` / `def is_odd n = ... is_even (n-1)` infers both types
-- [~] **12.3.5** Test: mutual recursion with `define/pi` explicit annotations — blocked: `define/pi` index-binder inference cannot resolve dimension variables across mutually recursive call sites when no array params carry the dimension
+- [x] **12.3.5** Test: mutual recursion with `define/pi` explicit annotations — typechecker and interpreter work.  Dimension variables declared in `define/pi` binders now flow across mutually recursive call sites via implicit self-binding when two DimVars match trivially.  CPU compilation blocked by pre-existing `HIRArrayLit in map body` lowering limitation (array-literal params).  (`tests/test_phase7_dependent_functions.py::test_mutual_recursion_define_pi_typechecks`, `test_mutual_recursion_define_pi_executes_interpreter`)
 - [x] **12.3.6** Test: three-function mutual recursion (A→B→C→A) — interpreter + CPU compiled, `a(9)=0` (`tests/test_phase7_dependent_functions.py::test_three_function_mutual_recursion_interpreted_and_compiled`)
 
 #### 12.4 Typechecker: higher-order recursion
@@ -842,8 +842,10 @@ All of the following tests reside in `tests/test_execution.py` and
 | `test_recursive_define_forall_typechecks` | test_phase7_dependent_functions | 12.2.6 — `define/forall` recursive typecheck |
 | `test_three_function_mutual_recursion_interpreted_and_compiled` | test_phase7_dependent_functions | 12.3.6 — three-function mutual |
 | `test_mutual_recursion_deep_interpreted_and_compiled` | test_phase7_dependent_functions | 12.24.3 — deep mutual (10k calls) |
+| `test_mutual_recursion_define_pi_typechecks` | test_phase7_dependent_functions | 12.3.5 — define/pi mutual typecheck |
+| `test_mutual_recursion_define_pi_executes_interpreter` | test_phase7_dependent_functions | 12.3.5 — define/pi mutual interpreter |
 
-**Total: 13 regression tests across 2 files, all passing.**
+**Total: 15 regression tests across 2 files, all passing.**
 
 ---
 

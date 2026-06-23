@@ -2719,6 +2719,20 @@ class TypeChecker:
                         function.loc,
                     )
                 bindings[name] = value
+        # When two DimVars with the same name compare equal (e.g. mutual
+        # define/pi recursion where both functions declare the same
+        # dimension variable), the constraint solver returns no binding
+        # because the equality is trivially satisfied.  Accept any
+        # remaining binder whose name appears as a free index variable
+        # in one of the actual param types — the dimension is already
+        # resolved by the caller's context.
+        from remora.dependent_types import free_type_index_vars
+        actual_free_vars = set().union(
+            *(free_type_index_vars(t) for t in actual_param_types)
+        )
+        for binder in binders:
+            if binder.name not in bindings and binder.name in actual_free_vars:
+                bindings[binder.name] = DimVar(binder.name)
         missing = [binder.name for binder in binders if binder.name not in bindings]
         if missing:
             names = ", ".join(missing)
