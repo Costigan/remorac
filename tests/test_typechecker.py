@@ -375,8 +375,7 @@ def test_top_level_function_definition_can_be_used_as_map_callable():
     assert typed.type == ArrayType(INT, (StaticDim(4),))
 
 
-def test_recursive_function_definition_is_deferred():
-    program = parse_program("def f x = f x\nf 1")
-
-    with pytest.raises(RemoraTypeError, match="recursive"):
-        TypeChecker().check_program(program)
+def test_recursive_function_definition_typechecks():
+    program = parse_program("def fac n = if n <= 1 then 1 else n * fac (n - 1)\nfac 5")
+    typed = TypeChecker().check_program(program)
+    assert typed.type == INT

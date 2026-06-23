@@ -773,10 +773,16 @@ def _source_gradient_request(
     return function_name, typed_grad.type.params
 
 
-def _collect_typed_grads(expr) -> list:
+def _collect_typed_grads(expr, _seen=None) -> list:
     """Recursively collect all TypedGrad nodes from a typed AST."""
     if expr is None:
         return []
+    if _seen is None:
+        _seen = set()
+    eid = id(expr)
+    if eid in _seen:
+        return []
+    _seen.add(eid)
     if isinstance(expr, TypedGrad):
         return [expr]
     results: list = []
@@ -786,16 +792,16 @@ def _collect_typed_grads(expr) -> list:
                  "counts", "target", "index", "update"):
         child = getattr(expr, attr, None)
         if child is not None and hasattr(child, '__class__') and child.__class__.__module__.startswith('remora'):
-            results.extend(_collect_typed_grads(child))
+            results.extend(_collect_typed_grads(child, _seen))
     for attr in ("args", "arrays", "elements", "definitions"):
         children = getattr(expr, attr, None)
         if isinstance(children, (list, tuple)):
             for child in children:
                 if hasattr(child, '__class__') and child.__class__.__module__.startswith('remora'):
-                    results.extend(_collect_typed_grads(child))
+                    results.extend(_collect_typed_grads(child, _seen))
                     child_val = getattr(child, 'value', None)
                     if child_val is not None and hasattr(child_val, '__class__') and child_val.__class__.__module__.startswith('remora'):
-                        results.extend(_collect_typed_grads(child_val))
+                        results.extend(_collect_typed_grads(child_val, _seen))
     return results
 
 

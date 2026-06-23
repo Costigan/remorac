@@ -12,7 +12,7 @@ def test_repl_evaluates_expression():
 def test_repl_cpu_target_uses_compiled_execution(monkeypatch):
     calls = []
 
-    def fake_evaluate_source_compiled(source, *, include_prelude=True, cpu_threads=None, cpu_vectorize=False, syntax="ml"):
+    def fake_evaluate_source_compiled(source, *, include_prelude=True, cpu_threads=None, cpu_vectorize=False, syntax="ml", strict=True):
         calls.append((source, include_prelude))
         from remora.runtime import EvaluationResult
         from remora.types import INT
@@ -197,11 +197,11 @@ def test_repl_load_file(tmp_path):
     assert session.eval_input("fold (+) 0.0 xs") == "6.0"
 
 
-def test_repl_reports_deferred_recursive_function_definition():
+def test_repl_supports_recursive_function_definition():
     session = ReplSession()
 
-    assert session.eval_input("def f x = f x") == "Defined: f : <function>"
-    assert "recursive function definitions are deferred" in session.eval_input("f 1")
+    assert session.eval_input("def fac n = if n <= 1 then 1 else n * fac (n - 1)") == "Defined: fac : <function>"
+    assert session.eval_input("fac 5") == "120"
 
 
 def test_repl_error_recovery():

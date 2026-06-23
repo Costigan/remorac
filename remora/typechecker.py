@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from remora.ast_nodes import (
     AppExpr,
@@ -720,8 +720,12 @@ class TypeChecker:
         """Create a new type checker with empty function registries."""
         self._functions: dict[str, FuncDef] = {}
         self._active_functions: set[str] = set()
+        self._provisional_func_types: dict[str, FuncType] = {}
         self._specializations: dict[
             tuple[str, tuple[DimExpr, ...]], TypedLambda
+        ] = {}
+        self._typed_lambda_cache: dict[
+            tuple[str, tuple[RemoraType, ...]], TypedLambda
         ] = {}
         self._timer = _Profiler()
         self._infer_cache: dict[tuple[int, int], tuple[int, TypedExpr]] = {}
@@ -756,7 +760,9 @@ class TypeChecker:
             if isinstance(definition, FuncDef)
         }
         self._active_functions = set()
+        self._provisional_func_types = {}
         self._specializations = {}
+        self._typed_lambda_cache = {}
 
         for definition in program.definitions:
             typed_definition, env = self._check_definition(definition, env)
@@ -2837,8 +2843,30 @@ class TypeChecker:
                     function.loc,
                 )
             return cached
+        if index_args is None:
+            param_key = (function.name, func_type.params)
+            if param_key in self._typed_lambda_cache:
+                return self._typed_lambda_cache[param_key]
         if function.name in self._active_functions:
-            raise RemoraTypeError("recursive function definitions are deferred", function.loc)
+            provisional_type = self._provisional_func_types.get(function.name)
+            if provisional_type is not None:
+                return cast(
+                    TypedLambda,
+                    TypedExprNode(
+                        VarExpr(function.name, function.loc),
+                        provisional_type,
+                    ),
+                )
+            raise RemoraTypeError(
+                f"recursive function {function.name} has no provisional type",
+                function.loc,
+            )
+        provisional_result = (
+            TypeVar(f"${function.name}_ret") if infer_result else func_type.result
+        )
+        self._provisional_func_types[function.name] = FuncType(
+            func_type.params, provisional_result
+        )
         self._active_functions.add(function.name)
         try:
             inner_env = env
@@ -2852,6 +2880,8 @@ class TypeChecker:
             else:
                 typed_result = self._coerce(typed_body, func_type.result, function.loc)
                 result_type = func_type.result
+            if isinstance(provisional_result, TypeVar) and result_type != provisional_result:
+                typed_result = _substitute_type_var(typed_result, provisional_result, result_type)
             inferred_type = FuncType(func_type.params, result_type)
             typed_lambda = TypedLambda(
                 function,
@@ -2863,11 +2893,14 @@ class TypeChecker:
                 else None,
                 index_args or (),
             )
+            if index_args is None:
+                self._typed_lambda_cache[param_key] = typed_lambda
             if cache_key is not None:
                 self._specializations[cache_key] = typed_lambda
             return typed_lambda
         finally:
             self._active_functions.remove(function.name)
+            del self._provisional_func_types[function.name]
 
     def _specialization_name(
         self,
@@ -2935,6 +2968,8 @@ class TypeChecker:
         raise RemoraTypeError(f"expected {expected_type}, got {typed.type}", loc)
 
     def _require(self, actual: RemoraType, expected: RemoraType, loc) -> None:
+        if _contains_type_var(actual) or _contains_type_var(expected):
+            return
         if actual != expected:
             raise RemoraTypeError(f"expected {expected}, got {actual}", loc)
 
@@ -3079,6 +3114,98 @@ def _contains_type_var(value_type: RemoraType) -> bool:
     if isinstance(value_type, FuncType):
         return any(_contains_type_var(p) for p in value_type.params) or _contains_type_var(value_type.result)
     return False
+
+
+def _replace_var_in_type(ty: RemoraType, old: TypeVar, new: RemoraType) -> RemoraType:
+    """Replace all occurrences of old TypeVar with new in a RemoraType."""
+    import copy
+    if isinstance(ty, TypeVar) and ty == old:
+        return new
+    if isinstance(ty, ArrayType):
+        new_elem = _replace_var_in_type(ty.element, old, new)
+        if new_elem is ty.element:
+            return ty
+        return ArrayType(new_elem, ty.shape, ty.shape_expr)
+    if isinstance(ty, FuncType):
+        new_params = tuple(_replace_var_in_type(p, old, new) for p in ty.params)
+        new_result = _replace_var_in_type(ty.result, old, new)
+        if all(np is op for np, op in zip(new_params, ty.params)) and new_result is ty.result:
+            return ty
+        return FuncType(new_params, new_result)
+    if isinstance(ty, ForallType):
+        new_body = _replace_var_in_type(ty.body, old, new)
+        if new_body is ty.body:
+            return ty
+        return ForallType(ty.binders, new_body)
+    return ty
+
+
+def _substitute_type_var(expr: TypedExpr, old: TypeVar, new: RemoraType) -> TypedExpr:
+    """Walk a typed expression and replace TypeVar in all type annotations."""
+    if isinstance(expr, TypedExprNode):
+        new_type = _replace_var_in_type(expr.type, old, new)
+        if new_type is expr.type:
+            return expr
+        return TypedExprNode(expr.expr, new_type)
+    if isinstance(expr, TypedApp):
+        new_type = _replace_var_in_type(expr.type, old, new)
+        new_func = _substitute_type_var(expr.func, old, new)
+        new_args = [_substitute_type_var(a, old, new) for a in expr.args]
+        if new_type is expr.type and new_func is expr.func and all(na is oa for na, oa in zip(new_args, expr.args)):
+            return expr
+        return TypedApp(expr.expr, new_func, new_args, new_type)
+    if isinstance(expr, TypedLambda):
+        new_body_type = _replace_var_in_type(expr.type, old, new)
+        new_body = _substitute_type_var(expr.body, old, new)
+        if new_body_type is expr.type and new_body is expr.body:
+            return expr
+        return TypedLambda(expr.expr, expr.params, new_body, new_body_type, expr.specialization_name, expr.index_args)
+    if isinstance(expr, TypedIf):
+        new_cond = _substitute_type_var(expr.condition, old, new)
+        new_then = _substitute_type_var(expr.then_branch, old, new)
+        new_else = _substitute_type_var(expr.else_branch, old, new)
+        new_type = _replace_var_in_type(expr.type, old, new)
+        if new_cond is expr.condition and new_then is expr.then_branch and new_else is expr.else_branch and new_type is expr.type:
+            return expr
+        return TypedIf(expr.expr, new_cond, new_then, new_else, new_type)
+    if isinstance(expr, TypedLet):
+        new_val = _substitute_type_var(expr.value, old, new)
+        new_body = _substitute_type_var(expr.body, old, new)
+        new_type = _replace_var_in_type(expr.type, old, new)
+        if new_val is expr.value and new_body is expr.body and new_type is expr.type:
+            return expr
+        return TypedLet(expr.name, new_val, new_body, new_type, expr.value_type)
+    if isinstance(expr, TypedCast):
+        new_val = _substitute_type_var(expr.value, old, new)
+        new_type = _replace_var_in_type(expr.type, old, new)
+        if new_val is expr.value and new_type is expr.type:
+            return expr
+        return TypedCast(new_val, expr.from_type, expr.to_type, new_type)
+    # For other typed expr types, walk children generically
+    for attr in ("func", "value", "body", "array", "init", "left", "right",
+                 "condition", "then_branch", "else_branch", "source",
+                 "predicate", "pair", "box_value", "count", "start", "end",
+                 "target", "index", "update", "image", "columns"):
+        child = getattr(expr, attr, None)
+        if child is not None and hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+            new_child = _substitute_type_var(child, old, new)
+            if new_child is not child:
+                # Create a copy of the expr with the replaced child
+                kwargs = {}
+                for field_name in getattr(expr, "__dataclass_fields__", {}):
+                    kwargs[field_name] = getattr(expr, field_name)
+                kwargs[attr] = new_child
+                kwargs["type"] = _replace_var_in_type(getattr(expr, "type", None), old, new)
+                new_expr = type(expr)(**kwargs)
+                return new_expr
+    new_type = _replace_var_in_type(getattr(expr, "type", None), old, new)
+    if new_type is not getattr(expr, "type", None):
+        kwargs = {}
+        for field_name in getattr(expr, "__dataclass_fields__", {}):
+            kwargs[field_name] = getattr(expr, field_name)
+        kwargs["type"] = new_type
+        return type(expr)(**kwargs)
+    return expr
 
 
 def _infer_type_vars(

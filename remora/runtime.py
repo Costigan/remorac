@@ -138,7 +138,7 @@ from remora.typechecker import (
     TypedCol2im,
     TypedMatmul,
 )
-from remora.types import ArrayType, BOOL, FLOAT, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim
+from remora.types import ArrayType, BOOL, FLOAT, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim, TypeVar
 
 
 class RuntimeUnavailable(RemoraError):
@@ -151,6 +151,14 @@ class CUDAError(RuntimeUnavailable):
 
 class EvaluationError(RemoraError):
     """Raised when CPU evaluation hits unsupported typed syntax."""
+
+
+class _TailCall(Exception):
+    """Raised internally to signal a tail-recursive call in the trampoline."""
+
+    def __init__(self, args: list) -> None:
+        super().__init__()
+        self.args = args
 
 
 @dataclass(frozen=True)
@@ -690,11 +698,44 @@ def evaluate_source_compiled(
         artifact.close()
 
 
+def _gather_func_lambdas(typed_expr: TypedExpr, seen: set[int] | None = None) -> dict[str, TypedLambda]:
+    """Walk a typed expression and collect TypedLambda nodes wrapping FuncDef entries."""
+    from remora.ast_nodes import FuncDef as _FuncDef
+    result: dict[str, TypedLambda] = {}
+    if seen is None:
+        seen = set()
+    eid = id(typed_expr)
+    if eid in seen:
+        return result
+    seen.add(eid)
+    if isinstance(typed_expr, TypedLambda) and isinstance(typed_expr.expr, _FuncDef):
+        result[typed_expr.expr.name] = typed_expr
+    for attr in ("func", "body", "condition", "then_branch", "else_branch",
+                 "value", "left", "right", "array", "init",
+                 "source", "predicate", "image", "columns",
+                 "pair", "box_value", "target", "index", "update",
+                 "function", "function_body", "count", "start", "end"):
+        child = getattr(typed_expr, attr, None)
+        if child is not None and hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+            result.update(_gather_func_lambdas(child, seen))
+    for attr in ("args", "arrays", "elements", "definitions", "indices"):
+        children = getattr(typed_expr, attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, "__class__") and child.__class__.__module__.startswith("remora"):
+                    result.update(_gather_func_lambdas(child, seen))
+    return result
+
+
 def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
     if program.body is None or program.type is None:
         raise EvaluationError("definition-only programs cannot be evaluated")
 
     env: Env = {}
+    if program.body is not None:
+        func_lambdas = _gather_func_lambdas(program.body)
+        for name, typed_lam in func_lambdas.items():
+            env[name] = _trampoline_closure(typed_lam, env, name)
     for definition in program.definitions:
         _bind_definition(definition, env)
     return EvaluationResult(_eval_expr(program.body, env), program.type)
@@ -1647,17 +1688,63 @@ def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
 
 
 def _lambda_callable(expr: TypedLambda, env: Env) -> CallableValue:
-    closed_env = dict(env)
-
     def call(*args: Value) -> Value:
         if len(args) != len(expr.params):
             raise EvaluationError("lambda arity mismatch")
-        inner_env = dict(closed_env)
+        inner_env = dict(env)
         for (name, _param_type), arg in zip(expr.params, args):
             inner_env[name] = arg
         return _eval_expr(expr.body, inner_env)
 
     return call
+
+
+def _trampoline_closure(expr: TypedLambda, env: Env, func_name: str) -> CallableValue:
+    """Create a closure with tail-call optimization for recursive calls."""
+
+    def call(*args: Value) -> Value:
+        _args = args
+        while True:
+            inner_env = dict(env)
+            for (name, _param_type), arg in zip(expr.params, _args):
+                inner_env[name] = arg
+            try:
+                return _eval_expr_tail(expr.body, inner_env, func_name)
+            except _TailCall as tc:
+                _args = tc.args
+
+    return call
+
+
+def _eval_expr_tail(expr: TypedExpr, env: Env, func_name: str) -> Value:
+    """Like _eval_expr but propagates tail position for func_name recursion."""
+    if isinstance(expr, TypedIf):
+        condition = _eval_expr(expr.condition, env)
+        if isinstance(condition, np.ndarray) and condition.dtype == bool:
+            then_val = _eval_expr_tail(expr.then_branch, env, func_name)
+            else_val = _eval_expr_tail(expr.else_branch, env, func_name)
+            return np.where(condition, then_val, else_val)
+        if bool(condition):
+            return _eval_expr_tail(expr.then_branch, env, func_name)
+        return _eval_expr_tail(expr.else_branch, env, func_name)
+    if isinstance(expr, TypedLet):
+        inner_env = dict(env)
+        inner_env[expr.name] = _eval_expr(expr.value, env)
+        return _eval_expr_tail(expr.body, inner_env, func_name)
+    if isinstance(expr, TypedApp):
+        fname = _typed_node_var_name_tail(expr.func)
+        if fname == func_name and fname not in ALL_PRIMITIVE_OPS:
+            args = [_eval_expr(arg, env) for arg in expr.args]
+            raise _TailCall(args)
+    if isinstance(expr, TypedCast):
+        return _cast_scalar(_eval_expr_tail(expr.value, env, func_name), expr.to_type)
+    return _eval_expr(expr, env)
+
+
+def _typed_node_var_name_tail(expr: TypedExpr) -> str | None:
+    if isinstance(expr, TypedExprNode) and isinstance(expr.expr, VarExpr):
+        return expr.expr.name
+    return None
 
 
 def _map_value(
@@ -1760,6 +1847,8 @@ def _apply_op(op: str, left: Value, right: Value | None = None) -> Value:
 
 
 def _coerce_runtime_value(value: Value, value_type: RemoraType) -> Value:
+    if isinstance(value_type, TypeVar):
+        return value
     if isinstance(value_type, ScalarType):
         return _cast_scalar(value, value_type)
     if isinstance(value_type, ArrayType):

@@ -393,11 +393,10 @@
   },
   {
     "name": "recursive_function",
-    "category": "rejected",
-    "path": "fail/recursive_function.remora",
-    "target": "cpu",
-    "expect_exit": 1,
-    "expect_stderr_contains": "recursive function definitions are deferred"
+    "category": "supported",
+    "path": "pass/recursive_function.remora",
+    "target": "interp",
+    "expect_exit": 0
   },
   {
     "name": "dynamic_shape",

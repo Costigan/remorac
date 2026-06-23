@@ -105,7 +105,7 @@ class ReplSession:
     def _evaluate_program_source(self, program_source: str) -> EvaluationResult:
         if self.state.target == "cpu":
             return evaluate_source_compiled(
-                program_source, include_prelude=False, syntax=self.state.syntax
+                program_source, include_prelude=False, syntax=self.state.syntax, strict=False
             )
         if self.state.target == "interp":
             return evaluate_source(

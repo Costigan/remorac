@@ -197,10 +197,9 @@ def test_cli_top_level_function_definition_runs_on_cpu(tmp_path, capsys):
 
 
 def test_cli_recursive_function_definition_exits_one(tmp_path, capsys):
-    source = write_source(tmp_path, "def f x = f x\nf 1")
+    source = write_source(tmp_path, "def fac n = if n <= 1 then 1 else n * fac (n - 1)\nfac 5")
 
-    assert main([str(source)]) == 1
-    assert "recursive function definitions are deferred" in capsys.readouterr().err
+    assert main(["--target", "interp", str(source)]) == 0
 
 
 def test_cli_missing_file_exits_one(capsys):
