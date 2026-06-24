@@ -1670,16 +1670,27 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
     if isinstance(ast, LambdaExpr):
         # Standalone lambda — return a callable that uses the typechecker
         # to typecheck the body on each call with concrete argument types.
+        # Captured variables from the enclosing env are passed through.
         from remora.typechecker import TypeChecker as _TC, TypeEnv as _TE
         from remora.types import FuncType as _FT
         tc = _TC()
+        # Build a type env from captured runtime values
+        captured_types = {}
+        for name, val in env.items():
+            try:
+                captured_types[name] = _remora_type_of(val)
+            except EvaluationError:
+                pass  # skip callables and other non-typed values
         def _lam_call(*args: Value) -> Value:
             arg_types = tuple(_remora_type_of(arg) for arg in args)
             param_types = tuple(
                 arg_types[i] if i < len(arg_types) else INT
                 for i in range(len(ast.params))
             )
-            typed_lam = tc.check_callable(ast, _FT(param_types, INT), _TE())
+            type_env = _TE()
+            for name, t in captured_types.items():
+                type_env = type_env.extend(name, t)
+            typed_lam = tc.check_callable(ast, _FT(param_types, INT), type_env)
             inner_env = dict(env)
             for (name, _pt), arg in zip(typed_lam.params, args):
                 inner_env[name] = arg

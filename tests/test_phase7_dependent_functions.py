@@ -936,3 +936,14 @@ def test_closure_multiple_captures_in_map_compiled():
     result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
     import numpy as np
     np.testing.assert_array_equal(result.value, [5, 7, 9])
+
+
+def test_closure_capture_in_hof_arg_interpreter():
+    """12.33.4: captured lambda in HOF argument position (interpreter only;
+    CPU deferred — needs full closure conversion)."""
+    src = (
+        "(define (apply_twice [f x]) (f (f x))) "
+        "(let ((z 3)) (apply_twice (lambda (x) (+ x z)) 5))"
+    )
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    assert result.value == 11  # (+ (+ 5 3) 3) = 11
