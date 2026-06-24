@@ -981,7 +981,7 @@ _EXAMPLE_DIR = Path(__file__).parent.parent / "examples"
 
 _EXPECTED_FAILURES = {
     # Known deferred features from plan
-    "function_application.remora": "dynamic higher-order functions are deferred",
+    "function_application.remora": "unknown HIR function add1",
     "row_norms.remora": "lambda captures outer variables",
 }
 

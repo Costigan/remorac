@@ -77,7 +77,7 @@ def _get_remora_rt_o() -> str:
 
 from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_function_source, compile_source
-from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, GradExpr, IfExpr, IntLit, IotaExpr, ReplicateExpr, SortExpr, VarExpr
+from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, GradExpr, IfExpr, IntLit, IotaExpr, LambdaExpr, ReplicateExpr, SortExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS
@@ -1667,6 +1667,24 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
         return np.repeat(array, counts.astype(int))
     if isinstance(ast, GradExpr):
         return _eval_ad_grad(expr, env)
+    if isinstance(ast, LambdaExpr):
+        # Standalone lambda — return a callable that uses the typechecker
+        # to typecheck the body on each call with concrete argument types.
+        from remora.typechecker import TypeChecker as _TC, TypeEnv as _TE
+        from remora.types import FuncType as _FT
+        tc = _TC()
+        def _lam_call(*args: Value) -> Value:
+            arg_types = tuple(_remora_type_of(arg) for arg in args)
+            param_types = tuple(
+                arg_types[i] if i < len(arg_types) else INT
+                for i in range(len(ast.params))
+            )
+            typed_lam = tc.check_callable(ast, _FT(param_types, INT), _TE())
+            inner_env = dict(env)
+            for (name, _pt), arg in zip(typed_lam.params, args):
+                inner_env[name] = arg
+            return _eval_expr(typed_lam.body, inner_env)
+        return _lam_call
     raise EvaluationError(f"CPU evaluation for {type(ast).__name__} is deferred")
 
 

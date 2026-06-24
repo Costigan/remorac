@@ -890,3 +890,13 @@ def test_hof_compose_compiled():
     )
     result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
     assert result.value == 7
+
+
+def test_hof_lambda_arg_compiled():
+    """12.36: apply_twice (lambda (x) (+ x 1)) 5 = 7 (CPU compiled)."""
+    src = (
+        "(define (apply_twice [f x]) (f (f x))) "
+        "(apply_twice (lambda (x) (+ x 1)) 5)"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert result.value == 7

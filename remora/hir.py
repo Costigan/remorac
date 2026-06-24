@@ -874,9 +874,19 @@ def _lower_typed_node(expr: TypedExprNode) -> HIRExpr:
             raise HIRLoweringError("lambda must have a function type")
         return HIRLambda(
             [HIRParam(name, param_type) for name, param_type in zip(ast.params, expr.type.params)],
-            HIRLit(0, INT),
+            _lower_lambda_body(ast, expr),
             expr.type,
         )
+
+
+def _lower_lambda_body(
+    ast: LambdaExpr, typed_expr: TypedExprNode
+) -> HIRExpr:
+    """Lower a lambda body by typechecking it against the declared param types."""
+    from remora.typechecker import TypeChecker as _TC, TypeEnv as _TE
+    tc = _TC()
+    typed_lam = tc.check_callable(ast, typed_expr.type, _TE())
+    return lower_expr(typed_lam.body)
     raise HIRLoweringError(f"lowering for {type(ast).__name__} is deferred")
 
 

@@ -234,12 +234,10 @@ class _Defunctionalizer:
             HIRLet: lambda e: _rewrite_let(self, e, scalar_env),
             HIRCall: lambda e: HIRCall(
                 e.func_name,
-                [self._rewrite_expr(a, scalar_env) for a in e.args],
+                [_rewrite_call_arg(self, a, scalar_env) for a in e.args],
                 e.result_type,
             ),
-            HIRLambda: lambda e: (_ for _ in ()).throw(
-                RemoraDefuncError("dynamic higher-order functions are deferred")
-            ),
+            HIRLambda: lambda e: _rewrite_lambda_value(self, e, scalar_env),
             HIRPrimOp: lambda e: HIRPrimOp(
                 e.op,
                 [self._rewrite_expr(a, scalar_env) for a in e.args],
@@ -293,7 +291,7 @@ class _Defunctionalizer:
     ) -> HIRCallable:
         scalar_env = scalar_env or {}
         if isinstance(callable_, HIRLambda):
-            return self._lift_lambda(callable_, scalar_env)
+            return _lift_lambda(callable_, scalar_env, self)
         if isinstance(callable_, HIRPrimCallable):
             return HIRPrimCallable(
                 callable_.op,
@@ -314,27 +312,64 @@ class _Defunctionalizer:
             return callable_
         raise AssertionError(f"unknown HIR callable {type(callable_).__name__}")
 
-    def _lift_lambda(
-        self,
-        lambda_: HIRLambda,
-        scalar_env: dict[str, HIRExpr] | None = None,
-    ) -> HIRVar:
-        scalar_env = scalar_env or {}
-        body = self._rewrite_expr(lambda_.body, scalar_env)
-        param_names = {param.name for param in lambda_.params}
-        free = _free_vars(body) - param_names
-        if free:
-            names = ", ".join(sorted(free))
-            raise RemoraDefuncError(
-                f"lambda captures outer variables ({names}); closure conversion is deferred"
-            )
 
-        name = f"__lambda_{self._counter}"
-        self._counter += 1
-        self._lifted.append(
-            HIRFunction(name, lambda_.params, body, lambda_.result_type.result)
+def _rewrite_call_arg(
+    defunc: _Defunctionalizer,
+    arg: HIRExpr,
+    scalar_env: dict[str, HIRExpr] | None = None,
+) -> HIRExpr:
+    """Rewrite a HIRCall argument — lift lambdas to named functions."""
+    if isinstance(arg, HIRLambda):
+        return _lift_lambda(arg, scalar_env, defunc)
+    return defunc._rewrite_expr(arg, scalar_env)
+
+
+def _rewrite_lambda_value(
+    defunc: _Defunctionalizer,
+    lambda_: HIRLambda,
+    scalar_env: dict[str, HIRExpr] | None = None,
+) -> HIRVar:
+    """Lift a lambda used as a value (not in a callable position)."""
+    return _lift_lambda(lambda_, scalar_env, defunc)
+
+
+
+
+def _lift_lambda(
+    lambda_: HIRLambda,
+    scalar_env: dict[str, HIRExpr] | None,
+    defunc: _Defunctionalizer,
+) -> HIRVar:
+    scalar_env = scalar_env or {}
+    body = defunc._rewrite_expr(lambda_.body, scalar_env)
+    param_names = {param.name for param in lambda_.params}
+    free = _free_vars(body) - param_names
+    if free:
+        names = ", ".join(sorted(free))
+        raise RemoraDefuncError(
+            f"lambda captures outer variables ({names}); closure conversion is deferred"
         )
-        return HIRVar(name, lambda_.result_type)
+
+    name = f"__lambda_{defunc._counter}"
+    defunc._counter += 1
+    # Use the body's concrete result type instead of the lambda's
+    # generic FuncType (which may contain TypeVars).
+    from remora.types import FuncType as _FT, TypeVar as _TV, INT as _INT
+    rt = getattr(body, "result_type", None)
+    if rt is None or isinstance(rt, _TV):
+        rt = _INT
+    param_types = tuple(
+        p.type if not isinstance(p.type, _TV) else _INT
+        for p in lambda_.params
+    )
+    resolved_params = [
+        HIRParam(p.name, p.type if not isinstance(p.type, _TV) else _INT)
+        for p in lambda_.params
+    ]
+    defunc._lifted.append(
+        HIRFunction(name, resolved_params, body, rt)
+    )
+    return HIRVar(name, _FT(param_types, rt))
 
 
 def _free_vars(expr: HIRExpr) -> set[str]:

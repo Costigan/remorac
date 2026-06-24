@@ -386,8 +386,8 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
             return name
         except Exception:
             return None
-
     new_functions: list[_HIRFunction] = list(program.functions)
+
     counter = 0
 
     def _replace_calls(expr, subs, new_calls):

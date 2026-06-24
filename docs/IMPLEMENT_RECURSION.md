@@ -890,7 +890,7 @@ Goal: `(let (g f) (g 1 2))` where `f` is a top-level function compiles.
 
 - [x] **12.33.3** Interpreter `_bind_definition` creates a lazy callable (`_make_func_def_callable`) for `FuncDef`s not already bound by `_gather_func_lambdas`, so function names can be passed as arguments to HOFs.  (`remora/runtime.py:1216-1228`, `1232-1249`)
 
-- [ ] **12.33.4** Closure conversion for lambdas with captures — replace the `"lambda captures outer variables; closure conversion is deferred"` rejection with environment-capture closure conversion.  (`remora/defunc.py:328-329`)
+- [~] **12.33.4** Closure conversion for lambdas with captures — lambdas without captures are now lifted in HIRCall argument positions (`_rewrite_call_arg`) and value positions (`_rewrite_lambda_value`).  Lambdas WITH captures still raise `RemoraDefuncError`.  (`remora/defunc.py:_lift_lambda`, `_rewrite_call_arg`, `_rewrite_lambda_value`)
 
 #### 12.34 Phase 2: monomorphization pass
 

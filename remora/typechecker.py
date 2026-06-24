@@ -994,8 +994,18 @@ class TypeChecker:
         if isinstance(expr, GradExpr):
             return self._infer_ad_grad(expr, env)
         if isinstance(expr, LambdaExpr):
-            raise RemoraTypeError(
-                "lambda expressions require an expected function type", expr.loc
+            # Standalone lambda — infer param types from the body.
+            # In a callable context (_check_callable) the lambda is
+            # checked against an expected FuncType.  Here we create a
+            # generic FuncType with TypeVar params/result so the
+            # lambda can be passed as a value argument.
+            param_types = tuple(
+                TypeVar(f"$lam_{p}") for p in expr.params
+            )
+            result_tv = TypeVar("$lam_ret")
+            return TypedExprNode(
+                expr,
+                FuncType(param_types, result_tv),
             )
         if isinstance(expr, (OperatorFuncExpr, LeftSectionExpr, RightSectionExpr)):
             raise RemoraTypeError(
