@@ -593,11 +593,14 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
         # becomes (inc (inc 5)).
         if isinstance(expr, _HIRLet) and isinstance(expr.value, _HIRVar):
             let_name = expr.value.name
-            if let_name in functions or let_name in func_defs:
-                # f aliases a known function — ensure it has a HIR entry,
-                # then redirect calls to the underlying function and drop
-                # the let binding.
-                fn_name = _ensure_function(let_name) or let_name
+            # Check if the aliased name is a known function (either
+            # directly or through prior substitutions from outer lets).
+            if let_name in functions or let_name in func_defs or let_name in subs:
+                if let_name in subs:
+                    resolved = subs[let_name]
+                    fn_name = resolved.name if isinstance(resolved, _HIRVar) else resolved
+                else:
+                    fn_name = _ensure_function(let_name) or let_name
                 new_subs = dict(subs)
                 new_subs[expr.name] = _HIRVar(fn_name, expr.value.type)
                 return _replace_calls(expr.body, new_subs, new_calls)

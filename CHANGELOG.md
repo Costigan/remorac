@@ -117,6 +117,104 @@ but the constraint solver short-circuited without recording a binding.
   and interpreter, map-over-recursive (Lisp + ML), and Ackermann.
 - 545 tests pass; no regressions.
 
+## Higher-Order Recursion — Monomorphization, Closure Capture, Lambda Lifting
+
+Higher-order functions (`def apply_twice f x = f (f x)`) now typecheck,
+interpret, and **compile to CPU**.  Function values can be passed as
+arguments, stored in let bindings, and used as map/fold callables.
+
+### Typechecker — function values as arguments
+- `VarExpr` handler falls back to `self._functions` when `env.lookup`
+  fails, producing a `FuncType` with `TypeVar` params/result for plain
+  `define` functions, or the declared type for `define/pi`/`define/forall`.
+- `_infer_app` handles calls through `TypeVar`-typed variables by
+  generating a fresh `FuncType` and proceeding with inference.
+- `_require_numeric` and the `/` division check skip `TypeVar` types.
+- `LambdaExpr` in value position returns a generic `FuncType` (no longer
+  rejected as `"lambda expressions require an expected function type"`).
+- `_infer_index_bindings` accepts unbound `define/pi` binders when their
+  name appears in the free index variables of actual param types —
+  enabling mutual recursion with `define/pi`.
+
+### Interpreter — lazy FuncDef callables, lambda closure env
+- `_bind_definition` creates a lazy callable (`_make_func_def_callable`)
+  for `FuncDef`s not already bound by `_gather_func_lambdas`.
+- `_make_func_def_callable` lazily typechecks the function body on first
+  call via `specialize_top_level_function`.
+- `_eval_expr_node` handles `LambdaExpr` by creating a closure that
+  passes captured variable types to `check_callable`.
+
+### Monomorphization pass (`remora/compiler.py`)
+- **`_monomorphize_hof_calls`**: scans all `HIRCall` nodes whose callee
+  has `FuncType` params.  For each concrete call site, clones the
+  callee's `HIRFunction`, substitutes the `FuncType` param with the
+  resolved function name, replaces `HIRCall` nodes to call-through-variable
+  with direct calls, resolves `TypeVar` return types, and removes the
+  original HOF function.
+- **`_ensure_function`**: materializes missing `HIRFunction` entries for
+  functions only used as values (via the typechecker).
+- **`_substitute_hir`**: extended to handle `HIRCall`, `HIRIf`,
+  `HIRFold`/`HIRReduce` with `TypeVar` result-type resolution via a
+  `functions` lookup dict.
+- **`_strip_hof_args`**: removes `FuncType` args from recursive self-calls
+  in monomorphized bodies.
+- **Let-bound alias resolution**: `HIRLet` bindings that alias known
+  functions are resolved by redirecting `HIRCall` targets and dropping
+  the let binding.  Handles nested aliases via substitution chaining.
+- **`CompilerArtifact.return_type`**: falls back to the resolved HIR
+  return type when the typed program's type contains `TypeVar`s.
+- Verified: `apply_twice inc 5 = 7`, `compose inc inc 5 = 7`,
+  `apply_twice (lambda (x) (+ x 1)) 5 = 7`,
+  `repeat inc 3 0 = 3` (recursive HOF), all CPU compiled.
+
+### Closure capture in map/fold callables (`remora/defunc.py`)
+- `_rewrite_callable` checks `_free_vars_of_lambda` before lifting.
+  If the lambda captures outer variables, it stays inline — the map/fold
+  lowering resolves captures from the local tensor/scalar env.
+- `_rewrite_function` passes function params in `scalar_env` so lambdas
+  inside function bodies can reference them without being rejected.
+- `_rewrite_call_arg` lifts capture-free `HIRLambda` in `HIRCall`
+  argument positions to named functions.
+- `_rewrite_lambda_value` handles `HIRLambda` in non-callable positions.
+- `_lift_lambda` resolves `TypeVar` params and return type from the
+  body expression; standalone function (formerly a `_Defunctionalizer`
+  method, now module-level).
+
+### HIR lambda body lowering (`remora/hir.py`)
+- `_lower_typed_node` for `LambdaExpr` now lowers the body via
+  `check_callable` instead of a dummy `HIRLit(0)` placeholder, so
+  inline lambdas carry their actual computation into MLIR.
+
+### Map over function variables
+- Function names can be passed as `map`/`fold` callables:
+  `map inc (iota 3) = [1, 2, 3]` (interpreter + CPU).
+
+### Function-valued typechecker gates removed
+- `frame.py:121`: `"map over function values is deferred"` — relaxed;
+  `FuncType` treated as scalar for cell/frame decomposition.
+- `frame.py:179`: `"function-valued map results are deferred"` — relaxed;
+  passes through unchanged.
+- `typechecker.py:1529`: same gate in binary map — relaxed.
+- `typechecker.py:1141`: `"arrays of functions are deferred"` — relaxed;
+  creates scalar-typed arrays for `FuncType` elements.
+
+### Recursive HOF support
+- Monomorphization correctly handles self-recursive HOFs by stripping
+  `FuncType` args from recursive self-calls and hard-coding the concrete
+  function in the body.
+- `function_application.remora` example now compiles (was an expected
+  failure).
+
+### Regression tests
+- 22 new regression tests across `test_execution.py` and
+  `test_phase7_dependent_functions.py` covering: array-valued recursion
+  (3), Ackermann, scalar regression (4), map-over-recursive (ML + Lisp),
+  `define/forall` typecheck, three-function mutual (2), deep mutual,
+  `define/pi` mutual (2), HOF apply_twice/compose/let/lambda/repeat (7),
+  closure capture in map (2), and map lambda regression.
+- 595 non-GPU tests pass; 1 pre-existing failure (`test_im2col.py`,
+  unrelated `HIRVar.result_type` bug).
+
 ## GPU Radix Sort (256-bin, 4-pass)
 
 New `remora/_gpu_radix_sort.py`: a device-resident LSD radix sort for

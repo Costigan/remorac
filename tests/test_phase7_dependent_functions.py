@@ -914,6 +914,16 @@ def test_hof_recursive_repeat_compiled():
     assert result.value == 3
 
 
+def test_map_lambda_regression():
+    """12.36.5: map with inline lambda — regression that still works."""
+    src = "(map (lambda (x) (+ x 1)) (iota 3))"
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [1, 2, 3])
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    np.testing.assert_array_equal(result.value, [1, 2, 3])
+
+
 def test_closure_capture_in_map_compiled():
     """12.33.4: lambda capturing outer var in map — inline, not lifted."""
     src = (

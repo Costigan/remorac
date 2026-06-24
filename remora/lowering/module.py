@@ -878,7 +878,7 @@ def _lower_function(
     has_array_return = isinstance(function.return_type, ArrayType)
 
     if has_array_params or has_array_return:
-        return _lower_function_with_tensor(function)
+        return _lower_function_with_tensor(function, functions)
 
     result_type = type_to_mlir(function.return_type)
     args = [
@@ -915,7 +915,7 @@ def _lower_function(
   }}"""
 
 
-def _lower_function_with_tensor(function: HIRFunction) -> str:
+def _lower_function_with_tensor(function: HIRFunction, functions: dict[str, HIRFunction] | None = None) -> str:
     """Lower a HIR function with array params or array return type."""
     result_type = type_to_mlir(function.return_type)
     args = [
@@ -946,7 +946,7 @@ def _lower_function_with_tensor(function: HIRFunction) -> str:
 
     if isinstance(function.return_type, ArrayType):
         if _has_self_hir_call(function.body, function.name):
-            return _lower_recursive_tensor_function(function)
+            return _lower_recursive_tensor_function(function, functions or {})
 
         code, result_name, lowered_result_type, _element_type = (
             _lower_tensor_input(
@@ -1162,7 +1162,7 @@ def _output_descriptor_store_lines(
 # ---------------------------------------------------------------------------
 
 
-def _lower_recursive_tensor_function(function: HIRFunction) -> str:
+def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[str, HIRFunction]) -> str:
     """Create a manual bufferization wrapper for recursive tensor functions.
 
     Produces two function definitions:
@@ -1219,7 +1219,7 @@ def _lower_recursive_tensor_function(function: HIRFunction) -> str:
     body_code, result_name, lowered_type, _elem = _lower_tensor_input(
         function.body,
         "result",
-        {function.name: impl_function},
+        {**all_functions, function.name: impl_function},
         tensor_env,
         scalar_env,
     )
