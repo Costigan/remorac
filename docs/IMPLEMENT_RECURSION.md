@@ -645,9 +645,9 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 
 #### 12.4 Typechecker: higher-order recursion
 
-- [x] **12.4.1** `def apply_twice f x = f (f x)` — typechecks + interpreter works.  CPU compilation deferred (needs monomorphization pass, §12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`)
-- [ ] **12.4.2** `fix`-style recursion — deferred: needs monomorphization (§12.34)
-- [ ] **12.4.3** Polymorphic recursive HOF — deferred: same as 12.4.2
+- [x] **12.4.1** `def apply_twice f x = f (f x)` — typechecks, interprets, AND CPU compiles via monomorphization (§12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`, `test_hof_apply_twice_compiled`)
+- [ ] **12.4.2** `fix`-style recursion — deferred: needs closure conversion (§12.33.4) for lambdas capturing outer variables
+- [ ] **12.4.3** Polymorphic recursive HOF — deferred: needs ForallType monomorphization + closure conversion
 
 #### 12.5 Interpreter: bind function names
 
@@ -655,7 +655,7 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 - [x] **12.5.2** `_lambda_callable` captures `env` by reference (not copy at creation time) so closures see their own name
 - [x] **12.5.3** Test: `evaluate_source("def fac n = if n <= 1 then 1 else n * fac (n - 1) ; fac 5")` returns `120`
 - [x] **12.5.4** Test: mutual `is_even`/`is_odd` returns correct results in interpreter
-- [x] **12.5.5** `apply_twice inc 5` — typechecks + interpreter works.  CPU compilation deferred (§12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`)
+- [x] **12.5.5** `apply_twice inc 5` — typechecks, interprets, AND CPU compiles.  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_compiled`)
 
 #### 12.6 Interpreter: trampoline for deep recursion
 
@@ -787,10 +787,10 @@ Goal: all four recursion forms work end-to-end (interpreter + CPU compiled).
 
 #### 12.25 Test: higher-order recursion
 
-- [x] **12.25.1** `apply_twice inc 5` — typechecks + interpreter (`test_hof_apply_twice_interpreter`)
-- [x] **12.25.2** `compose inc inc 5` — typechecks + interpreter (`test_hof_compose_interpreter`)
+- [x] **12.25.1** `apply_twice inc 5` — typechecks + interpreter + CPU compiled (`test_hof_apply_twice_interpreter`, `test_hof_apply_twice_compiled`)
+- [x] **12.25.2** `compose inc inc 5` — typechecks + interpreter + CPU compiled (`test_hof_compose_interpreter`, `test_hof_compose_compiled`)
 - [x] **12.25.3** `let f = inc in f(f 5)` — typechecks + interpreter (`test_hof_let_function_value_interpreter`)
-- [ ] **12.25.4** CPU compilation deferred — needs monomorphization pass (§12.34)
+- [x] **12.25.4** CPU compilation for `apply_twice` and `compose` works via monomorphization; `let`-bound calls through variables not yet monomorphized (closure conversion needed)
 
 #### 12.26 Test: array-valued recursion
 
@@ -850,8 +850,10 @@ All of the following tests reside in `tests/test_execution.py` and
 | `test_hof_apply_twice_interpreter` | test_phase7_dependent_functions | 12.36.1 — apply_twice inc 5 = 7 (interpreter) |
 | `test_hof_compose_interpreter` | test_phase7_dependent_functions | 12.36.3 — compose inc inc 5 = 7 (interpreter) |
 | `test_hof_let_function_value_interpreter` | test_phase7_dependent_functions | 12.36.4 — let f = inc in f(f 5) (interpreter) |
+| `test_hof_apply_twice_compiled` | test_phase7_dependent_functions | 12.36.2 — apply_twice inc 5 = 7 (CPU) |
+| `test_hof_compose_compiled` | test_phase7_dependent_functions | 12.36.3 — compose inc inc 5 = 7 (CPU) |
 
-**Total: 18 regression tests across 2 files, all passing.**
+**Total: 20 regression tests across 2 files, all passing.**
 
 ---
 
@@ -894,9 +896,11 @@ Goal: `(let (g f) (g 1 2))` where `f` is a top-level function compiles.
 
 Goal: `def apply_twice f x = f (f x)` compiles and runs on CPU.
 
-- [ ] **12.34.1** Global monomorphization — before MLIR lowering, scan all `HIRCall` nodes whose callee has `FuncType` params.  For each concrete call site, clone the callee's `HIRFunction`, substitute the `FuncType` param with the concrete function (either a named function reference or an inlined lambda body), and add the clone to the program.  Replace the original `HIRCall` with a call to the clone.  This is the same pattern as `_try_monomorphize` in `compiler.py:315-377`, but applied to all call sites.  (new pass in `remora/hir_opt.py` or `remora/compiler.py`)
+- [x] **12.34.1** Global monomorphization — `_monomorphize_hof_calls` scans all `HIRCall` nodes whose callee has `FuncType` params.  For each concrete call site, clones the callee's `HIRFunction`, substitutes the `FuncType` param with the resolved function name, replaces `HIRCall` nodes to call-through-variable with direct calls, resolves TypeVar return types, and removes the original HOF function.  (`remora/compiler.py:_monomorphize_hof_calls`, called after HIR generation in `compile_source`)
 
-- [ ] **12.34.2** Primitive-operator-as-argument — handle `(map f arr)` where `f` is a function variable referencing a primitive like `(+)`.  The monomorphization substitutes the primitive callable into the body, which already works via `HIRPrimCallable`.
+- [x] **12.34.2** Missing function materialization — `_ensure_function` uses the typechecker to lower `FuncDef`s into `HIRFunction`s on demand when a function is used as a value but doesn't have a HIR entry (only called directly from main expression).  TypeVars in the `CompilerArtifact.return_type` fall back to the resolved HIR return type.
+
+- [ ] **12.34.3** Multi-level HOF — `compose inc inc 5` works (monomorphization handles multiple FuncType params).  `let f = inc in f(f 5)` not yet monomorphized (the call through `f` is via a let-bound variable, not a HIRCall arg position).  Needs closure conversion (§12.33.4).
 
 #### 12.35 Phase 3: remove typechecker gates
 
@@ -914,10 +918,10 @@ Goal: standalone lambdas, function-typed let bindings, and function-valued map/f
 
 #### 12.36 Tests
 
-- [x] **12.36.1** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (typecheck + interpreter)
-- [ ] **12.36.2** `apply_twice inc 5` → 7 (CPU compiled) — deferred: monomorphization (§12.34)
-- [x] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter)
-- [x] **12.36.4** `let f = inc in f(f 5)` → 7 (typecheck + interpreter)
+- [x] **12.36.1** `def apply_twice f x = f (f x)` `def inc x = x + 1` `apply_twice inc 5` → 7 (typecheck + interpreter + CPU compiled)
+- [x] **12.36.2** `apply_twice inc 5` → 7 (CPU compiled) — monomorphization works (`test_hof_apply_twice_compiled`)
+- [x] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter + CPU compiled)
+- [x] **12.36.4** `let f = inc in f(f 5)` → 7 (typecheck + interpreter; CPU deferred: needs closure conversion)
 - [ ] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works, covered by existing tests)
 
 #### 12.37 Files to change

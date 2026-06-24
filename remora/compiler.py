@@ -31,7 +31,7 @@ from remora.pipeline import PipelineUnavailable
 from remora.prelude import with_prelude
 from remora.typechecker import TypeChecker, TypeEnv, TypedApp, TypedGrad, TypedProgram
 from remora.index import ShapeExpr
-from remora.types import DimExpr, FuncType, PairType, RemoraType, RemoraTypeError
+from remora.types import DimExpr, FuncType, INT, PairType, RemoraType, RemoraTypeError
 from remora.ast_nodes import AppExpr, FuncDef, IndexAppExpr, Program, VarExpr
 
 
@@ -58,7 +58,16 @@ class CompilerArtifact:
 
     @property
     def return_type(self) -> RemoraType | None:
-        return self.typed.type
+        rt = self.typed.type
+        if rt is not None and isinstance(rt, RemoraType):
+            from remora.types import TypeVar as _TV
+            if isinstance(rt, _TV):
+                # TypeVar from HOF — use the HIR return type
+                if self.hir.return_type is not None and not isinstance(
+                    self.hir.return_type, _TV
+                ):
+                    return self.hir.return_type
+        return rt
 
 
 @dataclass(frozen=True)
@@ -138,6 +147,7 @@ def compile_source(
         typed = TypeChecker().check_program(rewritten)
     core = elaborate_program(typed)
     hir = defunctionalize(erase_to_hir(core))
+    hir = _monomorphize_hof_calls(hir, core)
     mlir_module = MLIRLowering().lower_program(
         hir,
         export_output_descriptor=export_output_descriptor,
@@ -312,6 +322,167 @@ def compile_function_source(
     )
 
 
+def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
+    """Monomorphize higher-order calls by cloning and substituting.
+
+    Finds all HIRFunction with FuncType params, clones them for each
+    concrete call site, substitutes the function argument, and replaces
+    HIRCall nodes to call-though-variable with direct HIRCall to the
+    resolved function.
+    """
+    from remora.hir import (
+        HIRCall as _HIRCall,
+        HIRFunction as _HIRFunction,
+        HIRParam as _HIRParam,
+        HIRVar as _HIRVar,
+        lower_expr as _lower_expr,
+    )
+    from remora.types import FuncType as _FuncType
+    from remora.ast_nodes import FuncDef as _FuncDef
+
+    functions = {f.name: f for f in program.functions}
+    hof_functions = {
+        name: f for name, f in functions.items()
+        if any(isinstance(p.type, _FuncType) for p in f.params)
+    }
+    if not hof_functions:
+        return program
+
+    # Build a name→FuncDef lookup from the core program definitions
+    func_defs: dict[str, _FuncDef] = {}
+    for d in core_program.definitions:
+        if hasattr(d, 'source'):
+            src = d.source
+            if isinstance(src, _FuncDef):
+                func_defs[src.name] = src
+        elif isinstance(d, _FuncDef):
+            func_defs[d.name] = d
+
+    def _ensure_function(name: str) -> str | None:
+        """If *name* is a FuncDef not in HIR functions, lower it and add it."""
+        if name in functions:
+            return name
+        fd = func_defs.get(name)
+        if fd is None:
+            return None
+        # Create a typed lambda by specializing with concrete param types
+        from remora.typechecker import TypeChecker as _TC, TypeEnv as _TE
+        tc = _TC()
+        tc._functions[name] = fd
+        try:
+            param_types = tuple(
+                INT for _ in fd.params
+            )
+            typed_lam = tc.specialize_top_level_function(fd, param_types, _TE())
+            hir_body = _lower_expr(typed_lam.body)
+            hir_fn = _HIRFunction(
+                name,
+                [_HIRParam(pn, pt) for (pn, pt), _ in zip(typed_lam.params, param_types)],
+                hir_body,
+                typed_lam.type.result,
+            )
+            functions[name] = hir_fn
+            new_functions.append(hir_fn)
+            return name
+        except Exception:
+            return None
+
+    new_functions: list[_HIRFunction] = list(program.functions)
+    counter = 0
+
+    def _replace_calls(expr, subs, new_calls):
+        """Walk expr and replace HIRCall nodes matching known HOFs."""
+        nonlocal counter
+        if isinstance(expr, _HIRCall):
+            hof = hof_functions.get(expr.func_name)
+            if hof is not None:
+                new_params = [
+                    p for p in hof.params
+                    if not isinstance(p.type, _FuncType)
+                ]
+                concrete: dict[str, _HIRVar] = {}
+                for i, (arg, param) in enumerate(zip(expr.args, hof.params)):
+                    if isinstance(param.type, _FuncType):
+                        if isinstance(arg, _HIRVar):
+                            resolved_name = _ensure_function(arg.name)
+                            if resolved_name is not None:
+                                concrete[param.name] = _HIRVar(
+                                    resolved_name,
+                                    functions[resolved_name].return_type
+                                    if resolved_name in functions
+                                    else arg.type,
+                                )
+                if concrete:
+                    counter += 1
+                    actual_name = f"__mono_{expr.func_name}_{counter}"
+                    new_body = _substitute_hir(hof.body, concrete, functions)
+                    # Resolve result type from the concrete function's return
+                    resolved_return = hof.return_type
+                    for resolved_name in {
+                        v.name for v in concrete.values()
+                        if isinstance(v, _HIRVar) and v.name in functions
+                    }:
+                        resolved_return = functions[resolved_name].return_type
+                    new_functions.append(
+                        _HIRFunction(actual_name, new_params, new_body, resolved_return)
+                    )
+                    new_args = []
+                    for i, (a, param) in enumerate(zip(expr.args, hof.params)):
+                        if not isinstance(param.type, _FuncType):
+                            new_args.append(_replace_calls(a, subs, new_calls))
+                    return _HIRCall(actual_name, new_args, resolved_return)
+            return _HIRCall(
+                expr.func_name,
+                [_replace_calls(a, subs, new_calls) for a in expr.args],
+                expr.result_type,
+            )
+        if isinstance(expr, _HIRVar) and expr.name in subs:
+            return subs[expr.name]
+        for attr in ("body", "then_branch", "else_branch", "value", "condition",
+                     "left", "right", "array", "init"):
+            child = getattr(expr, attr, None)
+            if child is not None and hasattr(child, "__class__"):
+                new_child = _replace_calls(child, subs, new_calls)
+                if new_child is not child:
+                    kwargs = {}
+                    for fld in expr.__dataclass_fields__:
+                        kwargs[fld] = getattr(expr, fld)
+                    kwargs[attr] = new_child
+                    return type(expr)(**kwargs)
+        for list_attr in ("args", "arrays", "elements"):
+            children = getattr(expr, list_attr, None)
+            if isinstance(children, list):
+                changed = False
+                new_children = []
+                for child in children:
+                    new_child = _replace_calls(child, subs, new_calls)
+                    new_children.append(new_child)
+                    if new_child is not child:
+                        changed = True
+                if changed:
+                    kwargs = {}
+                    for fld in expr.__dataclass_fields__:
+                        kwargs[fld] = getattr(expr, fld)
+                    kwargs[list_attr] = new_children
+                    return type(expr)(**kwargs)
+        return expr
+
+    new_main = _replace_calls(program.main, {}, {}) if program.main else None
+
+    # Remove HOF functions that have been monomorphized — they have
+    # FuncType params and the main expression no longer calls them.
+    final_functions = [
+        f for f in new_functions
+        if not any(isinstance(p.type, _FuncType) for p in f.params)
+    ]
+
+    # Resolve the program's return type from the monomorphized main
+    # expression — it now has concrete types instead of TypeVars.
+    resolved_return = new_main.result_type if isinstance(new_main, _HIRCall) else program.return_type
+
+    return HIRProgram(final_functions, new_main, resolved_return)
+
+
 def _try_monomorphize(
     hir_function: HIRFunction,
     func_type_params: list[tuple[int, "HIRParam"]],
@@ -377,22 +548,56 @@ def _try_monomorphize(
     return HIRFunction(hir_function.name, new_params, new_body, hir_function.return_type)
 
 
-def _substitute_hir(expr, subs: dict):
+def _substitute_hir(expr, subs: dict, functions: dict | None = None):
     """Replace HIRVar references in subs with their concrete expressions."""
     from remora.hir import (
         HIRApply as _HIRApply, HIRLambda as _HIRLambda, HIRLet as _HIRLet,
         HIRMap as _HIRMap, HIRPrimCallable as _HIRPrimCallable, HIRVar as _HIRVar,
+        HIRCall as _HIRCall, HIRIf as _HIRIf, HIRFold as _HIRFold,
+        HIRReduce as _HIRReduce,
     )
+    from remora.types import TypeVar as _TV
 
     if isinstance(expr, _HIRVar) and expr.name in subs:
-        return subs[expr.name]
+        resolved = subs[expr.name]
+        if isinstance(resolved, _HIRVar):
+            return resolved
+        return resolved
+    if isinstance(expr, _HIRCall):
+        new_func_name = expr.func_name
+        new_result_type = expr.result_type
+        if expr.func_name in subs:
+            resolved = subs[expr.func_name]
+            if isinstance(resolved, _HIRVar):
+                new_func_name = resolved.name
+                # Resolve TypeVar result type from the concrete function
+                if functions and new_func_name in functions:
+                    fn = functions[new_func_name]
+                    if not isinstance(fn.return_type, _TV):
+                        new_result_type = fn.return_type
+        new_args = [_substitute_hir(a, subs, functions) for a in expr.args]
+        return _HIRCall(new_func_name, new_args, new_result_type)
+    if isinstance(expr, _HIRIf):
+        cond = _substitute_hir(expr.condition, subs, functions)
+        then_b = _substitute_hir(expr.then_branch, subs, functions)
+        else_b = _substitute_hir(expr.else_branch, subs, functions)
+        return _HIRIf(cond, then_b, else_b, expr.result_type)
+    if isinstance(expr, (_HIRFold, _HIRReduce)):
+        array = _substitute_hir(expr.array, subs, functions)
+        init = _substitute_hir(expr.init, subs, functions)
+        func = expr.func
+        if isinstance(func, _HIRVar) and func.name in subs:
+            resolved = subs[func.name]
+            if isinstance(resolved, (_HIRLambda, _HIRPrimCallable)):
+                func = resolved
+        return type(expr)(func, init, array, expr.result_type)
     if isinstance(expr, _HIRMap):
         func = expr.func
         if isinstance(func, _HIRVar) and func.name in subs:
             resolved = subs[func.name]
             if isinstance(resolved, (_HIRLambda, _HIRPrimCallable)):
                 func = resolved
-        arrays = [_substitute_hir(a, subs) for a in expr.arrays]
+        arrays = [_substitute_hir(a, subs, functions) for a in expr.arrays]
         return _HIRMap(expr.frame_shape, expr.cell_shape, func, arrays, expr.result_type)
     if isinstance(expr, _HIRApply):
         func = expr.func
@@ -400,11 +605,11 @@ def _substitute_hir(expr, subs: dict):
             resolved = subs[func.name]
             if isinstance(resolved, (_HIRLambda, _HIRPrimCallable)):
                 func = resolved
-        arrays = [_substitute_hir(a, subs) for a in expr.arrays]
+        arrays = [_substitute_hir(a, subs, functions) for a in expr.arrays]
         return _HIRApply(expr.frame_shape, expr.cell_shape, func, arrays, expr.result_type)
     if isinstance(expr, _HIRLet):
-        value = _substitute_hir(expr.value, subs)
-        body = _substitute_hir(expr.body, subs)
+        value = _substitute_hir(expr.value, subs, functions)
+        body = _substitute_hir(expr.body, subs, functions)
         return _HIRLet(expr.name, expr.value_type, value, body, expr.result_type)
     return expr
 

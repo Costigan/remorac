@@ -868,3 +868,25 @@ def test_hof_let_function_value_interpreter():
     )
     result = evaluate_source(src, include_prelude=False, syntax="lisp")
     assert result.value == 7
+
+
+def test_hof_apply_twice_compiled():
+    """12.36.2: apply_twice inc 5 = 7 (CPU compiled)."""
+    src = (
+        "(define (inc [x]) (+ x 1)) "
+        "(define (apply_twice [f x]) (f (f x))) "
+        "(apply_twice inc 5)"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert result.value == 7
+
+
+def test_hof_compose_compiled():
+    """12.36.3: compose inc inc 5 = 7 (CPU compiled)."""
+    src = (
+        "(define (inc [x]) (+ x 1)) "
+        "(define (compose [f g x]) (f (g x))) "
+        "(compose inc inc 5)"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert result.value == 7
