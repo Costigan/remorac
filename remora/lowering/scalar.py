@@ -70,7 +70,7 @@ def _arith_op(op: str, result_type: str) -> str:
 def _hir_prim_op(op: str, result_type: str) -> str:
     if op in {"+f", "-f", "*f", "/f"}:
         return _arith_op(op[0], result_type)
-    if op in {"+i", "-i", "*i"}:
+    if op in {"+i", "-i", "*i", "/i"}:
         return _arith_op(op[0], result_type)
     raise RemoraLoweringError(f"primitive HIR op {op} is deferred")
 
@@ -313,7 +313,7 @@ class _RegionEmitter:
                 "only binary primitive operations lower to MLIR"
             )
 
-        if op in {"+f", "-f", "*f", "/f", "+i", "-i", "*i"}:
+        if op in {"+f", "-f", "*f", "/f", "+i", "-i", "*i", "/i"}:
             coerced_args = [self._coerce(arg, result_type) for arg in args]
             result = self.temp()
             mlir_op = _hir_prim_op(op, result_type)

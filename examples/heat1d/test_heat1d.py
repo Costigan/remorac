@@ -10,7 +10,6 @@ import pytest
 
 from examples.heat1d.heat1d_model import (
     Heat1DModel,
-    thomas_solve,
     analytical_steady_state,
     _compute_Cp_numpy,
     _compute_K_numpy,
@@ -19,10 +18,40 @@ from examples.heat1d.heat1d_model import (
 )
 
 
-class TestThomasSolve:
-    """Verify the Thomas tridiagonal solver."""
+# ── Python Thomas solver (reference oracle) ──────────────────────────────
 
-    def test_thomas_random_system(self):
+def thomas_solve(
+    lower: np.ndarray,
+    diag: np.ndarray,
+    upper: np.ndarray,
+    rhs: np.ndarray,
+) -> np.ndarray:
+    """Solve tridiagonal system using the Thomas algorithm (TDMA).  O(n)."""
+    n = len(rhs)
+    cp = np.empty(n - 1, dtype=np.float64)
+    dp = np.empty(n, dtype=np.float64)
+
+    cp[0] = upper[0] / diag[0]
+    dp[0] = rhs[0] / diag[0]
+
+    for i in range(1, n):
+        m = diag[i] - lower[i - 1] * cp[i - 1]
+        if i < n - 1:
+            cp[i] = upper[i] / m
+        dp[i] = (rhs[i] - lower[i - 1] * dp[i - 1]) / m
+
+    x = np.empty(n, dtype=np.float64)
+    x[-1] = dp[-1]
+    for i in range(n - 2, -1, -1):
+        x[i] = dp[i] - cp[i] * x[i + 1]
+
+    return x
+
+
+class TestThomasSolve:
+    """Verify the Thomas tridiagonal solver (Python and Remora)."""
+
+    def test_thomas_random_system_python(self):
         rng = np.random.RandomState(42)
         n = 30
         lower = -rng.rand(n - 1).astype(np.float64) * 0.3
@@ -36,24 +65,57 @@ class TestThomasSolve:
         expected = np.linalg.solve(A, rhs)
         np.testing.assert_allclose(x, expected, rtol=1e-10)
 
-    def test_thomas_simple_3x3(self):
-        lower = np.array([-1.0, -1.0], dtype=np.float64)
-        diag = np.array([2.0, 2.0, 2.0], dtype=np.float64)
-        upper = np.array([-1.0, -1.0], dtype=np.float64)
-        rhs = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    def test_remora_vs_python_4x4(self):
+        """Remora-compiled Thomas matches Python reference."""
+        from examples.heat1d.heat1d_model import _compile_thomas
 
-        x = thomas_solve(lower, diag, upper, rhs)
-        expected = np.array([0.75, 0.5, 0.25], dtype=np.float64)
-        np.testing.assert_allclose(x, expected, rtol=1e-10)
+        executor = _compile_thomas(4)
+        lower = np.array([3.0, 5.0, 7.0], dtype=np.float32)
+        diag  = np.array([10.0, 15.0, 20.0, 25.0], dtype=np.float32)
+        upper = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        rhs   = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
-    def test_thomas_identity(self):
-        n = 10
-        lower = np.zeros(n - 1, dtype=np.float64)
-        diag = np.ones(n, dtype=np.float64)
-        upper = np.zeros(n - 1, dtype=np.float64)
-        rhs = np.arange(n, dtype=np.float64)
-        x = thomas_solve(lower, diag, upper, rhs)
-        np.testing.assert_allclose(x, rhs, rtol=1e-15)
+        result = executor.execute(lower, diag, upper, rhs)
+
+        expected = thomas_solve(
+            lower.astype(np.float64), diag.astype(np.float64),
+            upper.astype(np.float64), rhs.astype(np.float64),
+        )
+        np.testing.assert_allclose(result.value, expected, rtol=1e-4)
+
+    def test_remora_vs_python_random_10(self):
+        """Remora Thomas on random 10x10 diagonally-dominant system."""
+        from examples.heat1d.heat1d_model import _compile_thomas
+
+        rng = np.random.RandomState(123)
+        N = 10
+        executor = _compile_thomas(N)
+        lower = (-rng.rand(N - 1) * 0.3).astype(np.float32)
+        diag  = (rng.rand(N) * 2.0 + 2.0).astype(np.float32)
+        upper = (-rng.rand(N - 1) * 0.3).astype(np.float32)
+        rhs   = rng.rand(N).astype(np.float32)
+
+        result = executor.execute(lower, diag, upper, rhs)
+        expected = thomas_solve(
+            lower.astype(np.float64), diag.astype(np.float64),
+            upper.astype(np.float64), rhs.astype(np.float64),
+        )
+        np.testing.assert_allclose(result.value, expected, rtol=1e-4)
+
+    def test_remora_vs_python_identity(self):
+        """Remora Thomas on identity matrix (all zeros off-diagonal)."""
+        from examples.heat1d.heat1d_model import _compile_thomas
+
+        N = 5
+        executor = _compile_thomas(N)
+        lower = np.zeros(N - 1, dtype=np.float32)
+        diag  = np.ones(N, dtype=np.float32)
+        upper = np.zeros(N - 1, dtype=np.float32)
+        rhs   = np.arange(1, N + 1, dtype=np.float32)
+
+        result = executor.execute(lower, diag, upper, rhs)
+        expected = rhs
+        np.testing.assert_allclose(result.value, expected, rtol=1e-5)
 
 
 class TestRemoraProperties:
@@ -115,15 +177,16 @@ class TestHeat1DModelConstant:
         T_new = model.step_crank_nicolson()
         assert T_new[0] == pytest.approx(300.0)
         assert np.all(np.isfinite(T_new))
-        assert np.all(T_new >= 200.0 - 1e-6)
-        assert np.all(T_new <= 300.0 + 1e-6)
+        assert np.all(T_new >= 200.0 - 1e-3)
+        assert np.all(T_new <= 300.0 + 1e-3)
 
     def test_temperature_monotonic_decay(self):
         model = Heat1DModel(N=30, T_surface=300.0, T_init=100.0, z_max=0.5, dt=3600.0)
         model.run(100)
         T_final = model.T
-        np.testing.assert_array_compare(lambda a, b: a <= b, np.diff(T_final), 0,
-            err_msg="Final temperature profile not monotonic")
+        # Temperature should decrease with depth (allow f32 rounding noise)
+        diff = np.diff(T_final)
+        assert np.all(diff <= 1e-3), "Final temperature profile not monotonic"
 
     @pytest.mark.parametrize("N", [10, 30])
     def test_varying_grid_sizes(self, N):

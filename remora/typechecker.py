@@ -1481,8 +1481,10 @@ class TypeChecker:
     def _infer_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
         if len(expr.arrays) == 2:
             return self._infer_binary_map(expr, env)
+        if len(expr.arrays) > 2:
+            return self._infer_nary_map(expr, env)
         if len(expr.arrays) != 1:
-            raise RemoraTypeError("map currently supports one or two arrays", expr.loc)
+            raise RemoraTypeError("map requires at least one array", expr.loc)
         typed_array = self.infer(expr.array, env)
         candidates = self._cell_type_candidates(typed_array.type)
         errors: list[Exception] = []
@@ -1507,6 +1509,46 @@ class TypeChecker:
                 errors.append(exc)
 
         raise RemoraTypeError(f"could not type-check map callable: {errors[-1]}", expr.loc)
+
+    def _infer_nary_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
+        typed_arrays = [self.infer(arr, env) for arr in expr.arrays]
+        cells_and_frames = [
+            self._scalar_cell_and_frame(ta.type, expr.loc) for ta in typed_arrays
+        ]
+        cells = [cf[0] for cf in cells_and_frames]
+        frames = [cf[1] for cf in cells_and_frames]
+        frame_shape = frames[0]
+        for f in frames[1:]:
+            if f != frame_shape:
+                raise RemoraTypeError(
+                    f"map expects matching frame shapes, got {[ta.type for ta in typed_arrays]}",
+                    expr.loc,
+                )
+
+        from remora.ast_nodes import OperatorFuncExpr, VarExpr, LambdaExpr
+        from remora.operators import ARITHMETIC_OPS
+        from remora.types import FuncType
+
+        if isinstance(expr.func, (OperatorFuncExpr, VarExpr)):
+            op_name = expr.func.op if isinstance(expr.func, OperatorFuncExpr) else expr.func.name
+            if op_name in ARITHMETIC_OPS:
+                result_cell = cells[0]
+                for ct in cells[1:]:
+                    result_cell = common_numeric_type(result_cell, ct)
+                func_type = FuncType(tuple(cells), result_cell)
+                typed_func = TypedExprNode(expr.func, func_type)
+                result_type = ArrayType(result_cell, frame_shape)
+                return TypedMap(
+                    expr, typed_func, typed_arrays, frame_shape, (), result_type,
+                )
+
+        # For lambdas, check the callable
+        expected_func_type = FuncType(tuple(cells), cells[0])
+        typed_func = self.check_callable(expr.func, expected_func_type, env)
+        result_type = ArrayType(typed_func.type.result, frame_shape)
+        return TypedMap(
+            expr, typed_func, typed_arrays, frame_shape, (), result_type,
+        )
 
     def _infer_binary_map(self, expr: MapExpr, env: TypeEnv) -> TypedMap:
         left = self.infer(expr.arrays[0], env)

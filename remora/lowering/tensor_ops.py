@@ -439,13 +439,14 @@ def _lower_scan_tensor_input(
         step_sp = f"{p}_ss"
 
         step_scalar_env: dict[str, _Operand] = {}
-        step_tensor_env: dict[str, _TensorValue] = {}
+        step_tensor_env: dict[str, _TensorValue] = dict(tensor_env or {})
 
         step_scalar_env[fn.params[0].name] = _Operand(
             f"%{p}_c", [], result_elem,
         )
 
-        input_elem_remora = node.array.result_type.element
+        _input_elem_r = node.array.result_type if not isinstance(node.array, HIRVar) else node.result_type
+        input_elem_remora = _input_elem_r.element if isinstance(_input_elem_r, ArrayType) else _input_elem_r
         if isinstance(input_elem_remora, ArrayType):
             step_tensor_env[fn.params[1].name] = _TensorValue(
                 f"%{p}_elem", input_type,
@@ -1039,13 +1040,19 @@ def _lower_iota_scalar_map_module(
 ) -> str:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
+    needs_loops = _map_body_needs_tensor_lowering(node, functions)
     body, result_value, result_type = _lower_iota_scalar_map_result(
         node,
         functions,
         tensor_env,
         scalar_env=scalar_env,
     )
-    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
+    # When the loop path is used the lambda body is inlined in scf.for;
+    # exclude it from the separate function lowering pass.
+    fn_copy = functions
+    if needs_loops and isinstance(node.func, HIRVar) and node.func.name in functions:
+        fn_copy = {k: v for k, v in functions.items() if k != node.func.name}
+    builder = _MLIRMainModuleBuilder(result_type, functions=fn_copy)
     builder.add_block(body)
     return builder.render(result_value)
 
@@ -1064,6 +1071,13 @@ def _lower_iota_scalar_map_result(
         )
     if not isinstance(node.result_type, ArrayType):
         raise RemoraLoweringError("map lowering requires an array result")
+
+    if _map_body_needs_tensor_lowering(node, functions):
+        code, name, mlir_type, _elem = _lower_map_body_with_loops(
+            node, functions, prefix or "lp",
+            tensor_env=tensor_env, scalar_env=scalar_env,
+        )
+        return code, name, mlir_type
 
     input_code, input_name, input_type, input_element_type = (
         _lower_tensor_input(
@@ -1115,6 +1129,123 @@ def _lower_binary_map_module(
     builder = _MLIRMainModuleBuilder(result_type, functions=functions)
     builder.add_block(body)
     return builder.render(result_value)
+
+
+def _lower_nary_map_module(
+    node: HIRMap | HIRApply,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> str:
+    """Lower a map with 2+ array inputs by chaining binary operations."""
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    body, result_value, result_type, _elem = _lower_nary_map_result(
+        node, functions, tensor_env, scalar_env=scalar_env,
+    )
+    builder = _MLIRMainModuleBuilder(result_type, functions=functions)
+    builder.add_block(body)
+    return builder.render(result_value)
+
+
+def _lower_nary_map_result(
+    node: HIRMap | HIRApply,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    *,
+    scalar_env: dict[str, _Operand] | None = None,
+) -> tuple[str, str, str, str]:
+    n = len(node.arrays)
+    if n < 1:
+        raise RemoraLoweringError("map requires at least one array")
+    if n == 1:
+        return _lower_iota_scalar_map_result(
+            node, functions, tensor_env, scalar_env=scalar_env,
+        ) + (type_to_mlir(node.result_type.element),)
+    if n == 2:
+        code, name, ty = _lower_binary_map_result(
+            node, functions, tensor_env, scalar_env=scalar_env,
+        )
+        return code, name, ty, type_to_mlir(node.result_type.element)
+
+    # For 3+ arrays, chain: reduce via binary op (fold-like)
+    if not isinstance(node.result_type, ArrayType):
+        raise RemoraLoweringError("map lowering requires an array result")
+
+    result_type = type_to_mlir(node.result_type)
+    result_element_type = type_to_mlir(node.result_type.element)
+    result_rank = node.result_type.rank
+    iterators = _parallel_iterators(result_rank)
+    identity = _identity_affine_map(result_rank)
+
+    # Lower all inputs
+    input_codes: list[str] = []
+    input_names: list[str] = []
+    input_types: list[str] = []
+    input_element_types: list[str] = []
+    input_ranks: list[int] = []
+
+    for i, arr in enumerate(node.arrays):
+        side = ["a", "b", "c", "d", "e"][i] if i < 5 else f"in{i}"
+        code, name, ty, elem = _lower_binary_map_input(
+            arr, functions, side, tensor_env, scalar_env,
+            result_type=result_type, result_element_type=result_element_type,
+        )
+        input_codes.append(code)
+        input_names.append(name)
+        input_types.append(ty)
+        input_element_types.append(elem)
+        input_ranks.append(_tensor_rank_from_mlir_type(ty))
+
+    def _broadcast_map(input_rank: int) -> str:
+        if input_rank == result_rank:
+            return identity
+        if input_rank == 0:
+            return _constant_affine_map(result_rank)
+        dims = ", ".join(f"d{i}" for i in range(result_rank))
+        kept = ", ".join(f"d{i}" for i in range(input_rank))
+        return f"affine_map<({dims}) -> ({kept})>"
+
+    maps = [_broadcast_map(r) for r in input_ranks] + [identity]
+
+    # Use first input as accumulator, chain-reduce via binary op
+    arg_names = [f"%in{i}" for i in range(n)]
+    arg_types = input_element_types
+
+    # Currently only HIRPrimCallable with associative ops
+    if not isinstance(node.func, HIRPrimCallable):
+        raise RemoraLoweringError(
+            "n-ary maps (n>=3) currently only support primitive ops (+, *, etc.)"
+        )
+    op_name = _arith_op(node.func.op, result_element_type)
+    acc = arg_names[0]
+    op_lines = ""
+    for j in range(1, n):
+        tmp = f"%tmp{j}"
+        op_lines += f"      {tmp} = {op_name} {acc}, {arg_names[j]} : {result_element_type}\n"
+        acc = tmp
+    body_op = f"{op_lines}      linalg.yield {acc} : {result_element_type}"
+
+    ins_parts = ", ".join(
+        f"{input_names[i]} : {input_types[i]}" for i in range(n)
+    )
+    maps_str = ", ".join(maps)
+    bb_args = ", ".join(
+        f"{arg_names[i]}: {arg_types[i]}" for i in range(n)
+    ) + f", %out: {result_element_type}"
+
+    all_code = "\n".join(c for c in input_codes if c)
+    body = f"""{all_code}
+    %map_empty = tensor.empty() : {result_type}
+    %mapped = linalg.generic {{
+      indexing_maps = [{maps_str}],
+      iterator_types = {iterators}
+    }} ins({ins_parts}) outs(%map_empty : {result_type}) {{
+    ^bb0({bb_args}):
+{body_op}
+    }} -> {result_type}
+"""
+    return body.rstrip(), "%mapped", result_type, result_element_type
 
 
 def _lower_binary_map_result(
@@ -2455,6 +2586,21 @@ def _body_needs_tensor_lowering(body: HIRExpr) -> bool:
     return False
 
 
+def _map_body_needs_tensor_lowering(
+    node: HIRMap | HIRApply, functions: dict[str, HIRFunction],
+) -> bool:
+    """Check if a map's callable body needs tensor-level lowering.
+
+    Handles both inline HIRLambda and HIRVar referencing a lifted function.
+    """
+    if isinstance(node.func, HIRLambda):
+        return _body_needs_tensor_lowering(node.func.body)
+    if isinstance(node.func, HIRVar) and node.func.name in functions:
+        fn = functions[node.func.name]
+        return _body_needs_tensor_lowering(fn.body)
+    return False
+
+
 def _lower_map_body_with_loops(
     node: HIRMap,
     functions: dict[str, HIRFunction],
@@ -2488,6 +2634,9 @@ def _lower_map_body_with_loops(
     )
 
     lam = node.func
+    if isinstance(lam, HIRVar) and lam.name in functions:
+        fn = functions[lam.name]
+        lam = _function_as_lambda(fn)
     if not isinstance(lam, HIRLambda):
         raise RemoraLoweringError("loop-based map needs a HIRLambda callable")
     param = lam.params[0].name
@@ -2665,13 +2814,14 @@ def _lower_body_in_loop(
         pp = _join_prefix(prefix, f"po{_next_uid}")
         if tensor_env:
             arg_vals: list[str] = []
-            arg_vals: list[str] = []
+            arg_types: list[str] = []
             for i, arg in enumerate(expr.args):
-                av, _ = _lower_body_in_loop(
+                av, at = _lower_body_in_loop(
                     arg, lines, _join_prefix(pp, f"a{i}"), functions,
                     tensor_env, scalar_env, _next_uid + i + 1,
                 )
                 arg_vals.append(av)
+                arg_types.append(at)
             result_mlir = type_to_mlir(expr.result_type)
             result_name = f"%{_join_prefix(pp, 'r')}"
             base_op = expr.op
@@ -2680,11 +2830,19 @@ def _lower_body_in_loop(
                     base_op = base_op[:-1]
                     break
             from remora.operators import arith_op as _aop
-            mlir_op = _aop(base_op, result_mlir)
+            from remora.operators import COMPARISON_OPS as _CMPS
+            is_cmp = base_op in _CMPS
+            if is_cmp and arg_types:
+                op_type_mlir = arg_types[0]
+            else:
+                op_type_mlir = result_mlir
+            mlir_op = _aop(base_op, op_type_mlir)
+            if is_cmp:
+                mlir_op = mlir_op + ","  # arith.cmpi/cmpf predicate needs trailing comma
             if len(arg_vals) == 2:
-                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]}, {arg_vals[1]} : {result_mlir}")
+                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]}, {arg_vals[1]} : {op_type_mlir}")
             elif len(arg_vals) == 1:
-                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]} : {result_mlir}")
+                lines.append(f"    {result_name} = {mlir_op} {arg_vals[0]} : {op_type_mlir}")
             else:
                 raise RemoraLoweringError(f"HIRPrimOp with {len(arg_vals)} args not supported in loop body")
             return result_name, result_mlir
@@ -2826,6 +2984,39 @@ def _lower_body_in_loop(
         if expr.name in (tensor_env or {}):
             tv = tensor_env[expr.name]
             return tv.name, tv.type
+
+    if isinstance(expr, HIRIf) and _is_scalar_type(expr.result_type):
+        ip = _join_prefix(prefix, f"if{_next_uid}")
+        cond_val, cond_type = _lower_body_in_loop(
+            expr.condition, lines, _join_prefix(ip, "cond"), functions,
+            tensor_env, scalar_env, _next_uid + 1,
+        )
+        result_mlir = type_to_mlir(expr.result_type)
+        result_name = f"%{_join_prefix(ip, 'r')}"
+
+        then_lines: list[str] = []
+        then_val, then_type = _lower_body_in_loop(
+            expr.then_branch, then_lines, _join_prefix(ip, "t"), functions,
+            tensor_env, scalar_env, _next_uid + 2,
+        )
+
+        else_lines: list[str] = []
+        else_val, else_type = _lower_body_in_loop(
+            expr.else_branch, else_lines, _join_prefix(ip, "e"), functions,
+            tensor_env, scalar_env, _next_uid + 3,
+        )
+
+        then_body = "\n".join(then_lines)
+        else_body = "\n".join(else_lines)
+        lines.append(f"""\
+    {result_name} = scf.if {cond_val} -> {result_mlir} {{
+{then_body}
+      scf.yield {then_val} : {result_mlir}
+    }} else {{
+{else_body}
+      scf.yield {else_val} : {result_mlir}
+    }}""")
+        return result_name, result_mlir
 
     # Try full tensor lowering first
     try:
@@ -3539,45 +3730,52 @@ def _lower_indices_of_module(
 
     result_type = type_to_mlir(node.result_type)
     result_elem = type_to_mlir(node.result_type.element)
-    rank = node.result_type.rank
-    input_rank = node.result_type.rank - 1 if rank > 1 else 0
+    rank = node.result_type.rank  # = input_rank + 1
 
     identity = _identity_affine_map(rank)
     iterators = _parallel_iterators(rank)
 
-    # Generate the conditional chain: for each coordinate dim k, yield linalg.index (k+1)
-    yield_val = f"%idx{input_rank}" if input_rank >= 1 else "%c0_i32"
-    if rank == 2:  # rank-1 input → rank-2 result [1, N]
-        body = f"""    %c0_i32 = arith.constant 0 : i32
-    %empty = tensor.empty() : {result_type}
-    %indices = linalg.generic {{
-      indexing_maps = [{identity}],
-      iterator_types = {iterators}
-    }} outs(%empty : {result_type}) {{
-    ^bb0(%out: {result_elem}):
-      %d1 = linalg.index 1 : index
-      %cast1 = arith.index_cast %d1 : index to {result_elem}
-      linalg.yield %cast1 : {result_elem}
-    }} -> {result_type}"""
-    elif rank == 3:  # rank-2 input → rank-3 result [2, R, C]
-        body = f"""    %empty = tensor.empty() : {result_type}
-    %indices = linalg.generic {{
-      indexing_maps = [{identity}],
-      iterator_types = {iterators}
-    }} outs(%empty : {result_type}) {{
-    ^bb0(%out: {result_elem}):
-      %d0 = linalg.index 0 : index
-      %d1 = linalg.index 1 : index
-      %d2 = linalg.index 2 : index
-      %c0_idx = arith.constant 0 : index
-      %is_row = arith.cmpi eq, %d0, %c0_idx : index
-      %row_val = arith.index_cast %d1 : index to {result_elem}
-      %col_val = arith.index_cast %d2 : index to {result_elem}
-      %val = arith.select %is_row, %row_val, %col_val : {result_elem}
-      linalg.yield %val : {result_elem}
-    }} -> {result_type}"""
+    # Emit linalg.index for all dimensions
+    idx_lines = "\n".join(
+        f"      %d{k} = linalg.index {k} : index" for k in range(rank)
+    )
+    # Cast d1..d_{R-1} to result element type
+    casts = "\n".join(
+        f"      %cast{k} = arith.index_cast %d{k + 1} : index to {result_elem}"
+        for k in range(rank - 1)
+    )
+
+    # Build select chain: for k = 0..(rank-3), val = select(d0 == k, cast_k, prev)
+    if rank == 1:
+        val = "%zero"
+        select_lines = "      %zero = arith.constant 0 : i32"
+    elif rank == 2:
+        val = "%cast0"
+        select_lines = ""
     else:
-        raise RemoraLoweringError(f"unsupported rank {rank} for indices-of lowering")
+        val = f"%cast{rank - 2}"
+        select_lines = ""
+        for k in range(rank - 3, -1, -1):
+            ck = f"%ck{k}"
+            cmp = f"%cmp{k}"
+            sel = f"%sel{k}"
+            select_lines += f"""
+      {ck} = arith.constant {k} : index
+      {cmp} = arith.cmpi eq, %d0, {ck} : index
+      {sel} = arith.select {cmp}, %cast{k}, {val} : {result_elem}"""
+            val = sel
+
+    body = f"""    %empty = tensor.empty() : {result_type}
+    %indices = linalg.generic {{
+      indexing_maps = [{identity}],
+      iterator_types = {iterators}
+    }} outs(%empty : {result_type}) {{
+    ^bb0(%out: {result_elem}):
+{idx_lines}
+{casts}
+{select_lines}
+      linalg.yield {val} : {result_elem}
+    }} -> {result_type}"""
 
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)
@@ -3760,6 +3958,16 @@ def _lower_append_module(
 # ---------------------------------------------------------------------------
 
 
+def _function_as_lambda(fn: HIRFunction) -> HIRLambda:
+    """Convert a HIRFunction's params+body into a HIRLambda."""
+    from remora.hir import HIRParam
+    return HIRLambda(
+        params=[HIRParam(p.name, p.type) for p in fn.params],
+        body=fn.body,
+        result_type=fn.return_type,
+    )
+
+
 def _resolve_scan_function(
     node: HIRScan, functions: dict[str, HIRFunction]
 ) -> HIRFunction | None:
@@ -3783,6 +3991,19 @@ def _resolve_scan_function(
     return None
 
 
+def _lower_scan_tensor_let_result(
+    node: HIRScan,
+    functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv,
+) -> tuple[str, str, str]:
+    """Lower a HIRScan as the body of a tensor-let chain."""
+    result_type = type_to_mlir(node.result_type)
+    blocks, result_name = _lower_scan_rank1(
+        node, functions, tensor_env=tensor_env, render_module=False,
+    )
+    return blocks, result_name, result_type
+
+
 def _lower_scan_module(
     node: HIRScan, functions: dict[str, HIRFunction]
 ) -> str:
@@ -3801,8 +4022,10 @@ def _lower_scan_module(
 
 
 def _lower_scan_rank1(
-    node: HIRScan, functions: dict[str, HIRFunction]
-) -> str:
+    node: HIRScan, functions: dict[str, HIRFunction],
+    tensor_env: TensorEnv | None = None,
+    render_module: bool = True,
+) -> str | tuple[str, str]:
     from remora.lowering.module import _MLIRMainModuleBuilder
 
     result_type = type_to_mlir(node.result_type)
@@ -3819,13 +4042,14 @@ def _lower_scan_rank1(
         step_prefix = "scan_step"
 
         step_scalar_env: dict[str, _Operand] = {}
-        step_tensor_env: dict[str, _TensorValue] = {}
+        step_tensor_env: dict[str, _TensorValue] = dict(tensor_env or {})
 
         step_scalar_env[fn.params[0].name] = _Operand(
             "%carry", [], result_element_type,
         )
 
-        input_elem_remora = node.array.result_type.element
+        _input_elem_r = node.array.result_type if not isinstance(node.array, HIRVar) else node.result_type
+        input_elem_remora = _input_elem_r.element if isinstance(_input_elem_r, ArrayType) else _input_elem_r
         if isinstance(input_elem_remora, ArrayType):
             step_tensor_env[fn.params[1].name] = _TensorValue(
                 "%elem", input_element_type,
@@ -3944,7 +4168,9 @@ def _lower_scan_rank1(
 
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)
-    return builder.render("%scanned")
+    if render_module:
+        return builder.render("%scanned")
+    return builder.render_blocks(), "%scanned"
 
 
 def _lower_scan_multirank(

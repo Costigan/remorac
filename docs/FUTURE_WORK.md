@@ -3,26 +3,26 @@
 Items that have a clear upgrade path for performance or completeness.
 Completed items are marked; remaining items describe what is left.
 
----
+______________________________________________________________________
 
 ## Language Features (Deferred or Missing)
 
 These are features from the Remora academic papers that the compiler
-rejects or does not implement.  They are **upstream of lowering** —
+rejects or does not implement. They are **upstream of lowering** —
 the typechecker or parser gates them.
 
 ### Dynamic higher-order functions (polyvariadic application)
 
-Functions passed as arguments work via monomorphization.  Call-through-variable
-(e.g. `let f = inc in f(f 5)`) works.  What does not work: passing a function
+Functions passed as arguments work via monomorphization. Call-through-variable
+(e.g. `let f = inc in f(f 5)`) works. What does not work: passing a function
 through a `map` body as a callable (`map f arr` where `f` is a let-bound
-variable).  The map lowering needs to resolve the callable from the scalar
+variable). The map lowering needs to resolve the callable from the scalar
 environment.
 
 ### Functions in function position (MIMD arrays-of-functions)
 
 The typechecker defers map over function-valued arrays
-(`frame.py:121`, `frame.py:176`).  This blocks the classic Remora MIMD
+(`frame.py:121`, `frame.py:176`). This blocks the classic Remora MIMD
 pattern `(define m [[square sqrt] [add1 sub1]]) (m 9)`.
 
 ### Remaining text-path deferrals
@@ -35,7 +35,7 @@ full Remora would support this with pair-type output.
 
 ### `shape` / `rank` of function values
 
-Deferred (`hir.py:909`, `runtime.py:1783`).  Querying the shape or
+Deferred (`hir.py:909`, `runtime.py:1783`). Querying the shape or
 rank of a function-typed value is not supported.
 
 ### Missing surface syntax from the papers
@@ -50,49 +50,29 @@ current grammar:
 ### `ComposeExpr` (`∘`) asymmetry
 
 Function composition (`∘`) is in the ML-syntax grammar and parser but
-not in the Lisp reader.  Lisp programs cannot use composition.
+not in the Lisp reader. Lisp programs cannot use composition.
 
-### No scientific notation in Lisp reader
+______________________________________________________________________
 
-The Lisp reader does not recognise scientific-notation number literals
-(e.g., `8.9093e-9`).  The lexer tokenises the `e` as a separate `NAME`
-token and the `-9` as a subtraction, producing `unbound variable 'e-09'`
-in the type checker.  Real Lisp readers (Scheme, Common Lisp) all support
-scientific notation via the standard number-token grammar.  This is
-currently worked around by using fixed-point decimal literals
-(e.g. `0.0000000089093`) in Remora Lisp source.
+## heat1d: Thomas Algorithm Status
 
-Discovered: June 2026, heat1d Stage 1c — `Cp(T)` polynomial coefficients
-and the `R350` radiative factor triggered this when embedding
-Python-computed constants into Remora Lisp source strings.
+The Thomas tridiagonal solver is fully implemented in Remora and
+compiles on the CPU path.  All four gaps discovered during Stage 1
+(June 2026) have been resolved:
 
----
+| # | Gap | Resolution |
+|---|-----|-----------|
+| 1 | `iscan` with lambda step function | `_lower_body_in_loop` inlines lambda bodies; `_resolve_scan_function` resolves HIRVar refs |
+| 2 | Scan init/element type constraint | Removed `init_type == element_type` from `_infer_scan`/`_infer_trace`; fixed heterogenous result type |
+| 3 | Interpreter scan dtype truncation | `np.empty_like(array)` → `np.empty(shape, dtype=expr.type.element)` |
+| 4 | Closure-capturing scan lambdas | `tensor_env` from let-chain threaded through `_lower_scan_rank1` / `_lower_scan_tensor_input`; `HIRIf` added to `_lower_body_in_loop`; comparison ops use operand types |
 
-## heat1d: Why the Thomas Algorithm Was Not Written in Remora
+The compiled Thomas solver is used in `examples/heat1d/heat1d_model.py`
+via `_compile_thomas(N)` and matches the Python reference oracle
+(kept in `examples/heat1d/test_heat1d.py`) to f32 precision (~1e-5).
+Parity tests for N=4, N=10 random, and identity matrices all pass.
 
-The Thomas tridiagonal solver (forward sweep + back substitution) needs
-per-element sequential access with a loop-carried state.  Four separate
-gaps in the compiled-CPU path blocked every approach attempted during
-heat1d Stage 1 (June 2026):
-
-| # | Attempted approach | Blocker | Detail |
-|---|-------------------|---------|--------|
-| 1 | `iscan` with lambda step function | Scan lambdas | `tensor_ops.py:3735` accesses `node.func.op` — only `HIRPrimCallable` works |
-| 2 | `map (lambda (i) (peek arr i)) (iota N)` with recursive `peek` helper | Closure-capturing map bodies | Defunctionalization misses `peek` when captured in a lambda closure |
-| 3 | `map (lambda (i) ... (index-item upper i) ...)` building triples in-map | Index-in-map | Map body emitter rejects `HIRIndex` |
-| 4 | Recursive function building array via `append` | Recursive array construction | Type checker rejects `float[1]` vs `float[6]` mismatch in `define/pi` |
-
-Gap (1) blocks the natural approach: express the forward/backward passes
-as scans over pre-zipped triples.  Gap (2) blocks the fallback of
-computing each output element independently via a helper.  Gap (3)
-blocks building the triples inside a single Remora function.  Gap (4)
-blocks a direct recursive formulation.
-
-The workaround was to keep the Thomas solve in Python (50 lines, O(n))
-and use Remora only for the element-wise `map` computations that
-compiled cleanly — `compute_K(T, Kc)` and `compute_Cp(T)`.
-
----
+______________________________________________________________________
 
 ## Operations (Typechecked but Deferred in Lowering)
 
@@ -101,47 +81,33 @@ to MLIR on one or more backends.
 
 ### CPU lowering gaps
 
-| Operation | Status | Location |
-|-----------|--------|----------|
-| Integer division `/i` scalar | Deferred | `scalar.py:348` |
-| Ternary+ maps (>2 arrays) | Deferred | `module.py:662`, `tensor_ops.py` |
-| Indices-of for arbitrary ranks | Deferred | `tensor_ops.py:3255` |
-| Sort for non-f32 element types | Deferred | `tensor_ops.py:3655` |
-| Threaded CPU vectorization | Not supported | `pipeline.py:311` |
-| `iscan`/`escan`/`trace` with lambda step function | Deferred | `tensor_ops.py:3735` |
-| `index-item` (`HIRIndex`) inside map body | Deferred | `tensor_ops.py` map body emitter |
-| Recursive array construction via `define/pi` | Blocked | typechecker rejects mismatched sizes |
-| Cross-function calls in closure-capturing map bodies | Deferred | defunctionalization pass |
-
-#### Scan lambdas
-
-`tensor_ops.py:3735` directly accesses `node.func.op` to get the
-MLIR arithmetic op name.  This works for `HIRPrimCallable` (`+`, `*`,
-etc.) but not for `HIRLambda` (which has no `.op` attribute).  The
-forward sweep and back substitution of the Thomas tridiagonal solver
-both need user-defined scan-step functions (division, subtraction,
-multiplication on pre-zipped triples).  The workaround for the heat1d
-model was to keep the Thomas solve in Python (see `examples/heat1d/`).
-
-Discovered: June 2026, heat1d Stage 1 (see `docs/HEAT1D_PLAN.md`).
+| Operation                                            | Status        | Location                                  |
+| ---------------------------------------------------- | ------------- | ----------------------------------------- |
+| Integer division `/i` scalar                         | Deferred      | `scalar.py:348`                           |
+| Ternary+ maps (>2 arrays)                            | Deferred      | `module.py:662`, `tensor_ops.py`          |
+| Indices-of for arbitrary ranks                       | Deferred      | `tensor_ops.py:3255`                      |
+| Sort for non-f32 element types                       | Deferred      | `tensor_ops.py:3655`                      |
+| Threaded CPU vectorization                           | Not supported | `pipeline.py:311`                         |
+| `index-item` (`HIRIndex`) inside map body            | Deferred      | `tensor_ops.py` map body emitter          |
+| Recursive array construction via `define/pi`         | Blocked       | typechecker rejects mismatched sizes      |
+| Cross-function calls in closure-capturing map bodies | Deferred      | defunctionalization pass                  |
 
 #### Index-in-map
 
 `index-item` (`HIRIndex`) inside a `map` body is rejected by the map
-body expression emitter.  This blocks any `map` that needs per-element
+body expression emitter. This blocks any `map` that needs per-element
 access to a companion array (e.g. building triples for a Thomas scan
-by indexing into separate `upper`, `diag`, `lower` arrays).  The
-heat1d Crank-Nicolson RHS assembly attemped `(map (lambda (i) ...
-(index-item T i)) (iota N))` and hit this gap.
+by indexing into separate `upper`, `diag`, `lower` arrays). The
+heat1d Crank-Nicolson RHS assembly attemped `(map (lambda (i) ... (index-item T i)) (iota N))` and hit this gap.
 
 Discovered: June 2026, heat1d Stage 1.
 
 #### Recursive array construction
 
-`define/pi` requires a concrete (static) return shape.  A recursive
+`define/pi` requires a concrete (static) return shape. A recursive
 helper that builds an array via `(append [val] (recurse ...))` produces
 size `1 + returned_size` at each level, so the typechecker sees
-`float[1]` vs `float[6]` and rejects the body.  Dependent types
+`float[1]` vs `float[6]` and rejects the body. Dependent types
 (`define/pi ([k Dim]) ... (Array Float (- n i))`) could express this
 but are not yet threaded through lowering.
 
@@ -151,66 +117,56 @@ Discovered: June 2026, heat1d Stage 1.
 
 A `map` body lambda that captures a free variable and calls a
 top-level `define/pi` function hits `unknown HIR function` in the
-defunctionalization pass.  Direct `(map square arr)` (no closure,
-function passed as callable) works; `(map (lambda (i) (peek arr i))
-(iota N))` (captures `arr`, calls `peek`) does not.
+defunctionalization pass. Direct `(map square arr)` (no closure,
+function passed as callable) works; `(map (lambda (i) (peek arr i)) (iota N))` (captures `arr`, calls `peek`) does not.
 
 Discovered: June 2026, heat1d Stage 1.
 
 ### GPU lowering gaps
 
-| Operation | Status | Location |
-|-----------|--------|----------|
-| GPU scan limited to `+`, `*` | `min`/`max`/`&&`/`\|\|` rejected | `gpu_lowering.py:594` |
-| GPU radix sort f32-only + N limit | i32 rejected | `_gpu_radix_sort.py:437` |
-| GPU fused map f32-only | i32 outputs deferred | `_gpu_map_support.py` |
-| 16 HIR nodes have no standalone GPU kernel | Work inside map bodies only | See below |
-
-### GPU lowering gaps
-
-| Operation | Status | Location |
-|-----------|--------|----------|
-| GPU scan limited to `+`, `*` | `min`/`max`/`&&`/`\|\|` rejected | `gpu_lowering.py:594` |
-| GPU radix sort f32-only + N limit | i32 rejected | `_gpu_radix_sort.py:437` |
-| GPU fused map f32-only | i32 outputs deferred | `_gpu_map_support.py` |
-| 16 HIR nodes have no standalone GPU kernel | Work inside map bodies only | See below |
+| Operation                                  | Status                           | Location                 |
+| ------------------------------------------ | -------------------------------- | ------------------------ |
+| GPU scan limited to `+`, `*`               | `min`/`max`/`&&`/`\|\|` rejected | `gpu_lowering.py:594`    |
+| GPU radix sort f32-only + N limit          | i32 rejected                     | `_gpu_radix_sort.py:437` |
+| GPU fused map f32-only                     | i32 outputs deferred             | `_gpu_map_support.py`    |
+| 16 HIR nodes have no standalone GPU kernel | Work inside map bodies only      | See below                |
 
 ### HIR nodes without standalone GPU kernels
 
 These HIR nodes have no dedicated `codegen.py` dispatch or
-`gpu_lowering.py` builder.  Most work correctly **inside map bodies**
+`gpu_lowering.py` builder. Most work correctly **inside map bodies**
 via the general GPU expression compiler (`_gpu_expr_lowering.py`), but
 cannot be compiled as top-level kernels:
 
-| Node | Inside map body? |
-|------|:---:|
-| `HIRSlice` | ✗ |
-| `HIRReverse` | ✓ |
-| `HIRRotate` | ✓ |
-| `HIRSubarray` | ✓ |
-| `HIRTranspose` | Limited |
-| `HIRReshape` | ✓ |
-| `HIRRavel` | ✓ |
-| `HIRTake` | ✓ |
-| `HIRDrop` | ✓ |
-| `HIRAppend` | ✓ |
-| `HIRWithShape` | ✓ |
-| `HIRFoldRight` | ✗ |
-| `HIRPair` / `HIRFirst` / `HIRSecond` | ✗ |
-| `HIRCall` | ✗ |
-| `HIRLambda` | ✗ |
-| `HIRIota` | Limited |
+| Node                                 | Inside map body? |
+| ------------------------------------ | :--------------: |
+| `HIRSlice`                           |        ✗         |
+| `HIRReverse`                         |        ✓         |
+| `HIRRotate`                          |        ✓         |
+| `HIRSubarray`                        |        ✓         |
+| `HIRTranspose`                       |     Limited      |
+| `HIRReshape`                         |        ✓         |
+| `HIRRavel`                           |        ✓         |
+| `HIRTake`                            |        ✓         |
+| `HIRDrop`                            |        ✓         |
+| `HIRAppend`                          |        ✓         |
+| `HIRWithShape`                       |        ✓         |
+| `HIRFoldRight`                       |        ✗         |
+| `HIRPair` / `HIRFirst` / `HIRSecond` |        ✗         |
+| `HIRCall`                            |        ✗         |
+| `HIRLambda`                          |        ✗         |
+| `HIRIota`                            |     Limited      |
 
 ### Builder API (IREE path) — disabled
 
 The MLIR builder API path (`_builder_ops.py`, `_builder_emitter.py`,
-`scalar_builder.py`) is preserved but disabled in `module.py`.  It was
+`scalar_builder.py`) is preserved but disabled in `module.py`. It was
 the original lowering approach, but the text path is ~175x faster and
-handles all patterns.  If the builder is needed again (e.g. for
+handles all patterns. If the builder is needed again (e.g. for
 structural IR verification), reorder the fallback so text is tried
 first.
 
----
+______________________________________________________________________
 
 ## Backend Scale Limits
 
@@ -220,7 +176,7 @@ first.
   The f32 multi-block scan infrastructure exists; an i32 variant
   remains to be built.
 - **Scatter-add** currently uses a single-block kernel with
-  barrier + thread-0 add.  For N > 1024, needs a two-kernel plan
+  barrier + thread-0 add. For N > 1024, needs a two-kernel plan
   or `llvm.atomicrmw fadd`.
 
 ### Multi-block scan (N > 1,048,576)
@@ -233,14 +189,14 @@ Falls back to serial beyond 1M elements.
 The fused GPU map optimization (`_gpu_map_support.py`) currently
 handles 1–10 array inputs and float outputs only.
 
----
+______________________________________________________________________
 
 ## Type System
 
 ### Float64 and int64 support
 
-Most GPU and CPU lowering paths are f32/i32-only.  Scientific
-computing workloads need double precision.  Extending the descriptor
+Most GPU and CPU lowering paths are f32/i32-only. Scientific
+computing workloads need double precision. Extending the descriptor
 ABI, kernel generators, and type checker to support f64/i64 is
 straightforward but touches many files.
 
@@ -259,6 +215,7 @@ descriptor ranks all come from `StaticDim` constants.
 Dynamic shapes means compiling a **single** function/kernel that accepts array
 dimensions as *runtime* values and works for any size — true shape polymorphism,
 matching Remora's semantics. Concretely:
+
 - Thread dimension variables through to lowering instead of resolving them to
   constants (relax the "no free index variables" gate; discharge equality
   constraints from the dependent-type checker, with residual runtime checks for
@@ -312,10 +269,10 @@ runtime dimensions for true ragged arrays-of-arrays.
 ### Segmented reductions
 
 Remora papers describe segmented reductions (grouped reductions where
-group boundaries are data-driven).  No grammar entries, AST nodes, or
+group boundaries are data-driven). No grammar entries, AST nodes, or
 lowering exist for these.
 
----
+______________________________________________________________________
 
 ## Performance and Tooling
 
@@ -323,14 +280,14 @@ lowering exist for these.
 
 The MLIR builder API path (`_builder_ops.py`, `_builder_emitter.py`,
 `scalar_builder.py`) is ~175x slower than the text path and handles
-fewer patterns.  It is currently commented out in `module.py`.  Once
+fewer patterns. It is currently commented out in `module.py`. Once
 the text path has proven itself over time, the builder files can be
 deleted to simplify the codebase (~1000 lines).
 
 ### Text-path MLIR caching
 
 The text path emits MLIR strings which are then parsed via
-`ir.Module.parse(text)`.  For repeated compilations of the same
+`ir.Module.parse(text)`. For repeated compilations of the same
 program (e.g. iterative development), caching the parsed module
 object or the emitted MLIR text would avoid re-generation.
 
@@ -338,16 +295,16 @@ object or the emitted MLIR text would avoid re-generation.
 
 `_infer_type_vars` uses a single-pass approach: TypeVar bindings from
 nested FuncTypes are deferred, and concrete types from other params
-resolve them.  A pathological case where a ForallType variable
+resolve them. A pathological case where a ForallType variable
 appears *only* inside nested FuncType params (no top-level concrete
-param to resolve it) would leave the binder unbound.  A two-pass
+param to resolve it) would leave the binder unbound. A two-pass
 approach (collect all TypeVar candidates, resolve with concrete
 types, fall back to TypeVar consensus) would be more robust.
 
 ### Monomorphization code duplication
 
 `_monomorphize_hof_calls` at ~200 lines has logic for detecting HOF
-calls, cloning functions, substituting, and deduplicating.  A
+calls, cloning functions, substituting, and deduplicating. A
 standalone pass with helper extraction (`_clone_function_body`,
 `_substitute_params`) and sharing with `_try_monomorphize` would
 reduce duplication.
@@ -363,12 +320,12 @@ utility — would make the fallback behavior consistent and auditable.
 
 The Mandelbrot iteration calls three separate kernels per step
 (`step_real`, `step_imag`, `mag_sq`), each writing to and reading
-from intermediate device buffers.  When multiple element-wise maps
+from intermediate device buffers. When multiple element-wise maps
 share the same inputs, fusing them into a single kernel eliminates
 intermediate allocation and memory traffic.
 
 Approach: detect chains of `remora.define()` calls applied to the
-same arrays and compile a fused kernel with multiple outputs.  Or,
+same arrays and compile a fused kernel with multiple outputs. Or,
 allow `remora.define()` to accept a multi-expression body that
 returns a tuple.
 
@@ -379,7 +336,7 @@ On the compiled-CPU path the per-call allocation cost is already low —
 inputs are passed **zero-copy by pointer** (`array.ctypes.data`) and there
 is no host↔device transfer — but `CPUFunctionExecutor.execute()` still
 allocates a **fresh output array** (`_empty_output_value` → host `malloc`)
-on every call.  For tight iterative loops (e.g. a stencil or optimizer that
+on every call. For tight iterative loops (e.g. a stencil or optimizer that
 calls one compiled function thousands of times with the same output shape),
 reusing the output buffer avoids that per-call allocation and the associated
 GC churn.
@@ -389,7 +346,7 @@ The building block already exists: a host `Arena` (a bump allocator over a
 What is missing is an *ergonomic, automatic* mode — e.g. an executor option
 that keeps a right-sized output arena and `reset()`s it each call, or a
 size-classed host pool mirroring the GPU `DeviceMemoryPool` — so callers get
-reuse without manually managing an arena.  Modest payoff (host `malloc` /
+reuse without manually managing an arena. Modest payoff (host `malloc` /
 numpy allocation is already cheap and the OS allocator pools memory), so this
 is a low-priority ergonomic win, mainly useful for very hot CPU loops.
 
@@ -397,18 +354,18 @@ is a low-priority ergonomic win, mainly useful for very hot CPU loops.
 
 Systematic performance comparison of Remora-compiled code against
 hand-written NumPy, JAX `jit`, and Futhark for common array
-operations (map, fold, scan, matmul, sort, stencil).  This is the
+operations (map, fold, scan, matmul, sort, stencil). This is the
 most publishable artifact and validates whether rank polymorphism
 compiles to competitive code.
 
----
+______________________________________________________________________
 
 ## Interop and Ergonomics
 
 ### PyTorch tensor interop
 
-Accept `torch.Tensor` inputs in `RemoraFunction.__call__`.  For CPU
-tensors, extract `data_ptr()`.  For CUDA tensors, pass the device
+Accept `torch.Tensor` inputs in `RemoraFunction.__call__`. For CPU
+tensors, extract `data_ptr()`. For CUDA tensors, pass the device
 pointer directly to GPU kernels.
 
 ### PyTorch autograd integration
@@ -419,13 +376,13 @@ Register Remora's AD gradient functions as custom
 ### Better error messages
 
 Type errors and lowering failures produce compiler-internal messages
-(HIR node names, MLIR dialect errors).  Python users expect
+(HIR node names, MLIR dialect errors). Python users expect
 NumPy-quality diagnostics with source locations and suggestions.
 
 ### Persistent full-artifact cache
 
 `remora.define()` re-parses and re-typechecks every call even when
-the native `.so` is cached by `cache.py`.  Caching the full compiled
+the native `.so` is cached by `cache.py`. Caching the full compiled
 artifact (typed AST, HIR, kernel metadata) by source hash would make
 repeated `define()` calls instant after the first compilation.
 
@@ -433,17 +390,18 @@ repeated `define()` calls instant after the first compilation.
 
 Remora was designed by Slepak, Shivers, and Mansky at Northeastern.
 The academic papers in `docs/remora-reference/` describe the
-semantics and type theory.  A companion document showing how rank
+semantics and type theory. A companion document showing how rank
 polymorphism compiles through HIR → MLIR → GPU kernels, with
 concrete examples of implicit lifting and frame/cell decomposition,
 would bridge the gap between the theory papers and this
 implementation.
 
----
+______________________________________________________________________
 
 ## Completed
 
 ### Recursive functions — typechecker, interpreter, CPU compilation
+
 - Self-recursion (tail/non-tail), mutual recursion, deep call chains.
 - Typechecker: fixpoint inference with provisional FuncType.
 - Interpreter: tail-call trampoline, mutual trampoline.
@@ -451,6 +409,7 @@ implementation.
 - 15+ regression tests covering `fac`, `fib`, `sum_to`, `is_even`/`is_odd`, Ackermann.
 
 ### Higher-order functions — monomorphization, closure capture, lambda lifting
+
 - Function values passed as arguments, stored in let bindings.
 - Monomorphization pass clones HOFs per call site and substitutes concrete functions.
 - Full closure conversion: lambdas with captures compile on CPU.
@@ -458,12 +417,14 @@ implementation.
 - 20+ HOF regression tests.
 
 ### Text-path deferrals closed (4 of 5)
+
 - Fold operator sections, exclusive/right scans rank ≥ 2, cell-fold producer
   map sections, binary cell-map guard removed.
 - One remaining (binary map operator sections) is a defensive guard for
   a pattern the typechecker rejects.
 
 ### Builder path disabled
+
 - Builder API path was ~175x slower and fell back for 66% of programs.
   Commented out in `module.py`; text path only.
 
@@ -477,7 +438,7 @@ implementation.
   iterative multi-kernel case) — and is drained (`cuMemFree`) when the runtime
   is closed.
 - Runtimes without a shared pool (lightweight test fakes) get a local
-  executor-owned pool drained on `close()`.  Steady-state memory is bounded by
+  executor-owned pool drained on `close()`. Steady-state memory is bounded by
   (distinct size classes) × (peak concurrent buffers per class), not by call
   count.
 
@@ -492,14 +453,14 @@ implementation.
 ### Host-Orchestrated GPU Optimization Loops
 
 - `ad_optimize.lisp` compiles to a GPU `LoopPlan` via
-  `try_compile_state_fold_gpu`.  200-step gradient descent runs on
+  `try_compile_state_fold_gpu`. 200-step gradient descent runs on
   GPU producing the correct result `[0.512337, 0.433115, 0.911621]`.
 - CSE collapses the AD source transform's 32,769-node gradient
   expression before GPU compilation.
 
 ### Tiled Shared-Memory Matmul
 
-- TILE=16 cooperative loading.  Falls back to naive per-thread
+- TILE=16 cooperative loading. Falls back to naive per-thread
   dot-product when the tiled version fails to compile.
 
 ### Multi-Block Parallel Scan (up to 1M elements)
@@ -512,20 +473,70 @@ implementation.
 - Single-block bitonic sort/grade for N ≤ 1024.
 - Multi-block bitonic sort and grade for N > 1024 with odd-block
   reversal, double-buffered global merge, and i32 value-lookup
-  grade.  Supports up to ~1M elements.
+  grade. Supports up to ~1M elements.
 
 ### Parallel Scatter-Add (N ≤ 1024)
 
 - Single-block kernel: parallel copy + barrier + thread-0 add.
 
----
+### Scientific notation in parsers
+
+- Extended the `FLOAT` regex in both `lisp_reader.py` and `grammar.lark`
+  to accept `1e5`, `1.5e-3`, `10E+3`, etc. The old regex required a
+  decimal point; the new one also matches integer-with-exponent
+  (`[0-9]+[eE][+-]?[0-9]+`). 7 regression tests.
+  Discovered/Fixed: June 2026, heat1d Stage 1c.
+
+### Scan lambdas (CPU compiled path)
+
+- `_resolve_scan_function` resolves the step function from `HIRVar`
+  references (post-defunctionalization).
+- `_lower_scan_rank1` and `_lower_scan_tensor_input` inline lambda bodies
+  via `_lower_body_in_loop`, supporting `let`, `if`, arithmetic, and
+  index operations inside scan lambdas.
+- Removed the `init_type == element_type` constraint from
+  `_infer_scan`/`_infer_trace` in the type checker (blocked scans where
+  the carry and element types differ, e.g. scalar init + array elements).
+- Fixed scan result type for heterogeneous init/element.
+- Fixed interpreter scan result dtype — `np.empty_like(array)` inherited
+  the input array's Int32 dtype, truncating Float results; now uses
+  `expr.type` to determine the output dtype.
+- 7 new tests in `test_properties.py::test_scan_family`.
+  Discovered/Fixed: June 2026, heat1d Stage 1.
+
+### Closure-capturing scan lambdas + full Thomas algorithm (CPU compiled path)
+
+- Added HIRScan dispatch in `_lower_main_result_with_tensor_env` so
+  let-lowering can lower scans that appear as let-chain bodies.
+- Created `_lower_scan_tensor_let_result` to thread `tensor_env` from
+  enclosing let-bindings into the scan lambda lowering.
+- Merged the passed-in `tensor_env` into the step-function environment
+  in both `_lower_scan_rank1` and `_lower_scan_tensor_input`, so
+  `(index-item upper i)` on captured arrays works inside scan lambdas.
+- Added `HIRIf` handling to `_lower_body_in_loop` (scalar condition
+  with `scf.if`), needed for `(if (< i 1) 0.0 ...)` guard expressions.
+- Fixed comparison MLIR type annotation in `_lower_body_in_loop` to use
+  operand type (not `i1`) and add the required comma after `arith.cmpi/cmpf`
+  predicates.
+- Added `render_blocks()` to `_MLIRMainModuleBuilder` for extracting raw
+  MLIR blocks without the module wrapper.
+- Fixed `input_elem_remora` access to handle `HIRVar` array nodes in
+  function-parameter scan lowering.
+- The full Thomas tridiagonal solver (cp forward sweep, denominator
+  computation, dp forward sweep, back substitution via `trace-right`)
+  compiles and runs on the CPU path, matching the Python reference to
+  f32 precision.  Used in `examples/heat1d/heat1d_model.py`.
+- 3 new Remora-vs-Python parity tests in `examples/heat1d/test_heat1d.py`.
+  Discovered/Fixed: June 2026, heat1d Stage 1.
+
+______________________________________________________________________
 
 ## Abandoned
 
 ### `# coding: remora` source codec
 
-Removed.  The codec abused Python's encoding machinery, required a
+Removed. The codec abused Python's encoding machinery, required a
 `.pth` file for direct script execution, and re-invoked the Remora
-compiler on every module import.  Replaced by `remora.define()` which
+compiler on every module import. Replaced by `remora.define()` which
 accepts Remora source as a Python string and returns a compiled
 callable.

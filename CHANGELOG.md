@@ -3,6 +3,84 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## heat1d Lunar Thermal Model + CPU Lowering Gaps Closed (June 2026)
+
+### Scientific notation in Lisp reader
+- Extended `FLOAT` regex in both `lisp_reader.py` and `grammar.lark`
+  to accept `1e5`, `1.5e-3`, `10E+3`, etc.  Plain integers (`10`)
+  still match `INT` only (dimension contexts unchanged).
+
+### Scan lambdas (CPU compiled path)
+- `_resolve_scan_function` resolves step functions from `HIRVar`
+  references (post-defunctionalization).
+- `_lower_scan_rank1` and `_lower_scan_tensor_input` inline lambda
+  bodies via `_lower_body_in_loop`, supporting `let`, `if`, arithmetic,
+  and index operations inside scan lambdas.
+- Removed `init_type == element_type` constraint from
+  `_infer_scan`/`_infer_trace` (blocked scans with different carry
+  and element types, e.g. scalar init + array elements).
+- Fixed scan result type computation for heterogeneous init/element.
+- Fixed interpreter scan result dtype — `np.empty_like(array)`
+  inherited input's Int32 dtype, truncating Float results.
+
+### Closure-capturing scan lambdas + full Thomas algorithm
+- Added `HIRScan` dispatch in `_lower_main_result_with_tensor_env` so
+  let-lowering can lower scans with captured arrays.
+- Threaded `tensor_env` from enclosing let-bindings into scan lambda
+  lowering via `_lower_scan_tensor_let_result`.
+- Added `HIRIf` handling to `_lower_body_in_loop` (scalar conditions
+  with `scf.if`), needed for guard expressions like
+  `(if (< i 1) 0.0 ...)` in scan lambdas.
+- Fixed comparison MLIR type annotation in `_lower_body_in_loop` to
+  use operand type and add comma after `arith.cmpi/cmpf` predicates.
+- Added `render_blocks()` to `_MLIRMainModuleBuilder` for extracting
+  raw MLIR blocks without the module wrapper.
+- Fixed `input_elem_remora` access for `HIRVar` array nodes in
+  function-parameter scan lowering.
+- The full Thomas tridiagonal solver (cp sweep → denominator → dp
+  sweep → back-substitution via `trace-right`) compiles and runs on
+  the CPU path, matching the Python reference to f32 precision.
+
+### Index-in-map body (HIRIndex inside map lambdas)
+- Added `_map_body_needs_tensor_lowering` to detect compound bodies
+  (handles both `HIRLambda` and `HIRVar`-referenced functions).
+- Added compound-body routing check in `_lower_iota_scalar_map_result`;
+  redirects to `_lower_map_body_with_loops` when needed.
+- `_lower_map_body_with_loops` resolves `HIRVar` function refs via
+  `_function_as_lambda`.
+- Exclude inlined lambda from separate function lowering when loop
+  path is used (avoids double-lowering compile errors).
+
+### Integer division `/i` scalar
+- Added `/i` to accepted ops in `_hir_prim_op` and `_emit_prim_op`.
+
+### Indices-of for arbitrary ranks
+- Generalized from hardcoded rank 2/3 to arbitrary rank via
+  `linalg.index` + `arith.select` chain.
+
+### Ternary+ maps
+- Type checker: `_infer_nary_map` handles 3+ arrays with arithmetic
+  operators.
+- Interpreter: `_nary_map_value` applies callable element-wise to
+  N arrays.
+- Compiler: `_lower_nary_map_module`/`_lower_nary_map_result` emits
+  `linalg.generic` with N inputs and chained binary ops.
+- Binary map path unchanged (len==2 goes through existing dispatches).
+
+### heat1d model (`examples/heat1d/`)
+- `Heat1DModel` class with Remora-compiled K(T), Cp(T), and Thomas
+  solver.  Python handles CN coefficient assembly, Picard iteration,
+  boundary conditions, and time stepping.
+- 15 regression tests: 4 Thomas solve (Python + Remora parity),
+  4 material properties, 5 model correctness, 2 Picard iteration.
+- Python `thomas_solve` preserved as oracle in `test_heat1d.py`.
+
+### Tests
+- 7 scan lambda tests in `test_properties.py::test_scan_family`.
+- 3 Remora-vs-Python Thomas parity tests in
+  `examples/heat1d/test_heat1d.py`.
+- Total: 290 tests passing (non-GPU), 0 regressions.
+
 ## Dense Core CPU — Complete
 
 Full closure conversion, ForallType HOF monomorphization, all text-path

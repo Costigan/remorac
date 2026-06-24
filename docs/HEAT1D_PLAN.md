@@ -203,26 +203,57 @@ remorac/
   conserved to machine precision.
 - **Grid scaling**: Works for N = 10, 30, 100 grid points.
 
-### Remora lowering limitations discovered
+### Remora lowering gaps discovered, pursued, and resolved
 
-The following constructs were attempted but blocked by present lowering gaps:
+#### Gaps fixed (June 2026)
+
+| Gap | Fix | Location |
+|-----|-----|----------|
+| `iscan`/`escan`/`trace` with lambda step function | Lambda body inlined via `_lower_body_in_loop`; `_resolve_scan_function` resolves HIRVar refs | `tensor_ops.py` |
+| Scan init/element type constraint (init ≠ element when element is ArrayType) | Removed over-constraint from `_infer_scan`/`_infer_trace`; fixed result type for heterogenous init/element | `typechecker.py` |
+| Interpreter scan dtype (Float truncated to Int when scanning over Int indices) | Use `expr.type` instead of `np.empty_like(array)` for result dtype | `runtime.py` |
+| No scientific notation in Lisp reader | Extended FLOAT regex in both parsers | `lisp_reader.py`, `grammar.lark` |
+
+#### Gaps still open
 
 | Attempt | Blocker | Detail |
 |---------|---------|--------|
-| `iscan` with lambda step function | `tensor_ops.py:3735` accesses `node.func.op` | Scan lowering only handles `HIRPrimCallable` (`+`, `*`, etc.) — lambdas have no `.op` |
+| Closure-capturing scan lambdas (compiled path) | `_lower_tensor_let_module` rejects scan in let chain | Scan lambda references external arrays via let-bindings; lowering doesn't thread captures |
 | Recursive array construction with `define/pi` | Type checker rejects mismatched sizes | `(append [val] (recursive_call))` produces size k+1 but return annotation says size N |
 | `map` over `iota` calling recursive helper | `DefunctionalizationError: unknown HIR function` | Cross-function calls in closure-capturing map bodies aren't resolved |
 | `map` with `index-item` in body | `RemoraLoweringError: cannot lower HIRIndex in map body` | `tensor_ops.py` map body emitter rejects HIRIndex |
 
-**Takeaway:** For Stage 1a (constant coefficients, uniform grid), the per-step
-computation is trivially fast in NumPy. The Thomas algorithm and CN coefficient
-arithmetic are O(N) with small constant factors. Moving them to compiled Remora
-would bring no meaningful speedup. The value of Remora compilation emerges in
-later stages:
+#### Thomas algorithm status
+
+The Thomas forward sweep (cp computation) works correctly in the **interpreter**:
+
+```lisp
+(let ((upper [1.0 2.0 3.0])
+      (diag [10.0 15.0 20.0])
+      (lower [3.0 5.0 7.0]))
+  (iscan (lambda (prev i)
+    (let ((u (index-item upper i))
+          (d (index-item diag i))
+          (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
+      (/ u (- d (* l prev)))))
+    0.0 (iota 3)))
+; ⇒ [0.1, 0.136, 0.155]
+```
+
+The **compiled** path is blocked by the closure-capturing scan lambda gap:
+the scan body references `upper`, `diag`, `lower` captured from enclosing
+let-bindings, and the let-lowering pass rejects the resulting HIR.
+
+#### Takeaway
+
+For Stage 1a (constant coefficients, uniform grid), the per-step computation is
+trivially fast in NumPy. The Thomas algorithm and CN coefficient arithmetic are
+O(N) with small constant factors. Moving them to compiled Remora would bring no
+meaningful speedup. The value of Remora compilation emerges in later stages:
 
 - **Stage 1c (K(T), Cp(T)):** Element-wise polynomial/map evaluation over N
   points — a natural fit for `map` in Remora. The temperature-dependent K and
-  Cp computation will be the first Remora-compiled function.
+  Cp computation is compiled and used inside the Picard loop.
 - **Stage 2 (rank-polymorphic lifting):** `map` over [Y,X,N] tensors where each
   column is independent. The element-wise K/Cp computation lifts automatically.
 
@@ -231,17 +262,18 @@ later stages:
 ```
 examples/heat1d/
   __init__.py          # Empty package marker
-  heat1d_model.py      # Heat1DModel class + thomas_solve + analytical solution
-  test_heat1d.py       # 12 tests (3 Thomas, 9 model; all passing)
+  heat1d_model.py      # Heat1DModel class + Remora-compiled K(T)/Cp(T) + thomas_solve
+  test_heat1d.py       # 14 tests (3 Thomas, 4 Remora properties, 5 model, 2 Picard)
 ```
 
 ### Next steps
 
-1. **Stage 1c:** Implement temperature-dependent K(T) and Cp(T) as Remora
-   `define/pi` functions using `map` over the temperature array. Compile via
-   `CPUFunctionExecutor.compile_source()`. Python calls the compiled functions
-   inside the Picard loop.
+1. **Stage 1c (done):** Temperature-dependent K(T) and Cp(T) compile and run
+   via `CPUFunctionExecutor`. Python calls them inside the Picard loop.
 2. **Stage 1d:** Non-uniform grid geometry (compute g1/g2 coefficients in
    Python, pass to Remora for CN coefficients).
-3. **Stage 2:** Rank-polymorphic lifting test. Arrange data as [Y,X,N] tensors
+3. **Closure-capturing scan lambdas:** Fix the let-lowering to thread captured
+   arrays through scan lambdas. This would enable the full Thomas algorithm
+   on the compiled path.
+4. **Stage 2:** Rank-polymorphic lifting test. Arrange data as [Y,X,N] tensors
    and pass to the compiled K/Cp functions.

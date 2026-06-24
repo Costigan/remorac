@@ -166,6 +166,9 @@ class _MLIRMainModuleBuilder:
         if block.strip():
             self.blocks.append(block.rstrip())
 
+    def render_blocks(self) -> str:
+        return "\n".join(self.blocks)
+
     def render(self, result_value: str) -> str:
         function_text = _lower_functions(self.functions)
         function_prefix = f"\n{function_text}\n" if function_text else ""
@@ -695,9 +698,12 @@ def _lower_main_module(
                 node, functions
             )
         return _lower_binary_map_module(node, functions)
+    if len(node.arrays) > 2:
+        from remora.lowering.tensor_ops import _lower_nary_map_module
+        return _lower_nary_map_module(node, functions)
     if len(node.arrays) != 1:
         raise RemoraLoweringError(
-            "only unary and binary map MLIR lowering is supported"
+            "empty map MLIR lowering is not supported"
         )
     if not isinstance(node.result_type, ArrayType):
         return _lower_scalar_map_module(node, functions)
@@ -818,6 +824,11 @@ def _lower_main_result_with_tensor_env(
         return _lower_tensor_if_result(
             node, functions, tensor_env
         )
+    if isinstance(node, HIRScan):
+        from remora.lowering.tensor_ops import (
+            _lower_scan_tensor_let_result as _scan_let,
+        )
+        return _scan_let(node, functions, tensor_env)
     raise RemoraLoweringError(
         "unsupported tensor let body for MLIR lowering"
     )

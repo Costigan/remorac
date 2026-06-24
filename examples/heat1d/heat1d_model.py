@@ -1,10 +1,8 @@
-"""1D lunar heat flow model — Stage 1c: temperature-dependent K(T), Cp(T).
+"""1D lunar heat flow model — temperature-dependent K(T), Cp(T).
 
-Uses Remora-compiled functions for element-wise K(T) and Cp(T) computation
-via map.  Python handles the Thomas solve, CN assembly, boundary conditions,
-Picard iteration, and time stepping.
-
-Stage 1a (constant coefficients, uniform grid) → Stage 1c (temperature-dependent).
+Uses Remora-compiled functions for element-wise K(T)/Cp(T) and the
+Thomas tridiagonal solver.  Python handles the CN coefficient
+assembly, Picard iteration, boundary conditions, and time stepping.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from remora.runtime import CPUFunctionExecutor
-from remora.types import ArrayType, FLOAT, INT, StaticDim
+from remora.types import ArrayType, FLOAT, StaticDim
 
 
 # ── Physical constants ──────────────────────────────────────────────────
@@ -84,34 +82,57 @@ def _compile_Cp(N: int) -> CPUFunctionExecutor:
     return CPUFunctionExecutor(artifact)
 
 
-# ── Thomas Tridiagonal Solver (Python) ───────────────────────────────────
+# ── Remora source for the Thomas tridiagonal solver ──────────────────────
 
-def thomas_solve(
-    lower: np.ndarray,
-    diag: np.ndarray,
-    upper: np.ndarray,
-    rhs: np.ndarray,
-) -> np.ndarray:
-    """Solve tridiagonal system using the Thomas algorithm (TDMA).  O(n)."""
-    n = len(rhs)
-    cp = np.empty(n - 1, dtype=np.float64)
-    dp = np.empty(n, dtype=np.float64)
+_THOMAS_SOURCE = """
+(define/pi ()
+  (thomas_solve
+    [lower (Array Float {Nminus1}) diag (Array Float {N})
+     upper (Array Float {Nminus1}) rhs   (Array Float {N})]
+    (Array Float {N}))
+  (let* ((cp
+          (iscan (lambda (prev i)
+            (let ((u (index-item upper i))
+                  (d (index-item diag i))
+                  (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
+              (/ u (- d (* l prev)))))
+            0.0 (iota {Nminus1})))
+         (m
+          (map (lambda (i)
+            (let ((d  (index-item diag i))
+                  (l  (if (< i 1) 0.0 (index-item lower (- i 1))))
+                  (cpv (if (< i 1) 0.0 (index-item cp (- i 1)))))
+              (- d (* l cpv))))
+            (iota {N})))
+         (dp
+          (iscan (lambda (prev i)
+            (let ((r (index-item rhs i))
+                  (mi (index-item m i))
+                  (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
+              (/ (- r (* l prev)) mi)))
+            0.0 (iota {N}))))
+    (trace-right (lambda (xnext i)
+      (let ((dpi (index-item dp i))
+            (cpi (if (< i {Nminus1}) (index-item cp i) 0.0)))
+        (- dpi (* cpi xnext))))
+      0.0 (iota {N}))))
+"""
 
-    cp[0] = upper[0] / diag[0]
-    dp[0] = rhs[0] / diag[0]
 
-    for i in range(1, n):
-        m = diag[i] - lower[i - 1] * cp[i - 1]
-        if i < n - 1:
-            cp[i] = upper[i] / m
-        dp[i] = (rhs[i] - lower[i - 1] * dp[i - 1]) / m
-
-    x = np.empty(n, dtype=np.float64)
-    x[-1] = dp[-1]
-    for i in range(n - 2, -1, -1):
-        x[i] = dp[i] - cp[i] * x[i + 1]
-
-    return x
+def _compile_thomas(N: int) -> CPUFunctionExecutor:
+    """Compile the Thomas tridiagonal solver for grid size N."""
+    source = _THOMAS_SOURCE.format(N=N, Nminus1=N - 1)
+    artifact = CPUFunctionExecutor.compile_source(
+        source, "thomas_solve",
+        (
+            ArrayType(FLOAT, (StaticDim(N - 1),)),
+            ArrayType(FLOAT, (StaticDim(N),)),
+            ArrayType(FLOAT, (StaticDim(N - 1),)),
+            ArrayType(FLOAT, (StaticDim(N),)),
+        ),
+        syntax="lisp", include_prelude=False,
+    )
+    return CPUFunctionExecutor(artifact)
 
 
 # ── 1D Heat Model with Temperature-Dependent Properties ──────────────────
@@ -164,6 +185,7 @@ class Heat1DModel:
         # Lazy-compiled Remora functions
         self._K_executor: CPUFunctionExecutor | None = None
         self._Cp_executor: CPUFunctionExecutor | None = None
+        self._thomas_executor: CPUFunctionExecutor | None = None
 
         # Boundary conditions
         self._T_surface = T_surface
@@ -188,6 +210,11 @@ class Heat1DModel:
         if self._Cp_executor is None:
             self._Cp_executor = _compile_Cp(self.N)
         return self._Cp_executor
+
+    def _get_thomas_executor(self) -> CPUFunctionExecutor:
+        if self._thomas_executor is None:
+            self._thomas_executor = _compile_thomas(self.N)
+        return self._thomas_executor
 
     def _update_properties(self):
         """Update K(T) and Cp(T) from current temperature using Remora."""
@@ -261,8 +288,12 @@ class Heat1DModel:
                 lower[N - 2] = -1.0
                 diag[N - 1] = 1.0
 
-            # ── Solve ──
-            T_new = thomas_solve(lower, diag, upper, rhs)
+            # ── Solve (Remora-compiled Thomas algorithm) ──
+            result = self._get_thomas_executor().execute(
+                lower.astype(np.float32), diag.astype(np.float32),
+                upper.astype(np.float32), rhs.astype(np.float32),
+            )
+            T_new = result.value.astype(np.float64)
 
             # ── Check convergence ──
             if np.max(np.abs(T_new - T_guess)) < self.picard_tol:

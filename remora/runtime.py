@@ -1393,7 +1393,12 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         fn = _eval_callable(expr.func, env)
         if not isinstance(array, np.ndarray):
             raise EvaluationError("scan expects an array value")
-        result = np.empty_like(array)
+        result_dtype = _numpy_dtype(expr.type.element)
+        if hasattr(expr.type, "shape") and expr.type.shape:
+            result_shape = tuple(int(d.value) for d in expr.type.shape)
+        else:
+            result_shape = (len(array),)
+        result = np.empty(result_shape, dtype=result_dtype)
         if expr.right:
             for i in range(len(array) - 1, -1, -1):
                 if expr.exclusive:
@@ -1856,10 +1861,10 @@ def _map_value(
     cell_shape: tuple[StaticDim, ...],
     result_type: RemoraType,
 ) -> Value:
-    if len(arrays) == 2:
-        return _binary_map_value(callable_value, arrays[0], arrays[1], result_type)
+    if len(arrays) >= 2:
+        return _nary_map_value(callable_value, arrays, result_type)
     if len(arrays) != 1:
-        raise EvaluationError("map currently supports one or two arrays")
+        raise EvaluationError("map requires at least one array")
     array = arrays[0]
     if not isinstance(array, np.ndarray):
         return _coerce_runtime_value(callable_value(array), result_type)
@@ -1877,6 +1882,45 @@ def _map_value(
         callable_value(array[index] if cell_rank else array[index].item())
         for index in np.ndindex(frame_shape)
     ]
+    if isinstance(result_type, ArrayType):
+        return np.array(values, dtype=_numpy_dtype(result_type.element)).reshape(
+            tuple(dim.value for dim in result_type.shape)
+        )
+    return _coerce_runtime_value(values[0], result_type)
+
+
+def _nary_map_value(
+    callable_value: CallableValue,
+    arrays: list[Value],
+    result_type: RemoraType,
+) -> Value:
+    """Apply a callable to N arrays element-wise via rank polymorphism."""
+    n = len(arrays)
+    np_arrays = [np.asarray(a) for a in arrays]
+    # Determine frame rank from first non-scalar array
+    frame_rank = 0
+    for a in np_arrays:
+        if a.ndim > 0:
+            frame_rank = a.ndim
+            break
+    if frame_rank == 0:
+        # All scalars
+        return _coerce_runtime_value(callable_value(*[a.item() for a in np_arrays]), result_type)
+
+    values = []
+    for index in np.ndindex(np_arrays[0].shape[:frame_rank]):
+        args = []
+        for a in np_arrays:
+            elem = a[index] if a.ndim >= frame_rank else a.item()
+            # numpy scalars like np.int32 need explicit conversion
+            if isinstance(elem, (np.integer,)):
+                elem = int(elem)
+            elif isinstance(elem, (np.floating,)):
+                elem = float(elem)
+            elif isinstance(elem, (np.bool_,)):
+                elem = bool(elem)
+            args.append(elem)
+        values.append(callable_value(*args))
     if isinstance(result_type, ArrayType):
         return np.array(values, dtype=_numpy_dtype(result_type.element)).reshape(
             tuple(dim.value for dim in result_type.shape)
