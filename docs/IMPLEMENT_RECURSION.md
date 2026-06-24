@@ -910,11 +910,11 @@ Goal: standalone lambdas, function-typed let bindings, and function-valued map/f
 
 - [x] **12.35.2** `_require_numeric` and `/` division check skip `TypeVar` types, so pre-inferred polymorphic functions don't fail on operator constraints.  (`remora/typechecker.py:1390-1392`, `3056-3057`)
 
-- [ ] **12.35.3** Remove `"function-valued map results are deferred"` gate — deferred: needs monomorphization (§12.34).  (`remora/typechecker.py:1477-1478`)
+- [x] **12.35.3** Remove `"function-valued map results are deferred"` gate — relaxed to pass-through; monomorphization eliminates FuncType values before lowering.  (`remora/typechecker.py:1529-1532`, `remora/frame.py:179-181`)
 
-- [ ] **12.35.4** Remove `"map over function values is deferred"` gate — deferred.  (`remora/frame.py:117-121`)
+- [x] **12.35.4** Remove `"map over function values is deferred"` gate — relaxed to treat FuncType as scalar for cell/frame decomposition.  (`remora/frame.py:121-124`)
 
-- [ ] **12.35.5** Remove `"arrays of functions are deferred"` gate — deferred.  (`remora/typechecker.py:1104-1105`)
+- [x] **12.35.5** Remove `"arrays of functions are deferred"` gate — relaxed to create scalar-typed arrays for FuncType elements.  (`remora/typechecker.py:1141-1143`)
 
 #### 12.36 Tests
 

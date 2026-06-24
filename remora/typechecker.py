@@ -1139,7 +1139,9 @@ class TypeChecker:
             self._require(typed_element.type, element_type, expr.loc)
 
         if isinstance(element_type, FuncType):
-            raise RemoraTypeError("arrays of functions are deferred", expr.loc)
+            # After monomorphization, FuncType values in arrays are
+            # eliminated.  Treat as a scalar-typed array for now.
+            array_type = ArrayType(element_type, (StaticDim(len(expr.elements)),))
 
         if isinstance(element_type, ArrayType):
             array_type = ArrayType(element_type.element, (StaticDim(len(expr.elements)),) + element_type.shape)
@@ -1527,8 +1529,10 @@ class TypeChecker:
         result_type = func_type.result
         if frame_shape:
             if isinstance(result_type, FuncType):
-                raise RemoraTypeError("function-valued map results are deferred", expr.loc)
-            if isinstance(result_type, ArrayType):
+                # Function-typed results: after monomorphization, these
+                # are eliminated before lowering.  Pass through.
+                pass
+            elif isinstance(result_type, ArrayType):
                 raise RemoraTypeError("binary map over array-valued cells is deferred", expr.loc)
             result_type = apply_frame(result_type, frame_shape)
         return TypedMap(expr, typed_func, [left, right], frame_shape, (), result_type)

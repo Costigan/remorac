@@ -118,6 +118,10 @@ def scalar_cell_and_frame(
         return value_type, ()
     if isinstance(value_type, ArrayType):
         return value_type.element, value_type.shape
+    if isinstance(value_type, FuncType):
+        # Function-typed values: after monomorphization, these are
+        # eliminated before lowering.  Treat them as scalars here.
+        return value_type, ()
     raise RemoraTypeError("map over function values is deferred", loc)
 
 
@@ -173,7 +177,9 @@ def apply_frame(
     if not frame:
         return result_type
     if isinstance(result_type, FuncType):
-        raise RemoraTypeError("function-valued map results are deferred")
+        # Function-typed values: after monomorphization, these are
+        # eliminated before lowering.  Pass through unchanged.
+        return result_type
     if isinstance(result_type, ArrayType):
         return result_type.with_frame(frame)
     enforce_rank_limit(ArrayType(result_type, frame))
