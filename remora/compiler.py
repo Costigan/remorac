@@ -322,6 +322,125 @@ def compile_function_source(
     )
 
 
+def _resolve_let_bound_function_aliases(program: HIRProgram, core_program) -> HIRProgram:
+    """Resolve let-bound function aliases like (let (f inc) (f ...)) → (inc ...)."""
+    from remora.hir import (
+        HIRCall as _HC, HIRFunction as _HF, HIRLet as _HL,
+        HIRParam as _HP, HIRVar as _HV,
+    )
+    from remora.ast_nodes import FuncDef as _FuncDef
+
+    functions = {f.name: f for f in program.functions}
+    # Build FuncDef lookup for materializing missing functions
+    func_defs: dict[str, _FuncDef] = {}
+    for d in core_program.definitions:
+        if hasattr(d, 'source'):
+            src = d.source
+            if isinstance(src, _FuncDef):
+                func_defs[src.name] = src
+        elif isinstance(d, _FuncDef):
+            func_defs[d.name] = d
+
+    def ensure(name: str) -> str | None:
+        if name in functions:
+            return name
+        fd = func_defs.get(name)
+        if fd is None:
+            return None
+        from remora.typechecker import TypeChecker as _TC, TypeEnv as _TE
+        from remora.types import INT as _INT
+        tc = _TC()
+        tc._functions[name] = fd
+        try:
+            param_types = tuple(_INT for _ in fd.params)
+            typed_lam = tc.specialize_top_level_function(fd, param_types, _TE())
+            from remora.hir import lower_expr as _le
+            hir_body = _le(typed_lam.body)
+            fn = _HF(
+                name,
+                [_HP(pn, pt) for (pn, pt), _ in zip(typed_lam.params, param_types)],
+                hir_body,
+                typed_lam.type.result,
+            )
+            functions[name] = fn
+            new_fns.append(fn)
+            return name
+        except Exception:
+            return None
+
+    new_fns: list[_HF] = list(program.functions)
+    changed = True
+    new_main = program.main
+
+    while changed:
+        changed = False
+
+        def walk(expr, subs):
+            nonlocal changed
+            if isinstance(expr, _HL) and isinstance(expr.value, _HV):
+                alias = expr.value.name
+                # Try to materialize the aliased function if it's not
+                # in the HIR functions yet.
+                ensured = ensure(alias)
+                if ensured or alias in subs:
+                    target = subs.get(alias, alias)
+                    if isinstance(target, _HV):
+                        target = target.name
+                    new_subs = dict(subs)
+                    new_subs[expr.name] = _HV(target, expr.value.type)
+                    changed = True
+                    return walk(expr.body, new_subs)
+            if isinstance(expr, _HC) and expr.func_name in subs:
+                resolved = subs[expr.func_name]
+                target = resolved.name if isinstance(resolved, _HV) else resolved
+                ensured = ensure(target) or target
+                if ensured in functions:
+                    fn = functions[ensured]
+                    new_rt = fn.return_type
+                    new_args = [walk(a, subs) for a in expr.args]
+                    changed = True
+                    return _HC(ensured, new_args, new_rt)
+            if isinstance(expr, _HV) and expr.name in subs:
+                return subs[expr.name]
+            if isinstance(expr, _HL):
+                v = walk(expr.value, subs)
+                b = walk(expr.body, subs)
+                if v is not expr.value or b is not expr.body:
+                    changed = True
+                    return _HL(expr.name, expr.value_type, v, b, expr.result_type)
+                return expr
+            # Generic walk
+            kwargs = {}
+            for attr in ("body", "then_branch", "else_branch", "value",
+                         "condition", "left", "right", "array", "init"):
+                child = getattr(expr, attr, None)
+                if child is not None and hasattr(child, "__class__"):
+                    new_child = walk(child, subs)
+                    if new_child is not child:
+                        kwargs[attr] = new_child
+                        changed = True
+            for list_attr in ("args", "arrays", "elements"):
+                children = getattr(expr, list_attr, None)
+                if isinstance(children, list):
+                    new_children = [walk(c, subs) for c in children]
+                    if any(nc is not oc for nc, oc in zip(new_children, children)):
+                        kwargs[list_attr] = new_children
+                        changed = True
+            if kwargs:
+                for fld in expr.__dataclass_fields__:
+                    if fld not in kwargs:
+                        kwargs[fld] = getattr(expr, fld)
+                return type(expr)(**kwargs)
+            return expr
+
+        if new_main is not None:
+            new_main = walk(new_main, {})
+
+    if new_main is program.main:
+        return program
+    return HIRProgram(new_fns, new_main, program.return_type)
+
+
 def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
     """Monomorphize higher-order calls by cloning and substituting.
 
@@ -333,6 +452,7 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
     from remora.hir import (
         HIRCall as _HIRCall,
         HIRFunction as _HIRFunction,
+        HIRLet as _HIRLet,
         HIRParam as _HIRParam,
         HIRVar as _HIRVar,
         lower_expr as _lower_expr,
@@ -345,8 +465,9 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
         name: f for name, f in functions.items()
         if any(isinstance(p.type, _FuncType) for p in f.params)
     }
-    if not hof_functions:
-        return program
+    # Always process — even when there are no HOF functions, let-bound
+    # function aliases need resolution, and new functions may need
+    # materialization.
 
     # Build a name→FuncDef lookup from the core program definitions
     func_defs: dict[str, _FuncDef] = {}
@@ -394,6 +515,14 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
         """Walk expr and replace HIRCall nodes matching known HOFs."""
         nonlocal counter
         if isinstance(expr, _HIRCall):
+            # Resolve let-bound function aliases in call targets
+            if expr.func_name in subs:
+                resolved = subs[expr.func_name]
+                if isinstance(resolved, _HIRVar) and resolved.name in functions:
+                    fn = functions[resolved.name]
+                    new_result_type = fn.return_type if not isinstance(fn.return_type, type(None)) else expr.result_type
+                    new_args = [_replace_calls(a, subs, new_calls) for a in expr.args]
+                    return _HIRCall(resolved.name, new_args, new_result_type)
             hof = hof_functions.get(expr.func_name)
             if hof is not None:
                 new_params = [
@@ -415,7 +544,6 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
                 if concrete:
                     counter += 1
                     actual_name = f"__mono_{expr.func_name}_{counter}"
-                    new_body = _substitute_hir(hof.body, concrete, functions)
                     # Resolve result type from the concrete function's return
                     resolved_return = hof.return_type
                     for resolved_name in {
@@ -423,6 +551,29 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
                         if isinstance(v, _HIRVar) and v.name in functions
                     }:
                         resolved_return = functions[resolved_name].return_type
+                    # Also rename recursive self-calls inside the body
+                    concrete_with_self = dict(concrete)
+                    concrete_with_self[expr.func_name] = _HIRVar(
+                        actual_name, resolved_return
+                    )
+                    new_body = _substitute_hir(hof.body, concrete_with_self, functions)
+                    # Substitute FuncType vars AND self-calls.
+                    # For recursive HOFs, the FuncType var is also
+                    # inlined — the recursive call passes only the
+                    # non-FuncType args (the concrete function is
+                    # hard-coded in the body).
+                    concrete_with_self = dict(concrete)
+                    concrete_with_self[expr.func_name] = _HIRVar(
+                        actual_name, resolved_return
+                    )
+                    new_body = _substitute_hir(hof.body, concrete_with_self, functions)
+                    # For self-recursive HOFs, fix up recursive calls
+                    # in the body: remove FuncType args that were
+                    # substituted but don't belong in the monomorphized
+                    # copy's signature.
+                    new_body = _strip_hof_args(
+                        new_body, hof.params, actual_name
+                    )
                     new_functions.append(
                         _HIRFunction(actual_name, new_params, new_body, resolved_return)
                     )
@@ -438,6 +589,18 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
             )
         if isinstance(expr, _HIRVar) and expr.name in subs:
             return subs[expr.name]
+        # Resolve let-bound function aliases: (let (f inc) (f (f 5)))
+        # becomes (inc (inc 5)).
+        if isinstance(expr, _HIRLet) and isinstance(expr.value, _HIRVar):
+            let_name = expr.value.name
+            if let_name in functions or let_name in func_defs:
+                # f aliases a known function — ensure it has a HIR entry,
+                # then redirect calls to the underlying function and drop
+                # the let binding.
+                fn_name = _ensure_function(let_name) or let_name
+                new_subs = dict(subs)
+                new_subs[expr.name] = _HIRVar(fn_name, expr.value.type)
+                return _replace_calls(expr.body, new_subs, new_calls)
         for attr in ("body", "then_branch", "else_branch", "value", "condition",
                      "left", "right", "array", "init"):
             child = getattr(expr, attr, None)
@@ -469,11 +632,14 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
 
     new_main = _replace_calls(program.main, {}, {}) if program.main else None
 
-    # Remove HOF functions that have been monomorphized — they have
-    # FuncType params and the main expression no longer calls them.
+    # Remove non-recursive HOF functions that have been monomorphized.
+    # Self-recursive HOFs that were cloned keep their FuncType params
+    # only in the monomorphized copy (prefixed with __mono_); originals
+    # are removed.
     final_functions = [
         f for f in new_functions
         if not any(isinstance(p.type, _FuncType) for p in f.params)
+        or f.name.startswith("__mono_")
     ]
 
     # Resolve the program's return type from the monomorphized main
@@ -481,6 +647,54 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
     resolved_return = new_main.result_type if isinstance(new_main, _HIRCall) else program.return_type
 
     return HIRProgram(final_functions, new_main, resolved_return)
+
+
+def _has_self_hof_call(expr, func_name: str) -> bool:
+    """Check if *expr* contains a HIRCall to *func_name*."""
+    from remora.hir import HIRCall as _HC
+    if isinstance(expr, _HC) and expr.func_name == func_name:
+        return True
+    for attr in ("body", "then_branch", "else_branch", "value", "condition",
+                 "left", "right", "array", "init", "func"):
+        child = getattr(expr, attr, None)
+        if child is not None and hasattr(child, "__class__"):
+            if _has_self_hof_call(child, func_name):
+                return True
+    for list_attr in ("args", "arrays", "elements"):
+        children = getattr(expr, list_attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, "__class__") and _has_self_hof_call(child, func_name):
+                    return True
+    return False
+
+
+def _strip_hof_args(
+    expr, hof_params: list, mono_name: str
+):
+    """Remove FuncType args from self-calls to *mono_name* in *expr*."""
+    from remora.hir import HIRCall as _HC, HIRIf as _HI
+    from remora.types import FuncType as _FT
+    if isinstance(expr, _HC):
+        if expr.func_name == mono_name:
+            new_args = [
+                a for a, p in zip(expr.args, hof_params)
+                if not isinstance(p.type, _FT)
+            ]
+            return _HC(mono_name, [_strip_hof_args(a, hof_params, mono_name) for a in new_args], expr.result_type)
+        return _HC(
+            expr.func_name,
+            [_strip_hof_args(a, hof_params, mono_name) for a in expr.args],
+            expr.result_type,
+        )
+    if isinstance(expr, _HI):
+        return _HI(
+            _strip_hof_args(expr.condition, hof_params, mono_name),
+            _strip_hof_args(expr.then_branch, hof_params, mono_name),
+            _strip_hof_args(expr.else_branch, hof_params, mono_name),
+            expr.result_type,
+        )
+    return expr
 
 
 def _try_monomorphize(

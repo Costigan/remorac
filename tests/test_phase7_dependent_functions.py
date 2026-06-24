@@ -900,3 +900,39 @@ def test_hof_lambda_arg_compiled():
     )
     result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
     assert result.value == 7
+
+
+def test_hof_recursive_repeat_compiled():
+    """12.36: recursive HOF repeat inc 3 0 = 3 (CPU compiled)."""
+    src = (
+        "(define (repeat [f n x]) "
+        "  (if (<= n 0) x (repeat f (- n 1) (f x)))) "
+        "(define (inc [x]) (+ x 1)) "
+        "(repeat inc 3 0)"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    assert result.value == 3
+
+
+def test_closure_capture_in_map_compiled():
+    """12.33.4: lambda capturing outer var in map — inline, not lifted."""
+    src = (
+        "(define (scale_by [s xs]) "
+        "  (map (lambda (x) (* x s)) xs)) "
+        "(scale_by 3 [1 2 3])"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [3, 6, 9])
+
+
+def test_closure_multiple_captures_in_map_compiled():
+    """12.33.4: lambda capturing multiple outer vars in map."""
+    src = (
+        "(define (linear [a b xs]) "
+        "  (map (lambda (x) (+ (* a x) b)) xs)) "
+        "(linear 2 3 [1 2 3])"
+    )
+    result = evaluate_source_compiled(src, include_prelude=False, syntax="lisp", strict=True)
+    import numpy as np
+    np.testing.assert_array_equal(result.value, [5, 7, 9])

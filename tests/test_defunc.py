@@ -3,6 +3,8 @@ import pytest
 from remora.defunc import RemoraDefuncError, defunctionalize
 from remora.hir import (
     HIRFunction,
+    HIRLambda,
+    HIRLet,
     HIRMap,
     HIRPrimOp,
     HIRPrimCallable,
@@ -100,9 +102,15 @@ def test_lambda_capturing_scalar_let_value_is_lifted_statically():
 
 
 def test_lambda_capturing_array_value_is_deferred():
+    """Lambdas capturing outer variables are now kept inline (not rejected).
+    The lowering resolves captures from the local context."""
     program = lower_program_source(
         "let bias = [1, 2] in map (\\x -> x + bias[0]) (iota 4)"
     )
-
-    with pytest.raises(RemoraDefuncError, match="captures outer variables"):
-        defunctionalize(program)
+    result = defunctionalize(program)
+    # Walk through HIRLet chain to find the map
+    main_body = result.main
+    while isinstance(main_body, HIRLet):
+        main_body = main_body.body
+    assert isinstance(main_body, HIRMap)
+    assert isinstance(main_body.func, HIRLambda)

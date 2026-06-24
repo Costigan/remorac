@@ -291,7 +291,14 @@ class _Defunctionalizer:
     ) -> HIRCallable:
         scalar_env = scalar_env or {}
         if isinstance(callable_, HIRLambda):
-            return _lift_lambda(callable_, scalar_env, self)
+            # Check for captures.  If the lambda captures nothing, lift
+            # it.  If it captures outer variables, keep it inline — the
+            # lowering will resolve the captures from the local context
+            # (e.g., function params available in the map body).
+            free = _free_vars_of_lambda(callable_, scalar_env)
+            if not free:
+                return _lift_lambda(callable_, scalar_env, self)
+            return callable_
         if isinstance(callable_, HIRPrimCallable):
             return HIRPrimCallable(
                 callable_.op,
@@ -370,6 +377,19 @@ def _lift_lambda(
         HIRFunction(name, resolved_params, body, rt)
     )
     return HIRVar(name, _FT(param_types, rt))
+
+
+def _free_vars_of_lambda(
+    lambda_: HIRLambda,
+    scalar_env: dict[str, HIRExpr] | None,
+) -> set[str]:
+    """Return free variables of *lambda_* that are NOT in *scalar_env*."""
+    body = lambda_.body
+    param_names = {param.name for param in lambda_.params}
+    free = _free_vars(body) - param_names
+    if scalar_env:
+        free -= set(scalar_env.keys())
+    return free
 
 
 def _free_vars(expr: HIRExpr) -> set[str]:
