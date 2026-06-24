@@ -427,7 +427,6 @@ def _lower_scan_tensor_input(
     result_type = type_to_mlir(node.result_type)
     result_elem = type_to_mlir(node.result_type.element)
     init_value_str = _literal_value(node.init, result_elem)
-    op_name = _arith_op(node.func.op, result_elem)
     N = node.reduction_dim.value
     p = prefix
 
@@ -435,22 +434,76 @@ def _lower_scan_tensor_input(
         node.array, f"{p}_in", functions, tensor_env, scalar_env
     )
 
-    if node.exclusive:
-        loop = f"""\
+    fn = _resolve_scan_function(node, functions)
+    if fn is not None:
+        step_sp = f"{p}_ss"
+
+        step_scalar_env: dict[str, _Operand] = {}
+        step_tensor_env: dict[str, _TensorValue] = {}
+
+        step_scalar_env[fn.params[0].name] = _Operand(
+            f"%{p}_c", [], result_elem,
+        )
+
+        input_elem_remora = node.array.result_type.element
+        if isinstance(input_elem_remora, ArrayType):
+            step_tensor_env[fn.params[1].name] = _TensorValue(
+                f"%{p}_elem", input_type,
+                type_to_mlir(input_elem_remora.element),
+            )
+        else:
+            step_scalar_env[fn.params[1].name] = _Operand(
+                f"%{p}_elem", [], _input_elem,
+            )
+
+        step_lines: list[str] = []
+        next_name, _next_type = _lower_body_in_loop(
+            fn.body, step_lines, step_sp, functions,
+            step_tensor_env, step_scalar_env,
+            _next_uid=0,
+        )
+        step_body = "\n".join(step_lines)
+        step_next = next_name
+
+        if node.exclusive:
+            loop = f"""\
+    %{p}_stored = tensor.insert %{p}_c into %{p}_acc[%{p}_i] : {result_type}
+      %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
+{step_body}"""
+        elif node.right:
+            loop = f"""\
+    %{p}_rev = arith.subi %{p}_cNm1, %{p}_i : index
+      %{p}_elem = tensor.extract {input_name}[%{p}_rev] : {input_type}
+{step_body}
+      %{p}_stored = tensor.insert {step_next} into %{p}_acc[%{p}_rev] : {result_type}"""
+        else:
+            loop = f"""\
+    %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
+{step_body}
+      %{p}_stored = tensor.insert {step_next} into %{p}_acc[%{p}_i] : {result_type}"""
+
+        step_next_yield = step_next
+    else:
+        op_name = _arith_op(node.func.op, result_elem)
+
+        if node.exclusive:
+            loop = f"""\
     %{p}_stored = tensor.insert %{p}_c into %{p}_acc[%{p}_i] : {result_type}
       %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
       %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}"""
-    elif node.right:
-        loop = f"""\
+        elif node.right:
+            loop = f"""\
     %{p}_rev = arith.subi %{p}_cNm1, %{p}_i : index
       %{p}_elem = tensor.extract {input_name}[%{p}_rev] : {input_type}
       %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}
       %{p}_stored = tensor.insert %{p}_next into %{p}_acc[%{p}_rev] : {result_type}"""
-    else:
-        loop = f"""\
+        else:
+            loop = f"""\
     %{p}_elem = tensor.extract {input_name}[%{p}_i] : {input_type}
       %{p}_next = {op_name} %{p}_c, %{p}_elem : {result_elem}
       %{p}_stored = tensor.insert %{p}_next into %{p}_acc[%{p}_i] : {result_type}"""
+
+        step_next_yield = f"%{p}_next"
 
     extra_consts = ""
     if node.right:
@@ -466,7 +519,7 @@ def _lower_scan_tensor_input(
     %{p}, %{p}_carry = "scf.for"(%{p}_c0, %{p}_cN, %{p}_c1, %{p}_filled, %{p}_init) ({{
     ^bb0(%{p}_i: index, %{p}_acc: {result_type}, %{p}_c: {result_elem}):
       {loop}
-      "scf.yield"(%{p}_stored, %{p}_next) : ({result_type}, {result_elem}) -> ()
+      "scf.yield"(%{p}_stored, {step_next_yield}) : ({result_type}, {result_elem}) -> ()
     }}) : (index, index, index, {result_type}, {result_elem}) -> ({result_type}, {result_elem})"""
 
     return code, f"%{p}", result_type, result_elem
@@ -3707,6 +3760,29 @@ def _lower_append_module(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_scan_function(
+    node: HIRScan, functions: dict[str, HIRFunction]
+) -> HIRFunction | None:
+    """Resolve the scan step function to a HIRFunction.
+
+    Inline lambdas become HIRLambda attached to a lambda-wrapper function
+    before defunctionalization. After defunctionalization, the lambda body
+    is lifted into a top-level HIRFunction referenced by a HIRVar.
+    """
+    if isinstance(node.func, HIRVar) and node.func.name in functions:
+        return functions[node.func.name]
+    # Inline HIRLambda (pre-defunctionalization path, e.g. interpreter lowering)
+    if isinstance(node.func, HIRLambda):
+        from remora.hir import HIRParam
+        return HIRFunction(
+            "<inline>",
+            [HIRParam(p.name, p.type) for p in node.func.params],
+            node.func.body,
+            None,
+        )
+    return None
+
+
 def _lower_scan_module(
     node: HIRScan, functions: dict[str, HIRFunction]
 ) -> str:
@@ -3732,15 +3808,94 @@ def _lower_scan_rank1(
     result_type = type_to_mlir(node.result_type)
     result_element_type = type_to_mlir(node.result_type.element)
     init_value_str = _literal_value(node.init, result_element_type)
-    op_name = _arith_op(node.func.op, result_element_type)
     N = node.reduction_dim.value
 
     input_code, input_name, input_type, input_element_type = _lower_tensor_input(
         node.array, "input", functions
     )
 
-    if node.right:
-        body = f"""{input_code}
+    fn = _resolve_scan_function(node, functions)
+    if fn is not None:
+        step_prefix = "scan_step"
+
+        step_scalar_env: dict[str, _Operand] = {}
+        step_tensor_env: dict[str, _TensorValue] = {}
+
+        step_scalar_env[fn.params[0].name] = _Operand(
+            "%carry", [], result_element_type,
+        )
+
+        input_elem_remora = node.array.result_type.element
+        if isinstance(input_elem_remora, ArrayType):
+            step_tensor_env[fn.params[1].name] = _TensorValue(
+                "%elem", input_element_type,
+                type_to_mlir(input_elem_remora.element),
+            )
+        else:
+            step_scalar_env[fn.params[1].name] = _Operand(
+                "%elem", [], input_element_type,
+            )
+
+        step_lines: list[str] = []
+        next_carry_name, _next_carry_type = _lower_body_in_loop(
+            fn.body, step_lines, step_prefix, functions,
+            step_tensor_env, step_scalar_env,
+            _next_uid=0,
+        )
+        step_body = "\n".join(step_lines)
+
+        if node.right:
+            body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %cNminus1 = arith.constant {N - 1} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %rev_idx = arith.subi %cNminus1, %i : index
+      %elem = tensor.extract {input_name}[%rev_idx] : {input_type}
+{step_body}
+      %stored = tensor.insert {next_carry_name} into %acc_tensor[%rev_idx] : {result_type}
+      \"scf.yield\"(%stored, {next_carry_name}) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+        elif node.exclusive:
+            body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %stored = tensor.insert %carry into %acc_tensor[%i] : {result_type}
+      %elem = tensor.extract {input_name}[%i] : {input_type}
+{step_body}
+      \"scf.yield\"(%stored, {next_carry_name}) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+        else:
+            body = f"""{input_code}
+    %init = arith.constant {init_value_str} : {result_element_type}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %cN = arith.constant {N} : index
+    %empty = tensor.empty() : {result_type}
+    %filled = linalg.fill ins(%init : {result_element_type}) outs(%empty : {result_type}) -> {result_type}
+    %scanned, %_carry = \"scf.for\"(%c0, %cN, %c1, %filled, %init) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {result_element_type}):
+      %elem = tensor.extract {input_name}[%i] : {input_type}
+{step_body}
+      %stored = tensor.insert {next_carry_name} into %acc_tensor[%i] : {result_type}
+      \"scf.yield\"(%stored, {next_carry_name}) : ({result_type}, {result_element_type}) -> ()
+    }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
+    else:
+        op_name = _arith_op(node.func.op, result_element_type)
+
+        if node.right:
+            body = f"""{input_code}
     %init = arith.constant {init_value_str} : {result_element_type}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -3756,8 +3911,8 @@ def _lower_scan_rank1(
       %stored = tensor.insert %next_carry into %acc_tensor[%rev_idx] : {result_type}
       \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
     }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
-    elif node.exclusive:
-        body = f"""{input_code}
+        elif node.exclusive:
+            body = f"""{input_code}
     %init = arith.constant {init_value_str} : {result_element_type}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -3771,8 +3926,8 @@ def _lower_scan_rank1(
       %next_carry = {op_name} %carry, %elem : {result_element_type}
       \"scf.yield\"(%stored, %next_carry) : ({result_type}, {result_element_type}) -> ()
     }}) : (index, index, index, {result_type}, {result_element_type}) -> ({result_type}, {result_element_type})"""
-    else:
-        body = f"""{input_code}
+        else:
+            body = f"""{input_code}
     %init = arith.constant {init_value_str} : {result_element_type}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index

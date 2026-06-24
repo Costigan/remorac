@@ -398,6 +398,17 @@ class TestCompiledVsInterpreter:
         "(escan/zero + 0 [2 10 5])",
         "(iscan + [0 0 0] [[1 2 3] [4 5 6] [7 8 9]])",
         "(iscan + [[0 0] [0 0]] [[[1 2] [3 4]] [[5 6] [7 8]] [[9 10] [11 12]]])",
+        # ── scan with lambda ──
+        "(iscan (lambda (a x) (+ a x)) 0 (iota 5))",
+        "(escan (lambda (a x) (+ a x)) 0 (iota 5))",
+        "(trace (lambda (a x) (+ a x)) 0 [2 10 5])",
+        "(trace-right (lambda (a x) (+ a x)) 0 [2 10 5])",
+        # ── scan with lambda + let ──
+        "(iscan (lambda (p e) (let ((x e)) (+ p x))) 0 (iota 5))",
+        # ── scan with lambda + if ──
+        "(iscan (lambda (a x) (if (< x 0) a (+ a x))) 0 [1 -2 3 -4 5])",
+        # ── scan with lambda + arithmetic ──
+        "(iscan (lambda (p e) (let ((x e)) (/ x (+ 1.0 (* p p))))) 0.0 [1.0 2.0 3.0 4.0 5.0])",
     ])
     def test_scan_family(self, src):
         _assert_lisp_compiled_matches_interp(src)

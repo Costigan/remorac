@@ -1900,11 +1900,17 @@ class TypeChecker:
             raise RemoraTypeError("scan expects a non-scalar array", expr.loc)
 
         element_type = typed_array.type.drop_outer(1)
-        if isinstance(element_type, ArrayType):
-            self._require(typed_init.type, element_type, expr.loc)
 
         expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
+        result_type: RemoraType = typed_init.type
+        if isinstance(result_type, ScalarType):
+            result_type = ArrayType(result_type, (typed_array.type.shape[0],))
+        elif isinstance(result_type, ArrayType):
+            result_type = ArrayType(
+                result_type.element,
+                (typed_array.type.shape[0],) + result_type.shape,
+            )
         return TypedScan(
             expr,
             typed_func,
@@ -1913,7 +1919,7 @@ class TypeChecker:
             typed_array.type.shape[0],
             expr.exclusive,
             False,  # right
-            typed_array.type,
+            result_type,
         )
 
     def _infer_trace(self, expr: TraceExpr, env: TypeEnv) -> TypedScan:
@@ -1923,11 +1929,17 @@ class TypeChecker:
             raise RemoraTypeError("trace expects a non-scalar array", expr.loc)
 
         element_type = typed_array.type.drop_outer(1)
-        if isinstance(element_type, ArrayType):
-            self._require(typed_init.type, element_type, expr.loc)
 
         expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
+        result_type: RemoraType = typed_init.type
+        if isinstance(result_type, ScalarType):
+            result_type = ArrayType(result_type, (typed_array.type.shape[0],))
+        elif isinstance(result_type, ArrayType):
+            result_type = ArrayType(
+                result_type.element,
+                (typed_array.type.shape[0],) + result_type.shape,
+            )
         return TypedScan(
             expr,  # type: ignore[arg-type]
             typed_func,
@@ -1936,7 +1948,7 @@ class TypeChecker:
             typed_array.type.shape[0],
             False,  # exclusive
             expr.right,  # right
-            typed_array.type,
+            result_type,
         )
 
     def _infer_rerank(self, expr: RerankExpr, env: TypeEnv) -> TypedExpr:
