@@ -273,8 +273,8 @@ grad_form: "grad" sexpr -> grad_expr
 application: sexpr sexpr* -> app
 
 BOOL: "#t" | "#f"
-FLOAT: /-?([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)/
 INT: /-?[0-9]+/
+FLOAT: /-?(([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)/
 NAME: /[a-zA-Z_+\/*<=>!&|?][a-zA-Z0-9_+\-*\/\<=>!&|?']*/
 MINUS: "-"
 

@@ -1,0 +1,87 @@
+Work on the 1D lunar heat flow model described in docs/heat_flow_notes.txt,
+using the RemoraC project to implement as much numeric computation as
+possible in Remora (CPU-compiled), with Python for orchestration only
+(time stepping, convergence loops, I/O, visualization).
+
+## Reference implementation
+
+/e/projects/heat1d — Paul Haynes' Python implementation of the same
+model.  Read /e/projects/heat1d/README.md first, then study the source
+for the tridiagonal solver (Thomas algorithm), the Crank-Nicolson
+discretization, and the Picard iteration convergence loop.  Use it as
+the correctness oracle.
+
+## Approach
+
+Build in three stages:
+
+### Stage 1: Single 1D column in Remora
+
+Implement the Thomas algorithm as a Remora function operating on Rank-1
+arrays of length N (static).  Write the Crank-Nicolson coefficient
+computation and tridiagonal solve entirely in Remora.  Python does:
+- Set up the spatial grid (z, dz arrays)
+- Compute density rho(z) in Python (it's time-independent)
+- Call the Remora-compiled step function with T^t, return T^{t+1}
+- Run the Picard iteration loop (while not converged)
+- Time stepping loop
+
+Start with N=30, uniform grid, constant coefficients (no temperature
+dependence in K or Cp).  Verify against a NumPy implementation.
+
+Then add temperature-dependent K(T) and Cp(T).  Then non-uniform grid.
+
+### Stage 2: Rank-polymorphic lifting to 2D patch grid
+
+Organize the data as [Y, X, N] tensors — each (y,x) position is an
+independent column.  The N-dimension is the "cell" dimension.  Define
+the Thomas algorithm as operating on cells of rank 1.  Remora's rank
+polymorphism should lift it over the [Y, X] frame automatically.
+
+If automatic lifting doesn't compose with the sequential Thomas
+algorithm (which has loop-carried dependencies along N), fall back to
+Python `for` loops over (y,x) positions calling the compiled Stage-1
+function per column.  Document what worked and what didn't.
+
+### Stage 3: Performance and validation
+
+- Run with N=100, Y=32, X=32, 100 time steps
+- Compare temperatures against Haynes' reference implementation
+- Time the Remora-compiled path vs pure Python
+- Document what GPU strategy would be (Remora doesn't do GPU recursion
+  today, but the per-column independence makes this embarrassingly parallel)
+
+## Key constraints (learned from working on this project)
+
+1. **Static shapes only.** N, Y, X, and time steps must be
+   compile-time constants.  Use compile_function_source or
+   evaluate_source_compiled with concrete sizes.  Dynamic shapes are
+   deferred (see docs/FUTURE_WORK.md).
+
+2. **Interpreter first, compile second.**  Get the interpreter
+   producing correct results before trying to compile.  The
+   interpreter handles more Remora constructs than the CPU backend.
+
+3. **Test incrementally.**  For the Thomas algorithm, verify each
+   component (coefficient computation, forward sweep, back
+   substitution) independently against NumPy before combining them.
+
+4. **Remora functions, Python loops.**  Remora is good at per-step
+   array computation.  Python is good at convergence checking and
+   time-stepping.  Don't try to put the Picard loop or time loop in
+   Remora.
+
+5. **AGENTS.md** has all commands: `uv run pytest`, `uv run remorac`,
+   etc.
+
+## Documents to read
+
+- docs/heat_flow_notes.txt — physics and architecture
+- docs/PROJECT_OVERVIEW.md — what the compiler supports
+- docs/FUTURE_WORK.md — known gaps (Thomas algorithm is item 12.27 in
+  IMPLEMENT_RECURSION.md, currently not tested but the building blocks
+  exist)
+- AGENTS.md — commands and conventions
+- /e/projects/heat1d/README.md — Haynes' reference
+
+Write the plan in docs/HEAT1D_PLAN.md, then implement Stage 1.

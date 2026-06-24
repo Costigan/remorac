@@ -52,6 +52,46 @@ current grammar:
 Function composition (`∘`) is in the ML-syntax grammar and parser but
 not in the Lisp reader.  Lisp programs cannot use composition.
 
+### No scientific notation in Lisp reader
+
+The Lisp reader does not recognise scientific-notation number literals
+(e.g., `8.9093e-9`).  The lexer tokenises the `e` as a separate `NAME`
+token and the `-9` as a subtraction, producing `unbound variable 'e-09'`
+in the type checker.  Real Lisp readers (Scheme, Common Lisp) all support
+scientific notation via the standard number-token grammar.  This is
+currently worked around by using fixed-point decimal literals
+(e.g. `0.0000000089093`) in Remora Lisp source.
+
+Discovered: June 2026, heat1d Stage 1c — `Cp(T)` polynomial coefficients
+and the `R350` radiative factor triggered this when embedding
+Python-computed constants into Remora Lisp source strings.
+
+---
+
+## heat1d: Why the Thomas Algorithm Was Not Written in Remora
+
+The Thomas tridiagonal solver (forward sweep + back substitution) needs
+per-element sequential access with a loop-carried state.  Four separate
+gaps in the compiled-CPU path blocked every approach attempted during
+heat1d Stage 1 (June 2026):
+
+| # | Attempted approach | Blocker | Detail |
+|---|-------------------|---------|--------|
+| 1 | `iscan` with lambda step function | Scan lambdas | `tensor_ops.py:3735` accesses `node.func.op` — only `HIRPrimCallable` works |
+| 2 | `map (lambda (i) (peek arr i)) (iota N)` with recursive `peek` helper | Closure-capturing map bodies | Defunctionalization misses `peek` when captured in a lambda closure |
+| 3 | `map (lambda (i) ... (index-item upper i) ...)` building triples in-map | Index-in-map | Map body emitter rejects `HIRIndex` |
+| 4 | Recursive function building array via `append` | Recursive array construction | Type checker rejects `float[1]` vs `float[6]` mismatch in `define/pi` |
+
+Gap (1) blocks the natural approach: express the forward/backward passes
+as scans over pre-zipped triples.  Gap (2) blocks the fallback of
+computing each output element independently via a helper.  Gap (3)
+blocks building the triples inside a single Remora function.  Gap (4)
+blocks a direct recursive formulation.
+
+The workaround was to keep the Thomas solve in Python (50 lines, O(n))
+and use Remora only for the element-wise `map` computations that
+compiled cleanly — `compute_K(T, Kc)` and `compute_Cp(T)`.
+
 ---
 
 ## Operations (Typechecked but Deferred in Lowering)
@@ -68,6 +108,54 @@ to MLIR on one or more backends.
 | Indices-of for arbitrary ranks | Deferred | `tensor_ops.py:3255` |
 | Sort for non-f32 element types | Deferred | `tensor_ops.py:3655` |
 | Threaded CPU vectorization | Not supported | `pipeline.py:311` |
+| `iscan`/`escan`/`trace` with lambda step function | Deferred | `tensor_ops.py:3735` |
+| `index-item` (`HIRIndex`) inside map body | Deferred | `tensor_ops.py` map body emitter |
+| Recursive array construction via `define/pi` | Blocked | typechecker rejects mismatched sizes |
+| Cross-function calls in closure-capturing map bodies | Deferred | defunctionalization pass |
+
+#### Scan lambdas
+
+`tensor_ops.py:3735` directly accesses `node.func.op` to get the
+MLIR arithmetic op name.  This works for `HIRPrimCallable` (`+`, `*`,
+etc.) but not for `HIRLambda` (which has no `.op` attribute).  The
+forward sweep and back substitution of the Thomas tridiagonal solver
+both need user-defined scan-step functions (division, subtraction,
+multiplication on pre-zipped triples).  The workaround for the heat1d
+model was to keep the Thomas solve in Python (see `examples/heat1d/`).
+
+Discovered: June 2026, heat1d Stage 1 (see `docs/HEAT1D_PLAN.md`).
+
+#### Index-in-map
+
+`index-item` (`HIRIndex`) inside a `map` body is rejected by the map
+body expression emitter.  This blocks any `map` that needs per-element
+access to a companion array (e.g. building triples for a Thomas scan
+by indexing into separate `upper`, `diag`, `lower` arrays).  The
+heat1d Crank-Nicolson RHS assembly attemped `(map (lambda (i) ...
+(index-item T i)) (iota N))` and hit this gap.
+
+Discovered: June 2026, heat1d Stage 1.
+
+#### Recursive array construction
+
+`define/pi` requires a concrete (static) return shape.  A recursive
+helper that builds an array via `(append [val] (recurse ...))` produces
+size `1 + returned_size` at each level, so the typechecker sees
+`float[1]` vs `float[6]` and rejects the body.  Dependent types
+(`define/pi ([k Dim]) ... (Array Float (- n i))`) could express this
+but are not yet threaded through lowering.
+
+Discovered: June 2026, heat1d Stage 1.
+
+#### Closure-capturing map bodies calling top-level functions
+
+A `map` body lambda that captures a free variable and calls a
+top-level `define/pi` function hits `unknown HIR function` in the
+defunctionalization pass.  Direct `(map square arr)` (no closure,
+function passed as callable) works; `(map (lambda (i) (peek arr i))
+(iota N))` (captures `arr`, calls `peek`) does not.
+
+Discovered: June 2026, heat1d Stage 1.
 
 ### GPU lowering gaps
 
