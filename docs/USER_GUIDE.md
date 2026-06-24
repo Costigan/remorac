@@ -92,6 +92,9 @@ remora> (iscan + 0 [2 10 5])
 | `(define (f [x]) body)` | `def f x = body` |
 | `(define (f [x 0]) body)` | rank-annotated param |
 | `(define xs [1 2 3])` | `def xs = [1, 2, 3]` |
+| `(define/pi ([n Dim]) (f [x (Array Float n)] Float) body)` | — |
+| `(define/forall (t) (f [x (Array t 3)] (Array t 3)) body)` | — |
+| `(define/forall (t) (f [g (Func (t) t) x t] t) body)` | — |
 
 ### Lambda
 | Lisp | ML |
@@ -270,11 +273,60 @@ grads = compile_gradient_functions_source(source, "dot-loss", (tx, tw))
 | 1 | Lisp syntax | Full |
 | 2 | Rank polymorphism | Scalar/vector auto-lift, broadcasting |
 | 3 | Reduce/scan/fold/trace | 14/14 operators |
-| 4 | Additional primitives | 11/12 (sort/grade typecheck only) |
+| 4 | Additional primitives | 11/12 (sort/grade: f32/i32) |
 | 5 | Reranking | Full |
-| 6 | Boxes | Core done, execution deferred |
+| 6 | Boxes | Type erasure only (no runtime effect) |
 | AD | Automatic differentiation | Reverse-mode via tape + source gen |
-| 8 | GPU | 8/14 (maps, reductions, views, scan, append) |
+| 7 | Recursive functions | Self, mutual, tail, non-tail (CPU + interp) |
+| HOF | Higher-order functions | Monomorphization, closure capture, ForallType (CPU + interp) |
+| 8 | GPU | Maps, reductions, views, scan, append, sort, matmul |
+
+## Higher-order functions
+
+Functions can be passed as arguments to other functions.  Both plain
+`define` and `define/forall` with `Func`-typed parameters compile on CPU.
+
+```lisp
+;; Plain define — type inferred
+(define (apply_twice [f x]) (f (f x)))
+(define (inc [x]) (+ x 1))
+(apply_twice inc 5)  ;; → 7
+
+;; define/forall with explicit Func type
+(define/forall (t) (apply_twice [f (Func (t) t) x t] t) (f (f x)))
+(apply_twice (lambda (x) (+ x 1)) 5)  ;; → 7
+
+;; Closure capture — lambdas can reference outer variables
+(let ((z 3)) (apply_twice (lambda (x) (+ x z)) 5))  ;; → 11
+
+;; compose with two different type variables
+(define/forall (t u) (apply2 [f (Func (t) u) x t] u) (f x))
+(define (square [x]) (* x x))
+(apply2 square 5)  ;; → 25
+```
+
+## Recursive functions
+
+Both self-recursion and mutual recursion work on CPU and interpreter.
+
+```lisp
+;; Self-recursion (tail)
+(define (sum_to [n acc])
+  (if (== n 0) acc (sum_to (- n 1) (+ acc n))))
+(sum_to 10000 0)  ;; → 50005000
+
+;; Self-recursion (non-tail)
+(define (fib [n])
+  (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2)))))
+(fib 10)  ;; → 55
+
+;; Mutual recursion
+(define (is_even [n])
+  (if (== n 0) true (is_odd (- n 1))))
+(define (is_odd [n])
+  (if (== n 0) false (is_even (- n 1))))
+(is_even 4)  ;; → true
+```
 
 ## Examples
 

@@ -9,9 +9,41 @@ statically-shaped subset of the Remora language (both ML and Lisp syntax)
 to CPU and GPU executables via MLIR.
 
 **Design principle**: the implementation must handle valid dense Remora
-programs, not specific examples.  The GPU backend now handles general
-compound-body maps through a recursive expression compiler targeting
-MLIR LLVM dialect — no example-specific pattern matching remains.
+programs, not specific examples.  The compiled-CPU path now covers every
+construct the dense-core typechecker accepts — closure conversion,
+ForallType HOF monomorphization, recursion, and all text-path lowering
+are complete.
+
+## Language Subset Implemented (Dense Core)
+
+The dense core covers:
+
+| Feature | CPU | Interpreter | GPU |
+|---------|:---:|:-----------:|:---:|
+| Scalar arithmetic (+, -, *, /) | ✓ | ✓ | ✓ |
+| Arrays (rank 1–10, Int, Float, Bool) | ✓ | ✓ | ✓ |
+| `let` bindings (scalar and array) | ✓ | ✓ | ✓ |
+| `if` / `select` conditionals | ✓ | ✓ | ✓ |
+| `map` (unary, binary, operator sections) | ✓ | ✓ | ✓ |
+| `fold` / `reduce` | ✓ | ✓ | ✓ |
+| `scan` (inclusive, exclusive, left, right) | ✓ | ✓ | limited |
+| `lambda` expressions | ✓ | ✓ | ✓ |
+| `define` (plain, `define/pi`, `define/forall`) | ✓ | ✓ | ✗ |
+| Function values as arguments | ✓ | ✓ | ✗ |
+| Closure capture (lambdas with free vars) | ✓ | ✓ | ✗ |
+| Operator sections (`(* 2)`, `(+ 1)`) | ✓ | ✓ | ✓ |
+| Recursion (self, mutual, tail, non-tail) | ✓ | ✓ | ✗ |
+| `rerank` (`~(r1 r2)`) | ✓ | ✓ | ✓ |
+| Views (index, slice, transpose, reshape, ravel, reverse, take, drop) | ✓ | ✓ | ✓ |
+| `im2col` / `col2im` | ✓ | ✓ | ✗ |
+| `pair` / `first` / `second` | ✓ | ✓ | ✗ |
+| `box` / `unbox` (type erasure only) | ✓ | ✓ | ✗ |
+| `sort` / `grade` (f32/i32) | ✓ | ✓ | f32 only |
+| `append`, `rotate`, `subarray`, `indices-of`, `with-shape` | ✓ | ✓ | limited |
+| `dot` (prelude), `matmul` | ✓ | ✓ | f32 only |
+| Automatic differentiation (`grad`) | ✓ | ✓ | ✗ |
+| Rank limit | 10 | 10 | 10 |
+| Dynamic shapes | ✗ | ✗ | ✗ |
 
 ## Architecture
 
@@ -21,7 +53,7 @@ Source (ML or Lisp syntax)
   → Type Checker (typechecker.py) → Typed AST
   → Elaboration (elaborate.py) → Typed Core IR
   → HIR Lowering (hir.py) → HIR (hir.py)
-  → HIR Optimizations (hir_opt.py, defunc.py)
+  → HIR Optimizations (hir_opt.py, defunc.py, compiler.py monomorphization)
   → MLIR Lowering (lowering/tensor_ops.py, lowering/module.py, ...) → MLIR
   → CPU: mlir-opt → .so → ctypes (pipeline.py, runtime.py)
   → GPU: LLVM dialect descriptor-ABI → LLVM IR → PTX (gpu_lowering.py, codegen.py)
@@ -34,7 +66,7 @@ Source (ML or Lisp syntax)
 |-----------|---------|
 | `remora/` | Main source package |
 | `remora/lowering/` | HIR → MLIR lowering (tensor ops, scalar ops, view ops, module building) |
-| `tests/` | ≈886 tests across 43 files |
+| `tests/` | ≈988 tests across 50 files |
 | `examples/` | Example programs and Python drivers |
 | `docs/` | Design documents and plans |
 | `stdlib/` | Standard library (prelude.rem) |
@@ -78,8 +110,11 @@ Source (ML or Lisp syntax)
 ## Current State
 
 ### Working
-- **CPU**: General lowering for any valid dense program.  Compound bodies
-  (maps containing fold/index/nested-map) lowered via `scf.for` loops.
+- **CPU**: Complete lowering for every dense-core construct.  Closure
+  conversion, ForallType HOF monomorphization, recursion (self/mutual,
+  tail/non-tail), operator sections, exclusive/right scans, binary/cell
+  maps, and fold sections all compile.  Single text-based lowering path
+  (builder API disabled as slower and less capable).
 - **GPU**: General lowering via recursive expression compiler
   (`remora/_gpu_expr_lowering.py`).  Handles folds, index expressions,
   nested maps, conditionals, casts, let bindings, scalar and array-valued
@@ -96,7 +131,7 @@ Source (ML or Lisp syntax)
   loops (grad-lifting + state fold); see `examples/ad_optimize.lisp`.
 
 ### Test Counts
-- CPU tests: ≈340 (all passing)
+- Non-GPU tests: 988 (all passing, 1 skipped — OpenMP availability)
 - GPU tests: ≈97 (all passing)
 - General GPU lowering tests: 120+ (all passing, in `tests/test_gpu_general_lowering.py`)
 - N-body tests: 5 (all passing, including GPU compilation + numeric parity)

@@ -3621,11 +3621,12 @@ def _lower_scatter_add_module(
         idx_name = "%result"
 
     result_type = type_to_mlir(node.result_type)
+    add_op = "arith.addf" if target_elem == "f32" else "arith.addi"
     body = f"""{target_code}
 {update_code}
 {idx_code}
     %extracted = tensor.extract {target_name}[{idx_name}] : {target_type}
-    %added = arith.addf %extracted, {update_name} : {target_elem}
+    %added = {add_op} %extracted, {update_name} : {target_elem}
     %result = tensor.insert %added into {target_name}[{idx_name}] : {target_type}"""
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)

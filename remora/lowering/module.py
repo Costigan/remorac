@@ -30,6 +30,7 @@ from remora.hir import (
     HIRLambda,
     HIRLit,
     HIRMap,
+    HIRMatmul,
     HIRPrimCallable,
     HIRPrimOp,
     HIRProgram,
@@ -169,8 +170,23 @@ class _MLIRMainModuleBuilder:
         function_text = _lower_functions(self.functions)
         function_prefix = f"\n{function_text}\n" if function_text else ""
         extern_text = "\n".join(self.externs)
-        extern_prefix = f"{extern_text}\n" if extern_text else ""
         body = "\n".join(self.blocks)
+        # Auto-declare C runtime helpers referenced by the body.
+        if "remora_matmul_f32" in body:
+            # Emit a size-specific extern to match the call-site memref types.
+            import re as _re
+            sizes = _re.findall(
+                r"func\.call @remora_matmul_f32\(%\S+, %\S+, %\S+\) : "
+                r"\((memref<\d+x\d+xf32>), (memref<\d+x\d+xf32>), (memref<\d+x\d+xf32>)\)",
+                body,
+            )
+            if sizes:
+                a, b, c = sizes[0]
+                matmul_extern = (
+                    f"  func.func private @remora_matmul_f32({a}, {b}, {c})"
+                )
+                extern_text = f"{matmul_extern}\n{extern_text}" if extern_text else matmul_extern
+        extern_prefix = f"{extern_text}\n" if extern_text else ""
         return f"""module {{
 {extern_prefix}\
 {function_prefix}\
@@ -786,7 +802,7 @@ def _lower_main_result_with_tensor_env(
         return _lower_view_result(
             node, functions, tensor_env
         )
-    if isinstance(node, (HIRIota, HIRArrayLit, HIRWithShape, HIRScatterAdd)):
+    if isinstance(node, (HIRIota, HIRArrayLit, HIRWithShape, HIRScatterAdd, HIRMatmul)):
         code, value_name, value_type, _element_type = (
             _lower_tensor_input(
                 node,

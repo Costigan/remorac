@@ -1,3 +1,5 @@
+# ARCHIVED — out of date, kept for reference only. See AGENTS.md, PROJECT_OVERVIEW.md, and FUTURE_WORK.md for current information.
+
 # DeepSeek Continuation Plan  ⏸️ PAUSED after Phase 4
 
 **Reason:** Phase 5 requires real lunar raster tiles and a crater catalog

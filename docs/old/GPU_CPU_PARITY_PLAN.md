@@ -1,3 +1,5 @@
+# ARCHIVED — out of date, kept for reference only. See AGENTS.md, PROJECT_OVERVIEW.md, and FUTURE_WORK.md for current information.
+
 # GPU / CPU Backend Parity Plan
 
 ## Goal

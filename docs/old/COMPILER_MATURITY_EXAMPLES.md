@@ -1,3 +1,5 @@
+# ARCHIVED — out of date, kept for reference only. See AGENTS.md, PROJECT_OVERVIEW.md, and FUTURE_WORK.md for current information.
+
 # Compiler Maturity Example Roadmap
 
 ## Current Status (2026-06-18)

@@ -11,29 +11,13 @@ These are features from the Remora academic papers that the compiler
 rejects or does not implement.  They are **upstream of lowering** —
 the typechecker or parser gates them.
 
-### Recursive and mutually-recursive function definitions
+### Dynamic higher-order functions (polyvariadic application)
 
-The typechecker rejects recursion (`typechecker.py:2844`):
-`"recursive function definitions are deferred"`.  There is no `letrec`
-binding.  Tail-recursive loops are a standard Remora idiom (the papers
-describe them), but remorac has no support.  This blocks
-convergence-checked iterative algorithms (Newton, Picard, fixed-point)
-from running entirely within Remora.
-
-**Path:** Lowering tail calls to MLIR `scf.while` or to GPU loops
-(within a thread) would give the language general iteration.
-
-### Closure conversion
-
-Lambdas that capture outer variables are deferred
-(`defunc.py:329`).  Currently, only closed lambdas (no free variables)
-are lowered.  This blocks natural uses of partial application and
-closures in higher-order functions.
-
-### Dynamic higher-order functions
-
-Deferred in the defunctionalization pass (`defunc.py:241`).  Functions
-passed as arguments and stored in data structures are not lowered.
+Functions passed as arguments work via monomorphization.  Call-through-variable
+(e.g. `let f = inc in f(f 5)`) works.  What does not work: passing a function
+through a `map` body as a callable (`map f arr` where `f` is a let-bound
+variable).  The map lowering needs to resolve the callable from the scalar
+environment.
 
 ### Functions in function position (MIMD arrays-of-functions)
 
@@ -41,11 +25,13 @@ The typechecker defers map over function-valued arrays
 (`frame.py:121`, `frame.py:176`).  This blocks the classic Remora MIMD
 pattern `(define m [[square sqrt] [add1 sub1]]) (m 9)`.
 
-### Function definitions at runtime
+### Remaining text-path deferrals
 
-Rejected in HIR lowering (`hir.py:831`) and the interpreter
-(`runtime.py:1178`).  `def`/`define` forms cannot appear inside
-function bodies or expression contexts.
+One site remains intentionally deferred in `tensor_ops.py`:
+**binary map operator sections** — a unary section callable like `(* 2)`
+passed to a binary map is semantically ambiguous (one input, two arrays).
+The typechecker currently rejects sections in binary callable positions;
+full Remora would support this with pair-type output.
 
 ### `shape` / `rank` of function values
 
@@ -79,14 +65,18 @@ to MLIR on one or more backends.
 |-----------|--------|----------|
 | Integer division `/i` scalar | Deferred | `scalar.py:348` |
 | Ternary+ maps (>2 arrays) | Deferred | `module.py:662`, `tensor_ops.py` |
-| Binary cell-map | Deferred | `tensor_ops.py:856` |
-| Cell-fold producer map sections | Deferred | `tensor_ops.py:1247` |
-| Binary map operator sections | Deferred | `tensor_ops.py:2762` |
-| Fold operator sections | Deferred | `tensor_ops.py:2955` |
-| Exclusive/right scans rank ≥ 2 | Deferred | `tensor_ops.py:3538` |
 | Indices-of for arbitrary ranks | Deferred | `tensor_ops.py:3255` |
 | Sort for non-f32 element types | Deferred | `tensor_ops.py:3655` |
 | Threaded CPU vectorization | Not supported | `pipeline.py:311` |
+
+### GPU lowering gaps
+
+| Operation | Status | Location |
+|-----------|--------|----------|
+| GPU scan limited to `+`, `*` | `min`/`max`/`&&`/`\|\|` rejected | `gpu_lowering.py:594` |
+| GPU radix sort f32-only + N limit | i32 rejected | `_gpu_radix_sort.py:437` |
+| GPU fused map f32-only | i32 outputs deferred | `_gpu_map_support.py` |
+| 16 HIR nodes have no standalone GPU kernel | Work inside map bodies only | See below |
 
 ### GPU lowering gaps
 
@@ -123,11 +113,14 @@ cannot be compiled as top-level kernels:
 | `HIRLambda` | ✗ |
 | `HIRIota` | Limited |
 
-### Builder API (IREE path) gaps
+### Builder API (IREE path) — disabled
 
-Six lowering tasks in the `_builder_ops.py` IREE-compatible path are
-deferred: scalar map, cell map, array-cell fold, general indexing,
-dynamic index, and tensor-env variable load.
+The MLIR builder API path (`_builder_ops.py`, `_builder_emitter.py`,
+`scalar_builder.py`) is preserved but disabled in `module.py`.  It was
+the original lowering approach, but the text path is ~175x faster and
+handles all patterns.  If the builder is needed again (e.g. for
+structural IR verification), reorder the fallback so text is tried
+first.
 
 ---
 
@@ -238,6 +231,46 @@ lowering exist for these.
 
 ## Performance and Tooling
 
+### Remove the builder path entirely
+
+The MLIR builder API path (`_builder_ops.py`, `_builder_emitter.py`,
+`scalar_builder.py`) is ~175x slower than the text path and handles
+fewer patterns.  It is currently commented out in `module.py`.  Once
+the text path has proven itself over time, the builder files can be
+deleted to simplify the codebase (~1000 lines).
+
+### Text-path MLIR caching
+
+The text path emits MLIR strings which are then parsed via
+`ir.Module.parse(text)`.  For repeated compilations of the same
+program (e.g. iterative development), caching the parsed module
+object or the emitted MLIR text would avoid re-generation.
+
+### ForallType type inference robustness
+
+`_infer_type_vars` uses a single-pass approach: TypeVar bindings from
+nested FuncTypes are deferred, and concrete types from other params
+resolve them.  A pathological case where a ForallType variable
+appears *only* inside nested FuncType params (no top-level concrete
+param to resolve it) would leave the binder unbound.  A two-pass
+approach (collect all TypeVar candidates, resolve with concrete
+types, fall back to TypeVar consensus) would be more robust.
+
+### Monomorphization code duplication
+
+`_monomorphize_hof_calls` at ~200 lines has logic for detecting HOF
+calls, cloning functions, substituting, and deduplicating.  A
+standalone pass with helper extraction (`_clone_function_body`,
+`_substitute_params`) and sharing with `_try_monomorphize` would
+reduce duplication.
+
+### TypeVar leak prevention audit
+
+Multiple places apply `INT` as a fallback for `TypeVar` params and
+return types (`_lift_lambda`, `erase_to_hir`, `_resolve_main_return_type`).
+A systematic approach — a single `_resolve_type_var(type, hint=INT)`
+utility — would make the fallback behavior consistent and auditable.
+
 ### Kernel fusion
 
 The Mandelbrot iteration calls three separate kernels per step
@@ -321,6 +354,30 @@ implementation.
 ---
 
 ## Completed
+
+### Recursive functions — typechecker, interpreter, CPU compilation
+- Self-recursion (tail/non-tail), mutual recursion, deep call chains.
+- Typechecker: fixpoint inference with provisional FuncType.
+- Interpreter: tail-call trampoline, mutual trampoline.
+- CPU: `HIRCall` → MLIR `func.call`, manual bufferization for array types.
+- 15+ regression tests covering `fac`, `fib`, `sum_to`, `is_even`/`is_odd`, Ackermann.
+
+### Higher-order functions — monomorphization, closure capture, lambda lifting
+- Function values passed as arguments, stored in let bindings.
+- Monomorphization pass clones HOFs per call site and substitutes concrete functions.
+- Full closure conversion: lambdas with captures compile on CPU.
+- ForallType HOF: `define/forall` with `(Func (t) t)` params compiles.
+- 20+ HOF regression tests.
+
+### Text-path deferrals closed (4 of 5)
+- Fold operator sections, exclusive/right scans rank ≥ 2, cell-fold producer
+  map sections, binary cell-map guard removed.
+- One remaining (binary map operator sections) is a defensive guard for
+  a pattern the typechecker rejects.
+
+### Builder path disabled
+- Builder API path was ~175x slower and fell back for 66% of programs.
+  Commented out in `module.py`; text path only.
 
 ### GPU buffer arena (device memory pool)
 

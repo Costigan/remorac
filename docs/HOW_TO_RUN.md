@@ -1,3 +1,5 @@
+# ARCHIVED — out of date, kept for reference only. See AGENTS.md, PROJECT_OVERVIEW.md, and FUTURE_WORK.md for current information.
+
 # How To Run
 
 This project targets Python 3.11+. Use `uv` from the repository root when
