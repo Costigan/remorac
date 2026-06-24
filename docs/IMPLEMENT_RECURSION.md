@@ -646,8 +646,8 @@ Goal: all recursive Remora programs typecheck and run in the interpreter.
 #### 12.4 Typechecker: higher-order recursion
 
 - [x] **12.4.1** `def apply_twice f x = f (f x)` — typechecks, interprets, AND CPU compiles via monomorphization (§12.34).  (`tests/test_phase7_dependent_functions.py::test_hof_apply_twice_interpreter`, `test_hof_apply_twice_compiled`)
-- [ ] **12.4.2** `fix`-style recursion — deferred: needs closure conversion (§12.33.4) for lambdas capturing outer variables
-- [ ] **12.4.3** Polymorphic recursive HOF — deferred: needs ForallType monomorphization + closure conversion
+- [x] **12.4.2** `fix`-style recursion — lambdas capturing outer variables in HOF argument positions now compile on CPU via closure conversion (§12.33.4).  (`tests/test_phase7_dependent_functions.py::test_closure_capture_in_hof_arg_interpreter`, `test_closure_capture_in_hof_arg_compiled`)
+- [x] **12.4.3** Polymorphic recursive HOF — `define/forall` with `Func`-typed parameters works end-to-end on CPU.  Lisp parser extended with `(Func (t1 t2 ...) ret)` type expression.  `_infer_type_vars` handles TypeVar-vs-TypeVar conflicts in ForallType instantiation by deferring to concrete bindings from other parameters; also walks `FuncType.result` for binder resolution.  Tested: `apply_twice inc 5`, `compose inc inc 5`, `apply2 square 5` with single and multi-variable ForallType.
 
 #### 12.5 Interpreter: bind function names
 
@@ -890,7 +890,7 @@ Goal: `(let (g f) (g 1 2))` where `f` is a top-level function compiles.
 
 - [x] **12.33.3** Interpreter `_bind_definition` creates a lazy callable (`_make_func_def_callable`) for `FuncDef`s not already bound by `_gather_func_lambdas`, so function names can be passed as arguments to HOFs.  (`remora/runtime.py:1216-1228`, `1232-1249`)
 
-- [~] **12.33.4** Closure conversion for lambdas with captures — lambdas without captures are now lifted in HIRCall argument positions (`_rewrite_call_arg`) and value positions (`_rewrite_lambda_value`).  Lambdas WITH captures still raise `RemoraDefuncError`.  (`remora/defunc.py:_lift_lambda`, `_rewrite_call_arg`, `_rewrite_lambda_value`)
+- [x] **12.33.4** Closure conversion for lambdas with captures — lambdas with captures are now fully supported in HOF argument positions.  The typechecker (`_ensure_lambda_typed` in `_infer_top_level_function_app`) type-checks lambda bodies with their containing environment, producing `TypedLambda` with properly resolved free variables.  HIR lowering handles `TypedLambda` values directly.  Defunctionalization resolves scalar-captured variables via `scalar_env`.  Monomorphization inlines concrete lambdas into HOF bodies and propagates concrete return types.  TypeVar params in `erase_to_hir` are resolved to INT.  (`remora/typechecker.py`, `remora/hir.py`, `remora/compiler.py`, `remora/erase.py`, `remora/defunc.py`)
 
 #### 12.34 Phase 2: monomorphization pass
 
@@ -900,7 +900,7 @@ Goal: `def apply_twice f x = f (f x)` compiles and runs on CPU.
 
 - [x] **12.34.2** Missing function materialization — `_ensure_function` uses the typechecker to lower `FuncDef`s into `HIRFunction`s on demand when a function is used as a value but doesn't have a HIR entry (only called directly from main expression).  TypeVars in the `CompilerArtifact.return_type` fall back to the resolved HIR return type.
 
-- [ ] **12.34.3** Multi-level HOF — `compose inc inc 5` works (monomorphization handles multiple FuncType params).  `let f = inc in f(f 5)` not yet monomorphized (the call through `f` is via a let-bound variable, not a HIRCall arg position).  Needs closure conversion (§12.33.4).
+- [x] **12.34.3** Multi-level HOF — `compose inc inc 5` works (monomorphization handles multiple FuncType params).  `let f = inc in f(f 5)` now compiles via monomorphization + closure conversion (§12.33.4).  Tested: `let-bound f: 7`, `compose inc inc 5: 7`.
 
 #### 12.35 Phase 3: remove typechecker gates
 
@@ -922,7 +922,7 @@ Goal: standalone lambdas, function-typed let bindings, and function-valued map/f
 - [x] **12.36.2** `apply_twice inc 5` → 7 (CPU compiled) — monomorphization works (`test_hof_apply_twice_compiled`)
 - [x] **12.36.3** `def compose f g x = f (g x)` `compose inc inc 5` → 7 (typecheck + interpreter + CPU compiled)
 - [x] **12.36.4** `let f = inc in f(f 5)` → 7 (typecheck + interpreter; CPU deferred: needs closure conversion)
-- [ ] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works, covered by existing tests)
+- [x] **12.36.5** `map (\x -> x + 1) (iota 3)` → [1, 2, 3] (regression — already works, covered by existing tests; binary map, map with captures, cell-fold producer map sections, fold operator sections, exclusive/right scans all verified)
 
 #### 12.37 Files to change
 
@@ -932,7 +932,8 @@ Goal: standalone lambdas, function-typed let bindings, and function-valued map/f
 | `remora/defunc.py` | 12.33.3–4 | Lift lambdas at let bindings, closure conversion |
 | `remora/hir_opt.py` (new pass) | 12.34.1 | Monomorphization pass |
 | `remora/compiler.py` | 12.34.1 | Call monomorphization before lowering |
-| `remora/typechecker.py` | 12.35.1–3,5 | Remove gates at lines 969, 1104, 1477, 2945 |
+| `remora/typechecker.py` | 12.35.1–3,5 | Remove gates at lines 969, 1104, 1477, 2945; ForallType FuncType binder inference |
+| `remora/lisp_reader.py` | 12.4.3 | Add `(Func ...)` type expression to parser grammar |
 | `remora/frame.py` | 12.35.4 | Remove `"map over function values"` gate |
 | `tests/test_phase7_dependent_functions.py` | 12.36 | Add HOF tests |
 | `tests/test_execution.py` | 12.36 | Add HOF compiled tests |

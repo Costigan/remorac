@@ -798,7 +798,12 @@ def _lower_if_tensor_input(node, functions, prefix, tensor_env, scalar_env=None)
     """Lower an array-typed HIRIf as a tensor input."""
     from remora.types import ScalarType as _ScalarType
 
-    if isinstance(node.condition.result_type, _ScalarType):
+    cond_type = (
+        node.condition.result_type
+        if hasattr(node.condition, "result_type")
+        else node.condition.type
+    )
+    if isinstance(cond_type, _ScalarType):
         return _lower_if_tensor_input_scalar_cond(
             node, functions, prefix, tensor_env, scalar_env
         )
@@ -1066,8 +1071,6 @@ def _lower_binary_map_result(
     *,
     scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[str, str, str]:
-    if node.cell_shape:
-        raise RemoraLoweringError("binary cell-map MLIR lowering is deferred")
     if len(node.arrays) != 2:
         raise RemoraLoweringError("binary map requires exactly two inputs")
     if not isinstance(node.result_type, ArrayType):
@@ -1456,10 +1459,6 @@ def _lower_cell_fold_producer_result(
         raise RemoraLoweringError(
             "only primitive cell-fold producer maps lower to MLIR so far"
         )
-    if producer.func.left_arg is not None or producer.func.right_arg is not None:
-        raise RemoraLoweringError(
-            "cell-fold producer map sections are deferred"
-        )
     if producer.cell_shape:
         raise RemoraLoweringError(
             "only scalar (elementwise) cell-fold producer maps lower to MLIR so far"
@@ -1470,6 +1469,11 @@ def _lower_cell_fold_producer_result(
     input_rank = frame_rank + cell_rank
 
     operands = list(producer.arrays)
+    has_section = producer.func.left_arg is not None or producer.func.right_arg is not None
+    if has_section and len(operands) != 1:
+        raise RemoraLoweringError(
+            "cell-fold producer map sections require exactly one map operand"
+        )
     param_positions = [
         i
         for i, a in enumerate(operands)
@@ -1500,24 +1504,36 @@ def _lower_cell_fold_producer_result(
         free_codes.append(code)
         free_inputs.append((name, mtype, etype))
 
-    op = _arith_op(producer.func.op, result_element_type)
-    sep = ", " if "cmp" in op else " "
-    operand_values: list[str] = []
-    free_idx = 0
-    for i in range(len(operands)):
-        if i == param_pos:
-            operand_values.append("%in")
-        else:
-            operand_values.append(f"%in_free{free_idx}")
-            free_idx += 1
-    elem_line = (
-        f"      %elem = {op}{sep}" + ", ".join(operand_values) + f" : {result_element_type}"
-    )
+    if has_section:
+        section_lines, section_value = _lower_primitive_callable_result(
+            producer.func,
+            input_name="%in",
+            input_type=input_element_type,
+            result_type=result_element_type,
+            scalar_env=scalar_env,
+        )
+        elem_line = "\n".join(section_lines)
+        elem_value = section_value
+    else:
+        op = _arith_op(producer.func.op, result_element_type)
+        sep = ", " if "cmp" in op else " "
+        operand_values: list[str] = []
+        free_idx = 0
+        for i in range(len(operands)):
+            if i == param_pos:
+                operand_values.append("%in")
+            else:
+                operand_values.append(f"%in_free{free_idx}")
+                free_idx += 1
+        elem_line = (
+            f"      %elem = {op}{sep}" + ", ".join(operand_values) + f" : {result_element_type}"
+        )
+        elem_value = "%elem"
 
     fold_body = _lower_fold_callable_body(
         body_fold.func,
         functions,
-        input_name="%elem",
+        input_name=elem_value,
         input_type=result_element_type,
         acc_name="%acc",
         acc_type=result_element_type,
@@ -3166,7 +3182,20 @@ def _lower_fold_callable_body(
 ) -> str:
     if isinstance(callable_, HIRPrimCallable):
         if callable_.left_arg is not None or callable_.right_arg is not None:
-            raise RemoraLoweringError("fold operator sections are deferred")
+            # Fold with operator section: resolve the section and emit the
+            # binary operation using the section value on the fixed side and
+            # the input element on the variable side.
+            section_lines, section_value = _lower_primitive_callable_result(
+                callable_,
+                input_name=input_name,
+                input_type=input_type,
+                result_type=result_type,
+                scalar_env=scalar_env,
+            )
+            return "\n".join([
+                *section_lines,
+                f"      linalg.yield {section_value} : {result_type}",
+            ])
         left_lines = _cast_if_needed(
             acc_name, acc_type, result_type, "%fold_left"
         )
@@ -3748,8 +3777,73 @@ def _lower_scan_multirank(
     result_element_type = type_to_mlir(node.result_type.element)
 
     if node.exclusive or node.right:
-        raise RemoraLoweringError(
-            "exclusive and right scans with rank >= 2 are deferred"
+        result_type_mlir = result_type
+        result_element_type_mlir = result_element_type
+        # Trailing dimensions
+        trailing_dims = [d.value for d in node.result_type.shape[1:]]
+        trailing_total = 1
+        for d in trailing_dims:
+            trailing_total *= d
+        trailing_type = _tensor_type_mlir(trailing_dims, result_element_type_mlir)
+
+        init_code, init_name, _init_type, _ielem = _lower_tensor_input(
+            node.init, "scan_init", functions
+        )
+        input_code, input_name, input_type, _ielem2 = _lower_tensor_input(
+            node.array, "input", functions
+        )
+        op_name = _arith_op(node.func.op, result_element_type_mlir)
+
+        dim_consts = "".join(
+            f"    %cD{di} = arith.constant {d} : index\n"
+            for di, d in enumerate(trailing_dims)
+        )
+        suffix_products = []
+        for i in range(1, len(trailing_dims)):
+            prod = 1
+            for d in trailing_dims[i:]:
+                prod *= d
+            suffix_products.append(prod)
+
+        row_offsets = "%i" + ", %c0" * (rank - 1)
+        row_sizes = "1, " + ", ".join(str(d) for d in trailing_dims)
+        row_strides = ", ".join(["1"] * rank)
+
+        if len(trailing_dims) == 1:
+            multi_idx = "%k"
+            multi_idx_compute = ""
+        else:
+            parts = []
+            compute = ""
+            remaining = "%k"
+            for di in range(len(trailing_dims)):
+                if di == len(trailing_dims) - 1:
+                    idx = remaining
+                else:
+                    suffix_var = f"%s{di}"
+                    div_op = f"{suffix_var} = arith.divui {remaining}, %cS{di} : index"
+                    rem_op = f"%r{di} = arith.remui {remaining}, %cS{di} : index"
+                    compute += f"        {div_op}\n        {rem_op}\n"
+                    idx = suffix_var
+                    remaining = f"%r{di}"
+                parts.append(idx)
+            multi_idx = ", ".join(parts)
+            multi_idx_compute = compute
+
+        suffix_consts = "".join(
+            f"    %cS{si} = arith.constant {s} : index\n"
+            for si, s in enumerate(suffix_products)
+        )
+
+        return _lower_scan_multirank_exclusive_right(
+            node, functions, rank,
+            result_type_mlir, result_element_type_mlir,
+            input_code, input_name, input_type,
+            init_code, init_name,
+            trailing_dims, trailing_total, trailing_type,
+            dim_consts, suffix_products, suffix_consts,
+            row_offsets, row_sizes, row_strides,
+            multi_idx, multi_idx_compute,
         )
 
     # Trailing dimensions
@@ -3842,6 +3936,91 @@ def _lower_scan_multirank(
       }}) : (index, index, index, {trailing_type}) -> {trailing_type}
       %acc_next = tensor.insert_slice %new_carry into %acc_tensor[{row_offsets}] [{row_sizes}] [{row_strides}] : {trailing_type} into {result_type}
       "scf.yield"(%acc_next, %new_carry) : ({result_type}, {trailing_type}) -> ()
+    }}) : (index, index, index, {result_type}, {trailing_type}) -> ({result_type}, {trailing_type})"""
+
+    builder = _MLIRMainModuleBuilder(result_type)
+    builder.add_block(body)
+    return builder.render("%scanned")
+
+
+def _lower_scan_multirank_exclusive_right(
+    node: HIRScan,
+    functions: dict[str, HIRFunction],
+    rank: int,
+    result_type: str,
+    result_element_type: str,
+    input_code: str,
+    input_name: str,
+    input_type: str,
+    init_code: str,
+    init_name: str,
+    trailing_dims: list[int],
+    trailing_total: int,
+    trailing_type: str,
+    dim_consts: str,
+    suffix_products: list[int],
+    suffix_consts: str,
+    row_offsets: str,
+    row_sizes: str,
+    row_strides: str,
+    multi_idx: str,
+    multi_idx_compute: str,
+) -> str:
+    from remora.lowering.module import _MLIRMainModuleBuilder
+
+    N = node.reduction_dim.value
+    op_name = _arith_op(node.func.op, result_element_type)
+    exclusive = node.exclusive
+    right = node.right
+
+    if right:
+        cNm1 = N - 1
+        cm1 = -1
+        loop_start = "%cNm1"
+        loop_limit = "%cm1"
+        loop_step = "%cm1"
+        init_consts = f"    %cNm1 = arith.constant {cNm1} : index\n    %cm1 = arith.constant {cm1} : index\n"
+    else:
+        loop_start = "%c0"
+        loop_limit = "%cN"
+        loop_step = "%c1"
+        init_consts = f"    %cN = arith.constant {N} : index\n" if exclusive else ""
+
+    if exclusive:
+        inner_body = f"""{multi_idx_compute}        %c_elem = tensor.extract %c[{multi_idx}] : {trailing_type}
+        %in_elem = tensor.extract {input_name}[%i, {multi_idx}] : {input_type}
+        %added = {op_name} %c_elem, %in_elem : {result_element_type}
+        %c_next = tensor.insert %added into %c[{multi_idx}] : {trailing_type}
+        "scf.yield"(%c_next) : ({trailing_type}) -> ()"""
+        outer_body = f"""      %acc_w_old_carry = tensor.insert_slice %carry into %acc_tensor[{row_offsets}] [{row_sizes}] [{row_strides}] : {trailing_type} into {result_type}
+      %new_carry = "scf.for"(%c0, %cTotal, %c1, %carry) ({{
+      ^bb1(%k: index, %c: {trailing_type}):
+{inner_body}
+      }}) : (index, index, index, {trailing_type}) -> {trailing_type}
+      "scf.yield"(%acc_w_old_carry, %new_carry) : ({result_type}, {trailing_type}) -> ()"""
+    else:
+        inner_body = f"""{multi_idx_compute}        %c_elem = tensor.extract %c[{multi_idx}] : {trailing_type}
+        %in_elem = tensor.extract {input_name}[%i, {multi_idx}] : {input_type}
+        %added = {op_name} %c_elem, %in_elem : {result_element_type}
+        %c_next = tensor.insert %added into %c[{multi_idx}] : {trailing_type}
+        "scf.yield"(%c_next) : ({trailing_type}) -> ()"""
+        outer_body = f"""      %new_carry = "scf.for"(%c0, %cTotal, %c1, %carry) ({{
+      ^bb1(%k: index, %c: {trailing_type}):
+{inner_body}
+      }}) : (index, index, index, {trailing_type}) -> {trailing_type}
+      %acc_next = tensor.insert_slice %new_carry into %acc_tensor[{row_offsets}] [{row_sizes}] [{row_strides}] : {trailing_type} into {result_type}
+      "scf.yield"(%acc_next, %new_carry) : ({result_type}, {trailing_type}) -> ()"""
+
+    body = f"""{init_code}
+{input_code}
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+{init_consts}    %cTotal = arith.constant {trailing_total} : index
+{dim_consts}{suffix_consts}
+    %empty = tensor.empty() : {result_type}
+    %scanned, %_carry = "scf.for"({loop_start}, {loop_limit}, {loop_step}, %empty, {init_name}) ({{
+    ^bb0(%i: index, %acc_tensor: {result_type}, %carry: {trailing_type}):
+{outer_body}
     }}) : (index, index, index, {result_type}, {trailing_type}) -> ({result_type}, {trailing_type})"""
 
     builder = _MLIRMainModuleBuilder(result_type)

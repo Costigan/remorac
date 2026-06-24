@@ -2434,6 +2434,15 @@ class TypeChecker:
         if len(expr.args) != len(function.params):
             raise RemoraTypeError("function arity mismatch", expr.loc)
         typed_args = [self.infer(arg, env) for arg in expr.args]
+        # For lambda arguments that were not fully typed (standalone
+        # Lambdas infer a generic FuncType without checking the body),
+        # re-infer the body here with the current environment so that
+        # outer captures are resolved during type-checking rather than
+        # later during HIR lowering where the environment is lost.
+        typed_args = [
+            self._ensure_lambda_typed(arg, env)
+            for arg in typed_args
+        ]
         actual_param_types = tuple(arg.type for arg in typed_args)
 
         # Handle ForallType: infer element-type variables and instantiate
@@ -2520,6 +2529,34 @@ class TypeChecker:
             for arg, param_type in zip(typed_args, func_type.params)
         ]
         return TypedApp(expr, typed_func, typed_args, func_type.result)
+
+    def _ensure_lambda_typed(
+        self,
+        typed: TypedExpr,
+        env: TypeEnv,
+    ) -> TypedExpr:
+        """If *typed* is a TypedExprNode wrapping a LambdaExpr whose body was
+        not checked (standalone lambda inference at line 996-1009), re-infer
+        it with *env* so that outer captures are resolved.  Returns the
+        original *typed* unchanged when no action is needed."""
+        if not isinstance(typed, TypedExprNode):
+            return typed
+        if not isinstance(typed.expr, LambdaExpr):
+            return typed
+        # Only retype when the inner type is a generic FuncType —
+        # previously checked lambdas are TypedLambda already.
+        if not isinstance(typed.type, FuncType):
+            return typed
+        # Check whether the FuncType still has generic TypeVars
+        # indicating the body hasn't been specialized yet.
+        from remora.types import TypeVar as _TV
+        has_type_var = any(isinstance(pt, _TV) for pt in typed.type.params)
+        if not has_type_var and not isinstance(typed.type.result, _TV):
+            return typed
+        try:
+            return self.check_callable(typed.expr, typed.type, env)
+        except RemoraTypeError:
+            return typed
 
     def infer_top_level_function_type(
         self,
@@ -3297,6 +3334,11 @@ def _infer_type_vars(
             return
         existing = bindings.get(declared.name)
         if existing is not None:
+            if isinstance(existing, TypeVar) and not isinstance(actual, TypeVar):
+                bindings[declared.name] = actual
+                return
+            if isinstance(actual, TypeVar):
+                return
             if existing != actual:
                 raise RemoraTypeError(
                     f"type variable {declared.name!r} bound to "
@@ -3310,10 +3352,12 @@ def _infer_type_vars(
             )
         bindings[declared.name] = actual
         return
+        return
     if isinstance(declared, ArrayType) and isinstance(actual, ArrayType):
         _infer_type_vars(declared.element, actual.element, bindings, binder_names)
         return
     if isinstance(declared, FuncType) and isinstance(actual, FuncType):
         for dp, ap in zip(declared.params, actual.params):
             _infer_type_vars(dp, ap, bindings, binder_names)
+        _infer_type_vars(declared.result, actual.result, bindings, binder_names)
         return

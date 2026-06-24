@@ -59,11 +59,17 @@ def erase_to_hir(program: CoreProgram) -> HIRProgram:
         hir_functions: list[HIRFunction] = []
         for name, typed_lam in func_lambdas.items():
             hir_fn_body = lower_expr(typed_lam.body)
+            # Resolve TypeVar params to INT — they may survive from
+            # polymorphic inference when the function is used with
+            # generic arguments (e.g. inside a lambda).
+            from remora.types import TypeVar as _TV, INT as _INT
+            def _concrete(t):
+                return _INT if isinstance(t, _TV) else t
             hir_fn = HIRFunction(
                 name,
-                [HIRParam(p_name, p_type) for p_name, p_type in typed_lam.params],
+                [HIRParam(p_name, _concrete(p_type)) for p_name, p_type in typed_lam.params],
                 hir_fn_body,
-                typed_lam.type.result,
+                _concrete(typed_lam.type.result),
             )
             hir_functions.append(hir_fn)
 

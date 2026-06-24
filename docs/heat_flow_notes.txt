@@ -1,0 +1,58 @@
+Then, I want to implement the core of Paul Haynes' 1D heat flow model
+in Remora using the capabilities of this project and relying on python
+only where necessary.
+
+First, Haynes' implementation is in /e/projects/heat1d, and you can look at that for reference.
+/e/projects/heat1d/README.md is particularly useful.
+
+Second, here are implementation notes for you to consider.  Read these notes and then write a plan to implement this heat flow model, ideally leveraging remora a lot.
+
+The Physical 1D Heat Flow Model
+
+The core physics of the lunar regolith are governed by the 1-D heat conduction equation with highly non-linear, temperature-dependent coefficients:
+
+$$\rho(z) C_p(T) \frac{\partial T}{\partial t} = \frac{\partial}{\partial z} \left( K(T, \rho) \frac{\partial T}{\partial z} \right)$$
+
+Because the upper boundary condition experiences extreme diurnal temperature swings ($\sim 100\text{ K}$ at night to $\sim 400\text{ K}$ at noon at the equator), the physical parameters must be modeled precisely as formulated by Hayne et al. (2017):Density Profile $\rho(z)$The bulk density increases exponentially in the top few decimeters due to self-compaction under lunar gravity:
+
+$$\rho(z) = \rho_d - (\rho_d - \rho_s)e^{-z/H}$$
+$\rho_s = 1100 \text{ kg m}^{-3}$ (Surface density)$\rho_d = 1800 \text{ kg m}^{-3}$ (Deep regolith density)$H = 0.07 \text{ m}$ (Characteristic scale height)Specific Heat Capacity $C_p(T)$The specific heat capacity varies heavily with temperature and is independent of depth, calculated via a temperature polynomial derived from Apollo sample data:
+
+$$C_p(T) = c_0 + c_1 T + c_2 T^2 + c_3 T^3 + c_4 T^4$$
+
+Thermal Conductivity
+
+$K(T, \rho)$
+
+The conductivity includes a solid conduction term ($K_c$) and a radiative term ($K_r$) scaling with $T^3$ to account for photon scattering between regolith grains in a vacuum:$$K(T, \rho) = K_c(z) + K_r(z) T^3$$Where $K_c$ and $K_r$ scale linearly with density between the surface and deep boundaries:$$K_c(z) = K_{cs} + (K_{cd} - K_{cs}) \frac{\rho(z) - \rho_s}{\rho_d - \rho_s}$$$$K_r(z) = K_{rs} + (K_{rd} - K_{rs}) \frac{\rho(z) - \rho_s}{\rho_d - \rho_s}$$Boundary ConditionsBottom Boundary ($z = 2.5\text{ m}$): Insulated geothermal boundary condition, $\frac{\partial T}{\partial z} = 0$ (or a small fixed heat flux $Q_{geo}$).Top Boundary ($z = 0$): Energy balance between absorbed solar insolation, scattered radiation, and thermal emission:$$(1 - A) F_{sun}(t) + F_{scattered} = \epsilon \sigma T_s^4 - K(T_s, \rho_s) \left. \frac{\partial T}{\partial z} \right|_{z=0}$$Grid Setup & Non-uniform DiscretizationTo simulate down to $2.5\text{ m}$ accurately while capturing the steep thermal gradients near the surface, you cannot use a uniform grid. The spatial step $\Delta z$ must scale exponentially near the surface and coarsen with depth.In Remora, the spatial grid can be represented by two static Rank-1 arrays:z: Core node positions of length [N] (e.g., $N=100$, with spacing from millimeters at the top to decimeters at the bottom).dz: The mid-point differences between nodes, of length [N-1].Architectural Approach in RemoraRemora’s rank polymorphism allows you to define the mathematical operations for a single 1D column. By organizing your data structures, Remora will automatically lift these 1D operations over your 2D surface patch grid [Y, X], mapping the computation to the GPU without manual nested loops.Data Shape MappingStatic Grid Data: z shape [N], dz shape [N-1], rho shape [N]Surface Patch Coordinates: [Y, X]Global State (Current Temperature): T shape [Y, X, N]Upper Boundary Forcing: Insolation shape [Y, X]When an operation expecting a Rank-1 array of shape [N] is applied to a tensor of shape [Y, X, N], Remora splits the calculation across the Y and X axes. On a GPU target, these independent outer dimensions naturally map to a 2D grid of thread blocks, while the inner [N] dimension runs inside the block or utilizes thread-level loops.Implementing the Solvers1. The Explicit Solver (Forward Euler)The explicit solver updates the temperature at time $t+1$ using only known values from time $t$.$$\frac{T_i^{t+1} - T_i^t}{\Delta t} = \frac{1}{\rho_i C_{p,i}^t \Delta z_i} \left[ K_{i+1/2}^t \left(\frac{T_{i+1}^t - T_i^t}{\Delta z_{i+1/2}}\right) - K_{i-1/2}^t \left(\frac{T_i^t - T_{i-1}^t}{\Delta z_{i-1/2}}\right) \right]$$Remora StrategyScalar Property Lifting: Write scalar functions for compute_cp and compute_k. When passed the complete [Y, X, N] temperature tensor, Remora lifts these functions element-wise to return matching Cp and K property tensors.Stencil Operations via Shifting: To compute spatial derivatives without loops, use Remora's array slicing primitives to construct shifted views of the interior nodes along the inner axis:T_center = (slice T [0 0 1] [Y X -1])T_left   = (slice T [0 0 0] [Y X -1])T_right  = (slice T [0 0 2] [Y X 0])Evaluate the flux vector element-wise and add it directly to the base T tensor.GPU Trade-off: Extremely fast clock cycles per iteration because there are no matrix inversions. However, because $\Delta z$ is millimeter-scale at the surface, the CFL stability criterion ($\Delta t \le \frac{\rho C_p \Delta z^2}{2K}$) forces a very small time step ($\Delta t < 1 \text{ second}$), requiring millions of iterations for long runs.2. The Implicit Solver (Backward Euler)To bypass the CFL time-step restriction, the implicit solver evaluates spatial derivatives at the future time step $t+1$. This yields a tridiagonal linear system for every 1D column:$$-a_i T_{i-1}^{t+1} + b_i T_i^{t+1} - c_i T_{i+1}^{t+1} = d_i$$Where $a_i, b_i, c_i$ are functions of the non-linear properties $K(T^{t+1})$ and $C_p(T^{t+1})$.   Surface Boundary Node (z=0):   [ b0  -c0   0   ... ] [ T0   ]   [ d0 ]
+   Interior Regolith Nodes:       [ -a1  b1  -c1  ... ] [ T1   ] = [ d1 ]
+   Deep Regolith Node (z=2.5m):   [ ... ...  -aN  bN  ] [ TN   ]   [ dN ]
+Handling the Non-LinearityBecause $K$ and $C_p$ depend on the unknown future temperature $T^{t+1}$, you must implement a Picard iteration or Newton-Raphson loop inside each time step:Guess $T^{t+1, 0} = T^t$.Compute coefficients $a, b, c$ using the current guess.Solve the tridiagonal system to get $T^{t+1, k+1}$.Check for convergence ($\max|T^{t+1, k+1} - T^{t+1, k}| < \epsilon$). If not converged, repeat.Remora & GPU StrategyThe standard Thomas Algorithm for solving tridiagonal matrices is inherently sequential, creating a loop-carried dependency along the depth axis [N]. However, your target architecture features an outer [Y, X] grid of independent columns.                  [Y, X] Surface Patch Grid
+              +---------+---------+---------+
+              | Column  | Column  | Column  |  <-- Map each (y,x) to a
+              | (0,0)   | (0,1)   | (0,2)   |      GPU Thread Block
+              +---------+---------+---------+
+              | Column  | Column  | Column  |
+              | (1,0)   | (1,1)   | (1,2)   |
+              +---------+---------+---------+
+                   |
+                   v
+        Each column contains an independent 
+        1D Depth Array [N] (2.5 meters deep)
+Isolate the Thomas Algorithm: Write the forward-elimination and back-substitution loops as a standard sequential function operating on Rank-1 arrays (a, b, c, d) of length [N].Exploit Rank-Polymorphic Lifting: Pass the higher-dimensional tensor coefficient arrays of shape [Y, X, N] into your tridiagonal solver.Execution Target: Remora lifts the sequential Thomas algorithm across the [Y, X] coordinates. The compiler maps each surface patch $(y,x)$ to an isolated GPU thread block (or single thread, depending on register constraints). Each block processes its local 2.5-meter core independently, enabling massive parallel execution across the patch grid.3. The Crank-Nicolson SolverCrank-Nicolson blends the explicit and implicit methods 50/50, providing second-order accuracy in time ($O(\Delta t^2)$).$$\frac{T_i^{t+1} - T_i^t}{\Delta t} = \frac{1}{2} \left[ \mathcal{D}_z(T^{t+1}) + \mathcal{D}_z(T^t) \right]$$Remora StrategyThe system remains tridiagonal and follows the same structure as the implicit solver.The right-hand side vector d is modified to include the explicit evaluations of the current time step's thermal fluxes.Reuse the same lifted tridiagonal execution infrastructure developed for the implicit solver. This provides higher accuracy for tracking rapid surface transitions (such as shadows moving across the patch) without increasing matrix computing costs.4. The Fourier-Matrix / Analytical SolverThis solver skips time-stepping altogether by assuming a periodic steady-state under a repeating diurnal solar cycle. It solves for the temperature profile using a discrete set of Fourier harmonics.Remora StrategyFourier Transformation: Construct the incoming insolation profile as a periodic time-series array of shape [Time_Steps]. Apply Remora's Fast Fourier Transform primitive (fft) along the time axis to extract the frequency components.Matrix Formulation: For each harmonic frequency $\omega_m$, the 1D diffusion equation transforms into an ordinary differential equation in space, which discretized looks like a complex-valued matrix equation: $\mathbf{M}(\omega_m) \mathbf{\hat{T}}_m = \mathbf{\hat{F}}_m$.Array Processing Mapping: Remora handles dense linear algebra natively. You can construct a Rank-3 tensor of operators with the shape [Harmonics, N, N].Compute the matrix-vector multiplications concurrently across frequencies using Remora's primitive array operations.Apply the inverse FFT (ifft) to map the solved harmonics back to a clean [Time_Steps, N] array representing the steady-state day/night profile.Future Coupling via Radiative TransferBy laying out the data structures with an outer [Y, X] layout, your model will be structurally prepared for inter-patch coupling later on:                  Radiative Transfer Coupling (Future Step)
+                  [ Mutual Shadowing & Infrared Exchange ]
+                               |  ^  |
+                               v  |  v
+         +-------------------------------------------------+
+         |  Surface Energy Balance Layer: shape [Y, X]     |
+         +-------------------------------------------------+
+           |               |               |             |
+           v               v               v             v
+     +-----------+   +-----------+   +-----------+   +-----------+
+     | Core (0,0)|   | Core (0,1)|   | Core (1,0)|   | Core (1,1)|  ...
+     | Shape [N] |   | Shape [N] |   | Shape [N] |   | Shape [N] |
+     +-----------+   +-----------+   +-----------+   +-----------+
+
+When you introduce radiative transfer (where surface patch $(y_1, x_1)$ casts a shadow or radiates infrared energy onto patch $(y_2, x_2)$), the interaction will modify only the top boundary condition calculation at the beginning of each time step.Because the interior 2.5-meter regolith columns communicate only with their immediate vertical neighbors, the tridiagonal matrix structures remain entirely independent during the conduction phase, maintaining efficient parallel execution on the GPU.
+
+Write your implementation plan in docs/HEAT1D_PLAN.md .

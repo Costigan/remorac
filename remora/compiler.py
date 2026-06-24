@@ -614,6 +614,11 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
                     for fld in expr.__dataclass_fields__:
                         kwargs[fld] = getattr(expr, fld)
                     kwargs[attr] = new_child
+                    if isinstance(expr, _HIRLet) and attr == "body":
+                        # Propagate the concrete return type from the
+                        # monomorphized body back into the let.
+                        rt = _resolve_main_return_type(new_child, expr.result_type)
+                        kwargs["result_type"] = rt
                     return type(expr)(**kwargs)
         for list_attr in ("args", "arrays", "elements"):
             children = getattr(expr, list_attr, None)
@@ -647,9 +652,26 @@ def _monomorphize_hof_calls(program: HIRProgram, core_program) -> HIRProgram:
 
     # Resolve the program's return type from the monomorphized main
     # expression — it now has concrete types instead of TypeVars.
-    resolved_return = new_main.result_type if isinstance(new_main, _HIRCall) else program.return_type
+    resolved_return = _resolve_main_return_type(new_main, program.return_type)
 
     return HIRProgram(final_functions, new_main, resolved_return)
+
+
+def _resolve_main_return_type(main: object, fallback: "RemoraType") -> "RemoraType":
+    from remora.hir import HIRLet as _HL, HIRCall as _HC
+    from remora.types import TypeVar as _TV
+    if main is None:
+        return fallback
+    cur = main
+    while isinstance(cur, _HL):
+        cur = cur.body
+    if isinstance(cur, _HC):
+        rt = cur.result_type
+        return rt if not isinstance(rt, _TV) else fallback
+    rt = getattr(cur, "result_type", None)
+    if rt is not None and not isinstance(rt, _TV):
+        return rt
+    return fallback
 
 
 def _has_self_hof_call(expr, func_name: str) -> bool:

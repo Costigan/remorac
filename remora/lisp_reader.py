@@ -102,7 +102,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, PairType, RemoraType, StaticDim, TypeBinder, TypeVar
+from remora.types import BOOL, FLOAT, FuncType, INT, ArrayType, PairType, RemoraType, StaticDim, TypeBinder, TypeVar
 
 _GRAMMAR = r"""
 program: sexpr*
@@ -193,6 +193,7 @@ typed_param_spec: name_token type_expr -> param_typed
 ?type_expr: scalar_type
           | "(" "Array" scalar_type dim_ref* ")" -> array_type
           | "(" "Pair" type_expr type_expr ")" -> pair_type
+          | "(" "Func" "(" type_expr* ")" type_expr ")" -> func_type
 
 scalar_type: "Int" -> type_int
             | "Float" -> type_float
@@ -423,6 +424,11 @@ class LispASTBuilder(Transformer):
 
     def pair_type(self, items: list[Any]) -> RemoraType:
         return PairType(items[0], items[1])
+
+    def func_type(self, items: list[Any]) -> RemoraType:
+        param_types = tuple(items[:-1])
+        result_type = items[-1]
+        return FuncType(param_types, result_type)
 
     def dim_lit(self, items: list[Any]) -> StaticDim:
         return StaticDim(int(items[0]))

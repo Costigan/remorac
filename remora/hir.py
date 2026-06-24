@@ -799,6 +799,18 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
     if isinstance(expr, TypedGrade):
         return HIRGrade(lower_expr(expr.array), expr.type)
 
+    if isinstance(expr, TypedLambda):
+        if not isinstance(expr.type, FuncType):
+            raise HIRLoweringError("TypedLambda must have a FuncType")
+        return HIRLambda(
+            [
+                HIRParam(name, param_type)
+                for name, param_type in expr.params
+            ],
+            lower_expr(expr.body),
+            expr.type,
+        )
+
     if isinstance(expr, TypedExprNode):
         return _lower_typed_node(expr)
 
