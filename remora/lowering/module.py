@@ -254,17 +254,27 @@ class MLIRLowering:
                 "box/unbox, sort, grade, and reverse lower to MLIR so far"
             )
 
-        # Prefer builder API path; fall back to text-based if unsupported node types
-        try:
-            text, module_obj = _lower_via_builder(program, functions)
-            if export_output_descriptor and program.return_type is not None:
-                text = _add_output_descriptor_export(text, program.return_type)
-                with self.context, self.ir.Location.unknown(self.context):
-                    module_obj = self.ir.Module.parse(text)
-                text = str(module_obj)
-            return LoweredModule(text, module_obj)
-        except Exception:
-            pass
+        # The text-based lowering path handles every dense-core program
+        # (~175x faster than the builder API, covers all node types).
+        #
+        # The builder API path (Stream E7, _lower_via_builder) was the
+        # original lowering approach using iree's Python MLIR object
+        # construction.  It is preserved in _builder_ops.py /
+        # _builder_emitter.py / scalar_builder.py but currently disabled
+        # because:
+        #   1. It is slower (avg 10.5ms vs 0.06ms for text path)
+        #   2. It falls back to the text path for 66% of examples
+        #   3. The text path has no deferreds and serves all patterns
+        #
+        # To re-enable, uncomment the block below and reorder the
+        # fallback logic so the text path is tried first.
+        #
+        # try:
+        #     text, module_obj = _lower_via_builder(program, functions)
+        #     ...
+        #     return LoweredModule(text, module_obj)
+        # except Exception:
+        #     pass
 
         text = _lower_main_module(main, functions)
         if export_output_descriptor:

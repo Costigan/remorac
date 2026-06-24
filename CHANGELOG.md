@@ -3,6 +3,70 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Dense Core CPU — Complete
+
+Full closure conversion, ForallType HOF monomorphization, all text-path
+deferrals closed, builder path disabled.  The compiled-CPU path now
+covers every construct the dense-core typechecker accepts.
+
+### Full closure conversion
+- `_ensure_lambda_typed` in `_infer_top_level_function_app` type-checks
+  lambda bodies with their containing environment, producing `TypedLambda`
+  with resolved free variables (`remora/typechecker.py`).
+- `lower_expr` handles `TypedLambda` values directly, avoiding the
+  re-typecheck-with-empty-env path that lost outer bindings (`remora/hir.py`).
+- `_monomorphize_hof_calls` propagates concrete return types through
+  HIRLet chains; `_replace_calls` updates `result_type` on HIRLet nodes
+  when bodies are replaced (`remora/compiler.py`).
+- `erase_to_hir` resolves TypeVar params to INT so monomorphized
+  functions don't leak type variables into MLIR (`remora/erase.py`).
+- `_free_vars` and `_free_vars_callable` exclude FuncType HIRVars —
+  lifted function references are global, not closures (`remora/defunc.py`).
+- Verified: `(let ((z 3)) (apply_twice (lambda (x) (+ x z)) 5)) = 11`,
+  multi-capture variants, `row_norms.remora` now compiles.
+
+### ForallType HOF monomorphization
+- Lisp parser extended with `(Func (t1 t2 ...) ret)` type expression
+  in `define/forall` signatures (`remora/lisp_reader.py`).
+- `_infer_type_vars` walks `FuncType.result` for binder resolution;
+  TypeVar-vs-TypeVar conflicts defer to concrete bindings from other
+  parameters; concrete types replace provisional TypeVar bindings
+  (`remora/typechecker.py`).
+- Verified: `apply_twice inc 5`, `compose inc inc 5`, `apply2 square 5`
+  with single- and multi-variable ForallType, all CPU compiled.
+
+### Text-path deferrals closed
+- **Fold operator sections**: resolved via `_lower_primitive_callable_result`
+  (`tensor_ops.py:3173`).
+- **Exclusive/right scans rank ≥ 2**: `_lower_scan_multirank_exclusive_right`
+  emits `scf.for` with reversed loop or inverted carry logic
+  (`tensor_ops.py:3757`).
+- **Cell-fold producer map sections**: resolved via
+  `_lower_primitive_callable_result` with section value threading
+  (`tensor_ops.py:1461`).
+- **Binary cell-map**: guard removed — cell dimensions are parallel
+  iterators handled by the scalar lowering (`tensor_ops.py:1075`).
+- **Cell-fold producer map lifted lambdas**: `HIRVar` callables resolved
+  to `HIRPrimCallable` when the function body is a simple `HIRPrimOp`;
+  arity mismatch for patterns like `(lambda (x) (* x x))` handled by
+  operand replication (`tensor_ops.py`).
+- **HIRVar.result_type bug**: fixed to use `.type` for HIRVar nodes in
+  `_lower_if_tensor_input` (`tensor_ops.py:801`).
+
+### Builder path disabled
+- Builder API path (Stream E7) was ~175x slower than text path and
+  fell back for 66% of programs.  Commented out with rationale;
+  lowering always uses the text path now (`remora/lowering/module.py`).
+- `arith.select` → `scf.if` in `test_lowering.py` — the text path
+  correctly uses `scf.if` (eager `arith.select` would infinite-loop
+  on recursive calls; the builder had this bug masked by fallback).
+
+### Regression tests
+- `test_closure_capture_in_hof_arg_compiled` added to
+  `test_phase7_dependent_functions.py`.
+- `row_norms.remora` moved from expected failure to passing.
+- 988 non-GPU tests pass, 1 skipped (OpenMP availability check).
+
 ## Recursive Functions — Typechecker, Interpreter, CPU Compilation
 
 Recursive `def` functions now typecheck, interpret (with tail-call

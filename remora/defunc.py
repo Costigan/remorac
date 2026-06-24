@@ -394,8 +394,9 @@ def _free_vars_of_lambda(
 
 def _free_vars(expr: HIRExpr) -> set[str]:
     """Return the set of free variable names in *expr*."""
+    from remora.types import FuncType as _FT3
     return hir_dispatch(expr, {
-        HIRVar: lambda e: {e.name},
+        HIRVar: lambda e: set() if isinstance(e.type, _FT3) else {e.name},
         HIRLet: lambda e: _free_vars(e.value) | (_free_vars(e.body) - {e.name}),
         HIRMap: lambda e: _free_vars_callable(e.func) | set().union(
             *(_free_vars(a) for a in e.arrays)
@@ -450,5 +451,8 @@ def _free_vars_callable(callable_: HIRCallable) -> set[str]:
             free |= _free_vars(callable_.right_arg)
         return free
     if isinstance(callable_, HIRVar):
+        from remora.types import FuncType as _FT4
+        if isinstance(callable_.type, _FT4):
+            return set()
         return {callable_.name}
     raise AssertionError(f"unknown HIR callable {type(callable_).__name__}")

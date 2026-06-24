@@ -1455,7 +1455,27 @@ def _lower_cell_fold_producer_result(
     ``fold + 0.0 (map * p k)``).  The cell dimension is the reduction
     dimension; the free arrays are broadcast across the frame.
     """
-    if not isinstance(producer.func, HIRPrimCallable):
+    resolved_callable = producer.func
+    if isinstance(producer.func, HIRVar):
+        # Defunctionalization may lift the inline lambda to a named
+        # function.  If the function body is a simple HIRPrimOp (like
+        # `*` applied to its params), resolve it to a HIRPrimCallable
+        # so the cell-fold lowering can process it.
+        func = functions.get(producer.func.name)
+        if func is not None and isinstance(func.body, HIRPrimOp):
+            param_names = {p.name for p in func.params}
+            if all(isinstance(a, HIRVar) and a.name in param_names for a in func.body.args):
+                # HIRPrimOp uses typed operator names like `*f`, `+i`;
+                # HIRPrimCallable uses bare names like `*`, `+`.
+                raw_op = func.body.op
+                if len(raw_op) > 1 and raw_op[-1] in ("f", "i"):
+                    raw_op = raw_op[:-1]
+                resolved_callable = HIRPrimCallable(
+                    raw_op,
+                    tuple(p.type for p in func.params),
+                    func.return_type,
+                )
+    if not isinstance(resolved_callable, HIRPrimCallable):
         raise RemoraLoweringError(
             "only primitive cell-fold producer maps lower to MLIR so far"
         )
@@ -1469,7 +1489,7 @@ def _lower_cell_fold_producer_result(
     input_rank = frame_rank + cell_rank
 
     operands = list(producer.arrays)
-    has_section = producer.func.left_arg is not None or producer.func.right_arg is not None
+    has_section = resolved_callable.left_arg is not None or resolved_callable.right_arg is not None
     if has_section and len(operands) != 1:
         raise RemoraLoweringError(
             "cell-fold producer map sections require exactly one map operand"
@@ -1506,7 +1526,7 @@ def _lower_cell_fold_producer_result(
 
     if has_section:
         section_lines, section_value = _lower_primitive_callable_result(
-            producer.func,
+            resolved_callable,
             input_name="%in",
             input_type=input_element_type,
             result_type=result_element_type,
@@ -1515,7 +1535,7 @@ def _lower_cell_fold_producer_result(
         elem_line = "\n".join(section_lines)
         elem_value = section_value
     else:
-        op = _arith_op(producer.func.op, result_element_type)
+        op = _arith_op(resolved_callable.op, result_element_type)
         sep = ", " if "cmp" in op else " "
         operand_values: list[str] = []
         free_idx = 0
@@ -1525,6 +1545,15 @@ def _lower_cell_fold_producer_result(
             else:
                 operand_values.append(f"%in_free{free_idx}")
                 free_idx += 1
+        # When the callable has fewer operands than the operation needs
+        # (e.g. `(lambda (x) (* x x))` — 1 map operand, binary `*`),
+        # replicate the available operands.
+        if isinstance(resolved_callable, HIRPrimCallable) and len(operand_values) == 1:
+            arity = 1
+            if resolved_callable.op in {"+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!="}:
+                arity = 2
+            if arity > len(operand_values):
+                operand_values = operand_values * arity
         elem_line = (
             f"      %elem = {op}{sep}" + ", ".join(operand_values) + f" : {result_element_type}"
         )

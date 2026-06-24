@@ -162,11 +162,11 @@ def test_lowers_scalar_let_with_ssa_value():
     assert "return %" in lowered.text
 
 
-def test_lowers_scalar_if_expression_to_select():
+def test_lowers_scalar_if_expression_to_scf_if():
     lowered = MLIRLowering().lower_program(hir_from_source("if true then 1 else 2"))
 
     assert "func.func @main() -> i32" in lowered.text
-    assert "arith.select" in lowered.text
+    assert "scf.if" in lowered.text
     assert "return %" in lowered.text
 
 
@@ -980,8 +980,7 @@ def test_builder_iota_and_text_equivalent():
 _EXAMPLE_DIR = Path(__file__).parent.parent / "examples"
 
 _EXPECTED_FAILURES = {
-    # Known deferred features from plan
-    "row_norms.remora": "lambda captures outer variables",
+    # All previously-deferred patterns now compile.
 }
 
 _EXAMPLE_GPU_EXPECTED = {
