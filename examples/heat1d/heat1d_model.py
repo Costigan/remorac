@@ -12,6 +12,8 @@ Hayne et al. (2017), Eqs. A31-A33.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 import remora
@@ -21,7 +23,7 @@ import remora
 # ═══════════════════════════════════════════════════════════════════════════
 
 CP_COEFFS = (-3.6125, 2.7431, 2.3616e-3, -1.2340e-5, 8.9093e-9)
-Kcs = 0.0007
+Kcs = 0.00074
 Kcd = 0.0034
 CHI = 2.7
 R350 = CHI / 350.0**3
@@ -30,22 +32,49 @@ rhod = 1800.0
 H_SCALE = 0.07
 Q_GEO = 0.018          # geothermal heat flux [W/m²]
 
-N = 60
+# ═══════════════════════════════════════════════════════════════════════════
+# Non-uniform spatial grid
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_grid_skin_depth(
+    zs: float | None = None, m: int = 10, n: int = 4, b: int = 20,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a non-uniform grid matching Haynes et al. (2017), Eqs. A31-A33."""
+    if zs is None:
+        kappa = Kcs / (rhos * 600.0)
+        lunar_day = 29.53059 * 24 * 3600
+        zs = math.sqrt(kappa * lunar_day / math.pi)
+    dz0 = zs / m
+    r = 1.0 + 1.0 / n
+    z_max_skin = zs * b
+    n_layers = int(math.ceil(math.log(1 + z_max_skin * (r - 1) / dz0) / math.log(r)))
+    dz = dz0 * r ** np.arange(n_layers, dtype=np.float64)
+    z = np.zeros(n_layers + 1, dtype=np.float64)
+    z[1:] = np.cumsum(dz)
+    d3z = dz[1:] * dz[:-1] * (dz[1:] + dz[:-1])
+    g1 = 2.0 * dz[1:] / d3z
+    g2 = 2.0 * dz[:-1] / d3z
+    return z, dz, g1, g2
+
+
+# Grid size — computed from the reference skin-depth grid
+_N_DEFAULT = len(build_grid_skin_depth()[0])
+N = _N_DEFAULT
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Remora source — all functions in one string, N=60 hardcoded
+# Remora source — N=19 hardcoded (reference grid size)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _SOURCE = f"""
 (define/pi ()
   (compute_K
-    [T  (Array Float 60) Kc (Array Float 60)]
-    (Array Float 60))
+    [T  (Array Float {N}) Kc (Array Float {N})]
+    (Array Float {N}))
   (let ((R350 {repr(R350)}))
     (map (lambda (t kcz) (* kcz (+ 1.0 (* R350 (* t (* t t))))))  T Kc)))
 
 (define/pi ()
-  (compute_Cp [T (Array Float 60)] (Array Float 60))
+  (compute_Cp [T (Array Float {N})] (Array Float {N}))
   (let ((c0 {repr(CP_COEFFS[0])}) (c1 {repr(CP_COEFFS[1])})
         (c2 {repr(CP_COEFFS[2])}) (c3 {repr(CP_COEFFS[3])})
         (c4 {repr(CP_COEFFS[4])}))
@@ -56,69 +85,154 @@ _SOURCE = f"""
 
 (define/pi ()
   (cn_step
-    [T_old  (Array Float 60)    g1   (Array Float 58)
-     g2     (Array Float 58)    rho  (Array Float 60)
-     K      (Array Float 60)    Cp   (Array Float 60)
+    [T_old  (Array Float {N})    g1   (Array Float {N - 2})
+     g2     (Array Float {N - 2})    rho  (Array Float {N})
+     K      (Array Float {N})    Cp   (Array Float {N})
      dt     Float               T_surf Float]
-    (Array Float 60))
+    (Array Float {N}))
 
   (let* (
          (ha (map (lambda (i)
                 (/ (* 0.5 dt (index-item g1 i) (index-item K i))
                    (* (index-item rho (+ i 1)) (index-item Cp (+ i 1)))))
-              (iota 58)))
+              (iota {N - 2})))
          (hb (map (lambda (i)
                 (/ (* 0.5 dt (index-item g2 i) (index-item K (+ i 1)))
                    (* (index-item rho (+ i 1)) (index-item Cp (+ i 1)))))
-              (iota 58)))
+              (iota {N - 2})))
 
          (lower (map (lambda (i)
-                  (if (< i 58) (- 0.0 (index-item ha i)) -1.0))
-                (iota 59)))
+                  (if (< i {N - 2}) (- 0.0 (index-item ha i)) -1.0))
+                (iota {N - 1})))
          (diag (map (lambda (i)
                   (if (< i 1) 1.0
-                    (if (< i 59)
+                    (if (< i {N - 1})
                         (+ 1.0 (index-item ha (- i 1)) (index-item hb (- i 1)))
                         1.0)))
-                (iota 60)))
+                (iota {N})))
          (upper (map (lambda (i)
                   (if (< i 1) 0.0 (- 0.0 (index-item hb (- i 1)))))
-                (iota 59)))
+                (iota {N - 1})))
          (rhs (map (lambda (i)
                   (if (< i 1) T_surf
-                    (if (< i 59)
+                    (if (< i {N - 1})
                         (let ((ha_i (index-item ha (- i 1)))
                               (hb_i (index-item hb (- i 1))))
                           (+ (* ha_i (index-item T_old (- i 1)))
                              (* (- 1.0 ha_i hb_i) (index-item T_old i))
                              (* hb_i (index-item T_old (+ i 1)))))
                         0.0)))
-                (iota 60)))
+                (iota {N})))
 
          (cp (iscan (lambda (prev i)
                 (let ((u (index-item upper i))
                       (d (index-item diag i))
                       (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
                   (/ u (- d (* l prev)))))
-              0.0 (iota 59)))
+              0.0 (iota {N - 1})))
          (m  (map (lambda (i)
                 (let ((d  (index-item diag i))
                       (l  (if (< i 1) 0.0 (index-item lower (- i 1))))
                       (pv (if (< i 1) 0.0 (index-item cp (- i 1)))))
                   (- d (* l pv))))
-              (iota 60)))
+              (iota {N})))
          (dp (iscan (lambda (prev i)
                 (let ((r  (index-item rhs i))
                       (mi (index-item m i))
                       (l  (if (< i 1) 0.0 (index-item lower (- i 1)))))
                   (/ (- r (* l prev)) mi)))
-              0.0 (iota 60))))
+              0.0 (iota {N}))))
 
     (trace-right (lambda (xnext i)
       (let ((dpi (index-item dp i))
-            (cpi (if (< i 59) (index-item cp i) 0.0)))
+            (cpi (if (< i {N - 1}) (index-item cp i) 0.0)))
         (- dpi (* cpi xnext))))
-      0.0 (iota 60))))
+      0.0 (iota {N}))))
+"""
+
+_SOURCE = f"""
+(define/pi ()
+  (compute_K
+    [T  (Array Float {N}) Kc (Array Float {N})]
+    (Array Float {N}))
+  (let ((R350 {repr(R350)}))
+    (map (lambda (t kcz) (* kcz (+ 1.0 (* R350 (* t (* t t))))))  T Kc)))
+
+(define/pi ()
+  (compute_Cp [T (Array Float {N})] (Array Float {N}))
+  (let ((c0 {repr(CP_COEFFS[0])}) (c1 {repr(CP_COEFFS[1])})
+        (c2 {repr(CP_COEFFS[2])}) (c3 {repr(CP_COEFFS[3])})
+        (c4 {repr(CP_COEFFS[4])}))
+    (map (lambda (t)
+      (+ c0 (* c1 t) (* c2 (* t t))
+         (* c3 (* t (* t t))) (* c4 (* t (* t (* t t))))))
+      T)))
+
+(define/pi ()
+  (cn_step
+    [T_old  (Array Float {N})    g1   (Array Float {N - 2})
+     g2     (Array Float {N - 2})    rho  (Array Float {N})
+     K      (Array Float {N})    Cp   (Array Float {N})
+     dt     Float               T_surf Float]
+    (Array Float {N}))
+
+  (let* (
+         (ha (map (lambda (i)
+                (/ (* 0.5 dt (index-item g1 i) (index-item K i))
+                   (* (index-item rho (+ i 1)) (index-item Cp (+ i 1)))))
+              (iota {N - 2})))
+         (hb (map (lambda (i)
+                (/ (* 0.5 dt (index-item g2 i) (index-item K (+ i 1)))
+                   (* (index-item rho (+ i 1)) (index-item Cp (+ i 1)))))
+              (iota {N - 2})))
+
+         (lower (map (lambda (i)
+                  (if (< i {N - 2}) (- 0.0 (index-item ha i)) -1.0))
+                (iota {N - 1})))
+         (diag (map (lambda (i)
+                  (if (< i 1) 1.0
+                    (if (< i {N - 1})
+                        (+ 1.0 (index-item ha (- i 1)) (index-item hb (- i 1)))
+                        1.0)))
+                (iota {N})))
+         (upper (map (lambda (i)
+                  (if (< i 1) 0.0 (- 0.0 (index-item hb (- i 1)))))
+                (iota {N - 1})))
+         (rhs (map (lambda (i)
+                  (if (< i 1) T_surf
+                    (if (< i {N - 1})
+                        (let ((ha_i (index-item ha (- i 1)))
+                              (hb_i (index-item hb (- i 1))))
+                          (+ (* ha_i (index-item T_old (- i 1)))
+                             (* (- 1.0 ha_i hb_i) (index-item T_old i))
+                             (* hb_i (index-item T_old (+ i 1)))))
+                        0.0)))
+                (iota {N})))
+
+         (cp (iscan (lambda (prev i)
+                (let ((u (index-item upper i))
+                      (d (index-item diag i))
+                      (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
+                  (/ u (- d (* l prev)))))
+              0.0 (iota {N - 1})))
+         (m  (map (lambda (i)
+                (let ((d  (index-item diag i))
+                      (l  (if (< i 1) 0.0 (index-item lower (- i 1))))
+                      (pv (if (< i 1) 0.0 (index-item cp (- i 1)))))
+                  (- d (* l pv))))
+              (iota {N})))
+         (dp (iscan (lambda (prev i)
+                (let ((r  (index-item rhs i))
+                      (mi (index-item m i))
+                      (l  (if (< i 1) 0.0 (index-item lower (- i 1)))))
+                  (/ (- r (* l prev)) mi)))
+              0.0 (iota {N}))))
+
+    (trace-right (lambda (xnext i)
+      (let ((dpi (index-item dp i))
+            (cpi (if (< i {N - 1}) (index-item cp i) 0.0)))
+        (- dpi (* cpi xnext))))
+      0.0 (iota {N}))))
 """
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -191,7 +305,7 @@ class Heat1DModel:
 
     def __init__(
         self,
-        z_max: float = 2.5,
+        z_max: float | None = None,
         dt: float = 3600.0,
         T_surface: float = 250.0,
         T_init: float = 200.0,
@@ -204,7 +318,10 @@ class Heat1DModel:
         self.picard_max_iter = picard_max_iter
         self._T_surface = T_surface
 
-        self.z, self.dz, self.g1, self.g2 = build_grid(z_max, growth_rate)
+        if z_max is not None:
+            self.z, self.dz, self.g1, self.g2 = build_grid(z_max, growth_rate)
+        else:
+            self.z, self.dz, self.g1, self.g2 = build_grid_skin_depth()
         self.rho = rhod - (rhod - rhos) * np.exp(-self.z / H_SCALE)
         self.Kc = Kcs + (Kcd - Kcs) * (self.rho - rhos) / (rhod - rhos)
         self.T = np.full(N, T_init, dtype=np.float64)

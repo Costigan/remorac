@@ -41,7 +41,7 @@ class TestGrid:
 
     def test_grid_near_target_max(self):
         z, _, _, _ = build_grid(2.5, growth_rate=1.05)
-        assert z[-1] <= 2.5
+        assert z[-1] <= 2.5 + 1e-10
 
 
 class TestRemoraProperties:

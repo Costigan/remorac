@@ -234,10 +234,9 @@ def run_simulation(
 
     # ── Fourier equilibration (jump to periodic steady state) ──
     if fourier_equil:
-        z, dz, _, _ = build_grid(z_max, growth_rate)
-        kc = _kc(z)
-        rho_z = rhod - (rhod - rhos) * np.exp(-z / H_SCALE)
-        T_surf_fourier, T_eq_fourier = solve_fourier(lat, z, dz, kc, rho_z, dec=dec)
+        kc = _kc(model.z)
+        rho_z = rhod - (rhod - rhos) * np.exp(-model.z / H_SCALE)
+        T_surf_fourier, T_eq_fourier = solve_fourier(lat, model.z, model.dz, kc, rho_z, dec=dec)
         model.T[:] = T_eq_fourier
         model._update_properties()
 
@@ -439,8 +438,8 @@ if __name__ == "__main__":
                    help="Latitude [degrees]")
     p.add_argument("--lon", type=float, default=0.0,
                    help="Longitude [degrees]")
-    p.add_argument("--z-max", type=float, default=2.5,
-                   help="Domain depth [m]")
+    p.add_argument("--z-max", type=float, default=None,
+                   help="Override domain depth [m] (default: skin-depth grid)")
     p.add_argument("--dt", type=float, default=3600.0,
                    help="Time step [s] (default 3600 = 1 hr)")
     p.add_argument("--n-days", type=int, default=20,
@@ -448,7 +447,7 @@ if __name__ == "__main__":
     p.add_argument("--equil-days", type=int, default=20,
                    help="Equilibration days before output (default 20)")
     p.add_argument("--growth-rate", type=float, default=1.05,
-                   help="Grid growth ratio (1.0 = uniform)")
+                   help="Grid growth ratio (only with --z-max override)")
     p.add_argument("--T-init", type=float, default=None,
                    help="Initial temperature [K] (default: T_eq(lat))")
     p.add_argument("--month", type=int, default=0,
