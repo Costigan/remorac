@@ -340,7 +340,7 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
                 return GpuInputLoad(slot, use_coords, offsets, transforms, et)
             return GpuInputLoad(slot, use_coords, element_type=et)
         if expr.name in ctx.coord_map:
-            return GpuIndexCoordinate(expr.name)
+            return GpuIndexCoordinate(ctx.coord_map[expr.name])
         if expr.name in ctx.scalar_env:
             return GpuScalarParam(ctx.scalar_env[expr.name])
         raise GPUScaffoldError(
@@ -727,7 +727,10 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     if base_op in {"<", ">", "<=", ">=", "==", "!="}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: comparison needs 2 args")
-        return GpuCompareOp(base_op, lowered_args[0], lowered_args[1], elem_type)
+        # Infer element type from operands (not op suffix) for comparisons
+        _ops = {getattr(a, 'element_type', elem_type) for a in lowered_args if hasattr(a, 'element_type')}
+        _comp_et = next(iter(_ops)) if len(_ops) == 1 else elem_type
+        return GpuCompareOp(base_op, lowered_args[0], lowered_args[1], _comp_et)
 
     if base_op in {"exp", "log", "sqrt"}:
         if len(lowered_args) != 1:
@@ -897,6 +900,7 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
 
     # Resolve index coordinates
     index_coords: list[str] = []
+    let_exprs: list[tuple[str, GpuExpr]] = []  # let bindings for computed indices
     for idx in expr.indices:
         if isinstance(idx, HIRLit) and idx.type == INT:
             index_coords.append(str(int(idx.value)))
@@ -915,20 +919,23 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
                     f"{ctx.context}: index variable '{idx.name}' not resolved"
                 )
         else:
-            raise GPUScaffoldError(
-                f"{ctx.context}: non-literal index in HIRIndex"
-            )
+            # Computed (non-literal) index expression — lower it recursively
+            # and bind to a fresh let variable, cast to i64 for addressing.
+            # Phase 1.4: GPU index-in-map.
+            computed = _lower_hir(idx, ctx)
+            fresh_name = f"_cidx_{len(let_exprs)}_{id(idx)}"
+            coord_name = fresh_name  # same name — resolved via _GpuLetExpr env
+            # The expression compiler produces i32 for INT arithmetic, but
+            # thread coordinates and GpuInputLoad addressing require i64.
+            let_exprs.append((fresh_name, GpuCast(computed, "i32", "i64")))
+            ctx.let_env[fresh_name] = _placeholder(fresh_name)
+            index_coords.append(coord_name)
 
     # Determine the result rank from the HIRIndex result_type
     result_type = expr.result_type
     if isinstance(result_type, ScalarType):
-        # Scalar result: single GpuInputLoad
-        return GpuInputLoad(slot, index_coords, element_type=_scalar_type_to_mlir(result_type))
-
-    # Array result: fewer indices than the source rank. Unroll the remaining
-    # (cell) axes into one GpuInputLoad per element, in row-major order, so the
-    # store writes them at successive output offsets.
-    if isinstance(result_type, ArrayType):
+        result = GpuInputLoad(slot, index_coords, element_type=_scalar_type_to_mlir(result_type))
+    elif isinstance(result_type, ArrayType):
         import itertools
         dims = [int(d.value) for d in result_type.shape]
         if not dims or any(d <= 0 for d in dims):
@@ -940,11 +947,16 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
         for multi in itertools.product(*(range(d) for d in dims)):
             full_coords = list(index_coords) + [str(x) for x in multi]
             components.append(GpuInputLoad(slot, full_coords, element_type=elem_type))
-        return GpuArrayExpr(components=components, element_type=elem_type)
+        result: GpuExpr = GpuArrayExpr(components=components, element_type=elem_type)
+    else:
+        raise GPUScaffoldError(
+            f"{ctx.context}: unexpected index result type {type(result_type).__name__}"
+        )
 
-    raise GPUScaffoldError(
-        f"{ctx.context}: unexpected index result type {type(result_type).__name__}"
-    )
+    # Wrap in _GpuLetExpr for any computed index bindings
+    for name, value_expr in reversed(let_exprs):
+        result = _GpuLetExpr(name, value_expr, result)
+    return result
 
 
 def _lower_fold_to_gpu(

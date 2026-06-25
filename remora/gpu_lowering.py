@@ -551,13 +551,23 @@ def build_descriptor_abi_f32_scan_gpu_module(
     A production implementation would use a parallel prefix-sum + scatter
     with multi-kernel orchestration for arrays > 1024 (see docs/FUTURE_WORK.md).
     """
-    if len(function.params) != 1:
-        raise GPUScaffoldError("GPU scan supports single-parameter functions only")
+    if len(function.params) == 0:
+        raise GPUScaffoldError("GPU scan requires at least one parameter")
     param_type = function.params[0].type
     if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
         raise GPUScaffoldError("GPU scan supports rank-1 f32 input only")
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU scan supports rank-1 input only")
+
+    # Extra parameters beyond the first are captured arrays accessed
+    # by the scan lambda body via index-item.
+    captured_params = function.params[1:]
+    for cp in captured_params:
+        cpt = cp.type
+        if not (isinstance(cpt, ArrayType) and cpt.element == FLOAT and cpt.rank == 1):
+            raise GPUScaffoldError(
+                f"GPU scan captured param '{cp.name}' must be rank-1 f32"
+            )
 
     # Refuse to emit a prefix-sum kernel for a function that is not actually a
     # scan. Without this, any single rank-1 f32-array function that fell through
@@ -578,11 +588,43 @@ def build_descriptor_abi_f32_scan_gpu_module(
     scan_op = "+"
     is_exclusive = False
     is_right = False
+    is_compound = False
     if isinstance(function.body, _HIRScan):
         if isinstance(function.body.func, HIRPrimCallable):
             scan_op = function.body.func.op
+        else:
+            is_compound = True
         is_exclusive = function.body.exclusive
         is_right = function.body.right
+
+    # For compound bodies, always use serial path + expression compiler
+    if is_compound:
+        from remora._gpu_expr_lowering import gpu_expr_from_hir as _gfeh
+        # Build context: captured param names → descriptor slot
+        # slot 0 = scanned array, slots 1+ = captured arrays
+        _cctx: dict[str, int] = {}
+        for ci, cp in enumerate(captured_params):
+            _cctx[cp.name] = ci + 1
+        # scan array param is slot 0
+        _cctx[function.params[0].name] = 0
+        # The scan lambda has params (prev, i). Map 'prev' and 'i' to env vars.
+        # Thread coordinates are i64; expression compiler needs i32.
+        _scan_lambda = function.body.func
+        _compound_expr = _gfeh(
+            _scan_lambda.body,
+            input_map=_cctx,
+            scalar_env={},
+            coords=["%ss_acc", "%ss_idx_i32"],
+            coord_map={
+                _scan_lambda.params[0].name: "%ss_acc",
+                _scan_lambda.params[1].name: "%ss_idx_i32",
+            },
+            context="scan compound body",
+        )
+        # Force serial path for compound bodies
+        _use_serial = True
+    else:
+        _compound_expr = None
 
     if scan_op == "+":
         llvm_scan_op = "llvm.fadd"
@@ -611,12 +653,56 @@ def build_descriptor_abi_f32_scan_gpu_module(
         raise GPUScaffoldError("Use multi-block scan for N > 1024")
 
     rank = 1
-    desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
+    _scan_prefix = "in0" if len(captured_params) > 0 else "in"
+    _scan_desc_name = "%input0_desc" if len(captured_params) > 0 else "%input_desc"
+    desc_lines = _descriptor_load_lines(_scan_prefix, _scan_desc_name, rank)
+    # Descriptor loads for captured arrays (use in1, in2, ... convention)
+    for ci, cp in enumerate(captured_params):
+        desc_lines.extend(_descriptor_load_lines(f"in{ci + 1}", f"%input{ci + 1}_desc", rank))
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
 
-    if N > 1024:
+    # Use serial path for compound bodies or large N
+    _use_serial = N > 1024 or len(captured_params) > 0
+    if _use_serial:
         idx_expr = "llvm.sub %ss_Nm1, %ss_i" if is_right else "llvm.add %ss_i, %ss_c0"
-        if is_exclusive:
+        if is_compound and _compound_expr is not None:
+            # Compound body: use expression-compiled lambda body.
+            # Load captured array elements, emit via _gpu_emit_expr.
+            _clines: list[str] = []
+            for ci in range(len(captured_params)):
+                _clines.append(f"      %ss_c{ci}_si = llvm.add %in{ci + 1}_offset, %ss_idx  : i64")
+                _clines.append(f"      %ss_c{ci}_sp = llvm.getelementptr %in{ci + 1}_aligned[%ss_c{ci}_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
+                _clines.append(f"      %ss_c{ci}_v = llvm.load %ss_c{ci}_sp : !llvm.ptr -> f32")
+            # Emit scanned element load
+            _scan_load = f"      %ss_si = llvm.add %in0_offset, %ss_idx  : i64\n      %ss_sp = llvm.getelementptr %in0_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32\n      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32"
+            # Emit compound expression via _gpu_emit_expr (appends to _clines)
+            _compound_env = {"%ss_idx": "%ss_idx", "%ss_acc": "%ss_acc", "%ss_idx_i32": "%ss_idx_i32"}
+            _compound_ssa = _gpu_emit_expr(_compound_expr, _clines, _compound_env, temp_counter=1000)
+            _clines_str = "\n".join(_clines)
+            if is_exclusive:
+                body_block = f"""    ^ss_body:
+      %ss_idx = {idx_expr}  : i64
+{_scan_load}
+{_clines_str}
+      %ss_di = llvm.add %out_offset, %ss_idx  : i64
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ss_acc, %ss_dp : f32, !llvm.ptr
+      %ss_nacc = {_compound_ssa}
+      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+            else:
+                body_block = f"""    ^ss_body:
+      %ss_idx = {idx_expr}  : i64
+      %ss_idx_i32 = llvm.trunc %ss_idx : i64 to i32
+{_scan_load}
+{_clines_str}
+      %ss_nacc = llvm.fadd {_compound_ssa}, %ss_ident  : f32
+      %ss_di = llvm.add %out_offset, %ss_idx  : i64
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ss_nacc, %ss_dp : f32, !llvm.ptr
+      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+        elif is_exclusive:
             body_block = f"""    ^ss_body:
       %ss_idx = {idx_expr}  : i64
       %ss_si = llvm.add %in_offset, %ss_idx  : i64
@@ -641,9 +727,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
       %ss_ni = llvm.add %ss_i, %ss_c1 : i64
       llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
 
+        _captured_params_str = "".join(f", %input{ci + 1}_desc: !llvm.ptr" for ci in range(len(captured_params)))
+        _first_param = "%input0_desc: !llvm.ptr" if len(captured_params) > 0 else "%input_desc: !llvm.ptr"
+        _ident_line = "      %ss_ident = llvm.mlir.constant(0.000000e+00 : f32) : f32\n" if is_compound else ""
         text = f"""module {{
   gpu.module @{module_name} {{
-    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+    llvm.func @{name}({_first_param}{_captured_params_str}, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
 {chr(10).join(desc_lines)}
       %ss_tid32 = nvvm.read.ptx.sreg.tid.x : i32
       %ss_tid = llvm.sext %ss_tid32 : i32 to i64
@@ -656,7 +745,7 @@ def build_descriptor_abi_f32_scan_gpu_module(
       %ss_Nm1 = llvm.mlir.constant({N - 1} : index) : i64
       %ss_c1 = llvm.mlir.constant(1 : index) : i64
       %ss_init = llvm.mlir.constant({identity} : f32) : f32
-      llvm.br ^ss_loop(%ss_c0, %ss_init : i64, f32)
+{_ident_line}      llvm.br ^ss_loop(%ss_c0, %ss_init : i64, f32)
 
     ^ss_loop(%ss_i: i64, %ss_acc: f32):
       %ss_done_cond = llvm.icmp "uge" %ss_i, %ss_N : i64
@@ -4535,7 +4624,7 @@ def build_descriptor_abi_general_map_gpu_module(
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name
                             if axis_idx < len(coords):
-                                coord_map[pname] = coords[axis_idx]
+                                coord_map[pname] = f"{coords[axis_idx]}_i32"
 
                 elif append_node is not None:
                     left_name, _, _ = _unwrap_view_op(append_node.left)
@@ -4560,7 +4649,7 @@ def build_descriptor_abi_general_map_gpu_module(
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name
                             if axis_idx < len(coords):
-                                coord_map[pname] = coords[axis_idx]
+                                coord_map[pname] = f"{coords[axis_idx]}_i32"
 
                 elif withshape_node is not None:
                     base_name, view_offsets, view_transforms = _unwrap_view_op(withshape_node)
@@ -4581,7 +4670,7 @@ def build_descriptor_abi_general_map_gpu_module(
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name
                             if axis_idx < len(coords):
-                                coord_map[pname] = coords[axis_idx]
+                                coord_map[pname] = f"{coords[axis_idx]}_i32"
                 else:
                     base_name, view_offsets, view_transforms = _unwrap_view_op(array_expr)
                     if base_name is not None and base_name in input_map:
@@ -4592,7 +4681,7 @@ def build_descriptor_abi_general_map_gpu_module(
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name
                             if axis_idx < len(coords):
-                                coord_map[pname] = coords[axis_idx]
+                                coord_map[pname] = f"{coords[axis_idx]}_i32"
                     elif hasattr(array_expr, 'result_type') and array_expr.result_type is not None:
                         from remora.hir import HIRLet as _HL
                         from remora.hir_opt import hir_optimize as _hopt
@@ -4609,7 +4698,7 @@ def build_descriptor_abi_general_map_gpu_module(
                         for axis_idx in range(len(body_map.func.params)):
                             pname = body_map.func.params[axis_idx].name
                             if axis_idx < len(coords):
-                                coord_map[pname] = coords[axis_idx]
+                                coord_map[pname] = f"{coords[axis_idx]}_i32"
 
     from remora.types import BOOL as _BOOL, INT as _INT
     _slot_etypes: dict[int, str] = {}
@@ -4715,11 +4804,23 @@ def build_descriptor_abi_general_map_gpu_module(
     # Multi-index decomposition over frame dimensions
     body_lines.extend(_multi_index_lines(frame_rank))
 
+    # Thread coordinates from _multi_index_lines are i64 (needed for
+    # getelementptr addressing).  Remora int arithmetic produces i32,
+    # so create i32 aliases for use in the expression compiler.
+    coord_i32_lines: list[str] = []
+    for axis in range(frame_rank):
+        coord_i32_lines.append(
+            f"      %i{axis}_i32 = llvm.trunc %i{axis} : i64 to i32"
+        )
+    body_lines.extend(coord_i32_lines)
+
     # Linear index computation for output store position (frame coords only)
     body_lines.extend(_linear_index_lines(out_prefix, frame_rank))
 
     # Emit the expression tree
     _initial_env = {c: c for c in coords}
+    for axis in range(frame_rank):
+        _initial_env[f"%i{axis}_i32"] = f"%i{axis}_i32"
     result_ssa = _gpu_emit_expr(expr, body_lines, _initial_env)
 
     # Store result — handle both scalar and array-valued results
@@ -5139,6 +5240,14 @@ def _gpu_emit_expr(
                     f"      {lit_name} = llvm.mlir.constant({int(coord_ssa)} : index) : i64"
                 )
                 coord_ssa = lit_name
+            elif coord_ssa.endswith("_i32"):
+                # Thread/index coordinates from expression compiler are i32;
+                # cast to i64 for descriptor addressing.
+                cast_name = _fresh_ssa()
+                lines.append(
+                    f"      {cast_name} = llvm.sext {coord_ssa} : i32 to i64"
+                )
+                coord_ssa = cast_name
 
             if expr.coord_transforms and axis < len(expr.coord_transforms):
                 t = expr.coord_transforms[axis]

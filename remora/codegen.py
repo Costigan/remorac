@@ -720,16 +720,23 @@ def generate_mlir_descriptor_abi_ptx(
             else:
                 _out_et, _out_dtype = "f32", "float32"
 
+            _total = 1
+            for d in output_shape:
+                _total *= d
+            _kind: list[str] = []
+            for param in function.params:
+                _kind.append("array" if isinstance(param.type, ArrayType) else "scalar")
             meta = KernelMeta(
                 name=name,
                 grid_dims=1,
-                block_size=0,
+                block_size=max(1, min(_total, 1024)),
                 num_inputs=total_inputs,
                 num_outputs=1,
                 input_elem_types=input_elem_types,
                 output_elem_types=[_out_et],
                 output_shape=output_shape,
                 output_dtype=_out_dtype,
+                input_kinds=_kind,
             )
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
             llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
@@ -841,16 +848,26 @@ def generate_mlir_descriptor_abi_ptx(
                     try:
                         gpu_module = build_descriptor_abi_f32_scan_gpu_module(function, kernel_name=name)
                         scan_shape = tuple(int(d.value) for d in function.params[0].type.shape)
+                        _num_inputs = len(function.params)
+                        _scan_elem_types: list[str] = []
+                        _scan_kinds: list[str] = []
+                        for p in function.params:
+                            _scan_kinds.append("array")
+                            if isinstance(p.type, ArrayType):
+                                _scan_elem_types.append("f32")
+                            else:
+                                _scan_elem_types.append("f32")
                         meta = KernelMeta(
                             name=name,
                             grid_dims=1,
                             block_size=scan_shape[0],
-                            num_inputs=1,
+                            num_inputs=_num_inputs,
                             num_outputs=1,
-                            input_elem_types=["f32"],
+                            input_elem_types=_scan_elem_types,
                             output_elem_types=["f32"],
                             output_shape=scan_shape,
                             output_dtype="float32",
+                            input_kinds=_scan_kinds,
                         )
                     except GPUScaffoldError as scan_error:
                         try:
@@ -946,16 +963,23 @@ def generate_mlir_descriptor_abi_ptx(
                                 _out_et2, _out_dtype2 = "i8", "bool"
                             else:
                                 _out_et2, _out_dtype2 = "f32", "float32"
+                            _kind2: list[str] = []
+                            for param2 in function.params:
+                                _kind2.append("array" if isinstance(param2.type, ArrayType) else "scalar")
+                            _total2 = 1
+                            for d in output_shape2:
+                                _total2 *= d
                             meta = KernelMeta(
                                 name=name,
                                 grid_dims=1,
-                                block_size=0,
+                                block_size=max(1, min(_total2, 1024)),
                                 num_inputs=num_array_inputs2 + num_scalar_inputs2,
                                 num_outputs=1,
                                 input_elem_types=input_elem_types2,
                                 output_elem_types=[_out_et2],
                                 output_shape=output_shape2,
                                 output_dtype=_out_dtype2,
+                                input_kinds=_kind2,
                             )
                         except (GPUScaffoldError, CodegenUnavailable) as general_error:
                             raise CodegenUnavailable(str(bool_map_error)) from general_error

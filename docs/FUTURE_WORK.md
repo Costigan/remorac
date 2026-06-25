@@ -157,7 +157,94 @@ cannot be compiled as top-level kernels:
 | `HIRLambda`                          |        ✗         |
 | `HIRIota`                            |     Limited      |
 
-### Builder API (IREE path) — disabled
+### Complex number type + FFT primitives
+
+Adding a `Complex` numeric type and one-dimensional FFT primitives
+(`rfft`, `irfft`) would let Remora compute in the frequency domain —
+matching the approach used by array-language cousins (J, APL,
+Futhark).  The immediate motivator is the **heat1d Fourier-matrix
+solver** (`examples/heat1d/fourier_solver.py`), which currently runs in
+pure NumPy and could be expressed entirely in Remora.
+
+**Why it fits Remora.**  Array languages in the APL family have
+included Fourier transforms as primitives for decades — J has `fft`
+and `ifft`, most APL implementations expose FFTW through system
+functions.  Remora already follows this pattern for sort, scan, and
+matmul.  Adding a frequency-domain path also unblocks the entire
+thermal-quadrupole formalism (transmission matrices, circulant
+admittance, rectification) used in planetary heat-flow models.
+
+**What needs to be built.**
+
+1. **`Complex` type in the type system.**  Add `Complex` to the type
+   grammar, `Type` enum, and internal representations (`remora_type`,
+   `RemoraType`, `ArrayType`).  The typechecker needs to infer
+   `Complex` results for `rfft` and accept `Complex` operands for
+   `irfft`.  `VarExpr` disambiguation, frame/cell typing, and
+   dependent-type tracking all need `Complex` variants.
+
+2. **Complex literals and arithmetic.**  The parser and grammar must
+   accept complex notation (e.g. `1+2j`, `1.0+0.0j`).  Arithmetic
+   operators (`+`, `-`, `*`, `/`) need complex-aware promotion —
+   `Float + Complex = Complex` — mirroring numpy.
+
+3. **HIR nodes.**  `HIRRfft` (real → complex, sequence length baked as
+   a static dimension) and `HIRIrfft` (complex → real).  These carry
+   the transform length `n` as an attribute, analogous to `HIRSort`.
+
+4. **CPU lowering.**  Call through to FFTW (or PocketFFT for a
+   header-only dependency): `HIRRfft` emits a C runtime call
+   `remora_rfft_f32(n, real_input, complex_output)`.  Same pattern as
+   the existing `remora_matmul_f32` / `remora_sort_f32` in
+   `remora_rt.c`.
+
+5. **GPU lowering.**  `HIRRfft` emits a cuFFT plan + execution kernel.
+   For single-kernel embedding, cuFFT batch mode (many 1D transforms
+   of the same length) is well-suited.  Descriptor ABI integration
+   passes the plan handle and workspaces through the existing
+   `ExecutionPlan` / `BufferSpec` infrastructure.
+
+6. **Complex storage in the descriptor ABI.**  Interleaved floats
+   `[re, im, re, im, …]` — this matches cuFFT's default layout and
+   numpy's `.view(float).reshape(-1, 2)` convention, so zero-copy
+   passes are possible.
+
+**Pragmatic shortcut (no Complex type).**  As a low-ceremony
+alternative, `rfft` can return **two `Float` arrays** (real and
+imaginary components), and `irfft` can accept two.  This is the
+approach used by pure-real-array FFT libraries and would unblock the
+heat1d Fourier solver *without* a type-system expansion.  The cost: no
+complex arithmetic in Remora (the heat1d solver needs none — it works
+with real-valued temperature and flux), but all general-purpose
+frequency-domain code would lack ergonomic complex support.
+
+**Impact beyond heat1d.**  A working FFT primitive enables:
+- Convolution / correlation in O(N log N) time (essential for signal
+  processing and image filtering on GPU).
+- Spectral PDE solvers (beyond the 1D heat equation).
+- Feature-engineering pipelines that call `rfft → map → irfft` on
+  sensor or audio data.
+- Replacing NumPy as the host-side glue in any Remora-compiled
+  pipeline that needs a Fourier transform.
+
+### Bool type
+
+Remora currently has `Int` and `Float` but no `Bool` type — boolean
+results from comparisons are represented as `Int` (0/1).  A first-class
+`Bool` type would:
+
+- Allow type-safe `if` conditions and predicate arrays.
+- Enable boolean reductions (`fold &&`, `fold ||`) with proper typing.
+- Let GPU filter/replicate operations produce and consume `Bool` arrays
+  instead of i32 workarounds.
+- Improve error messages when a boolean is expected but a float/int is
+  provided.
+
+The main work is in the type grammar (`Bool` variant), typechecker
+(comparison result types, conditional predicates), HIR (`HIRIf`
+already uses a scalar condition — formalize), MLIR lowering (i1 vs i32
+in `arith.select`/`scf.if`), and the descriptor ABI (bool descriptors
+for GPU kernels).
 
 The MLIR builder API path (`_builder_ops.py`, `_builder_emitter.py`,
 `scalar_builder.py`) is preserved but disabled in `module.py`. It was
@@ -168,26 +255,109 @@ first.
 
 ______________________________________________________________________
 
+## GPU Dense-Subset Completion Plan
+
+The dense subset is fully implemented on CPU — every construct the
+typechecker accepts compiles and runs.  GPU coverage is ~60–70% of that
+same set.  The phases below close the remaining gaps in priority order.
+
+### Phase 1 — Scan in compound map bodies (unblocks heat1d CN on GPU)
+
+These four items are needed for the heat1d Crank-Nicolson Thomas
+solver (forward `iscan` + backward `trace-right`) to compile on GPU
+inside a map body via the general expression compiler.
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 1.1 | `iscan` in map body | Medium | `GpuScan` node wrapping Hillis-Steele in shared memory; serial fallback for N > 1024 to start. |
+| 1.2 | `trace-right` in map body | Medium | Reverse-direction of 1.1; shares kernel structure, reversed index ordering. |
+| 1.3 | `iota` as thread coordinate in compound bodies | Small | `GpuIndexCoordinate` already exists; needs wiring as explicit `iota` source for scan indices. |
+| 1.4 | `index-item` from captured arrays at computed coordinates | Small | Resolves to `GpuInputLoad` at let-bound coordinates; coordinate-from-let path partially wired. |
+
+Milestone: `cn_step` runs on GPU, matching CPU output to f32 precision.
+
+### Phase 2 — Scan operator generalization
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 2.1 | `min`/`max` in f32 scan | Small | `llvm.intr.minnum`/`maxnum` in scan kernel builder; wire through `GpuReduce`. |
+| 2.2 | `&&`/`||` in bool scan | Small | i1 scan kernel with `llvm.and`/`llvm.or`, mirroring f32 path. |
+| 2.3 | Multi-block scan: exclusive, right, multiply modes | Medium | Extend 4-kernel plan beyond inclusive-add-only. |
+| 2.4 | Standalone `trace-right` kernel | Medium | Reverse-scan builder mirroring existing scan module builder. |
+
+### Phase 3 — View ops as standalone GPU kernels
+
+Every view op already works inside map bodies via the expression
+compiler.  This phase adds top-level kernels so they appear outside
+map bodies, matching the CPU path and the codegen dispatch cascade.
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 3.1 | `HIRSlice` standalone | Medium | Only view op also rejected inside map bodies; needs descriptor ABI with per-dimension offset+size. |
+| 3.2 | `HIRTake` / `HIRDrop` standalone | Small | Per-dimension offset in descriptor; wrapper kernel adjusting base pointer + shape. |
+| 3.3 | `HIRReverse` / `HIRRotate` standalone | Small | Descriptor-level: flip stride sign or offset; no data movement. |
+| 3.4 | `HIRSubarray` standalone | Small | Per-dimension offset/size, descriptor-level. |
+| 3.5 | `HIRReshape` / `HIRRavel` standalone | Small | Descriptor-only: reshape permutes shape/strides, ravel flattens. |
+| 3.6 | `HIRTranspose` standalone | Medium | Stride permutation in descriptor; needs output allocation for non-contiguous result. |
+| 3.7 | `HIRAppend` standalone | Medium | Concatenation: two memcpy regions or parallel copy with conditional source select. |
+
+### Phase 4 — Multi-element-type support
+
+All GPU operations currently hardcode f32 (a few support i32).  This
+phase generalizes the kernel builders and expression compiler.
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 4.1 | i32 fused map (compound expressions) | Medium | `_gpu_map_support.py` defers i32 fused maps; needs `I32Expr` tree. |
+| 4.2 | i32 reduction (fold) | Medium | Grid-strided + shmem tree reduce with i32 loads/stores. |
+| 4.3 | i32 scan (single-block + multi-block) | Medium | Generalize f32 scan builders to i32. |
+| 4.4 | i32 sort | Medium | Radix sort works on uint32 keys; i32→uint32 is same bitcast+sign-flip. Extend type dispatch. |
+| 4.5 | i32 filter / replicate / scatter-add | Small | Extend existing f32 plans with i32 load/store variants. |
+| 4.6 | f64 support (all ops) | Large | Requires f64 descriptor ABI, f64 MLIR typing, alignment; touches every GPU file. |
+
+### Phase 5 — Scale limits (multi-block >1024)
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 5.1 | Multi-block i32 prefix sum (for filter/replicate) | Medium | f32 multi-block scan exists; i32 variant unblocks filter/replicate N > 1024. |
+| 5.2 | Multi-block scatter-add (N > 1024) | Small | `llvm.atomicrmw fadd` for global-memory atomics, or two-kernel plan. |
+| 5.3 | Recursive multi-level scan (N > 1M) | Medium | Three-level approach: scan blocks → scan block-sums → propagate. |
+| 5.4 | Sort beyond 1M | Medium | Extend radix-sort block count or multi-level aggregation. |
+
+### Phase 6 — Structural nodes (pairs, call, recursion)
+
+These are the hardest remaining items — they require structural changes
+to the GPU kernel model.
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 6.1 | `HIRPair` / `HIRFirst` / `HIRSecond` in map bodies | Medium | 2-component `GpuPairExpr` in expression compiler. |
+| 6.2 | `HIRFoldRight` standalone | Medium | Reverse-direction reduction; same kernel structure as fold. |
+| 6.3 | `HIRCall` in map bodies | Large | Cross-kernel calls need device-side function pointers or callee-body inlining. |
+| 6.4 | Recursive device functions | Large | Needs bounded-stack depth + manual stack; defer until a concrete use case demands it. |
+
+### Completed GPU milestones
+
+- [x] Simple f32/i32/bool maps (rank 1–10)
+- [x] Compound map bodies via general expression compiler
+- [x] f32 reduction (fold/reduce, `+`/`*`)
+- [x] f32 scan (single-block `+`/`*`, multi-block `+` up to 1M)
+- [x] f32 sort/grade (bitonic + 256-bin radix up to 1M)
+- [x] f32 matmul (basic + tiled 16×16)
+- [x] f32 im2col + cell-fold conv
+- [x] Indices-of (any rank)
+- [x] f32 filter/replicate (parallel, up to 1024)
+- [x] f32 scatter-add (parallel, up to 1024)
+- [x] View ops inside map bodies (reverse, rotate, subarray, take, drop, append, reshape, ravel, withShape)
+- [x] AD gradient descent state-fold GPU loop plan
+- [x] Device memory pool + device-resident execution
+
+______________________________________________________________________
+
 ## Backend Scale Limits
 
-### Multi-block operations (N > 1024)
-
-- **Filter and replicate** need a multi-block i32 prefix sum.
-  The f32 multi-block scan infrastructure exists; an i32 variant
-  remains to be built.
-- **Scatter-add** currently uses a single-block kernel with
-  barrier + thread-0 add. For N > 1024, needs a two-kernel plan
-  or `llvm.atomicrmw fadd`.
-
-### Multi-block scan (N > 1,048,576)
-
-Recursive multi-level scan for arrays exceeding 1024 blocks.
-Falls back to serial beyond 1M elements.
-
-### Fused GPU map scale limits
-
-The fused GPU map optimization (`_gpu_map_support.py`) currently
-handles 1–10 array inputs and float outputs only.
+> **Superseded by [GPU Dense-Subset Completion Plan](#gpu-dense-subset-completion-plan) Phase 5 above.**
+> The multi-block filter/replicate/scatter-add/scan/sort items are tracked there.
 
 ______________________________________________________________________
 
