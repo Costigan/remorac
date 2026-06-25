@@ -180,6 +180,7 @@ RemoraType: TypeAlias = ScalarType | ArrayType | FuncType | SigmaType | PiType |
 FLOAT = ScalarType("float")
 INT = ScalarType("int")
 BOOL = ScalarType("bool")
+FLOAT64 = ScalarType("float64")
 
 class RemoraTypeError(RemoraError):
     """Raised when Dense Core type checking fails."""

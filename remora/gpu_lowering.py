@@ -25,7 +25,9 @@ from remora.hir import HIRFold, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimC
 from remora.hir import HIRApply
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
-from remora.types import FLOAT, BOOL, ArrayType
+from remora.types import FLOAT, BOOL, INT, ArrayType, ScalarType
+# f64: not a pre-defined constant in types.py, but used directly
+_FLOAT64 = ScalarType("float64")
 
 
 class GPUScaffoldError(RemoraError):
@@ -213,15 +215,34 @@ def build_descriptor_abi_f32_reduction_gpu_module(
     module_name: str = "remora_gpu",
     kernel_name: str | None = None,
 ) -> GPUModuleScaffold:
-    """Build an executable descriptor-ABI GPU module for a supported f32 reduction."""
+    """Build an executable descriptor-ABI GPU module for a supported reduction.
+
+    Supports f32 and i32 element types.
+    """
+    param_type = function.params[0].type
+    _is_int_red = (
+        isinstance(param_type, ArrayType) and param_type.element == INT
+    ) if len(function.params) > 0 else False
+    _is_f64_red = (
+        isinstance(param_type, ArrayType) and param_type.element == _FLOAT64
+    ) if len(function.params) > 0 else False
     kernel = _f32_reduction_kernel(function)
     name = kernel_name or f"remora_{function.name}_f32"
     _validate_scaffold_names(module_name, name)
-    return _build_descriptor_abi_f32_reduction_gpu_module(
+    scaffold = _build_descriptor_abi_f32_reduction_gpu_module(
         kernel,
         module_name=module_name,
         kernel_name=name,
     )
+    if _is_int_red:
+        scaffold = GPUModuleScaffold(
+            _replace_elem_type(scaffold.text, "f32", "i32", replace_ops=True, replace_identity=True),
+            scaffold.module_name, scaffold.kernel_name)
+    elif _is_f64_red:
+        scaffold = GPUModuleScaffold(
+            _replace_elem_type(scaffold.text, "f32", "f64"),
+            scaffold.module_name, scaffold.kernel_name)
+    return scaffold
 
 
 def _cell_fold_dot_kernel(function: HIRFunction) -> tuple[HIRFunction, tuple[int, int], int]:
@@ -556,12 +577,21 @@ def build_descriptor_abi_f32_scan_gpu_module(
     param_type = function.params[0].type
     if not isinstance(param_type, ArrayType):
         raise GPUScaffoldError("GPU scan supports array input only")
-    if param_type.element not in (FLOAT, BOOL):
-        raise GPUScaffoldError("GPU scan supports f32 and bool element types only")
+    if param_type.element not in (FLOAT, BOOL, INT, _FLOAT64):
+        raise GPUScaffoldError("GPU scan supports f32, f64, i32, and bool element types only")
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU scan supports rank-1 input only")
     _is_bool_scan = param_type.element == BOOL
-    _scan_elem_type = "f32" if not _is_bool_scan else "i1"
+    _is_int_scan = param_type.element == INT
+    _is_f64_scan = param_type.element == _FLOAT64
+    if _is_bool_scan:
+        _scan_elem_type = "i1"
+    elif _is_int_scan:
+        _scan_elem_type = "i32"
+    elif _is_f64_scan:
+        _scan_elem_type = "f64"
+    else:
+        _scan_elem_type = "f32"
 
     # Extra parameters beyond the first are captured arrays accessed
     # by the scan lambda body via index-item.
@@ -608,10 +638,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
         if isinstance(function.body.init, _HIRLit):
             if _is_bool_scan:
                 identity = "1" if function.body.init.value else "0"
+            elif _is_int_scan:
+                identity = str(int(function.body.init.value))
             else:
                 identity = f"{float(function.body.init.value):.6e}"
         else:
-            identity = "0" if _is_bool_scan else "0.000000e+00"
+            identity = "0" if _is_bool_scan else ("0" if _is_int_scan else "0.000000e+00")
         from remora._gpu_expr_lowering import gpu_expr_from_hir as _gfeh
         # Build context: captured param names → descriptor slot
         # slot 0 = scanned array, slots 1+ = captured arrays
@@ -644,11 +676,11 @@ def build_descriptor_abi_f32_scan_gpu_module(
         _compound_expr = None
 
     if scan_op == "+" and not is_compound:
-        llvm_scan_op = "llvm.fadd"
-        identity = "0.000000e+00"
+        llvm_scan_op = "llvm.fadd" if not _is_int_scan else "llvm.add"
+        identity = "0.000000e+00" if not _is_int_scan else "0"
     elif scan_op == "*" and not is_compound:
-        llvm_scan_op = "llvm.fmul"
-        identity = "1.000000e+00"
+        llvm_scan_op = "llvm.fmul" if not _is_int_scan else "llvm.mul"
+        identity = "1.000000e+00" if not _is_int_scan else "1"
     elif not is_compound:
         raise GPUScaffoldError(f"GPU scan op '{scan_op}' not supported (only + and *)")
 
@@ -679,6 +711,10 @@ def build_descriptor_abi_f32_scan_gpu_module(
     # Set up _nacc_op before the body blocks capture it
     if _is_bool_scan:
         _nacc_op = "      %ss_nacc = llvm.or {compound_ssa}, {compound_ssa}  : i1"
+    elif _is_int_scan:
+        _nacc_op = "      %ss_nacc = llvm.add {compound_ssa}, %ss_ident  : i32"
+    elif _is_f64_scan:
+        _nacc_op = "      %ss_nacc = llvm.fadd {compound_ssa}, %ss_ident  : f64"
     else:
         _nacc_op = "      %ss_nacc = llvm.fadd {compound_ssa}, %ss_ident  : f32"
     if _use_serial:
@@ -750,7 +786,8 @@ def build_descriptor_abi_f32_scan_gpu_module(
 
         _captured_params_str = "".join(f", %input{ci + 1}_desc: !llvm.ptr" for ci in range(len(captured_params)))
         _first_param = "%input0_desc: !llvm.ptr" if len(captured_params) > 0 else "%input_desc: !llvm.ptr"
-        _ident_line = (f"      %ss_ident = llvm.mlir.constant({0.0 if not _is_bool_scan else '0'} : {_scan_elem_type}) : {_scan_elem_type}\n"
+        _ident_val = "0" if _is_bool_scan else ("0" if _is_int_scan else "0.0")
+        _ident_line = (f"      %ss_ident = llvm.mlir.constant({_ident_val} : {_scan_elem_type}) : {_scan_elem_type}\n"
                        if is_compound else "")
         _loop_sig = f"^ss_loop(%ss_i: i64, %ss_acc: {_scan_elem_type})"
         text = f"""module {{
@@ -781,7 +818,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
     }}
   }}
 }}"""
-        return GPUModuleScaffold(text, module_name, name)
+    # Post-process for non-f32 scans
+    if _is_int_scan:
+        text = _replace_elem_type(text, "f32", "i32", replace_ops=True, replace_identity=True)
+    elif _is_f64_scan:
+        text = _replace_elem_type(text, "f32", "f64")
+    return GPUModuleScaffold(text, module_name, name)
 
     import math
     max_d = math.ceil(math.log2(N)) if N > 1 else 0
@@ -1173,8 +1215,45 @@ def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# View-copy kernel builder — standalone GPU kernels for view operations
+# Element-type conversion helper for text-based MLIR builders
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _replace_elem_type(text: str, from_et: str, to_et: str, *,
+                       replace_ops: bool = False,
+                       replace_identity: bool = False) -> str:
+    """Replace element-type references in MLIR text.
+
+    Used to adapt f32-hardcoded builders to i32/f64 without rewriting them.
+
+    Parameters
+    ----------
+    from_et : str
+        Source element type (e.g. ``"f32"``).
+    to_et : str
+        Target element type (e.g. ``"i32"`` or ``"f64"``).
+    replace_ops : bool
+        If True, also replace float ops with integer ops (``fadd→add`` etc.).
+    replace_identity : bool
+        If True, also replace float identity literals with int literals.
+    """
+    t = text.replace(f"!llvm.array<256 x {from_et}>", f"!llvm.array<256 x {to_et}>")
+    t = t.replace(f"!llvm.array<1024 x {from_et}>", f"!llvm.array<1024 x {to_et}>")
+    t = t.replace(f"-> !llvm.ptr, {from_et}", f"-> !llvm.ptr, {to_et}")
+    t = t.replace(f", {from_et})", f", {to_et})")  # loop sig
+    t = t.replace(f": !llvm.ptr, {from_et}", f": !llvm.ptr, {to_et}")  # atomic
+    t = t.replace(f", {from_et}", f", {to_et}")
+    t = t.replace(f"{from_et}  :", f"{to_et}  :")  # identity values
+    t = t.replace(f": {from_et}", f" : {to_et}")
+    t = t.replace(f"-> {from_et}", f" -> {to_et}")
+    t = t.replace(f"!llvm.ptr<3> -> {from_et}", f"!llvm.ptr<3> -> {to_et}")
+    if replace_ops:
+        t = t.replace("llvm.fadd", "llvm.add")
+        t = t.replace("llvm.fmul", "llvm.mul")
+        t = t.replace("atomicrmw fadd", "atomicrmw add")
+    if replace_identity:
+        t = t.replace("0.000000e+00", "0")
+        t = t.replace("1.000000e+00", "1")
+    return t
 
 def _build_view_copy_kernel(
     function: HIRFunction,
@@ -2203,19 +2282,19 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
     """Analyze a HIR fold/map+fold function and return an F32ReductionKernel or raise."""
     if not isinstance(function.body, HIRFold):
         raise GPUScaffoldError("descriptor ABI GPU reduction currently supports fold bodies only")
-    if function.return_type != FLOAT:
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports float scalar outputs only")
+    if function.return_type not in (FLOAT, INT, _FLOAT64):
+        raise GPUScaffoldError("descriptor ABI GPU reduction supports f32, f64, and i32 scalar outputs only")
     if not (
         isinstance(function.body.func, HIRPrimCallable)
         and function.body.func.left_arg is None
         and function.body.func.right_arg is None
-        and function.body.func.result_type == FLOAT
+        and function.body.func.result_type in (FLOAT, INT, _FLOAT64)
     ):
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports primitive float fold callables only")
+        raise GPUScaffoldError("descriptor ABI GPU reduction supports primitive f32/f64/i32 fold callables only")
     if function.body.func.op not in {"+", "*"}:
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports + and * folds only")
-    if not isinstance(function.body.init, HIRLit) or function.body.init.type != FLOAT:
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently requires a literal float initializer")
+        raise GPUScaffoldError("descriptor ABI GPU reduction supports + and * folds only")
+    if not isinstance(function.body.init, HIRLit) or function.body.init.type not in (FLOAT, INT, _FLOAT64):
+        raise GPUScaffoldError("descriptor ABI GPU reduction requires a literal f32/f64/i32 initializer")
 
     if isinstance(function.body.array, HIRVar):
         if len(function.params) != 1 or function.body.array.name != function.params[0].name:
@@ -2257,13 +2336,13 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
 
 
 def _require_rank1_f32_param(param_type: object) -> ArrayType:
-    """Deprecated: historically required rank-1; now accepts any-rank float arrays."""
+    """Validate an input type for reduction: f32, f64, or i32 arrays."""
     if not (
         isinstance(param_type, ArrayType)
-        and param_type.element == FLOAT
+        and param_type.element in (FLOAT, INT, _FLOAT64)
     ):
         raise GPUScaffoldError(
-            "descriptor ABI GPU reduction currently supports float inputs only"
+            "descriptor ABI GPU reduction supports float, double, and int inputs only"
         )
     return param_type
 
@@ -3936,10 +4015,12 @@ def build_descriptor_abi_filter_gpu_module(
     if len(function.params) != 1:
         raise GPUScaffoldError("GPU filter requires exactly one array parameter")
     param_type = function.params[0].type
-    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
-        raise GPUScaffoldError("GPU filter supports rank-1 f32 only")
-    if param_type.rank != 1:
+    if not isinstance(param_type, ArrayType) or param_type.rank != 1:
         raise GPUScaffoldError("GPU filter supports rank-1 only")
+    _filt_is_int = param_type.element == INT
+    _filt_elem = "i32" if _filt_is_int else "f32"
+    if param_type.element not in (FLOAT, INT):
+        raise GPUScaffoldError("GPU filter supports f32 and i32 only")
 
     pred = function.body.predicate
     cmp_op = None
@@ -4072,9 +4153,12 @@ def build_descriptor_abi_parallel_filter_gpu_module(
     if len(function.params) != 1:
         raise GPUScaffoldError("GPU parallel filter requires one array parameter")
     param_type = function.params[0].type
-    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
-        raise GPUScaffoldError("GPU parallel filter supports rank-1 f32 only")
-    if param_type.rank != 1:
+    if not isinstance(param_type, ArrayType) or param_type.rank != 1:
+        raise GPUScaffoldError("GPU parallel filter supports rank-1 only")
+    _pfit_is_int = param_type.element == INT
+    _pfit_elem = "i32" if _pfit_is_int else "f32"
+    if param_type.element not in (FLOAT, INT):
+        raise GPUScaffoldError("GPU parallel filter supports f32 and i32 only")
         raise GPUScaffoldError("GPU parallel filter supports rank-1 only")
 
     N = int(param_type.shape[0].value)
@@ -4291,6 +4375,14 @@ def build_descriptor_abi_parallel_filter_gpu_module(
     }}
   }}
 }}"""
+    if _pfit_is_int:
+        text = _replace_elem_type(text, "f32", "i32", replace_ops=False)
+        text = text.replace('llvm.fcmp "olt"', 'llvm.icmp "slt"')
+        text = text.replace('llvm.fcmp "ole"', 'llvm.icmp "sle"')
+        text = text.replace('llvm.fcmp "ogt"', 'llvm.icmp "sgt"')
+        text = text.replace('llvm.fcmp "oge"', 'llvm.icmp "sge"')
+        text = text.replace('llvm.fcmp "oeq"', 'llvm.icmp "eq"')
+        text = text.replace('llvm.fcmp "one"', 'llvm.icmp "ne"')
     return GPUModuleScaffold(text, module_name, scatter_name)
 
 

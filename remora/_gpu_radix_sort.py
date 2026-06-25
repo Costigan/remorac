@@ -22,7 +22,7 @@ from remora.codegen import KernelMeta
 from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep
 from remora.gpu_lowering import GPUScaffoldError, _descriptor_load_lines
 from remora.hir import HIRFunction, HIRSort
-from remora.types import ArrayType, FLOAT
+from remora.types import ArrayType, FLOAT, INT
 
 BS = 1024
 NEG = -2147483648  # 0x80000000 as i32
@@ -30,10 +30,25 @@ POS = 2147483647   # 0x7fffffff
 RADIX_MAX_N = BS * 1024  # 1,048,576
 
 
-def _key_map_func(name, N, inverse):
+def _key_map_func(name, N, inverse, *, elem="f32", is_int=False):
     inld = "\n".join(_descriptor_load_lines("in", "%in_desc", 1))
     outld = "\n".join(_descriptor_load_lines("out", "%out_desc", 1))
-    if not inverse:
+    if is_int:
+        # i32: just XOR sign bit, no bitcast needed
+        if not inverse:
+            body = f"""
+      %v = llvm.load %sp : !llvm.ptr -> {elem}
+      %key = llvm.xor %v, %neg : {elem}
+      %dp = llvm.getelementptr %out_aligned[%di] : (!llvm.ptr, i64) -> !llvm.ptr, {elem}
+      llvm.store %key, %dp : {elem}, !llvm.ptr"""
+        else:
+            body = f"""
+      %k = llvm.load %sp : !llvm.ptr -> {elem}
+      %v = llvm.xor %k, %neg : {elem}
+      %dp = llvm.getelementptr %out_aligned[%di] : (!llvm.ptr, i64) -> !llvm.ptr, {elem}
+      llvm.store %v, %dp : {elem}, !llvm.ptr"""
+        sp_elem = elem
+    elif not inverse:
         body = """
       %f = llvm.load %sp : !llvm.ptr -> f32
       %u = llvm.bitcast %f : f32 to i32
@@ -427,14 +442,24 @@ def _km(name, block, grid, ninputs, out_shape, out_dtype):
 
 
 def build_radix_sort_gpu_module(function: HIRFunction, *, kernel_name: str | None = None):
-    """Build the f32 radix-sort module, kernel metas, and ExecutionPlan."""
+    """Build the f32/i32 radix-sort module, kernel metas, and ExecutionPlan."""
     if not isinstance(function.body, HIRSort):
         raise GPUScaffoldError("radix sort requires HIRSort body")
     if len(function.params) != 1:
         raise GPUScaffoldError("radix sort requires one parameter")
     pt = function.params[0].type
-    if not isinstance(pt, ArrayType) or pt.element != FLOAT or pt.rank != 1:
-        raise GPUScaffoldError("radix sort supports rank-1 f32 only")
+    if not isinstance(pt, ArrayType) or pt.rank != 1:
+        raise GPUScaffoldError("radix sort supports rank-1 only")
+    if pt.element == FLOAT:
+        _elem = "f32"
+        _key_elem = "i32"
+        _is_int = False
+    elif pt.element == INT:
+        _elem = "i32"
+        _key_elem = "i32"
+        _is_int = True
+    else:
+        raise GPUScaffoldError("radix sort supports f32 and i32 only")
     N = int(pt.shape[0].value)
     if N <= BS or N > RADIX_MAX_N:
         raise GPUScaffoldError(f"radix sort handles 1024 < N <= {RADIX_MAX_N}")
@@ -450,8 +475,8 @@ def build_radix_sort_gpu_module(function: HIRFunction, *, kernel_name: str | Non
     snames = [f"{base}_scat{d}" for d in range(4)]
 
     funcs = [
-        _key_map_func(nm["kf"], N, False),
-        _key_map_func(nm["ki"], N, True),
+        _key_map_func(nm["kf"], N, False, elem=_elem, is_int=_is_int),
+        _key_map_func(nm["ki"], N, True, elem=_elem, is_int=_is_int),
         *[_hist_func(hnames[d], N, NB, d) for d in range(4)],
         _rowscan_func(nm["rs"], NB),
         _digitscan_func(nm["ds"]),

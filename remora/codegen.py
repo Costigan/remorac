@@ -300,9 +300,13 @@ def generate_mlir_descriptor_abi_ptx(
             except GPUScaffoldError:
                 pass
         try:
+            # Detect element type for sort/grade
+            _sg_elem = getattr(function.params[0].type, 'element', None)
+            _sg_ename = getattr(_sg_elem, 'name', 'float') if _sg_elem else 'float'
+            out_et = "i32" if _sg_ename == "int" else "f32"
+            out_dtype = "int32" if _sg_ename == "int" else "float32"
             if isinstance(function.body, HIRSort):
                 gpu_module = build_descriptor_abi_bitonic_sort_gpu_module(function, kernel_name=name)
-                out_dtype = "float32"
             else:
                 gpu_module = build_descriptor_abi_bitonic_grade_gpu_module(function, kernel_name=name)
                 out_dtype = "int32"
@@ -314,8 +318,8 @@ def generate_mlir_descriptor_abi_ptx(
                 sg_NP *= 2
             meta = KernelMeta(
                 name=name, grid_dims=1, block_size=sg_NP, num_inputs=1, num_outputs=1,
-                input_elem_types=["f32"],
-                output_elem_types=["f32" if out_dtype == "float32" else "i32"],
+                input_elem_types=[out_et],
+                output_elem_types=[out_et],
                 output_shape=sg_shape, output_dtype=out_dtype, grid_size=1,
             )
             device_module = extract_gpu_module_body_as_module(gpu_module.text)
@@ -890,16 +894,21 @@ def generate_mlir_descriptor_abi_ptx(
                 try:
                     gpu_module = build_descriptor_abi_f32_reduction_gpu_module(function, kernel_name=name)
                     num_inputs = len(function.params)
+                    _red_ename = function.params[0].type.element.name if isinstance(function.params[0].type, ArrayType) else "float"
+                    _red_et = ("f32" if _red_ename == "float" else "i32" if _red_ename == "int"
+                               else "f64" if _red_ename == "float64" else "f32")
+                    _red_dt = ("float32" if _red_ename == "float" else "int32" if _red_ename == "int"
+                               else "float64" if _red_ename == "float64" else "float32")
                     meta = KernelMeta(
                         name=name,
                         grid_dims=1,
                         block_size=0,
                         num_inputs=num_inputs,
                         num_outputs=1,
-                        input_elem_types=["f32"] * num_inputs,
-                        output_elem_types=["f32"],
+                        input_elem_types=[_red_et] * num_inputs,
+                        output_elem_types=[_red_et],
                         output_shape=(),
-                        output_dtype="float32",
+                        output_dtype=_red_dt,
                         is_reduction=True,
                     )
                 except GPUScaffoldError as reduction_error:
@@ -917,8 +926,12 @@ def generate_mlir_descriptor_abi_ptx(
                             else:
                                 _scan_elem_types.append("f32")
                         _out_ename = function.params[0].type.element.name if isinstance(function.params[0].type, ArrayType) else "float"
-                        _out_et = "f32" if _out_ename == "float" else "i1" if _out_ename == "bool" else "f32"
-                        _out_dt = "float32" if _out_ename == "float" else "bool" if _out_ename == "bool" else "float32"
+                        _out_et = ("f32" if _out_ename == "float" else "i1" if _out_ename == "bool"
+                                   else "i32" if _out_ename == "int" else "f64" if _out_ename == "float64"
+                                   else "f32")
+                        _out_dt = ("float32" if _out_ename == "float" else "bool" if _out_ename == "bool"
+                                   else "int32" if _out_ename == "int" else "float64" if _out_ename == "float64"
+                                   else "float32")
                         meta = KernelMeta(
                             name=name,
                             grid_dims=1,
