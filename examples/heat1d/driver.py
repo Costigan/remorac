@@ -19,7 +19,7 @@ Options
     --n-days     Number of lunar days (default 1)
     --T-init     Initial temperature in K (default 200)
     --growth-rate  Grid growth ratio (default 1.05, use 1.0 for uniform)
-    --dec        Solar declination in degrees (default 0)
+    --month   Month 0–12 (0 = southern summer solstice, dec ≈ −1.54°)
     --output     Output filename prefix (default "heat1d")
     --show       Display plots interactively (default: save to file only)
 
@@ -59,6 +59,36 @@ SIGMA = 5.670367e-8   # Stefan-Boltzmann constant
 LUNAR_DAY = 29.53059 * 24.0 * 3600.0  # synodic month [s]
 OBLIQUITY = math.radians(1.54)         # lunar obliquity [rad]
 Q_GEO = 0.018         # geothermal heat flux [W/m²]
+
+# ── Orbital parameters ──────────────────────────────────────────────────
+
+OBLIQUITY_RAD = math.radians(1.54)
+LUNAR_ORBIT = 27.321661 * 24.0 * 3600.0  # sidereal month [s]
+
+
+def _declination(month: float) -> float:
+    """Solar declination at a given month (0–12).
+
+    The Moon's orbit is ~27.3 days; we approximate the seasonal cycle
+    as a sinusoidal variation between ±1.54° (lunar obliquity).
+    month=0 → equinox (dec ≈ 0°), month=3 → southern summer (dec ≈ −1.54°).
+    """
+    return -OBLIQUITY_RAD * math.sin(2.0 * math.pi * month / 12.0)
+
+
+def equilibrium_temp(lat: float) -> float:
+    """Mean equilibrium temperature for a rapidly rotating airless body.
+
+    Hayne et al. (2017): the subsurface temperature at a given latitude
+    is well approximated by the radiative-equilibrium noontime temperature
+    divided by sqrt(2), following the classic analytic solution for a
+    semi-infinite solid with a periodic surface boundary condition.
+
+    T = [(1 - A) · S · cos(lat) / (ε · σ)]^(1/4)  /  sqrt(2)
+    """
+    T_noon = ((1.0 - A0) * S0 * max(math.cos(lat), 0.0)
+              / (EMISSIVITY * SIGMA)) ** 0.25
+    return T_noon / math.sqrt(2.0)
 DTSURF = 0.1          # Newton surface-temp convergence tolerance [K]
 MAX_NEWTON_ITER = 100
 
@@ -181,24 +211,45 @@ def run_simulation(
     dt: float = 3600.0,
     n_days: int = 1,
     equil_days: int = 0,
-    T_init: float = 200.0,
+    T_init: float | None = None,
     growth_rate: float = 1.05,
     dec: float = 0.0,
+    fourier_equil: bool = True,
 ) -> dict:
     """Run the 1D heat flow model and return results.
 
     Parameters
     ----------
     equil_days : int
-        Number of days to run before recording output.  The model
-        starts from a uniform *T_init* profile; equilibration spins
-        it up to a periodic steady state.
+        Number of days to time-step before recording output.
+    T_init : float or None
+        Initial temperature.  If None, uses the latitude-dependent
+        equilibrium temperature from Hayne et al. (2017).
+    fourier_equil : bool
+        If True, use the Fourier-matrix solver to compute the periodic
+        steady state, then initialize the time-stepping model from it.
+        This replaces multi-orbit spin-up and is ~1000x faster.
     """
+    from examples.heat1d.heat1d_model import build_grid, N, rhos, rhod, H_SCALE, Kcs, Kcd
+    from examples.heat1d.fourier_solver import solve_fourier, _kc
+
+    if T_init is None:
+        T_init = equilibrium_temp(lat)
     steps_per_day = int(LUNAR_DAY / dt)
     model = Heat1DModel(z_max=z_max, dt=dt, T_init=T_init,
                         growth_rate=growth_rate)
 
+    # ── Fourier equilibration (jump to periodic steady state) ──
+    if fourier_equil:
+        z, dz, _, _ = build_grid(z_max, growth_rate)
+        kc = _kc(z)
+        rho_z = rhod - (rhod - rhos) * np.exp(-z / H_SCALE)
+        T_surf_fourier, T_eq_fourier = solve_fourier(lat, z, dz, kc, rho_z, dec=dec)
+        model.T[:] = T_eq_fourier
+        model._update_properties()
+
     Qs_prev = 0.0
+    month_offset = dec / OBLIQUITY_RAD * 6.0 / math.pi if dec != 0.0 else 0.0  # approx
 
     # ── Equilibration ──
     for _ in range(equil_days):
@@ -224,7 +275,9 @@ def run_simulation(
     for step in range(n_steps):
         t = step * dt
         hour_angle = 2.0 * math.pi * t / LUNAR_DAY + lon
-        Qs = absorbed_flux(lat, hour_angle, dec=dec)
+        # Declination cycles with the lunar orbit period (~27.3 days)
+        current_dec = _declination(month_offset + t / (27.3 * 24.0 * 3600.0) * 12.0)
+        Qs = absorbed_flux(lat, hour_angle, dec=current_dec)
 
         T_surf = surface_temp_newton(
             model.T[0], model.T[1], model.T[2],
@@ -291,6 +344,8 @@ def plot_depth_profile(
     z: np.ndarray,
     lat: float = 0.0,
     ax: plt.Axes | None = None,
+    z_min: float | None = None,
+    z_max: float | None = None,
 ) -> plt.Axes:
     """Plot min, max, and average temperature vs depth."""
     if ax is None:
@@ -310,8 +365,10 @@ def plot_depth_profile(
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.invert_yaxis()
-    if z[-1] > 0.02:
-        ax.set_yscale("log")
+    top = 0 if z_min is None else z_min
+    bot = z[-1] if z_max is None else z_max
+    ax.set_ylim(bot, top)
+    ax.margins(y=0)
     return ax
 
 
@@ -360,7 +417,8 @@ def generate_plots(
 
     # 2. Depth profile
     fig2, ax2 = plt.subplots(figsize=(6, 8))
-    plot_depth_profile(T_history, z, lat=lat, ax=ax2)
+    plot_depth_profile(T_history, z, lat=lat, ax=ax2,
+                       z_min=args.plot_y_min, z_max=args.plot_y_max)
     fig2.tight_layout()
     fig2.savefig(f"{output_prefix}_depth_profile.png", dpi=150)
 
@@ -398,10 +456,18 @@ if __name__ == "__main__":
                    help="Equilibration days before output (default 20)")
     p.add_argument("--growth-rate", type=float, default=1.05,
                    help="Grid growth ratio (1.0 = uniform)")
-    p.add_argument("--T-init", type=float, default=200.0,
-                   help="Initial temperature [K]")
-    p.add_argument("--dec", type=float, default=0.0,
-                   help="Solar declination [degrees]")
+    p.add_argument("--T-init", type=float, default=None,
+                   help="Initial temperature [K] (default: T_eq(lat))")
+    p.add_argument("--month", type=int, default=0,
+                   help="Starting month (0 = equinox, 3 = southern summer)")
+    p.add_argument("--dec", type=float, default=None,
+                   help="Solar declination [deg] (overrides --month)")
+    p.add_argument("--csv", type=str, default=None,
+                   help="Write temperature data to CSV file")
+    p.add_argument("--plot-y-min", type=float, default=None,
+                   help="Min depth shown in profile plot [m]")
+    p.add_argument("--plot-y-max", type=float, default=None,
+                   help="Max depth shown in profile plot [m]")
     p.add_argument("--show", action="store_true",
                    help="Display plots interactively")
     p.add_argument("--output", type=str, default="heat1d",
@@ -409,10 +475,14 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     lat_rad = math.radians(args.lat)
-    dec_rad = math.radians(args.dec)
+    if args.dec is not None:
+        dec_rad = math.radians(args.dec)
+    else:
+        dec_rad = _declination(args.month)
 
     print(f"Running {args.n_days} lunar day(s) at lat = {args.lat}°")
     print(f"  dt = {args.dt:.0f} s, z_max = {args.z_max} m")
+    print(f"  solar declination = {math.degrees(dec_rad):.2f}°")
     results = run_simulation(
         lat=lat_rad, lon=math.radians(args.lon),
         z_max=args.z_max, dt=args.dt,
@@ -424,5 +494,17 @@ if __name__ == "__main__":
     T_surf = results["T_history"][:, 0]
     print(f"  T_surf min = {T_surf.min():.1f} K, max = {T_surf.max():.1f} K")
     print(f"  T_surf mean = {T_surf.mean():.1f} K")
+
+    if args.csv:
+        import csv as _csv
+        z = results["z"]
+        T = results["T_history"]
+        with open(args.csv, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["time_hr"] + [f"z_{zv:.6f}" for zv in z])
+            for i, t in enumerate(results["time_hours"]):
+                w.writerow([f"{t:.4f}"] + [f"{T[i,j]:.4f}" for j in range(len(z))])
+        print(f"  Wrote {args.csv}")
+
     print(f"Generating plots...")
     generate_plots(results, output_prefix=args.output, show=args.show)
