@@ -157,14 +157,7 @@ def surface_temp_newton(
 
     epsilon * sigma * Ts^4 - Qs - K(Ts) * dT/dz|_surface = 0
     """
-    if Qs < 1e-6:
-        # No insolation — surface cools radiatively to a floor.
-        # In steady state with subsurface geothermal flux this floor
-        # is ~30-50 K; during transient cooling from a warm initial
-        # condition we step downward gently.
-        return max(Ts_guess * 0.999, 30.0)
-
-    # Use Volterra predictor for sunlit periods
+    # Volterra predictor for the initial guess
     if Qs_prev is not None and dt is not None and dt > 0 and Qs_prev > 1e-6:
         k0 = Kc0 * (1.0 + R350 * Ts_guess ** 3)
         H0 = k0 * (-3.0 * Ts_guess + 4.0 * T1 - T2) / (2.0 * dz0)
