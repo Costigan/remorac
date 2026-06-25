@@ -71,6 +71,62 @@ and display formatting.
 identity, reduce, map, fold, scan, reverse, rotate, append, sort — all
 produce correct numeric results on the CPU compiled path.
 
+## GPU f64 Support — General Map, Scan, Reduce, Parity Tests (June 2026)
+
+GPU descriptor-ABI kernels now fully support `float64` element types
+through maps (simple and compound), reductions, and scans.  f32 was
+silently assumed in several code paths; all have been corrected.
+
+### General map builder f64 support (`gpu_lowering.py`)
+
+- **Element type detection**: `input_elem_types` gains `"f64"` for
+  `FLOAT64` params; `_slot_etypes` and `result_elem_type` now
+  recognise `_FLOAT64`.
+- **Primitive callable suffix**: `+d` / `-d` / `*d` / `/d` recognised
+  alongside `+f` / `+i` for f64 primitive callables in map bodies.
+- **Scalar all-mode routing**: `_use_serial` is forced True for
+  non-f32 scans (f64/i32/bool), preventing the parallel Hillis-Steele
+  path from silently miscompiling non-f32 scans.
+- **Scan body text**: non-compound serial scan body blocks use
+  `_scan_elem_type` instead of hardcoded `f32`.
+
+### codegen KernelMeta f64 support (`codegen.py`)
+
+- Both the first-pass and fallback `KernelMeta` construction paths
+  recognise `"float64"` output element type (was silently
+  defaulting to `"f32"`, causing f64 kernels to write to
+  4-byte-wide output buffers).
+
+### GPU expression compiler f64 support (`_gpu_expr_lowering.py`)
+
+- `_lower_prim_op` strips `d` suffix for f64, mapping to `"f64"`
+  element type.
+- `_lower_fold_to_gpu`: iota→accumulator cast uses
+  `_scalar_type_to_mlir(result_type)` instead of hardcoded `"f32"`.
+- `_scalar_type_to_mlir` maps `FLOAT64` → `"f64"`.
+
+### General map text emitter f64 fixes (`gpu_lowering.py`)
+
+- `_emit_scalar_reduce` and `_emit_multi_reduce`: loop signatures,
+  select types, fold ops, and done branches use the element type
+  from the init expression instead of hardcoded `"f32"`.
+- Added `i64 → f64` cast via `llvm.sitofp`.
+
+### GPU f64 parity tests (6 tests, 6 passing)
+
+New tests in `TestGPUNumericParity` (`tests/test_gpu_general_lowering.py`),
+comparing GPU descriptor-ABI output against the reference interpreter:
+
+- `test_f64_map_primitive` — `(map (+ 1.0d) a)`
+- `test_f64_map_lambda` — `(map (lambda (x) (+ x 1.0d)) a)`
+- `test_f64_map_binary` — `(map + a a)`
+- `test_f64_reduce` — `(fold + 0.0d a)`
+- `test_f64_scan` — `(iscan + 0.0d a)`
+- `test_f64_map_compound_fold` — `(map (lambda (x) (fold + 0.0d (iota 2))) a)`
+
+Parity harness upgraded: `_run_parity` accepts `dtype` parameter;
+`_format_input` emits `1.0d`-suffixed literals for f64 oracle source.
+
 ## heat1d Lunar Thermal Model + CPU Lowering Gaps Closed (June 2026)
 
 ### Scientific notation in Lisp reader

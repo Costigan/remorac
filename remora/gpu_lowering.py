@@ -706,8 +706,8 @@ def build_descriptor_abi_f32_scan_gpu_module(
         desc_lines.extend(_descriptor_load_lines(f"in{ci + 1}", f"%input{ci + 1}_desc", rank))
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
 
-    # Use serial path for compound bodies or large N
-    _use_serial = is_compound or N > 1024 or len(captured_params) > 0
+    # Use serial path for compound bodies, large N, captured params, or non-f32 scans
+    _use_serial = is_compound or N > 1024 or len(captured_params) > 0 or _is_int_scan or _is_bool_scan or _is_f64_scan
     # Set up _nacc_op before the body blocks capture it
     if _is_bool_scan:
         _nacc_op = "      %ss_nacc = llvm.or {compound_ssa}, {compound_ssa}  : i1"
@@ -763,26 +763,26 @@ def build_descriptor_abi_f32_scan_gpu_module(
             body_block = f"""    ^ss_body:
       %ss_idx = {idx_expr}  : i64
       %ss_si = llvm.add %in_offset, %ss_idx  : i64
-      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32
+      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> {_scan_elem_type}
       %ss_di = llvm.add %out_offset, %ss_idx  : i64
-      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      llvm.store %ss_acc, %ss_dp : f32, !llvm.ptr
-      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : f32
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      llvm.store %ss_acc, %ss_dp : {_scan_elem_type}, !llvm.ptr
+      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : {_scan_elem_type}
       %ss_ni = llvm.add %ss_i, %ss_c1 : i64
-      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, {_scan_elem_type})"""
         else:
             body_block = f"""    ^ss_body:
       %ss_idx = {idx_expr}  : i64
       %ss_si = llvm.add %in_offset, %ss_idx  : i64
-      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32
-      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : f32
+      %ss_sp = llvm.getelementptr %in_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> {_scan_elem_type}
+      %ss_nacc = {llvm_scan_op} %ss_acc, %ss_elem  : {_scan_elem_type}
       %ss_di = llvm.add %out_offset, %ss_idx  : i64
-      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      llvm.store %ss_nacc, %ss_dp : f32, !llvm.ptr
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      llvm.store %ss_nacc, %ss_dp : {_scan_elem_type}, !llvm.ptr
       %ss_ni = llvm.add %ss_i, %ss_c1 : i64
-      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, {_scan_elem_type})"""
 
         _captured_params_str = "".join(f", %input{ci + 1}_desc: !llvm.ptr" for ci in range(len(captured_params)))
         _first_param = "%input0_desc: !llvm.ptr" if len(captured_params) > 0 else "%input_desc: !llvm.ptr"
@@ -5247,7 +5247,7 @@ def build_descriptor_abi_general_map_gpu_module(
         _op = map_func.op
         _rt = map_func.result_type
         _elem_rt = _rt.element if isinstance(_rt, ArrayType) else _rt
-        _suffix = "f" if _elem_rt == FLOAT else ("i" if str(getattr(_elem_rt, 'name', '')) == 'int' else "f")
+        _suffix = "f" if _elem_rt == FLOAT else ("d" if _elem_rt == _FLOAT64 else ("i" if str(getattr(_elem_rt, 'name', '')) == 'int' else "f"))
         _typed_op = f"{_op}{_suffix}"
         if map_func.left_arg is not None:
             _p = _P("_gx", map_func.params[0] if map_func.params else FLOAT)
@@ -5311,6 +5311,8 @@ def build_descriptor_abi_general_map_gpu_module(
                 elem = "i32"
             elif param.type.element.name == "bool":
                 elem = "i1"
+            elif param.type.element == _FLOAT64:
+                elem = "f64"
             input_elem_types.append(elem)
         else:
             scalar_params[param.name] = num_scalar_inputs
@@ -5477,6 +5479,8 @@ def build_descriptor_abi_general_map_gpu_module(
                 _e = _p.type.element
                 if _e == FLOAT:
                     _slot_etypes[_s] = "f32"
+                elif _e == _FLOAT64:
+                    _slot_etypes[_s] = "f64"
                 elif _e == _INT:
                     _slot_etypes[_s] = "i32"
                 elif _e == _BOOL:
@@ -5492,6 +5496,8 @@ def build_descriptor_abi_general_map_gpu_module(
             result_elem_type = "i32"
         elif _re == _BOOL:
             result_elem_type = "i8"
+        elif _re == _FLOAT64:
+            result_elem_type = "f64"
 
     expr = gpu_expr_from_hir(
         lambda_body,
@@ -5864,6 +5870,10 @@ def _gpu_emit_expr(
                 lines.append(
                     f"      {ssa} = llvm.sitofp {inner} : i64 to f32"
                 )
+            elif expr.from_type == "i64" and expr.to_type == "f64":
+                lines.append(
+                    f"      {ssa} = llvm.sitofp {inner} : i64 to f64"
+                )
             else:
                 raise GPUScaffoldError(
                     f"unsupported cast: {expr.from_type} → {expr.to_type}"
@@ -6181,8 +6191,10 @@ def _gpu_emit_expr(
         init_raw = expr.init
         if isinstance(init_raw, list):
             init_ssa = emit(init_raw[0], env)
+            elem_type = getattr(init_raw[0], 'element_type', 'f32')
         else:
             init_ssa = emit(init_raw, env)
+            elem_type = getattr(init_raw, 'element_type', 'f32')
 
         dim = expr.dimension
         blk = _fresh_block()
@@ -6200,18 +6212,18 @@ def _gpu_emit_expr(
         ])
 
         lines.append(
-            f"      llvm.br ^{loop_label}({c0_ssa}, {init_ssa} : i64, f32)"
+            f"      llvm.br ^{loop_label}({c0_ssa}, {init_ssa} : i64, {elem_type})"
         )
 
         body_label = f"{loop_label}_body"
         done_label = f"{loop_label}_done"
         done_cond_ssa = _fresh_ssa()
-        lines.append(f"    ^{loop_label}({idx_ssa}: i64, {acc_in_ssa}: f32):")
+        lines.append(f"    ^{loop_label}({idx_ssa}: i64, {acc_in_ssa}: {elem_type}):")
         lines.append(
             f"      {done_cond_ssa} = llvm.icmp \"uge\" {idx_ssa}, {cN_ssa} : i64"
         )
         lines.append(
-            f"      llvm.cond_br {done_cond_ssa}, ^{done_label}({acc_in_ssa} : f32), ^{body_label}"
+            f"      llvm.cond_br {done_cond_ssa}, ^{done_label}({acc_in_ssa} : {elem_type}), ^{body_label}"
         )
 
         lines.append(f"    ^{body_label}:")
@@ -6246,7 +6258,7 @@ def _gpu_emit_expr(
                     elem_ssa = comp_ssa
                 else:
                     sel_ssa = _fresh_ssa()
-                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comp_ssa}, {elem_ssa} : i1, f32")
+                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comp_ssa}, {elem_ssa} : i1, {elem_type}")
                     elem_ssa = sel_ssa
         else:
             elem_ssa = emit(expr.body_expr, body_env)
@@ -6262,26 +6274,26 @@ def _gpu_emit_expr(
                     eq_ssa = _fresh_ssa()
                     lines.append(f"      {eq_ssa} = llvm.icmp \"eq\" {idx_ssa}, {k_ssa} : i64")
                     sel_ssa = _fresh_ssa()
-                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comps[k]}, {sel} : i1, f32")
+                    lines.append(f"      {sel_ssa} = llvm.select {eq_ssa}, {comps[k]}, {sel} : i1, {elem_type}")
                     sel = sel_ssa
                 elem_ssa = sel
 
         acc_next_ssa = _fresh_ssa()
-        fold_llvm = llvm_op(expr.op, "f32")
+        fold_llvm = llvm_op(expr.op, elem_type)
         lines.append(
-            f"      {acc_next_ssa} = {fold_llvm} {acc_in_ssa}, {elem_ssa}  : f32"
+            f"      {acc_next_ssa} = {fold_llvm} {acc_in_ssa}, {elem_ssa}  : {elem_type}"
         )
         idx_next_ssa = _fresh_ssa()
         lines.append(
             f"      {idx_next_ssa} = llvm.add {idx_ssa}, {c1_ssa} : i64"
         )
         lines.append(
-            f"      llvm.br ^{loop_label}({idx_next_ssa}, {acc_next_ssa} : i64, f32)"
+            f"      llvm.br ^{loop_label}({idx_next_ssa}, {acc_next_ssa} : i64, {elem_type})"
         )
 
         result_ssa = _fresh_ssa()
         lines.append(
-            f"    ^{done_label}({result_ssa}: f32):"
+            f"    ^{done_label}({result_ssa}: {elem_type}):"
         )
         return result_ssa
 
@@ -6294,10 +6306,13 @@ def _gpu_emit_expr(
         if not isinstance(init_exprs, list):
             init_exprs = [init_exprs] * K
 
-        # Emit init values
+        # Emit init values and determine element type from first init
         init_ssas: list[str] = []
+        elem_type = "f32"
         for k in range(K):
             init_ssas.append(emit(init_exprs[k], env))
+            if k == 0:
+                elem_type = getattr(init_exprs[k], 'element_type', 'f32')
 
         dim = expr.dimension
         blk = _fresh_block()
@@ -6315,7 +6330,7 @@ def _gpu_emit_expr(
         ])
 
         # Loop branch: (idx, acc0, acc1, ..., accK-1)
-        iter_types = "i64, " + ", ".join("f32" for _ in range(K))
+        iter_types = f"i64, " + ", ".join(elem_type for _ in range(K))
         iter_args = f"{c0_ssa}, " + ", ".join(init_ssas)
         lines.append(
             f"      llvm.br ^{loop_label}({iter_args} : {iter_types})"
@@ -6324,10 +6339,10 @@ def _gpu_emit_expr(
         body_label = f"{loop_label}_body"
         done_label = f"{loop_label}_done"
         done_cond_ssa = _fresh_ssa()
-        iter_params = f"{idx_ssa}: i64, " + ", ".join(f"{a}: f32" for a in acc_in_ssas)
+        iter_params = f"{idx_ssa}: i64, " + ", ".join(f"{a}: {elem_type}" for a in acc_in_ssas)
         # Format: %v1, %v2 : type1, type2
         done_vals = ", ".join(acc_in_ssas)
-        done_types = ", ".join("f32" for _ in range(K))
+        done_types = ", ".join(elem_type for _ in range(K))
         lines.append(f"    ^{loop_label}({iter_params}):")
         lines.append(
             f"      {done_cond_ssa} = llvm.icmp \"uge\" {idx_ssa}, {cN_ssa} : i64"
@@ -6351,11 +6366,11 @@ def _gpu_emit_expr(
 
         # Accumulate each component
         acc_next_ssas: list[str] = []
-        fold_llvm = llvm_op(expr.op, "f32")
+        fold_llvm = llvm_op(expr.op, elem_type)
         for k in range(K):
             nxt = _fresh_ssa()
             lines.append(
-                f"      {nxt} = {fold_llvm} {acc_in_ssas[k]}, {elem_ssas[k]}  : f32"
+                f"      {nxt} = {fold_llvm} {acc_in_ssas[k]}, {elem_ssas[k]}  : {elem_type}"
             )
             acc_next_ssas.append(nxt)
 
@@ -6366,14 +6381,14 @@ def _gpu_emit_expr(
 
         # Loop back
         next_iter_args = f"{idx_next_ssa}, " + ", ".join(acc_next_ssas)
-        next_iter_types = "i64, " + ", ".join("f32" for _ in range(K))
+        next_iter_types = f"i64, " + ", ".join(elem_type for _ in range(K))
         lines.append(
             f"      llvm.br ^{loop_label}({next_iter_args} : {next_iter_types})"
         )
 
         # Done
         result_ssas = [_fresh_ssa() for _ in range(K)]
-        result_params = ", ".join(f"{r}: f32" for r in result_ssas)
+        result_params = ", ".join(f"{r}: {elem_type}" for r in result_ssas)
         lines.append(
             f"    ^{done_label}({result_params}):"
         )

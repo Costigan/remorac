@@ -57,7 +57,7 @@ from remora.hir import (
 )
 from remora.pipeline import detect_toolchain, translate_llvmir_to_nvptx_text, translate_mlir_to_llvmir
 from remora.runtime import CUDARuntime, evaluate_source, RuntimeUnavailable
-from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, StaticDim
+from remora.types import BOOL, FLOAT, FLOAT64, INT, ArrayType, ScalarType, StaticDim
 from remora.types import SigmaType
 
 
@@ -1264,10 +1264,10 @@ class TestGPUNumericParity:
         yield
         self._rt.close()
 
-    def _run_parity(self, src, name, param_types, inputs, include_prelude=False, syntax="ml"):
+    def _run_parity(self, src, name, param_types, inputs, include_prelude=False, syntax="ml", dtype=np.float32):
         """Compile on CPU and GPU, execute both, assert close match."""
         # CPU: use interpreter for reference
-        formatted = [self._format_input(v, syntax) for v in inputs]
+        formatted = [self._format_input(v, syntax, dtype=dtype) for v in inputs]
         if syntax == "ml":
             arg_str = " ".join(f"({a})" for a in formatted)
             call_expr = f"{name} {arg_str}"
@@ -1278,7 +1278,7 @@ class TestGPUNumericParity:
         cpu_result = evaluate_source(
             full_src, include_prelude=include_prelude, syntax=syntax,
         )
-        cpu_arr = np.asarray(cpu_result.value, dtype=np.float32)
+        cpu_arr = np.asarray(cpu_result.value, dtype=dtype)
 
         # GPU
         ptx, kernels, _ = compile_function_source_to_mlir_gpu_ptx(
@@ -1292,20 +1292,25 @@ class TestGPUNumericParity:
             if hasattr(executor, 'close'):
                 executor.close()
 
-        gpu_arr = np.asarray(gpu_result, dtype=np.float32)
+        gpu_arr = np.asarray(gpu_result, dtype=dtype)
         np.testing.assert_allclose(
             gpu_arr, cpu_arr, rtol=1e-4, atol=1e-5,
             err_msg=f"GPU vs CPU mismatch for '{name}'",
         )
 
     @staticmethod
-    def _format_input(v, syntax="ml"):
+    def _format_input(v, syntax="ml", dtype=np.float32):
         sep = ", " if syntax == "ml" else " "
 
         def fmt(x):
             x = np.asarray(x)
             if x.ndim == 0:
                 if x.dtype.kind == "f":
+                    if dtype == np.float64:
+                        text = f"{float(x):.15g}"
+                        if "." not in text and "e" not in text.lower():
+                            text += ".0"
+                        return text + "d"
                     return f"{float(x):.6f}"
                 if x.dtype.kind in ("i", "u"):
                     return str(int(x))
@@ -1317,6 +1322,11 @@ class TestGPUNumericParity:
             return "[" + sep.join(fmt(e) for e in x) + "]"
 
         if isinstance(v, (np.floating, float)):
+            if dtype == np.float64:
+                text = f"{float(v):.15g}"
+                if "." not in text and "e" not in text.lower():
+                    text += ".0"
+                return text + "d"
             return f"{float(v):.6f}"
         if isinstance(v, (np.integer, int)):
             return str(int(v))
@@ -1520,6 +1530,65 @@ class TestGPUNumericParity:
             src, "f",
             (ArrayType(FLOAT, (StaticDim(3), StaticDim(2), StaticDim(2))),),
             [m], syntax="lisp",
+        )
+
+    # ── f64 parity tests ──────────────────────────────────────────────
+
+    def test_f64_map_primitive(self):
+        src = '(define/pi () (m64 [a (Array Float64 4)] (Array Float64 4)) (map (+ 1.0d) a))'
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "m64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
+        )
+
+    def test_f64_map_lambda(self):
+        src = '(define/pi () (m64 [a (Array Float64 4)] (Array Float64 4)) (map (lambda (x) (+ x 1.0d)) a))'
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "m64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
+        )
+
+    def test_f64_map_binary(self):
+        src = '(define/pi () (m64 [a (Array Float64 4)] (Array Float64 4)) (map + a a))'
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "m64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
+        )
+
+    def test_f64_reduce(self):
+        src = '(define/pi () (r64 [a (Array Float64 4)] Float64) (fold + 0.0d a))'
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "r64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
+        )
+
+    def test_f64_scan(self):
+        src = '(define/pi () (s64 [a (Array Float64 4)] (Array Float64 4)) (iscan + 0.0d a))'
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "s64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
+        )
+
+    def test_f64_map_compound_fold(self):
+        src = (
+            '(define/pi () (cf64 [a (Array Float64 4)] (Array Float64 4))'
+            ' (map (lambda (x) (fold + 0.0d (iota 2))) a))'
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        self._run_parity(
+            src, "cf64",
+            (ArrayType(FLOAT64, (StaticDim(4),)),),
+            [x], syntax="lisp", dtype=np.float64,
         )
 
 

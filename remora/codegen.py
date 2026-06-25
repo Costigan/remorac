@@ -765,6 +765,8 @@ def generate_mlir_descriptor_abi_ptx(
                     elem = param.type.element.name
                     if elem == "float":
                         input_elem_types.append("f32")
+                    elif elem == "float64":
+                        input_elem_types.append("f64")
                     elif elem == "int":
                         input_elem_types.append("i32")
                     elif elem == "bool":
@@ -779,6 +781,8 @@ def generate_mlir_descriptor_abi_ptx(
                 _out_et, _out_dtype = "i32", "int32"
             elif _out_elem_name == "bool":
                 _out_et, _out_dtype = "i8", "bool"
+            elif _out_elem_name == "float64":
+                _out_et, _out_dtype = "f64", "float64"
             else:
                 _out_et, _out_dtype = "f32", "float32"
 
@@ -1062,6 +1066,8 @@ def generate_mlir_descriptor_abi_ptx(
                                     elem = param.type.element.name
                                     if elem == "float":
                                         input_elem_types2.append("f32")
+                                    elif elem == "float64":
+                                        input_elem_types2.append("f64")
                                     elif elem == "int":
                                         input_elem_types2.append("i32")
                                     elif elem == "bool":
@@ -1075,6 +1081,8 @@ def generate_mlir_descriptor_abi_ptx(
                                 _out_et2, _out_dtype2 = "i32", "int32"
                             elif _out_elem_name2 == "bool":
                                 _out_et2, _out_dtype2 = "i8", "bool"
+                            elif _out_elem_name2 == "float64":
+                                _out_et2, _out_dtype2 = "f64", "float64"
                             else:
                                 _out_et2, _out_dtype2 = "f32", "float32"
                             _kind2: list[str] = []

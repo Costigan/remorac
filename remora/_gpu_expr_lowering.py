@@ -760,7 +760,7 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     op = expr.op
     base_op = op
     elem_type = "f32"
-    for suffix, etype in (("f", "f32"), ("i", "i32"), ("b", "i1")):
+    for suffix, etype in (("f", "f32"), ("d", "f64"), ("i", "i32"), ("b", "i1")):
         if base_op.endswith(suffix):
             base_op = base_op[:-1]
             elem_type = etype
@@ -1063,7 +1063,8 @@ def _lower_fold_to_gpu(
         iota_dim = int(array_expr.size.value) if isinstance(array_expr.size, StaticDim) else 0
         if iota_dim > 0:
             body_raw: GpuExpr = GpuIndexCoordinate("_iota_coord")
-            body_expr = GpuCast(body_raw, "i64", "f32")
+            to_etype = _scalar_type_to_mlir(result_type) if isinstance(result_type, ScalarType) else "f32"
+            body_expr = GpuCast(body_raw, "i64", to_etype)
             dim = iota_dim
             loop_var_name = "_iota_coord"
 
