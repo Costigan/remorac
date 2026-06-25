@@ -854,9 +854,13 @@ def generate_mlir_descriptor_abi_ptx(
                         for p in function.params:
                             _scan_kinds.append("array")
                             if isinstance(p.type, ArrayType):
-                                _scan_elem_types.append("f32")
+                                en = p.type.element.name
+                                _scan_elem_types.append("f32" if en == "float" else "i1" if en == "bool" else "f32")
                             else:
                                 _scan_elem_types.append("f32")
+                        _out_ename = function.params[0].type.element.name if isinstance(function.params[0].type, ArrayType) else "float"
+                        _out_et = "f32" if _out_ename == "float" else "i1" if _out_ename == "bool" else "f32"
+                        _out_dt = "float32" if _out_ename == "float" else "bool" if _out_ename == "bool" else "float32"
                         meta = KernelMeta(
                             name=name,
                             grid_dims=1,
@@ -864,9 +868,9 @@ def generate_mlir_descriptor_abi_ptx(
                             num_inputs=_num_inputs,
                             num_outputs=1,
                             input_elem_types=_scan_elem_types,
-                            output_elem_types=["f32"],
+                            output_elem_types=[_out_et],
                             output_shape=scan_shape,
-                            output_dtype="float32",
+                            output_dtype=_out_dt,
                             input_kinds=_scan_kinds,
                         )
                     except GPUScaffoldError as scan_error:

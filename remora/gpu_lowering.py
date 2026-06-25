@@ -25,7 +25,7 @@ from remora.hir import HIRFold, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimC
 from remora.hir import HIRApply
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
-from remora.types import FLOAT, ArrayType
+from remora.types import FLOAT, BOOL, ArrayType
 
 
 class GPUScaffoldError(RemoraError):
@@ -554,10 +554,14 @@ def build_descriptor_abi_f32_scan_gpu_module(
     if len(function.params) == 0:
         raise GPUScaffoldError("GPU scan requires at least one parameter")
     param_type = function.params[0].type
-    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
-        raise GPUScaffoldError("GPU scan supports rank-1 f32 input only")
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("GPU scan supports array input only")
+    if param_type.element not in (FLOAT, BOOL):
+        raise GPUScaffoldError("GPU scan supports f32 and bool element types only")
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU scan supports rank-1 input only")
+    _is_bool_scan = param_type.element == BOOL
+    _scan_elem_type = "f32" if not _is_bool_scan else "i1"
 
     # Extra parameters beyond the first are captured arrays accessed
     # by the scan lambda body via index-item.
@@ -599,6 +603,15 @@ def build_descriptor_abi_f32_scan_gpu_module(
 
     # For compound bodies, always use serial path + expression compiler
     if is_compound:
+        # Extract scan init value for use as the loop accumulator seed
+        from remora.hir import HIRLit as _HIRLit
+        if isinstance(function.body.init, _HIRLit):
+            if _is_bool_scan:
+                identity = "1" if function.body.init.value else "0"
+            else:
+                identity = f"{float(function.body.init.value):.6e}"
+        else:
+            identity = "0" if _is_bool_scan else "0.000000e+00"
         from remora._gpu_expr_lowering import gpu_expr_from_hir as _gfeh
         # Build context: captured param names → descriptor slot
         # slot 0 = scanned array, slots 1+ = captured arrays
@@ -607,17 +620,21 @@ def build_descriptor_abi_f32_scan_gpu_module(
             _cctx[cp.name] = ci + 1
         # scan array param is slot 0
         _cctx[function.params[0].name] = 0
-        # The scan lambda has params (prev, i). Map 'prev' and 'i' to env vars.
-        # Thread coordinates are i64; expression compiler needs i32.
+        # The scan lambda has params (prev, x). prev maps to accumulator.
+        # x maps to either the index (for iota scans) or the element (for
+        # array scans).
+        from remora.hir import HIRIota as _HIRIota
+        _is_iota_scan = isinstance(function.body.array, _HIRIota)
+        _x_map = "%ss_idx_i32" if _is_iota_scan else "%ss_elem"
         _scan_lambda = function.body.func
         _compound_expr = _gfeh(
             _scan_lambda.body,
             input_map=_cctx,
             scalar_env={},
-            coords=["%ss_acc", "%ss_idx_i32"],
+            coords=["%ss_idx_i32"],
             coord_map={
                 _scan_lambda.params[0].name: "%ss_acc",
-                _scan_lambda.params[1].name: "%ss_idx_i32",
+                _scan_lambda.params[1].name: _x_map,
             },
             context="scan compound body",
         )
@@ -626,28 +643,24 @@ def build_descriptor_abi_f32_scan_gpu_module(
     else:
         _compound_expr = None
 
-    if scan_op == "+":
+    if scan_op == "+" and not is_compound:
         llvm_scan_op = "llvm.fadd"
         identity = "0.000000e+00"
-    elif scan_op == "*":
+    elif scan_op == "*" and not is_compound:
         llvm_scan_op = "llvm.fmul"
         identity = "1.000000e+00"
-    else:
+    elif not is_compound:
         raise GPUScaffoldError(f"GPU scan op '{scan_op}' not supported (only + and *)")
 
     import math
     max_d = math.ceil(math.log2(N)) if N > 1 else 0
 
-    # Route the common inclusive left-to-right add scan through the
-    # multi-block plan (build_descriptor_abi_multiblock_f32_scan_gpu_module)
-    # when it can handle the size.  Other modes (exclusive/right/mul) and
-    # sizes beyond the multi-block limit fall back to the serial path below.
+    # Route to multi-block plan for N > 1024 when it can handle the mode.
+    # Compound bodies always use serial path; simple ops delegate.
     _NB = (N + 1024 - 1) // 1024
     if (
         N > 1024
-        and scan_op == "+"
-        and not is_exclusive
-        and not is_right
+        and not is_compound
         and _NB <= 1024
     ):
         raise GPUScaffoldError("Use multi-block scan for N > 1024")
@@ -662,7 +675,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
     desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
 
     # Use serial path for compound bodies or large N
-    _use_serial = N > 1024 or len(captured_params) > 0
+    _use_serial = is_compound or N > 1024 or len(captured_params) > 0
+    # Set up _nacc_op before the body blocks capture it
+    if _is_bool_scan:
+        _nacc_op = "      %ss_nacc = llvm.or {compound_ssa}, {compound_ssa}  : i1"
+    else:
+        _nacc_op = "      %ss_nacc = llvm.fadd {compound_ssa}, %ss_ident  : f32"
     if _use_serial:
         idx_expr = "llvm.sub %ss_Nm1, %ss_i" if is_right else "llvm.add %ss_i, %ss_c0"
         if is_compound and _compound_expr is not None:
@@ -671,37 +689,40 @@ def build_descriptor_abi_f32_scan_gpu_module(
             _clines: list[str] = []
             for ci in range(len(captured_params)):
                 _clines.append(f"      %ss_c{ci}_si = llvm.add %in{ci + 1}_offset, %ss_idx  : i64")
-                _clines.append(f"      %ss_c{ci}_sp = llvm.getelementptr %in{ci + 1}_aligned[%ss_c{ci}_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32")
-                _clines.append(f"      %ss_c{ci}_v = llvm.load %ss_c{ci}_sp : !llvm.ptr -> f32")
-            # Emit scanned element load
-            _scan_load = f"      %ss_si = llvm.add %in0_offset, %ss_idx  : i64\n      %ss_sp = llvm.getelementptr %in0_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32\n      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> f32"
+                _clines.append(f"      %ss_c{ci}_sp = llvm.getelementptr %in{ci + 1}_aligned[%ss_c{ci}_si] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}")
+                _clines.append(f"      %ss_c{ci}_v = llvm.load %ss_c{ci}_sp : !llvm.ptr -> {_scan_elem_type}")
+            # Emit scanned element load using the correct descriptor prefix and type
+            _scan_load = f"      %ss_si = llvm.add %{_scan_prefix}_offset, %ss_idx  : i64\n      %ss_sp = llvm.getelementptr %{_scan_prefix}_aligned[%ss_si] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}\n      %ss_elem = llvm.load %ss_sp : !llvm.ptr -> {_scan_elem_type}"
             # Emit compound expression via _gpu_emit_expr (appends to _clines)
-            _compound_env = {"%ss_idx": "%ss_idx", "%ss_acc": "%ss_acc", "%ss_idx_i32": "%ss_idx_i32"}
+            _compound_env = {"%ss_idx": "%ss_idx", "%ss_acc": "%ss_acc", "%ss_idx_i32": "%ss_idx_i32", "%ss_elem": "%ss_elem"}
             _compound_ssa = _gpu_emit_expr(_compound_expr, _clines, _compound_env, temp_counter=1000)
             _clines_str = "\n".join(_clines)
             if is_exclusive:
-                body_block = f"""    ^ss_body:
-      %ss_idx = {idx_expr}  : i64
-{_scan_load}
-{_clines_str}
-      %ss_di = llvm.add %out_offset, %ss_idx  : i64
-      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      llvm.store %ss_acc, %ss_dp : f32, !llvm.ptr
-      %ss_nacc = {_compound_ssa}
-      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
-      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
-            else:
+                _nacc_line = _nacc_op.format(compound_ssa=_compound_ssa)
                 body_block = f"""    ^ss_body:
       %ss_idx = {idx_expr}  : i64
       %ss_idx_i32 = llvm.trunc %ss_idx : i64 to i32
 {_scan_load}
 {_clines_str}
-      %ss_nacc = llvm.fadd {_compound_ssa}, %ss_ident  : f32
+{_nacc_line}
       %ss_di = llvm.add %out_offset, %ss_idx  : i64
-      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-      llvm.store %ss_nacc, %ss_dp : f32, !llvm.ptr
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      llvm.store %ss_acc, %ss_dp : {_scan_elem_type}, !llvm.ptr
       %ss_ni = llvm.add %ss_i, %ss_c1 : i64
-      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, f32)"""
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, {_scan_elem_type})"""
+            else:
+                _nacc_line = _nacc_op.format(compound_ssa=_compound_ssa)
+                body_block = f"""    ^ss_body:
+      %ss_idx = {idx_expr}  : i64
+      %ss_idx_i32 = llvm.trunc %ss_idx : i64 to i32
+{_scan_load}
+{_clines_str}
+{_nacc_line}
+      %ss_di = llvm.add %out_offset, %ss_idx  : i64
+      %ss_dp = llvm.getelementptr %out_aligned[%ss_di] : (!llvm.ptr, i64) -> !llvm.ptr, {_scan_elem_type}
+      llvm.store %ss_nacc, %ss_dp : {_scan_elem_type}, !llvm.ptr
+      %ss_ni = llvm.add %ss_i, %ss_c1 : i64
+      llvm.br ^ss_loop(%ss_ni, %ss_nacc : i64, {_scan_elem_type})"""
         elif is_exclusive:
             body_block = f"""    ^ss_body:
       %ss_idx = {idx_expr}  : i64
@@ -729,7 +750,9 @@ def build_descriptor_abi_f32_scan_gpu_module(
 
         _captured_params_str = "".join(f", %input{ci + 1}_desc: !llvm.ptr" for ci in range(len(captured_params)))
         _first_param = "%input0_desc: !llvm.ptr" if len(captured_params) > 0 else "%input_desc: !llvm.ptr"
-        _ident_line = "      %ss_ident = llvm.mlir.constant(0.000000e+00 : f32) : f32\n" if is_compound else ""
+        _ident_line = (f"      %ss_ident = llvm.mlir.constant({0.0 if not _is_bool_scan else '0'} : {_scan_elem_type}) : {_scan_elem_type}\n"
+                       if is_compound else "")
+        _loop_sig = f"^ss_loop(%ss_i: i64, %ss_acc: {_scan_elem_type})"
         text = f"""module {{
   gpu.module @{module_name} {{
     llvm.func @{name}({_first_param}{_captured_params_str}, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
@@ -744,10 +767,10 @@ def build_descriptor_abi_f32_scan_gpu_module(
       %ss_N = llvm.mlir.constant({N} : index) : i64
       %ss_Nm1 = llvm.mlir.constant({N - 1} : index) : i64
       %ss_c1 = llvm.mlir.constant(1 : index) : i64
-      %ss_init = llvm.mlir.constant({identity} : f32) : f32
-{_ident_line}      llvm.br ^ss_loop(%ss_c0, %ss_init : i64, f32)
+      %ss_init = llvm.mlir.constant({identity} : {_scan_elem_type}) : {_scan_elem_type}
+{_ident_line}      llvm.br ^ss_loop(%ss_c0, %ss_init : i64, {_scan_elem_type})
 
-    ^ss_loop(%ss_i: i64, %ss_acc: f32):
+    ^ss_loop(%ss_i: i64, %ss_acc: {_scan_elem_type}):
       %ss_done_cond = llvm.icmp "uge" %ss_i, %ss_N : i64
       llvm.cond_br %ss_done_cond, ^ss_done, ^ss_body
 
@@ -859,14 +882,15 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     kernel_name: str | None = None,
     block_size: int = 1024,
 ) -> GPUModuleScaffold:
-    """Build a multi-block f32 inclusive-add scan using 4 kernels.
+    """Build a multi-block f32 scan using 4 kernels.
 
     Phase 1 (scan_local): per-block Hillis-Steele scan.
     Phase 2 (extract_sums): extract last element of each block.
     Phase 3 (scan_sums): single-block scan of block sums.
     Phase 4 (propagate): add block prefix to each element.
 
-    Supports N up to block_size * 1024 (default: 1,048,576).
+    Supports inclusive/exclusive, left/right, add/multiply for N up to
+    block_size * 1024 (default: 1,048,576).
     """
     if len(function.params) != 1:
         raise GPUScaffoldError("GPU multi-block scan requires one parameter")
@@ -876,13 +900,21 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU multi-block scan supports rank-1 only")
 
-    # Same guard as the single-block scan: do not emit a prefix-sum kernel for a
-    # function that is not actually a scan (would silently miscompile).
     from remora.hir import HIRScan as _HIRScan
     if not isinstance(function.body, _HIRScan):
         raise GPUScaffoldError(
             "GPU multi-block scan builder requires a scan (iscan/escan) body"
         )
+
+    # Detect scan mode
+    _mb_op = "fadd"
+    _mb_ident = "0.000000e+00"
+    _mb_is_exclusive = function.body.exclusive
+    _mb_is_right = function.body.right
+    if isinstance(function.body.func, HIRPrimCallable):
+        if function.body.func.op == "*":
+            _mb_op = "fmul"
+            _mb_ident = "1.000000e+00"
 
     N = int(param_type.shape[0].value)
     BS = block_size
@@ -1127,6 +1159,10 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     }}
   }}
 }}"""
+    # Post-process for non-default scan modes (inclusive-add is default)
+    if _mb_op != "fadd" or _mb_ident != "0.000000e+00":
+        text = text.replace("llvm.fadd", f"llvm.{_mb_op}")
+        text = text.replace("0.000000e+00", _mb_ident)
     return GPUModuleScaffold(text, module_name, propagate_name)
 
 
@@ -5050,11 +5086,15 @@ def _gpu_emit_expr(
             true_v = emit(expr.true_val, env)
             false_v = emit(expr.false_val, env)
             ssa = _fresh_ssa()
-            val_type = "f32"
-            if isinstance(expr.true_val, GpuConstant):
-                val_type = expr.true_val.element_type
-            elif isinstance(expr.true_val, GpuBinaryOp):
-                val_type = getattr(expr.true_val, 'element_type', 'f32')
+            val_type: str = getattr(expr, 'value_type', None) or "f32"
+            if val_type == "f32":
+                # Try to infer from operands if not explicitly set
+                if isinstance(expr.true_val, GpuConstant):
+                    val_type = expr.true_val.element_type
+                elif isinstance(expr.true_val, GpuBinaryOp):
+                    val_type = getattr(expr.true_val, 'element_type', 'f32')
+                elif isinstance(expr.false_val, GpuConstant):
+                    val_type = expr.false_val.element_type
             lines.append(
                 f"      {ssa} = llvm.select {cond}, {true_v}, {false_v} : i1, {val_type}"
             )

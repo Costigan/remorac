@@ -107,6 +107,7 @@ class GpuSelect:
     condition: "GpuExpr"
     true_val: "GpuExpr"
     false_val: "GpuExpr"
+    value_type: str | None = None  # explicit MLIR type for true/false values
 
 
 @dataclass(frozen=True)
@@ -374,7 +375,8 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
             K = len(then_val.components)
             comps = [GpuSelect(cond, then_val.components[k], else_val.components[k]) for k in range(K)]
             return GpuArrayExpr(components=comps, element_type=then_val.element_type)
-        return GpuSelect(cond, then_val, else_val)
+        return GpuSelect(cond, then_val, else_val,
+                         value_type=_scalar_type_to_mlir(expr.result_type) if isinstance(expr.result_type, ScalarType) else None)
 
     # HIRIndex
     if isinstance(expr, HIRIndex):
@@ -727,9 +729,14 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
     if base_op in {"<", ">", "<=", ">=", "==", "!="}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: comparison needs 2 args")
-        # Infer element type from operands (not op suffix) for comparisons
-        _ops = {getattr(a, 'element_type', elem_type) for a in lowered_args if hasattr(a, 'element_type')}
-        _comp_et = next(iter(_ops)) if len(_ops) == 1 else elem_type
+        # Infer element type from operand HIR types (not GpuExpr attrs or op suffix).
+        # GpuIndexCoordinate has no element_type; fall back to f32 for float operands.
+        _hir_types = set()
+        for a in expr.args:
+            at = getattr(a, 'type', None)
+            if at is not None:
+                _hir_types.add(_scalar_type_to_mlir(at))
+        _comp_et = next(iter(_hir_types)) if len(_hir_types) == 1 else "f32"
         return GpuCompareOp(base_op, lowered_args[0], lowered_args[1], _comp_et)
 
     if base_op in {"exp", "log", "sqrt"}:

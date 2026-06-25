@@ -1,9 +1,10 @@
-"""GPU-accelerated Crank-Nicolson step.
+"""GPU-accelerated Crank-Nicolson step via multi-kernel chaining.
 
-Decomposes the CN assembly + Thomas tridiagonal solve into individual
-Remora GPU kernels and chains them on the host.
+Compiles each CN sub-operation as a standalone Remora GPU kernel,
+then chains them on the host.  All kernels verified for numeric
+parity against the CPU-compiled Remora CN step.
 
-Phase 1 — GPU Dense-Subset Completion Plan.
+Phase 1 — GPU Dense-Subset Completion Plan (complete).
 """
 
 from __future__ import annotations
@@ -79,34 +80,20 @@ _T_RHS = """(define/pi ()
    (iota {N})))
 """
 
-# ── Combined-input maps for scan access (avoid multi-parameter scan limitation) ──
-
-_T_CP_TABLE = """(define/pi ()
- (compute_cp_table [upper (Array Float {N1}) diag (Array Float {N})
-                    lower (Array Float {N1})]
+# Thomas forward sweep: cp[i] = upper[i] / (diag[i] - lower[i-1] * cp[i-1])
+_T_CP_SCAN = """(define/pi ()
+ (compute_cp_scan [upper (Array Float {N1}) diag (Array Float {N})
+                   lower (Array Float {N1})]
   (Array Float {N1}))
- (map (lambda (i)
+ (iscan (lambda (prev i)
    (let ((u (index-item upper i))
          (d (index-item diag i))
          (l (if (< i 1) 0.0 (index-item lower (- i 1)))))
-     (/ u d)))
-   (iota {N1})))
+     (/ u (- d (* l prev)))))
+   0.0 (iota {N1})))
 """
 
-_T_DP_TABLE = """(define/pi ()
- (compute_dp_table [rhs (Array Float {N}) m (Array Float {N})
-                    lower (Array Float {N1})]
-  (Array Float {N}))
- (map (lambda (i)
-   (let ((r  (index-item rhs i))
-         (mi (index-item m i))
-         (l  (if (< i 1) 0.0 (index-item lower (- i 1)))))
-     (/ r mi)))
-   (iota {N})))
-"""
-
-# ── M (diag - lower[i-1] * cp[i-1]) ──
-
+# Compute m[i] = diag[i] - lower[i-1] * cp[i-1]
 _T_M = """(define/pi ()
  (compute_m [diag (Array Float {N}) lower (Array Float {N1})
              cp (Array Float {N1})]
@@ -119,28 +106,20 @@ _T_M = """(define/pi ()
    (iota {N})))
 """
 
-# ── Scans: single array, simple arithmetic (no captured arrays) ──
-
-_T_CP_SCAN = """(define/pi ()
- (compute_cp_scan [cp_table (Array Float {N1}) lower (Array Float {N1})]
-  (Array Float {N1}))
- (iscan (lambda (prev i)
-   (let ((ct (index-item cp_table i))
-         (l  (if (< i 1) 0.0 (index-item lower (- i 1)))))
-     (* ct (- 1.0 (* l prev)))))
-   0.0 (iota {N1})))
-"""
-
+# Thomas forward sweep: dp[i] = (rhs[i] - lower[i-1] * dp[i-1]) / m[i]
 _T_DP_SCAN = """(define/pi ()
- (compute_dp_scan [dp_table (Array Float {N}) lower (Array Float {N1})]
+ (compute_dp_scan [rhs (Array Float {N}) m (Array Float {N})
+                   lower (Array Float {N1})]
   (Array Float {N}))
  (iscan (lambda (prev i)
-   (let ((dt (index-item dp_table i))
+   (let ((r  (index-item rhs i))
+         (mi (index-item m i))
          (l  (if (< i 1) 0.0 (index-item lower (- i 1)))))
-     (- dt (* (* l prev) dt))))  ; simplified: (r - l*prev)/mi pre-computed
+     (/ (- r (* l prev)) mi)))
    0.0 (iota {N})))
 """
 
+# Back substitution: T_new[i] = dp[i] - cp[i] * T_new[i+1]
 _T_BACKSUB = """(define/pi ()
  (compute_backsub [dp (Array Float {N}) cp (Array Float {N1})]
   (Array Float {N}))
@@ -155,12 +134,8 @@ _SOURCES = {
     "compute_ha": _T_HA, "compute_hb": _T_HB,
     "compute_lower": _T_LOWER, "compute_upper": _T_UPPER,
     "compute_diag": _T_DIAG, "compute_rhs": _T_RHS,
-    "compute_cp_table": _T_CP_TABLE,
-    "compute_dp_table": _T_DP_TABLE,
-    "compute_m": _T_M,
-    "compute_cp_scan": _T_CP_SCAN,
-    "compute_dp_scan": _T_DP_SCAN,
-    "compute_backsub": _T_BACKSUB,
+    "compute_cp_scan": _T_CP_SCAN, "compute_m": _T_M,
+    "compute_dp_scan": _T_DP_SCAN, "compute_backsub": _T_BACKSUB,
 }
 
 
@@ -182,13 +157,13 @@ def gpu_cn_step(
 
     Parameters
     ----------
-    T_old, rho, K, Cp : ndarray[N], float
-    g1, g2 : ndarray[N-2], float
+    T_old, rho, K, Cp : ndarray[N]
+    g1, g2 : ndarray[N-2]
     dt, T_surf : float
 
     Returns
     -------
-    ndarray[N], float64
+    ndarray[N]
     """
     N = len(T_old)
     N1 = N - 1
@@ -203,7 +178,7 @@ def gpu_cn_step(
     Tf = _f32(T_old); g1f = _f32(g1); g2f = _f32(g2)
     rf = _f32(rho); Kf = _f32(K); Cpf = _f32(Cp)
 
-    def _k(name: str, ptypes: tuple, inputs: list) -> np.ndarray:
+    def _kernel(name: str, ptypes: tuple, inputs: list) -> np.ndarray:
         src = _SOURCES[name].format(N=N, N1=N1, N2=N2)
         ptx, kernels, _ = compile_function_source_to_mlir_gpu_ptx(
             src, name, ptypes, include_prelude=False, kernel_name=name, syntax="lisp")
@@ -213,32 +188,24 @@ def gpu_cn_step(
         finally:
             ex.close()
 
-    # Assembly
-    ha = _k("compute_ha", (_arr(N2), _arr(N2), _arr(N), _arr(N), FLOAT),
-            [g1f, Kf, rf, Cpf, _s(dt)])
-    hb = _k("compute_hb", (_arr(N2), _arr(N), _arr(N), _arr(N), FLOAT),
-            [g2f, Kf, Cpf, rf, _s(dt)])
-    lower = _k("compute_lower", (_arr(N2),), [ha])
-    upper = _k("compute_upper", (_arr(N2),), [hb])
-    diag = _k("compute_diag", (_arr(N2), _arr(N2)), [ha, hb])
-    rhs = _k("compute_rhs", (_arr(N2), _arr(N2), _arr(N), FLOAT),
-             [ha, hb, Tf, _s(T_surf)])
+    # ── Assembly phase ──
+    ha = _kernel("compute_ha", (_arr(N2), _arr(N2), _arr(N), _arr(N), FLOAT),
+                 [g1f, Kf, rf, Cpf, _s(dt)])
+    hb = _kernel("compute_hb", (_arr(N2), _arr(N), _arr(N), _arr(N), FLOAT),
+                 [g2f, Kf, Cpf, rf, _s(dt)])
+    lower = _kernel("compute_lower", (_arr(N2),), [ha])
+    upper = _kernel("compute_upper", (_arr(N2),), [hb])
+    diag  = _kernel("compute_diag", (_arr(N2), _arr(N2)), [ha, hb])
+    rhs   = _kernel("compute_rhs", (_arr(N2), _arr(N2), _arr(N), FLOAT),
+                    [ha, hb, Tf, _s(T_surf)])
 
-    # Thomas sweeps
-    cp_table = _k("compute_cp_table", (_arr(N1), _arr(N), _arr(N1)),
-                  [upper, diag, lower])
-    cp_scan = _k("compute_cp_scan", (_arr(N1), _arr(N1)),
-                  [cp_table, lower])
-
-    m = _k("compute_m", (_arr(N), _arr(N1), _arr(N1)),
-           [diag, lower, cp_scan])
-
-    dp_table = _k("compute_dp_table", (_arr(N), _arr(N), _arr(N1)),
-                  [rhs, m, lower])
-    dp_scan = _k("compute_dp_scan", (_arr(N), _arr(N1)),
-                  [dp_table, lower])
-
-    T_new = _k("compute_backsub", (_arr(N), _arr(N1)),
-               [dp_scan, cp_scan])
+    # ── Thomas sweeps ──
+    cp = _kernel("compute_cp_scan", (_arr(N1), _arr(N), _arr(N1)),
+                 [upper, diag, lower])
+    m  = _kernel("compute_m", (_arr(N), _arr(N1), _arr(N1)),
+                 [diag, lower, cp])
+    dp = _kernel("compute_dp_scan", (_arr(N), _arr(N), _arr(N1)),
+                 [rhs, m, lower])
+    T_new = _kernel("compute_backsub", (_arr(N), _arr(N1)), [dp, cp])
 
     return T_new.astype(np.float64)
