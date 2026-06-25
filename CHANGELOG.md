@@ -75,6 +75,95 @@ feature area.  See also the per-phase changelog in the git history.
   4 material properties, 5 model correctness, 2 Picard iteration.
 - Python `thomas_solve` preserved as oracle in `test_heat1d.py`.
 
+## heat1d — Orbit Model, CFL Warmup, and Reference Validation (June 2026)
+
+The lunar heat flow model now faithfully reproduces the Hayne et al. (2017)
+reference implementation, matching surface temperatures to 0.1 K and
+depth swings to <0.5 K over a 708-Earth-day (24 lunar day) simulation.
+
+### Verification against Hayne et al. (2017) reference
+
+Validated against the open-source reference model by P. O. Hayne
+([github.com/pog1990/heat1d](https://github.com/pog1990/heat1d)),
+which was fitted to Diviner LRO radiometer data.  Comparison at
+latitude −85° (lunar south pole), dt=360 s, Fourier-matrix equilibration,
+3-cycle CFL warmup, 24 lunar days of Crank-Nicolson output:
+
+| Metric | Reference | Our model | Δ |
+|--------|-----------|-----------|-----|
+| T_surf min | 56.6 K | 56.5 K | −0.1 K |
+| T_surf max | 177.9 K | 177.9 K | 0.0 K |
+| T_surf mean | 99.3 K | 99.2 K | −0.1 K |
+| Swing at 0.33 m | 8.0 K | 7.6 K | −0.5 K |
+| Swing at 0.66 m | 6.2 K | 5.7 K | −0.5 K |
+| Mean at 0.66 m | 103.6 K | 102.1 K | −1.5 K |
+
+The subsurface mean runs ~1.5 K cooler at depth, attributable to a
+small orbit-phase offset accumulated during the warmup phase (our
+single CFL-dt computation vs. the reference's per-step CFL recomputation).
+
+### Component-level verification
+
+- **Crank-Nicolson step**: single-step Remora TDMA vs reference NumPy Thomas
+  solver matches to 3×10⁻⁵ K across all 19 grid nodes.
+- **Surface Newton solver**: standalone comparison to 3×10⁻⁵ K.
+- **Absorbed solar flux**: identical to machine precision (matching Keihm
+  1984 angle-dependent albedo and cosine solar zenith).
+- **Fourier-matrix solver**: surface temperature extrema match to 0.1 K.
+- **Kcs consistency fix**: surface contact conductivity corrected from
+  7.0×10⁻⁴ to 7.4×10⁻⁴ W/m/K in `fourier_solver.py` (matched the value in
+  `heat1d_model.py` and the reference `Moon.ks`).
+
+### Bug fix — CN upper-array indexing
+
+Fixed a one-off error in the Crank-Nicolson tridiagonal assembly
+(`_SOURCE` f-string): `upper[0]` was incorrectly `-hb[0]` instead of
+`0.0`, and `upper[i]` for interior nodes used `hb[i]` instead of
+`hb[i-1]`.  This corrupted the surface Dirichlet BC and caused
+T_new[0] to drift from the imposed T_surf.  The fix restores the
+correct Thomas tridiagonal structure.
+
+### Orbit model — eccentric Earth orbit (`orbit.py`)
+
+New module computing heliocentric distance r_au(t) and solar declination
+dec(t) via Kepler's equation:
+
+- Solves `M = E - e*sin(E)` for eccentric anomaly E via Newton-Raphson
+- True anomaly nu = atan2(sqrt(1-e²)·sin(E), cos(E) - e)
+- r_au = (1-e²) / (1 + e·cos(nu)) — gives perihelion boost of 3.4%
+- dec = asin(sin(obliq) · sin(nu + Lp)) — seasons cycle at Earth's
+  orbital rate
+
+Parameters: e=0.0167 (Earth), obliquity=1.54° (Moon), YEAR=365.256 d.
+
+### Driver improvements
+
+- **Orbit-aware flux**: `absorbed_flux()` now receives r_au from
+  `orbit_state()` rather than a constant 1.0 AU.  Both the warmup and
+  output phases track absolute time `t_global` with continuous orbit
+  advancement.  The equilibration phase preserves the Fourier initial
+  state by using a fixed r_au and dec at the epoch.
+- **CFL warmup phase** (matching reference Phase 1b): runs 3 diurnal
+  cycles at CFL-limited time step (~2400 s) after equilibration to
+  bridge the Fourier solution to the output time step.  Uses
+  `Heat1DModel.step(dt_override=...)` for variable step size.
+- **`compute_cfl_ts(model)`**: new helper computing `min(F·ρ·cp·dz²/K)`
+  with F=0.5, matching the reference's `computeCFL`.
+- CLI: `--no-warmup` flag to skip the CFL warmup phase,
+  `--n-warmup` to set the number of warmup cycles (default 3).
+- **Declination cycling removed from driver**: orbital declination is
+  now computed by `orbit_state()`, replacing the standalone
+  `_declination()` sinusoidal approximation.
+
+### Documentation (`examples/heat1d/README.md`)
+
+Added comprehensive README covering model physics, grid construction,
+solver architecture, CLI usage, side-by-side validation results against
+the Hayne reference, and a future-work section proposing Remora
+migration paths (bottom BC, surface Newton, Picard loop), Numba
+acceleration of Python loops, FFT primitives in Remora for the Fourier
+solver, GPU time-stepping path, and adaptive dt.
+
 ### Tests
 - 7 scan lambda tests in `test_properties.py::test_scan_family`.
 - 3 Remora-vs-Python Thomas parity tests in

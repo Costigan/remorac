@@ -335,8 +335,16 @@ class Heat1DModel:
         self.K = _get_K()(T_f32, Kc_f32).astype(np.float64)           # type: ignore[union-attr]
         self.Cp = _get_Cp()(T_f32).astype(np.float64)                  # type: ignore[union-attr]
 
-    def step(self) -> np.ndarray:
-        """Advance one Crank-Nicolson time step with Picard iteration."""
+    def step(self, dt_override: float | None = None) -> np.ndarray:
+        """Advance one Crank-Nicolson time step with Picard iteration.
+
+        Parameters
+        ----------
+        dt_override : float or None
+            If given, use this time step instead of ``self.dt``.
+            Used for warmup at CFL-limited dt.
+        """
+        dt_step = dt_override if dt_override is not None else self.dt
         T_old = self.T.copy()
 
         T_guess = T_old.copy()
@@ -353,7 +361,7 @@ class Heat1DModel:
                 self.rho.astype(np.float32),
                 K_guess.astype(np.float32),
                 Cp_guess.astype(np.float32),
-                np.asarray(self.dt, dtype=np.float32),
+                np.asarray(dt_step, dtype=np.float32),
                 np.asarray(self._T_surface, dtype=np.float32),
             ).astype(np.float64)
 
@@ -389,6 +397,35 @@ class Heat1DModel:
 # ═══════════════════════════════════════════════════════════════════════════
 # NumPy reference oracle (for test validation)
 # ═══════════════════════════════════════════════════════════════════════════
+
+def compute_cfl_ts(model: Heat1DModel, fourier_number: float = 0.5) -> float:
+    """Compute the CFL-limited time step from current model properties.
+
+    Corresponds to ``computeCFL`` in the reference heat1d model
+    (Hayne et al. 2017).
+
+    Parameters
+    ----------
+    model : Heat1DModel
+        Model with current grid and thermophysical properties.
+    fourier_number : float
+        Fourier mesh number (default 0.5 for stability).
+
+    Returns
+    -------
+    float
+        Maximum stable time step [s] for the explicit solver.
+    """
+    return float(
+        np.min(
+            fourier_number
+            * model.rho[:-1]
+            * model.Cp[:-1]
+            * model.dz**2
+            / model.K[:-1]
+        )
+    )
+
 
 def _compute_Cp_numpy(T: np.ndarray) -> np.ndarray:
     c0, c1, c2, c3, c4 = CP_COEFFS

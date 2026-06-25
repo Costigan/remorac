@@ -43,8 +43,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from examples.heat1d.heat1d_model import (
-    Heat1DModel, N, _get_K, Kcs, R350,
+    Heat1DModel, N, _get_K, Kcs, R350, compute_cfl_ts,
 )
+from examples.heat1d.orbit import orbit_state
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Physical constants
@@ -208,6 +209,8 @@ def run_simulation(
     growth_rate: float = 1.05,
     dec: float = 0.0,
     fourier_equil: bool = True,
+    warmup: bool = True,
+    warmup_cycles: int = 3,
 ) -> dict:
     """Run the 1D heat flow model and return results.
 
@@ -221,7 +224,11 @@ def run_simulation(
     fourier_equil : bool
         If True, use the Fourier-matrix solver to compute the periodic
         steady state, then initialize the time-stepping model from it.
-        This replaces multi-orbit spin-up and is ~1000x faster.
+    warmup : bool
+        If True, run a warmup phase at CFL-limited dt after equilibration
+        (matching the reference model's Phase 1b).
+    warmup_cycles : int
+        Number of diurnal cycles in the warmup phase (default 3).
     """
     from examples.heat1d.heat1d_model import build_grid, N, rhos, rhod, H_SCALE, Kcs, Kcd
     from examples.heat1d.fourier_solver import solve_fourier, _kc
@@ -241,13 +248,16 @@ def run_simulation(
         model._update_properties()
 
     Qs_prev = 0.0
-    month_offset = dec / OBLIQUITY_RAD * 6.0 / math.pi if dec != 0.0 else 0.0  # approx
 
-    # ── Equilibration ──
-    for _ in range(equil_days):
-        for _ in range(steps_per_day):
-            t_hour = 2.0 * math.pi * (_ * dt % LUNAR_DAY) / LUNAR_DAY + lon
-            Qs = absorbed_flux(lat, t_hour, dec=dec)
+    # ── Equilibration (relax Fourier→time-stepper transients) ──
+    # Use fixed dec *and* r_au matching the Fourier init epoch.
+    # t_global stays at 0 during equil; orbit advances only during
+    # warmup and output phases.
+    r_au_init, _dec_init = orbit_state(0.0, lon)
+    for _day in range(equil_days):
+        for _step in range(steps_per_day):
+            hour_angle = 2.0 * math.pi * (_step * dt) / LUNAR_DAY + lon
+            Qs = absorbed_flux(lat, hour_angle, dec=dec, r_au=r_au_init)
             T_surf = surface_temp_newton(
                 model.T[0], model.T[1], model.T[2],
                 model.dz[0], Kcs, model.rho[0], model.Cp[0],
@@ -258,6 +268,29 @@ def run_simulation(
             model.step()
             Qs_prev = Qs
 
+    t_global = 0.0
+
+    # ── Warmup (CFL-limited dt, matching reference Phase 1b) ──
+    if warmup:
+        dt_cfl = compute_cfl_ts(model)
+        steps_warmup_per_day = max(int(LUNAR_DAY / dt_cfl), 1)
+        dt_cfl = LUNAR_DAY / steps_warmup_per_day  # snap to exact divisor
+        for _cycle in range(warmup_cycles):
+            for _step in range(steps_warmup_per_day):
+                r_au, current_dec = orbit_state(t_global, lon)
+                hour_angle = 2.0 * math.pi * t_global / LUNAR_DAY + lon
+                Qs = absorbed_flux(lat, hour_angle, dec=current_dec, r_au=r_au)
+                T_surf = surface_temp_newton(
+                    model.T[0], model.T[1], model.T[2],
+                    model.dz[0], Kcs, model.rho[0], model.Cp[0],
+                    Qs, Qs_prev=Qs_prev, dt=dt_cfl,
+                )
+                model._T_surface = T_surf
+                model.T[-1] = model.T[-2] + (Q_GEO / model.K[-2]) * model.dz[-1]
+                model.step(dt_override=dt_cfl)
+                Qs_prev = Qs
+                t_global += dt_cfl
+
     # ── Output recording ──
     n_steps = n_days * steps_per_day
 
@@ -265,11 +298,9 @@ def run_simulation(
     T_history[0] = model.T.copy()
 
     for step in range(n_steps):
-        t = step * dt
-        hour_angle = 2.0 * math.pi * t / LUNAR_DAY + lon
-        # Declination cycles with the lunar orbit period (~27.3 days)
-        current_dec = _declination(month_offset + t / (27.3 * 24.0 * 3600.0) * 12.0)
-        Qs = absorbed_flux(lat, hour_angle, dec=current_dec)
+        r_au, current_dec = orbit_state(t_global, lon)
+        hour_angle = 2.0 * math.pi * t_global / LUNAR_DAY + lon
+        Qs = absorbed_flux(lat, hour_angle, dec=current_dec, r_au=r_au)
 
         T_surf = surface_temp_newton(
             model.T[0], model.T[1], model.T[2],
@@ -283,6 +314,7 @@ def run_simulation(
 
         T_history[step + 1] = model.T
         Qs_prev = Qs
+        t_global += dt
 
     hours = np.arange(n_steps + 1) * dt / 3600.0
 
@@ -452,6 +484,10 @@ if __name__ == "__main__":
                    help="Initial temperature [K] (default: T_eq(lat))")
     p.add_argument("--month", type=int, default=0,
                    help="Starting month (0 = equinox, 3 = southern summer)")
+    p.add_argument("--no-warmup", action="store_true",
+                   help="Skip CFL warmup phase (equilibration only)")
+    p.add_argument("--n-warmup", type=int, default=3,
+                   help="Warmup diurnal cycles (default 3, matching reference)")
     p.add_argument("--dec", type=float, default=None,
                    help="Solar declination [deg] (overrides --month)")
     p.add_argument("--csv", type=str, default=None,
@@ -481,6 +517,8 @@ if __name__ == "__main__":
         n_days=args.n_days, equil_days=args.equil_days,
         T_init=args.T_init, growth_rate=args.growth_rate,
         dec=dec_rad,
+        warmup=not args.no_warmup,
+        warmup_cycles=args.n_warmup,
     )
 
     T_surf = results["T_history"][:, 0]
