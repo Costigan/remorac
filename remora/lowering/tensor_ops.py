@@ -2825,7 +2825,7 @@ def _lower_body_in_loop(
             result_mlir = type_to_mlir(expr.result_type)
             result_name = f"%{_join_prefix(pp, 'r')}"
             base_op = expr.op
-            for sfx in ("f", "i", "b"):
+            for sfx in ("f", "d", "i", "b"):
                 if base_op.endswith(sfx):
                     base_op = base_op[:-1]
                     break
@@ -4456,6 +4456,8 @@ def _sort_runtime_func(result_elem: str) -> str:
         return "remora_sort_i32"
     if result_elem == "f32":
         return "remora_sort_f32"
+    if result_elem == "f64":
+        return "remora_sort_f64"
     raise RemoraLoweringError(f"sort not supported for type {result_elem}")
 
 
@@ -4545,7 +4547,12 @@ def _lower_grade_module(node: HIRGrade, functions: dict[str, HIRFunction]) -> st
     result_elem = type_to_mlir(node.result_type.element)
 
     if rank == 1:
-        rt_func = "remora_grade_i32" if input_element_type == "i32" else "remora_grade_f32"
+        if input_element_type == "i32":
+            rt_func = "remora_grade_i32"
+        elif input_element_type == "f64":
+            rt_func = "remora_grade_f64"
+        else:
+            rt_func = "remora_grade_f32"
         grade_body = f"""{input_code}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -4615,7 +4622,11 @@ def _cmp_op_to_mlir(op: str, elem_type: str) -> str:
     int_preds = {">": "sgt", "<": "slt", ">=": "sge", "<=": "sle", "==": "eq", "!=": "ne"}
     flt_preds = {">": "ogt", "<": "olt", ">=": "oge", "<=": "ole", "==": "oeq", "!=": "one"}
     preds = int_preds if elem_type == "i32" else flt_preds
-    op_base = op[:-1] if op.endswith("b") else op
+    op_base = op
+    for sfx in ("f", "d", "i", "b"):
+        if op_base.endswith(sfx):
+            op_base = op_base[:-1]
+            break
     return preds.get(op_base, "sgt")
 
 

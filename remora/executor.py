@@ -74,6 +74,8 @@ def _contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
 _PLAN_DTYPES = {
     "f32": np.float32,
     "float32": np.float32,
+    "f64": np.float64,
+    "float64": np.float64,
     "i32": np.int32,
     "int32": np.int32,
     "i1": np.bool_,
@@ -790,6 +792,8 @@ def _dtype_from_mlir_or_numpy_name(name: str) -> np.dtype:
         "int32": np.int32,
         "f32": np.float32,
         "float32": np.float32,
+        "f64": np.float64,
+        "float64": np.float64,
     }
     try:
         return np.dtype(names[name])

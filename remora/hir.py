@@ -9,6 +9,7 @@ from remora.ast_nodes import (
     AppExpr,
     BoolLit,
     FloatLit,
+    Float64Lit,
     IntLit,
     IotaExpr,
     LambdaExpr,
@@ -70,6 +71,7 @@ from remora.typechecker import (
 from remora.types import (
     BOOL,
     FLOAT,
+    FLOAT64,
     INT,
     ArrayType,
     DimExpr,
@@ -873,6 +875,8 @@ def _lower_typed_node(expr: TypedExprNode) -> HIRExpr:
         return HIRLit(ast.value, INT)
     if isinstance(ast, FloatLit):
         return HIRLit(ast.value, FLOAT)
+    if isinstance(ast, Float64Lit):
+        return HIRLit(ast.value, FLOAT64)
     if isinstance(ast, BoolLit):
         return HIRLit(ast.value, BOOL)
     if isinstance(ast, VarExpr):
@@ -1051,6 +1055,8 @@ def _prim_op_name(op: str | None, result_type: RemoraType) -> str:
         result_type = result_type.element
     if result_type == FLOAT:
         suffix = "f"
+    elif result_type == FLOAT64:
+        suffix = "d"
     elif result_type == INT:
         suffix = "i"
     elif result_type == BOOL:

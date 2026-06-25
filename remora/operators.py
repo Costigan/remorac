@@ -46,6 +46,8 @@ _ARITH_OPS_F32: dict[str, str] = {
     "<=": "arith.cmpf ole",
 }
 
+_ARITH_OPS_F64: dict[str, str] = _ARITH_OPS_F32  # same ops, MLIR types determine precision
+
 _ARITH_OPS_I32: dict[str, str] = {
     "+": "arith.addi",
     "-": "arith.subi",
@@ -77,6 +79,7 @@ _ARITH_OPS_I1: dict[str, str] = {
 
 _ARITH_OPS_BY_TYPE: dict[str, dict[str, str]] = {
     "f32": _ARITH_OPS_F32,
+    "f64": _ARITH_OPS_F64,
     "i32": _ARITH_OPS_I32,
     "i64": _ARITH_OPS_I64,
     "i1": _ARITH_OPS_I1,
@@ -105,6 +108,8 @@ _LLVM_OPS_F32: dict[str, str] = {
     "/": "llvm.fdiv",
 }
 
+_LLVM_OPS_F64: dict[str, str] = _LLVM_OPS_F32  # same LLVM ops for f64
+
 _LLVM_OPS_I32: dict[str, str] = {
     "+": "llvm.add",
     "-": "llvm.sub",
@@ -121,6 +126,7 @@ _LLVM_OPS_I1: dict[str, str] = {
 
 _LLVM_OPS_BY_TYPE: dict[str, dict[str, str]] = {
     "f32": _LLVM_OPS_F32,
+    "f64": _LLVM_OPS_F64,
     "i32": _LLVM_OPS_I32,
     "i1": _LLVM_OPS_I1,
 }
@@ -160,7 +166,7 @@ def comparison_predicate(op: str, operand_type: str) -> str:
     i_pred, f_pred = preds
     if operand_type == "i32":
         return i_pred
-    if operand_type == "f32":
+    if operand_type in ("f32", "f64"):
         return f_pred
     raise KeyError(f"no comparison predicate for operand type {operand_type!r}")
 

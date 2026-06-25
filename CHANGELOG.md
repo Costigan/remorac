@@ -3,6 +3,74 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## f64 CPU Lowering + f64 Literal Syntax (June 2026)
+
+### f64 CPU lowering pipeline
+
+Extended the CPU compiled backend to support `float64` element types
+end-to-end through typechecking, HIR lowering, MLIR emission, C runtime,
+and display formatting.
+
+- **Typechecker** (`typechecker.py`): `_infer_scan`, `_infer_trace`,
+  `_infer_fold`, `_infer_reduce`, `_infer_fold_right` now use
+  `common_numeric_type(init_type, element_type)` when both are
+  `ScalarType` and `is_numeric`, so `float` init + `float64` array
+  produces a `float64` result.  `is_numeric` guard prevents spurious
+  `common_numeric_type` calls on bool operations.
+- **HIR** (`hir.py`): `_prim_op_name` maps `FLOAT64` → suffix `"d"`
+  (e.g. `+d` for `arith.addf` with f64 operands).
+- **MLIR type mapping** (`lowering/types.py`): `type_to_mlir` maps
+  `FLOAT64` → `"f64"`.
+- **Arithmetic operations** (`operators.py`): Added `_ARITH_OPS_F64`,
+  `_LLVM_OPS_F64`, `"f64"` entries in dispatch tables, `f64` handling in
+  `comparison_predicate`.
+- **CPU scalar lowering** (`lowering/scalar.py`): `_literal_value` handles
+  `"f64"`; `_cast_if_needed` adds i32→f64 and f32→f64 casts; `_hir_prim_op`
+  and `_emit_prim_op` accept `+d`/`-d`/`*d`/`/d`/`expd`/`logd` ops;
+  `_prim_op_operand` emits f64 constants.
+- **Tensor ops** (`lowering/tensor_ops.py`): Suffix stripping recognises
+  `"d"`; `_cmp_op_to_mlir` handles all suffixes.
+- **Module builder** (`lowering/module.py`): Auto-detect regex for
+  `remora_sort_*` externs updated to include `f64`.
+- **GPU expression compiler** (`_gpu_expr_lowering.py`):
+  `_scalar_type_to_mlir` maps `FLOAT64` → `"f64"`.
+- **Runtime** (`runtime.py`): `_cast_scalar` / `_numpy_dtype` support
+  `FLOAT64`; `_eval_expr_node` handles `Float64Lit`.
+- **AD tracer** (`ad.py`): `_trace_node` handles `Float64Lit` → `push_const`.
+- **Display** (`display.py`): FLOAT64 formatting (`.15g`); array formatter
+  selects FLOAT64 for `float64` element arrays.
+- **Executor** (`executor.py`): `_PLAN_DTYPES` includes `"f64"`/`"float64"`.
+
+### f64 C runtime extensions (`remora_rt.c`)
+
+- Added `_cmp_f64_asc` comparison helper.
+- Added `remora_sort_f64` (qsort-based).
+- Added `_cmp_grade_f64` and `remora_grade_f64`.
+- Added 1d aliases `remora_sort_1d_f64` and `remora_grade_1d_f64`.
+
+### f64 literal syntax (`1.0d`)
+
+- **AST node** (`ast_nodes.py`): New `Float64Lit` dataclass, added to
+  `Expr` type union.
+- **Lisp reader** (`lisp_reader.py`): `FLOAT64` terminal with `d` suffix
+  regex; `float64_lit` transformer strips suffix before `float()`.
+- **ML grammar** (`grammar.lark`): `FLOAT64` terminal + `float64_lit`
+  rule in `primary`.
+- **ML parser** (`parser.py`): `float64_lit` method, `Float64Lit` import.
+- **Type checker**: `Float64Lit` → `FLOAT64` type.
+- **HIR**: `Float64Lit` → `HIRLit(value, FLOAT64)`.
+- **Interpreter**: `Float64Lit` → `float(value)`.
+
+### Cache invalidation on C runtime changes
+
+- `compute_cache_key` now includes a hash of `remora_rt.c` so changes
+  to the C runtime invalidate stale cached `.so` files.
+
+### Verified f64 CPU operations
+
+identity, reduce, map, fold, scan, reverse, rotate, append, sort — all
+produce correct numeric results on the CPU compiled path.
+
 ## heat1d Lunar Thermal Model + CPU Lowering Gaps Closed (June 2026)
 
 ### Scientific notation in Lisp reader

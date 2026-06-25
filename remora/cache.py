@@ -67,6 +67,8 @@ def compute_cache_key(
         # Include toolchain info (mlir-opt, llc versions)
         f"toolchain:{_toolchain_fingerprint()}",
         f"pipeline_version:3",
+        # Include C runtime hash — changes to remora_rt.c invalidate stale .so files.
+        f"runtime_c:{_runtime_hash()}",
     ]
     canonical = "\n".join(parts)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -94,6 +96,15 @@ def _remora_version() -> str:
     except Exception:
         pass
     return "0.1.0"
+
+
+def _runtime_hash() -> str:
+    """Hash of remora_rt.c — changes invalidate stale cached .so files."""
+    rt_c = Path(__file__).resolve().parent / "remora_rt.c"
+    try:
+        return _hash_bytes(rt_c.read_bytes())
+    except Exception:
+        return "unknown"
 
 
 def _toolchain_fingerprint() -> str:

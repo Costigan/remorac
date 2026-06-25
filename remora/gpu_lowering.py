@@ -21,7 +21,7 @@ from remora._gpu_map_support import (
     analyze_supported_i32_map_function,
 )
 from remora.errors import RemoraError
-from remora.hir import HIRFold, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.hir import HIRFold, HIRFoldRight, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRVar
 from remora.hir import HIRApply
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
@@ -937,10 +937,13 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     if len(function.params) != 1:
         raise GPUScaffoldError("GPU multi-block scan requires one parameter")
     param_type = function.params[0].type
-    if not isinstance(param_type, ArrayType) or param_type.element != FLOAT:
-        raise GPUScaffoldError("GPU multi-block scan supports f32 only")
+    if not isinstance(param_type, ArrayType):
+        raise GPUScaffoldError("GPU multi-block scan requires an array parameter")
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU multi-block scan supports rank-1 only")
+    _mb_is_int = param_type.element == INT
+    if param_type.element not in (FLOAT, INT):
+        raise GPUScaffoldError("GPU multi-block scan supports f32 and i32 only")
 
     from remora.hir import HIRScan as _HIRScan
     if not isinstance(function.body, _HIRScan):
@@ -963,8 +966,12 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     if N <= BS:
         raise GPUScaffoldError("Use single-block scan for N <= block_size")
     num_blocks = (N + BS - 1) // BS
-    if num_blocks > 1024:
-        raise GPUScaffoldError(f"N={N} requires {num_blocks} blocks (max 1024)")
+    _level2_needed = num_blocks > 1024
+    if _level2_needed and num_blocks > BS * 1024:
+        raise GPUScaffoldError(
+            f"N={N} requires {num_blocks} blocks (max {BS * 1024}; "
+            f"for larger N, a third recursion level is needed)"
+        )
 
     import math
     max_d_local = math.ceil(math.log2(BS))
@@ -1165,6 +1172,223 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
       llvm.return
     }}
 
+"""
+    if _level2_needed:
+        L2_N = num_blocks
+        L2_NB = (L2_N + BS - 1) // BS
+        max_d_l2 = math.ceil(math.log2(L2_NB)) if L2_NB > 1 else 1
+
+        l2_local = f"{base}_l2_local"
+        l2_extract = f"{base}_l2_extract"
+        l2_sums = f"{base}_l2_sums"
+        l2_prop = f"{base}_l2_prop"
+
+        text += f"""
+    llvm.func @{l2_local}(%in_desc: !llvm.ptr, %out_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k2_desc)}  <!-- reuse extract descriptors : in→scanned, out→block_sums -->
+      %tid = nvvm.read.ptx.sreg.tid.x : i32
+      %tid64 = llvm.sext %tid : i32 to i64
+      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %bid = llvm.sext %bid32 : i32 to i64
+      %BS_c = llvm.mlir.constant({BS} : index) : i64
+      %N_c = llvm.mlir.constant({L2_N} : index) : i64
+      %base = llvm.mul %bid, %BS_c  : i64
+      %gidx = llvm.add %base, %tid64  : i64
+      %ok = llvm.icmp "ult" %gidx, %N_c : i64
+      %shmem = llvm.mlir.addressof @mb_shmem : !llvm.ptr<3>
+      %zf = llvm.mlir.constant({_mb_ident} : f32) : f32
+      llvm.cond_br %ok, ^load_l2, ^oob_l2
+
+    ^load_l2:
+      %si = llvm.add %in_offset, %gidx  : i64
+      %sp = llvm.getelementptr %in_aligned[%si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %val = llvm.load %sp : !llvm.ptr -> f32
+      %mp = llvm.getelementptr %shmem[0, %tid64] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      llvm.store %val, %mp : f32, !llvm.ptr<3>
+      llvm.br ^sync_l2
+
+    ^oob_l2:
+      %mp2 = llvm.getelementptr %shmem[0, %tid64] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      llvm.store %zf, %mp2 : f32, !llvm.ptr<3>
+      llvm.br ^sync_l2
+
+    ^sync_l2:
+      nvvm.barrier0
+      %c0 = llvm.mlir.constant(0 : index) : i64
+      %c1 = llvm.mlir.constant(1 : index) : i64
+      %c2 = llvm.mlir.constant(2 : index) : i64
+      %maxd = llvm.mlir.constant({max_d_local} : index) : i64
+      llvm.br ^loop_l2(%c0, %c1 : i64, i64)
+
+    ^loop_l2(%d: i64, %stride: i64):
+      %ld = llvm.icmp "uge" %d, %maxd : i64
+      llvm.cond_br %ld, ^write_l2, ^step_l2
+
+    ^step_l2:
+      %act = llvm.icmp "uge" %tid64, %stride : i64
+      %pr = llvm.sub %tid64, %stride  : i64
+      %sp2 = llvm.select %act, %pr, %c0 : i1, i64
+      %pp = llvm.getelementptr %shmem[0, %sp2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %pv = llvm.load %pp : !llvm.ptr<3> -> f32
+      %tmp = llvm.select %act, %pv, %zf : i1, f32
+      nvvm.barrier0
+      %mp3 = llvm.getelementptr %shmem[0, %tid64] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %cur = llvm.load %mp3 : !llvm.ptr<3> -> f32
+      %new = llvm.fadd %cur, %tmp  : f32
+      %res = llvm.select %act, %new, %cur : i1, f32
+      llvm.store %res, %mp3 : f32, !llvm.ptr<3>
+      nvvm.barrier0
+      %nd = llvm.add %d, %c1  : i64
+      %ns = llvm.mul %stride, %c2  : i64
+      llvm.br ^loop_l2(%nd, %ns : i64, i64)
+
+    ^write_l2:
+      llvm.cond_br %ok, ^wb_l2, ^done_l2
+
+    ^wb_l2:
+      %mp4 = llvm.getelementptr %shmem[0, %tid64] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<{BS} x f32>
+      %fv = llvm.load %mp4 : !llvm.ptr<3> -> f32
+      %oi = llvm.add %out_offset, %gidx  : i64
+      %op = llvm.getelementptr %out_aligned[%oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %fv, %op : f32, !llvm.ptr
+      llvm.br ^done_l2
+
+    ^done_l2:
+      llvm.return
+    }}
+
+    llvm.func @{l2_extract}(%sc_desc: !llvm.ptr, %bs_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+      %tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tid = llvm.sext %tid32 : i32 to i64
+      %NB = llvm.mlir.constant({L2_NB} : index) : i64
+      %BS_c = llvm.mlir.constant({BS} : index) : i64
+      %c1 = llvm.mlir.constant(1 : index) : i64
+      %ok = llvm.icmp "ult" %tid, %NB : i64
+      llvm.cond_br %ok, ^work, ^done
+
+    ^work:
+      %next = llvm.add %tid, %c1  : i64
+      %end = llvm.mul %next, %BS_c  : i64
+      %last = llvm.sub %end, %c1  : i64
+      %N_c = llvm.mlir.constant({L2_N} : index) : i64
+      %clamp = llvm.icmp "ult" %last, %N_c : i64
+      %safe = llvm.sub %N_c, %c1  : i64
+      %idx = llvm.select %clamp, %last, %safe : i1, i64
+      %si = llvm.add %sc_offset, %idx  : i64
+      %sp = llvm.getelementptr %sc_aligned[%si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %val = llvm.load %sp : !llvm.ptr -> f32
+      %oi = llvm.add %bs_offset, %tid  : i64
+      %op = llvm.getelementptr %bs_aligned[%oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %val, %op : f32, !llvm.ptr
+      llvm.br ^done
+
+    ^done:
+      llvm.return
+    }}
+
+    llvm.func @{l2_sums}(%sums_desc: !llvm.ptr, %pfx_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+      %tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tid = llvm.sext %tid32 : i32 to i64
+      %NB = llvm.mlir.constant({L2_NB} : index) : i64
+      %ok = llvm.icmp "ult" %tid, %NB : i64
+      %shmem = llvm.mlir.addressof @mb_shmem2 : !llvm.ptr<3>
+      %zf = llvm.mlir.constant({_mb_ident} : f32) : f32
+      llvm.cond_br %ok, ^load, ^oob
+
+    ^load:
+      %si = llvm.add %sums_offset, %tid  : i64
+      %sp = llvm.getelementptr %sums_aligned[%si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %val = llvm.load %sp : !llvm.ptr -> f32
+      %mp = llvm.getelementptr %shmem[0, %tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      llvm.store %val, %mp : f32, !llvm.ptr<3>
+      llvm.br ^sync
+
+    ^oob:
+      %mp2 = llvm.getelementptr %shmem[0, %tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      llvm.store %zf, %mp2 : f32, !llvm.ptr<3>
+      llvm.br ^sync
+
+    ^sync:
+      nvvm.barrier0
+      %c0 = llvm.mlir.constant(0 : index) : i64
+      %c1 = llvm.mlir.constant(1 : index) : i64
+      %c2 = llvm.mlir.constant(2 : index) : i64
+      %maxd = llvm.mlir.constant({max_d_l2} : index) : i64
+      llvm.br ^loop(%c0, %c1 : i64, i64)
+
+    ^loop(%d: i64, %stride: i64):
+      %ld = llvm.icmp "uge" %d, %maxd : i64
+      llvm.cond_br %ld, ^write, ^step
+
+    ^step:
+      %act = llvm.icmp "uge" %tid, %stride : i64
+      %pr = llvm.sub %tid, %stride  : i64
+      %sp2 = llvm.select %act, %pr, %c0 : i1, i64
+      %pp = llvm.getelementptr %shmem[0, %sp2] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %pv = llvm.load %pp : !llvm.ptr<3> -> f32
+      %tmp = llvm.select %act, %pv, %zf : i1, f32
+      nvvm.barrier0
+      %mp3 = llvm.getelementptr %shmem[0, %tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %cur = llvm.load %mp3 : !llvm.ptr<3> -> f32
+      %new = llvm.fadd %cur, %tmp  : f32
+      %res = llvm.select %act, %new, %cur : i1, f32
+      llvm.store %res, %mp3 : f32, !llvm.ptr<3>
+      nvvm.barrier0
+      %nd = llvm.add %d, %c1  : i64
+      %ns = llvm.mul %stride, %c2  : i64
+      llvm.br ^loop(%nd, %ns : i64, i64)
+
+    ^write:
+      llvm.cond_br %ok, ^wb, ^done
+
+    ^wb:
+      %mp4 = llvm.getelementptr %shmem[0, %tid] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, !llvm.array<1024 x f32>
+      %fv = llvm.load %mp4 : !llvm.ptr<3> -> f32
+      %oi = llvm.add %pfx_offset, %tid  : i64
+      %op = llvm.getelementptr %pfx_aligned[%oi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %fv, %op : f32, !llvm.ptr
+      llvm.br ^done
+
+    ^done:
+      llvm.return
+    }}
+
+    llvm.func @{l2_prop}(%pfx_desc: !llvm.ptr, %sc_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+      %tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %tid = llvm.sext %tid32 : i32 to i64
+      %bid32 = nvvm.read.ptx.sreg.ctaid.x : i32
+      %bid = llvm.sext %bid32 : i32 to i64
+      %c0 = llvm.mlir.constant(0 : index) : i64
+      %is_b0 = llvm.icmp "eq" %bid, %c0 : i64
+      llvm.cond_br %is_b0, ^done, ^work
+
+    ^work:
+      %BS_c = llvm.mlir.constant({BS} : index) : i64
+      %N_c = llvm.mlir.constant({L2_N} : index) : i64
+      %c1 = llvm.mlir.constant(1 : index) : i64
+      %prev = llvm.sub %bid, %c1  : i64
+      %pi = llvm.add %pfx_offset, %prev  : i64
+      %pp = llvm.getelementptr %pfx_aligned[%pi] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %prefix = llvm.load %pp : !llvm.ptr -> f32
+      %base = llvm.mul %bid, %BS_c  : i64
+      %gidx = llvm.add %base, %tid  : i64
+      %ok = llvm.icmp "ult" %gidx, %N_c : i64
+      llvm.cond_br %ok, ^add, ^done
+
+    ^add:
+      %si = llvm.add %sc_offset, %gidx  : i64
+      %sp = llvm.getelementptr %sc_aligned[%si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %val = llvm.load %sp : !llvm.ptr -> f32
+      %new = llvm.fadd %val, %prefix  : f32
+      llvm.store %new, %sp : f32, !llvm.ptr
+      llvm.br ^done
+
+    ^done:
+      llvm.return
+    }}
+"""
+
+    text += f"""
     llvm.func @{propagate_name}(%prefix_desc: !llvm.ptr, %scanned_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
 {chr(10).join(k4_desc)}
       %sp_tid32 = nvvm.read.ptx.sreg.tid.x : i32
@@ -1201,8 +1425,10 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
     }}
   }}
 }}"""
-    # Post-process for non-default scan modes (inclusive-add is default)
-    if _mb_op != "fadd" or _mb_ident != "0.000000e+00":
+    # Post-process for non-default scan modes
+    if _mb_is_int:
+        text = _replace_elem_type(text, "f32", "i32", replace_ops=True, replace_identity=True)
+    elif _mb_op != "fadd" or _mb_ident != "0.000000e+00":
         text = text.replace("llvm.fadd", f"llvm.{_mb_op}")
         text = text.replace("0.000000e+00", _mb_ident)
     return GPUModuleScaffold(text, module_name, propagate_name)
@@ -2280,8 +2506,8 @@ class F32ReductionKernel:
 
 def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
     """Analyze a HIR fold/map+fold function and return an F32ReductionKernel or raise."""
-    if not isinstance(function.body, HIRFold):
-        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports fold bodies only")
+    if not isinstance(function.body, (HIRFold, HIRFoldRight)):
+        raise GPUScaffoldError("descriptor ABI GPU reduction currently supports fold and fold-right bodies only")
     if function.return_type not in (FLOAT, INT, _FLOAT64):
         raise GPUScaffoldError("descriptor ABI GPU reduction supports f32, f64, and i32 scalar outputs only")
     if not (
@@ -4795,8 +5021,11 @@ def build_descriptor_abi_parallel_scatter_add_gpu_module(
     if len(shape) != 1:
         raise GPUScaffoldError("GPU parallel scatter-add supports rank-1 only")
     N = shape[0]
-    if N > 1024:
-        raise GPUScaffoldError("GPU parallel scatter-add requires N ≤ 1024")
+    _use_atomic = N > 1024
+    if not _use_atomic:
+        # Single-block parallel approach: all threads copy, barrier, thread-0 add
+        pass  # existing path
+    # else: use atomicrmw (handled in text generation below)
 
     name = kernel_name or f"remora_{function.name}_scatter"
     _validate_scaffold_names(module_name, name)
@@ -4844,7 +5073,34 @@ def build_descriptor_abi_parallel_scatter_add_gpu_module(
 
     all_params = ["%input0_desc: !llvm.ptr"] + scalar_params + ["%output_desc: !llvm.ptr"]
 
-    text = f"""module {{
+    if _use_atomic:
+        # For N > 1024, use global atomic add instead of shared-memory barrier.
+        # A single thread performs the indexed atomic update.
+        text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}({", ".join(all_params)}) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %pa_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %pa_tid = llvm.sext %pa_tid32 : i32 to i64
+      %pa_zero = llvm.mlir.constant(0 : index) : i64
+      %pa_is_t0 = llvm.icmp "eq" %pa_tid, %pa_zero : i64
+      llvm.cond_br %pa_is_t0, ^pa_work, ^pa_done
+
+    ^pa_work:
+{idx_load}
+{upd_load}
+      %pa_aoff = llvm.add %out_offset, %pa_idx  : i64
+      %pa_ap = llvm.getelementptr %out_aligned[%pa_aoff] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %pa_unused = llvm.atomicrmw fadd %pa_ap, {upd_ssa} monotonic : !llvm.ptr, f32
+      llvm.br ^pa_done
+
+    ^pa_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    else:
+        text = f"""module {{
   gpu.module @{module_name} {{
     llvm.func @{name}({", ".join(all_params)}) attributes {{gpu.kernel, nvvm.kernel}} {{
 {chr(10).join(desc_lines)}

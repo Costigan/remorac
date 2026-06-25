@@ -50,6 +50,7 @@ from remora.ast_nodes import (
     Definition,
     Expr,
     FloatLit,
+    Float64Lit,
     FirstExpr,
     FoldExpr,
     FoldRightExpr,
@@ -102,7 +103,7 @@ from remora.ast_nodes import (
     VarExpr,
     WithShapeExpr,
 )
-from remora.types import BOOL, FLOAT, FuncType, INT, ArrayType, PairType, RemoraType, StaticDim, TypeBinder, TypeVar
+from remora.types import BOOL, FLOAT, FLOAT64, FuncType, INT, ArrayType, PairType, RemoraType, StaticDim, TypeBinder, TypeVar
 
 _GRAMMAR = r"""
 program: sexpr*
@@ -111,6 +112,7 @@ program: sexpr*
       | rerank_form
       | array_lit
       | BOOL -> bool_lit
+      | FLOAT64 -> float64_lit
       | FLOAT -> float_lit
       | INT -> int_lit
       | NAME -> var
@@ -198,9 +200,11 @@ typed_param_spec: name_token type_expr -> param_typed
 scalar_type: "Int" -> type_int
             | "Float" -> type_float
             | "Bool" -> type_bool
+            | "Float64" -> type_float64
             | "int" -> type_int
             | "float" -> type_float
             | "bool" -> type_bool
+            | "float64" -> type_float64
             | NAME -> type_var
 
 dim_ref: INT -> dim_lit
@@ -275,6 +279,7 @@ application: sexpr sexpr* -> app
 BOOL: "#t" | "#f"
 INT: /-?[0-9]+/
 FLOAT: /-?(([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)/
+FLOAT64: /-?(([0-9]+\.[0-9]*|[0-9]*\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)d/
 NAME: /[a-zA-Z_+\/*<=>!&|?][a-zA-Z0-9_+\-*\/\<=>!&|?']*/
 MINUS: "-"
 
@@ -410,6 +415,9 @@ class LispASTBuilder(Transformer):
     def type_float(self, items: list[Any]) -> RemoraType:
         return FLOAT
 
+    def type_float64(self, items: list[Any]) -> RemoraType:
+        return FLOAT64
+
     def type_bool(self, items: list[Any]) -> RemoraType:
         return BOOL
 
@@ -418,7 +426,7 @@ class LispASTBuilder(Transformer):
 
     def array_type(self, items: list[Any]) -> RemoraType:
         element = items[0]
-        if element not in (INT, FLOAT, BOOL) and not isinstance(element, TypeVar):
+        if element not in (INT, FLOAT, BOOL, FLOAT64) and not isinstance(element, TypeVar):
             raise TypeError("array element type must be scalar or type variable")
         return ArrayType(element, tuple(items[1:]))
 
@@ -700,6 +708,10 @@ class LispASTBuilder(Transformer):
 
     def float_lit(self, items: list[Any]) -> FloatLit:
         return FloatLit(float(items[0]), self._loc_from(items))
+
+    def float64_lit(self, items: list[Any]) -> Float64Lit:
+        s = str(items[0])
+        return Float64Lit(float(s[:-1]), self._loc_from(items))
 
     def bool_lit(self, items: list[Any]) -> BoolLit:
         val = str(items[0]) == "#t"

@@ -209,6 +209,9 @@ def enforce_rank_limit(value_type: RemoraType, loc: SourceLoc | None = None) -> 
 
 
 def common_numeric_type(left: RemoraType, right: RemoraType) -> ScalarType:
+    if left == FLOAT64 or right == FLOAT64:
+        if is_numeric(left) and is_numeric(right):
+            return FLOAT64
     if left == FLOAT or right == FLOAT:
         if is_numeric(left) and is_numeric(right):
             return FLOAT
@@ -218,4 +221,4 @@ def common_numeric_type(left: RemoraType, right: RemoraType) -> ScalarType:
 
 
 def is_numeric(value_type: RemoraType) -> bool:
-    return value_type in (INT, FLOAT)
+    return value_type in (INT, FLOAT, FLOAT64)

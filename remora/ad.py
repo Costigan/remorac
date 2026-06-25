@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from remora.ast_nodes import FloatLit, IntLit, OperatorFuncExpr, VarExpr
+from remora.ast_nodes import FloatLit, Float64Lit, IntLit, OperatorFuncExpr, VarExpr
 from remora.typechecker import (
     TypedApp,
     TypedAppend,
@@ -311,6 +311,8 @@ def _value(tape: EvalTape, idx: int) -> np.ndarray:
 def _trace_node(expr: TypedExprNode, env: dict[str, int], tape: EvalTape) -> int:
     ast = expr.expr
     if isinstance(ast, FloatLit):
+        return tape.push_const(ast.value)
+    if isinstance(ast, Float64Lit):
         return tape.push_const(ast.value)
     if isinstance(ast, IntLit):
         return tape.push_const(float(ast.value))

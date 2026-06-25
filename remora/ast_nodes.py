@@ -418,6 +418,12 @@ class FloatLit:
 
 
 @dataclass(frozen=True)
+class Float64Lit:
+    value: float
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class BoolLit:
     value: bool
     loc: SourceLoc
@@ -496,6 +502,7 @@ Expr: TypeAlias = (
     | VarExpr
     | IntLit
     | FloatLit
+    | Float64Lit
     | BoolLit
     | ArrayLit
     | IndexExpr

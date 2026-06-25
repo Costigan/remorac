@@ -28,6 +28,9 @@ from remora.hir import (
     HIRLet,
     HIRLit,
     HIRMap,
+    HIRPair,
+    HIRFirst,
+    HIRSecond,
     HIRPrimCallable,
     HIRPrimOp,
     HIRRavel,
@@ -43,7 +46,7 @@ from remora.hir import (
     HIRVar,
     HIRWithShape,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, StaticDim
+from remora.types import BOOL, FLOAT, FLOAT64, INT, ArrayType, ScalarType, StaticDim
 
 
 # ---------------------------------------------------------------------------
@@ -277,11 +280,16 @@ class _CompileCtx:
     input_flat_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
     input_broadcast_skip: dict[str, int] = field(default_factory=dict)
     input_element_types: dict[str, str] = field(default_factory=dict)
+    # Phase 6.3: function definitions for HIRCall inlining.
+    # Populated by the general map builder from the containing HIRFunction.
+    functions: dict = field(default_factory=dict)
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
     if t == FLOAT:
         return "f32"
+    if t == FLOAT64:
+        return "f64"
     if t == INT:
         return "i32"
     if t == BOOL:
@@ -306,6 +314,7 @@ def gpu_expr_from_hir(
     input_flat_shapes: dict[str, tuple[int, ...]] | None = None,
     input_broadcast_skip: dict[str, int] | None = None,
     input_element_types: dict[str, str] | None = None,
+    functions: dict | None = None,
 ) -> GpuExpr:
     """Compile a HIR expression to a GpuExpr."""
     ctx = _CompileCtx(
@@ -318,6 +327,7 @@ def gpu_expr_from_hir(
         input_flat_shapes=dict(input_flat_shapes or {}),
         input_broadcast_skip=dict(input_broadcast_skip or {}),
         input_element_types=dict(input_element_types or {}),
+        functions=dict(functions or {}),
     )
     return _lower_hir(expr, ctx)
 
@@ -482,11 +492,48 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
             f"{ctx.context}: HIRScatterAdd requires compile-time constant index"
         )
 
-    # HIRCall — recursive/named function calls not yet supported on GPU
+    # HIRCall — inline callee body for non-recursive calls (Phase 6.3)
     if isinstance(expr, HIRCall):
+        callee_name = expr.func_name if hasattr(expr, 'func_name') else None
+        if callee_name and callee_name in ctx.functions:
+            from remora.compiler import _substitute_hir
+            callee_fn = ctx.functions[callee_name]
+            subs = {}
+            for i, p in enumerate(callee_fn.params):
+                if i < len(expr.args):
+                    subs[p.name] = expr.args[i]
+            inlined = _substitute_hir(callee_fn.body, subs)
+            return _lower_hir(inlined, ctx)
         raise GPUScaffoldError(
-            f"{ctx.context}: recursive function calls are not supported on GPU"
+            f"{ctx.context}: function calls are not supported on GPU"
         )
+
+    # HIRPair / HIRFirst / HIRSecond — pair construction and projection
+    if isinstance(expr, HIRPair):
+        left = _lower_hir(expr.left, ctx)
+        right = _lower_hir(expr.right, ctx)
+        # Represent pairs as 2-component arrays for GPU emission
+        if isinstance(left, GpuArrayExpr) and isinstance(right, GpuArrayExpr):
+            return GpuArrayExpr(
+                components=list(left.components) + list(right.components),
+                element_type=left.element_type,
+            )
+        left_comps = left.components if isinstance(left, GpuArrayExpr) else [left]
+        right_comps = right.components if isinstance(right, GpuArrayExpr) else [right]
+        elem_type = getattr(left_comps[0], 'element_type', 'f32') if left_comps else 'f32'
+        return GpuArrayExpr(components=left_comps + right_comps, element_type=elem_type)
+
+    if isinstance(expr, HIRFirst):
+        inner = _lower_hir(expr.pair, ctx)
+        if isinstance(inner, GpuArrayExpr):
+            return inner.components[0] if len(inner.components) > 0 else inner
+        return inner
+
+    if isinstance(expr, HIRSecond):
+        inner = _lower_hir(expr.pair, ctx)
+        if isinstance(inner, GpuArrayExpr):
+            return inner.components[1] if len(inner.components) > 1 else inner
+        return inner
 
     raise GPUScaffoldError(
         f"{ctx.context}: unsupported HIR node {type(expr).__name__}"

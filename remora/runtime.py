@@ -77,7 +77,7 @@ def _get_remora_rt_o() -> str:
 
 from remora.abi import make_numpy_memref_descriptor
 from remora.compiler import compile_function_source, compile_source
-from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, FuncDef, GradeExpr, GradExpr, IfExpr, IntLit, IotaExpr, LambdaExpr, ReplicateExpr, SortExpr, VarExpr
+from remora.ast_nodes import BoolLit, FilterExpr, FloatLit, Float64Lit, FuncDef, GradeExpr, GradExpr, IfExpr, IntLit, IotaExpr, LambdaExpr, ReplicateExpr, SortExpr, VarExpr
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.operators import ALL_PRIMITIVE_OPS
@@ -138,7 +138,7 @@ from remora.typechecker import (
     TypedCol2im,
     TypedMatmul,
 )
-from remora.types import ArrayType, BOOL, FLOAT, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim, TypeVar
+from remora.types import ArrayType, BOOL, FLOAT, FLOAT64, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim, TypeVar
 
 
 class RuntimeUnavailable(RemoraError):
@@ -594,7 +594,7 @@ def _pack_cuda_kernel_args(
         elif isinstance(arg, np.integer):
             c_arg = ctypes.c_int64(int(arg))
         elif isinstance(arg, np.floating):
-            c_arg = ctypes.c_float(float(arg))
+            c_arg = ctypes.c_double(float(arg)) if arg.dtype == np.float64 else ctypes.c_float(float(arg))
         else:
             raise CUDAError(f"unsupported CUDA kernel argument type {type(arg).__name__}")
         packed_args.append(c_arg)
@@ -1633,6 +1633,8 @@ def _eval_expr_node(expr: TypedExprNode, env: Env) -> Value:
         return int(ast.value)
     if isinstance(ast, FloatLit):
         return float(ast.value)
+    if isinstance(ast, Float64Lit):
+        return float(ast.value)
     if isinstance(ast, BoolLit):
         return bool(ast.value)
     if isinstance(ast, VarExpr):
@@ -2020,6 +2022,8 @@ def _cast_scalar(value: Value, value_type: ScalarType) -> Value:
         return int(value)
     if value_type == FLOAT:
         return float(value)
+    if value_type == FLOAT64:
+        return float(value)
     if value_type == BOOL:
         return bool(value)
     raise EvaluationError(f"cannot cast runtime value to {value_type}")
@@ -2030,6 +2034,8 @@ def _numpy_dtype(element_type: ScalarType) -> np.dtype:
         return np.dtype(np.int32)
     if element_type == FLOAT:
         return np.dtype(np.float32)
+    if element_type == FLOAT64:
+        return np.dtype(np.float64)
     if element_type == BOOL:
         return np.dtype(np.bool_)
     raise EvaluationError(f"unsupported array element type {element_type}")

@@ -15,6 +15,7 @@ from remora.ast_nodes import (
     Definition,
     Expr,
     FloatLit,
+    Float64Lit,
     FoldExpr,
     FoldRightExpr,
     FuncDef,
@@ -102,6 +103,7 @@ from remora.operators import ALL_PRIMITIVE_OPS, UNARY_FLOAT_OPS
 from remora.types import (
     BOOL,
     FLOAT,
+    FLOAT64,
     INT,
     ArrayType,
     DimExpr,
@@ -801,6 +803,8 @@ class TypeChecker:
             return TypedExprNode(expr, INT)
         if isinstance(expr, FloatLit):
             return TypedExprNode(expr, FLOAT)
+        if isinstance(expr, Float64Lit):
+            return TypedExprNode(expr, FLOAT64)
         if isinstance(expr, BoolLit):
             return TypedExprNode(expr, BOOL)
         if isinstance(expr, VarExpr):
@@ -1880,7 +1884,13 @@ class TypeChecker:
         if isinstance(element_type, ArrayType):
             self._require(typed_init.type, element_type, expr.loc)
 
-        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        result_elem = (
+            common_numeric_type(typed_init.type, element_type)
+            if isinstance(typed_init.type, ScalarType) and isinstance(element_type, ScalarType)
+               and is_numeric(typed_init.type) and is_numeric(element_type)
+            else typed_init.type
+        )
+        expected_func_type = FuncType((result_elem, element_type), result_elem)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
         return TypedFold(
             expr,
@@ -1888,7 +1898,7 @@ class TypeChecker:
             typed_init,
             typed_array,
             typed_array.type.shape[0],
-            typed_init.type,
+            result_elem,
         )
 
     def _infer_reduce(self, expr: ReduceExpr, env: TypeEnv) -> TypedFold:
@@ -1903,7 +1913,13 @@ class TypeChecker:
         if isinstance(element_type, ArrayType):
             self._require(typed_init.type, element_type, expr.loc)
 
-        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        result_elem = (
+            common_numeric_type(typed_init.type, element_type)
+            if isinstance(typed_init.type, ScalarType) and isinstance(element_type, ScalarType)
+               and is_numeric(typed_init.type) and is_numeric(element_type)
+            else typed_init.type
+        )
+        expected_func_type = FuncType((result_elem, element_type), result_elem)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
         return TypedFold(
             expr,  # type: ignore[arg-type]
@@ -1911,7 +1927,7 @@ class TypeChecker:
             typed_init,
             typed_array,
             typed_array.type.shape[0],
-            typed_init.type,
+            result_elem,
         )
 
     def _infer_fold_right(self, expr: FoldRightExpr, env: TypeEnv) -> TypedFoldRight:
@@ -1924,7 +1940,13 @@ class TypeChecker:
         if isinstance(element_type, ArrayType):
             self._require(typed_init.type, element_type, expr.loc)
 
-        expected_func_type = FuncType((element_type, typed_init.type), typed_init.type)
+        result_elem = (
+            common_numeric_type(typed_init.type, element_type)
+            if isinstance(typed_init.type, ScalarType) and isinstance(element_type, ScalarType)
+               and is_numeric(typed_init.type) and is_numeric(element_type)
+            else typed_init.type
+        )
+        expected_func_type = FuncType((element_type, result_elem), result_elem)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
         return TypedFoldRight(
             expr,
@@ -1932,7 +1954,7 @@ class TypeChecker:
             typed_init,
             typed_array,
             typed_array.type.shape[0],
-            typed_init.type,
+            result_elem,
         )
 
     def _infer_scan(self, expr: ScanExpr, env: TypeEnv) -> TypedScan:
@@ -1943,9 +1965,16 @@ class TypeChecker:
 
         element_type = typed_array.type.drop_outer(1)
 
-        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        # Use common numeric type for init+element, so float init + float64 array → float64 result
+        result_elem = (
+            common_numeric_type(typed_init.type, element_type)
+            if isinstance(typed_init.type, ScalarType) and isinstance(element_type, ScalarType)
+               and is_numeric(typed_init.type) and is_numeric(element_type)
+            else typed_init.type
+        )
+        expected_func_type = FuncType((result_elem, element_type), result_elem)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
-        result_type: RemoraType = typed_init.type
+        result_type: RemoraType = result_elem
         if isinstance(result_type, ScalarType):
             result_type = ArrayType(result_type, (typed_array.type.shape[0],))
         elif isinstance(result_type, ArrayType):
@@ -1972,9 +2001,16 @@ class TypeChecker:
 
         element_type = typed_array.type.drop_outer(1)
 
-        expected_func_type = FuncType((typed_init.type, element_type), typed_init.type)
+        # Use common numeric type for init+element, so float init + float64 array → float64 result
+        result_elem = (
+            common_numeric_type(typed_init.type, element_type)
+            if isinstance(typed_init.type, ScalarType) and isinstance(element_type, ScalarType)
+               and is_numeric(typed_init.type) and is_numeric(element_type)
+            else typed_init.type
+        )
+        expected_func_type = FuncType((result_elem, element_type), result_elem)
         typed_func = self.check_callable(expr.func, expected_func_type, env)
-        result_type: RemoraType = typed_init.type
+        result_type: RemoraType = result_elem
         if isinstance(result_type, ScalarType):
             result_type = ArrayType(result_type, (typed_array.type.shape[0],))
         elif isinstance(result_type, ArrayType):
@@ -3131,6 +3167,12 @@ class TypeChecker:
             return typed
         if typed.type == INT and expected_type == FLOAT:
             return TypedCast(typed, INT, FLOAT, FLOAT)
+        if typed.type == FLOAT and expected_type == FLOAT64:
+            return TypedCast(typed, FLOAT, FLOAT64, FLOAT64)
+        if typed.type == INT and expected_type == FLOAT64:
+            return TypedCast(typed, INT, FLOAT64, FLOAT64)
+        if typed.type == FLOAT64 and expected_type == FLOAT:
+            return TypedCast(typed, FLOAT64, FLOAT, FLOAT)
         raise RemoraTypeError(f"expected {expected_type}, got {typed.type}", loc)
 
     def _require(self, actual: RemoraType, expected: RemoraType, loc) -> None:

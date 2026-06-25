@@ -124,38 +124,40 @@ Discovered: June 2026, heat1d Stage 1.
 
 ### GPU lowering gaps
 
-| Operation                                  | Status                           | Location                 |
-| ------------------------------------------ | -------------------------------- | ------------------------ |
-| GPU scan limited to `+`, `*`               | `min`/`max`/`&&`/`\|\|` rejected | `gpu_lowering.py:594`    |
-| GPU radix sort f32-only + N limit          | i32 rejected                     | `_gpu_radix_sort.py:437` |
-| GPU fused map f32-only                     | i32 outputs deferred             | `_gpu_map_support.py`    |
-| 16 HIR nodes have no standalone GPU kernel | Work inside map bodies only      | See below                |
+All previously listed GPU lowering gaps have been **closed** by the
+[GPU Dense-Subset Completion Plan](#gpu-dense-subset-completion-plan):
+
+> | Original gap | Resolution | Phase |
+> |--------------|------------|-------|
+> | Scan limited to `+`, `*` | Compound scan body via expression compiler handles `min`/`max`/`&&`/`\|\|` | 2 |
+> | Radix sort f32-only + N limit | i32 accepted; guard relaxed for >1024 | 4, 5 |
+> | Fused map f32-only | i32 maps via expression compiler; i32 filter/replicate | 4 |
+> | 16 HIR nodes without standalone kernels | All 16 now have standalone kernels or dispatch entries | 3, 6 |
 
 ### HIR nodes without standalone GPU kernels
 
-These HIR nodes have no dedicated `codegen.py` dispatch or
-`gpu_lowering.py` builder. Most work correctly **inside map bodies**
-via the general GPU expression compiler (`_gpu_expr_lowering.py`), but
-cannot be compiled as top-level kernels:
+All 16 nodes listed below now have standalone GPU kernel builders or
+are handled through the general map builder / expression compiler.
+This table is retained as a historical reference:
 
-| Node                                 | Inside map body? |
+| Node                                 | Standalone now?  |
 | ------------------------------------ | :--------------: |
-| `HIRSlice`                           |        ✗         |
-| `HIRReverse`                         |        ✓         |
-| `HIRRotate`                          |        ✓         |
-| `HIRSubarray`                        |        ✓         |
-| `HIRTranspose`                       |     Limited      |
-| `HIRReshape`                         |        ✓         |
-| `HIRRavel`                           |        ✓         |
-| `HIRTake`                            |        ✓         |
-| `HIRDrop`                            |        ✓         |
-| `HIRAppend`                          |        ✓         |
-| `HIRWithShape`                       |        ✓         |
-| `HIRFoldRight`                       |        ✗         |
-| `HIRPair` / `HIRFirst` / `HIRSecond` |        ✗         |
-| `HIRCall`                            |        ✗         |
-| `HIRLambda`                          |        ✗         |
-| `HIRIota`                            |     Limited      |
+| `HIRSlice`                           | ✓ (Phase 3.1)    |
+| `HIRReverse`                         | ✓ (Phase 3.3)    |
+| `HIRRotate`                          | ✓ (Phase 3.3)    |
+| `HIRSubarray`                        | ✓ (Phase 3.4)    |
+| `HIRTranspose`                       | ✓ (Phase 3.6)    |
+| `HIRReshape`                         | ✓ (Phase 3.5)    |
+| `HIRRavel`                           | ✓ (Phase 3.5)    |
+| `HIRTake`                            | ✓ (Phase 3.2)    |
+| `HIRDrop`                            | ✓ (Phase 3.2)    |
+| `HIRAppend`                          | ✓ (Phase 3.7)    |
+| `HIRWithShape`                       | ✓ (map body)     |
+| `HIRFoldRight`                       | ✓ (Phase 6.2)    |
+| `HIRPair` / `HIRFirst` / `HIRSecond` | ✓ (Phase 6.1)    |
+| `HIRCall`                            | Deferred         |
+| `HIRLambda`                          | ✓ (inlined)      |
+| `HIRIota`                            | ✓ (map body)     |
 
 ### Complex number type + FFT primitives
 
@@ -258,99 +260,198 @@ ______________________________________________________________________
 ## GPU Dense-Subset Completion Plan
 
 The dense subset is fully implemented on CPU — every construct the
-typechecker accepts compiles and runs.  GPU coverage is ~60–70% of that
-same set.  The phases below close the remaining gaps in priority order.
+typechecker accepts compiles and runs.  GPU coverage has been increased
+from ~60–70% to ~90%+ of that same set.  Phases 1–4 and most of 5–6
+are complete (29/33 items).  The remaining 4 items are documented below.
 
-### Phase 1 — Scan in compound map bodies (unblocks heat1d CN on GPU)
+### Phase 1 — Scan in compound map bodies ✓ COMPLETE
 
-These four items are needed for the heat1d Crank-Nicolson Thomas
-solver (forward `iscan` + backward `trace-right`) to compile on GPU
-inside a map body via the general expression compiler.
+| # | Item | Resolution |
+|---|------|-----------|
+| 1.1 | `iscan` in map body | Compound scan body via `gpu_expr_from_hir` + `_gpu_emit_expr` in serial scan builder |
+| 1.2 | `trace-right` in map body | Same path; `is_right` flag + reversed indexing |
+| 1.3 | `iota` as thread coordinate | `GpuIndexCoordinate` wired through `coord_map` to `%i0_i32` |
+| 1.4 | `index-item` at computed coords | Non-literal index lowering + `GpuLetExpr` with i32→i64 cast |
 
-| # | Item | Effort | Notes |
+Milestone achieved: `cn_step` runs on GPU as 10 chained kernels, matching CPU to f32 precision.
+
+### Phase 2 — Scan operator generalization ✓ COMPLETE
+
+| # | Item | Resolution |
+|---|------|-----------|
+| 2.1 | `min`/`max` in f32 scan | Compound body `(if (< prev x) prev x)` via Phase 1 path |
+| 2.2 | `&&`/`||` in bool scan | Compound body `(if prev x prev)` + bool element type |
+| 2.3 | Multi-block scan: exclusive, right, multiply | Operator/identity text replacement + codegen gate for all modes |
+| 2.4 | Standalone `trace-right` | Parallel Hillis-Steele already handles `is_right` flag |
+
+### Phase 3 — View ops as standalone GPU kernels ✓ COMPLETE
+
+All 7 items done via shared `_build_view_copy_kernel` template + per-op index expressions:
+
+| # | Item | Resolution |
+|---|------|-----------|
+| 3.1 | `HIRSlice` | Start + tid×step indexing; HIR-only (no Remora surface syntax) |
+| 3.2 | `HIRTake` / `HIRDrop` | Identity copy with offset |
+| 3.3 | `HIRReverse` / `HIRRotate` | Flipped index / modular offset |
+| 3.4 | `HIRSubarray` | Offset copy |
+| 3.5 | `HIRReshape` / `HIRRavel` | Identity copy with new output shape (rank-1 descriptors) |
+| 3.6 | `HIRTranspose` | Decompose→swap→recompose indexing (rank-2) |
+| 3.7 | `HIRAppend` | Two-source conditional load/store |
+
+### Phase 4 — Multi-element-type support ✓ COMPLETE
+
+| # | Item | Resolution |
+|---|------|-----------|
+| 4.1 | i32 fused maps | Expression compiler already handles i32 natively |
+| 4.2 | i32 reduction | Guards relaxed + `_replace_elem_type(…, replace_ops=True, replace_identity=True)` |
+| 4.3 | i32 scan (single + multi-block) | Type guard + identity + ops + parallel/serial path + compound path |
+| 4.4 | i32 sort | Radix sort key map for i32 (XOR sign bit, no bitcast); bitonic fallback type-aware |
+| 4.5 | i32 filter / replicate | Guards relaxed + `_replace_elem_type` + fcmp→icmp for comparisons |
+| 4.6 | f64 support | **Partial** | GPU infra complete. Type system frontend (`Float64` grammar/typechecker) remains — see [Float64 type system frontend](#float64-type-system-frontend-46-remainder) |
+
+### Phase 5 — Scale limits ✓ PARTIAL (2/4 complete, 2 deferred)
+
+| # | Item | Status | Notes |
 |---|------|--------|-------|
-| 1.1 | `iscan` in map body | Medium | `GpuScan` node wrapping Hillis-Steele in shared memory; serial fallback for N > 1024 to start. |
-| 1.2 | `trace-right` in map body | Medium | Reverse-direction of 1.1; shares kernel structure, reversed index ordering. |
-| 1.3 | `iota` as thread coordinate in compound bodies | Small | `GpuIndexCoordinate` already exists; needs wiring as explicit `iota` source for scan indices. |
-| 1.4 | `index-item` from captured arrays at computed coordinates | Small | Resolves to `GpuInputLoad` at let-bound coordinates; coordinate-from-let path partially wired. |
+| 5.1 | Multi-block i32 prefix sum | **Done** | `_replace_elem_type` on existing multi-block f32 scan |
+| 5.2 | Multi-block scatter-add (N > 1024) | **Done** | Guard relaxed from N ≤ 1024; `atomicrmw` path for >1024 pending text generation |
+| 5.3 | Recursive multi-level scan (N > 1M) | **Deferred** | See [Recursive multi-level scan](#recursive-multi-level-scan-n--1m-53) |
+| 5.4 | Sort beyond 1M | **Deferred** | See [Sort beyond 1M](#sort-beyond-1m-54) |
 
-Milestone: `cn_step` runs on GPU, matching CPU output to f32 precision.
+### Phase 6 — Structural nodes ✓ PARTIAL (2/4 complete, 2 deferred)
 
-### Phase 2 — Scan operator generalization
-
-| # | Item | Effort | Notes |
+| # | Item | Status | Notes |
 |---|------|--------|-------|
-| 2.1 | `min`/`max` in f32 scan | Small | `llvm.intr.minnum`/`maxnum` in scan kernel builder; wire through `GpuReduce`. |
-| 2.2 | `&&`/`||` in bool scan | Small | i1 scan kernel with `llvm.and`/`llvm.or`, mirroring f32 path. |
-| 2.3 | Multi-block scan: exclusive, right, multiply modes | Medium | Extend 4-kernel plan beyond inclusive-add-only. |
-| 2.4 | Standalone `trace-right` kernel | Medium | Reverse-scan builder mirroring existing scan module builder. |
-
-### Phase 3 — View ops as standalone GPU kernels
-
-Every view op already works inside map bodies via the expression
-compiler.  This phase adds top-level kernels so they appear outside
-map bodies, matching the CPU path and the codegen dispatch cascade.
-
-| # | Item | Effort | Notes |
-|---|------|--------|-------|
-| 3.1 | `HIRSlice` standalone | Medium | Only view op also rejected inside map bodies; needs descriptor ABI with per-dimension offset+size. |
-| 3.2 | `HIRTake` / `HIRDrop` standalone | Small | Per-dimension offset in descriptor; wrapper kernel adjusting base pointer + shape. |
-| 3.3 | `HIRReverse` / `HIRRotate` standalone | Small | Descriptor-level: flip stride sign or offset; no data movement. |
-| 3.4 | `HIRSubarray` standalone | Small | Per-dimension offset/size, descriptor-level. |
-| 3.5 | `HIRReshape` / `HIRRavel` standalone | Small | Descriptor-only: reshape permutes shape/strides, ravel flattens. |
-| 3.6 | `HIRTranspose` standalone | Medium | Stride permutation in descriptor; needs output allocation for non-contiguous result. |
-| 3.7 | `HIRAppend` standalone | Medium | Concatenation: two memcpy regions or parallel copy with conditional source select. |
-
-### Phase 4 — Multi-element-type support
-
-All GPU operations currently hardcode f32 (a few support i32).  This
-phase generalizes the kernel builders and expression compiler.
-
-| # | Item | Effort | Notes |
-|---|------|--------|-------|
-| 4.1 | i32 fused map (compound expressions) | Medium | `_gpu_map_support.py` defers i32 fused maps; needs `I32Expr` tree. |
-| 4.2 | i32 reduction (fold) | Medium | Grid-strided + shmem tree reduce with i32 loads/stores. |
-| 4.3 | i32 scan (single-block + multi-block) | Medium | Generalize f32 scan builders to i32. |
-| 4.4 | i32 sort | Medium | Radix sort works on uint32 keys; i32→uint32 is same bitcast+sign-flip. Extend type dispatch. |
-| 4.5 | i32 filter / replicate / scatter-add | Small | Extend existing f32 plans with i32 load/store variants. |
-| 4.6 | f64 support (all ops) | Large | Requires f64 descriptor ABI, f64 MLIR typing, alignment; touches every GPU file. |
-
-### Phase 5 — Scale limits (multi-block >1024)
-
-| # | Item | Effort | Notes |
-|---|------|--------|-------|
-| 5.1 | Multi-block i32 prefix sum (for filter/replicate) | Medium | f32 multi-block scan exists; i32 variant unblocks filter/replicate N > 1024. |
-| 5.2 | Multi-block scatter-add (N > 1024) | Small | `llvm.atomicrmw fadd` for global-memory atomics, or two-kernel plan. |
-| 5.3 | Recursive multi-level scan (N > 1M) | Medium | Three-level approach: scan blocks → scan block-sums → propagate. |
-| 5.4 | Sort beyond 1M | Medium | Extend radix-sort block count or multi-level aggregation. |
-
-### Phase 6 — Structural nodes (pairs, call, recursion)
-
-These are the hardest remaining items — they require structural changes
-to the GPU kernel model.
-
-| # | Item | Effort | Notes |
-|---|------|--------|-------|
-| 6.1 | `HIRPair` / `HIRFirst` / `HIRSecond` in map bodies | Medium | 2-component `GpuPairExpr` in expression compiler. |
-| 6.2 | `HIRFoldRight` standalone | Medium | Reverse-direction reduction; same kernel structure as fold. |
-| 6.3 | `HIRCall` in map bodies | Large | Cross-kernel calls need device-side function pointers or callee-body inlining. |
-| 6.4 | Recursive device functions | Large | Needs bounded-stack depth + manual stack; defer until a concrete use case demands it. |
+| 6.1 | `HIRPair` / `HIRFirst` / `HIRSecond` | **Done** | Pairs lowered as 2-component `GpuArrayExpr` in expression compiler |
+| 6.2 | `HIRFoldRight` standalone | **Done** | Routed to reduction builder (associative for `+`/`*`) |
+| 6.3 | `HIRCall` in map bodies | **Deferred** | See [Device-side calls](#device-side-function-calls-63) |
+| 6.4 | Recursive device functions | **Deferred** | See [Device-side calls](#device-side-function-calls-63) |
 
 ### Completed GPU milestones
 
 - [x] Simple f32/i32/bool maps (rank 1–10)
 - [x] Compound map bodies via general expression compiler
-- [x] f32 reduction (fold/reduce, `+`/`*`)
-- [x] f32 scan (single-block `+`/`*`, multi-block `+` up to 1M)
-- [x] f32 sort/grade (bitonic + 256-bin radix up to 1M)
+- [x] f32/i32 reduction (fold/reduce/fold-right, `+`/`*`)
+- [x] f32/i32 scan (single-block `+`/`*`/min/max, multi-block `+`/`*` up to 1M, exclusive/right, compound bodies)
+- [x] f32/i32 sort/grade (bitonic + 256-bin radix up to 1M)
 - [x] f32 matmul (basic + tiled 16×16)
 - [x] f32 im2col + cell-fold conv
 - [x] Indices-of (any rank)
-- [x] f32 filter/replicate (parallel, up to 1024)
-- [x] f32 scatter-add (parallel, up to 1024)
-- [x] View ops inside map bodies (reverse, rotate, subarray, take, drop, append, reshape, ravel, withShape)
+- [x] f32/i32 filter/replicate (parallel, up to 1024)
+- [x] f32 scatter-add (parallel, up to 1024; guard relaxed for >1024)
+- [x] View ops standalone (reverse, rotate, take, drop, subarray, reshape, ravel, transpose, append, withShape)
+- [x] Pairs (Pair/First/Second) in map bodies via expression compiler
 - [x] AD gradient descent state-fold GPU loop plan
 - [x] Device memory pool + device-resident execution
+- [x] heat1d CN step (10-kernel chain) exact match to CPU
+- [x] f64 GPU infra (guards, codegen, `_replace_elem_type`)
+
+## Deferred GPU Scale and Structural Items
+
+### Recursive multi-level scan (N > 1M) (5.3)
+
+The existing multi-block scan handles N up to 1,048,576 (1024 blocks ×
+1024 threads).  For N beyond 1M, the block-sum scan itself exceeds 1024
+elements and needs another level.
+
+**Approach:** Three-level recursive aggregation.
+- Level 1: per-block Hillis-Steele (existing, unchanged).
+- Level 2: block-sum scan on >1024 blocks — recurse: scan per-sub-group
+  of blocks, extract sub-group sums, scan those, propagate.
+- Level 3: final sum scan always fits in one block.
+This mirrors CUB's three-level device scan.  ~200 lines of new kernel
+orchestration code building on the existing 4-kernel plan.
+
+### Sort beyond 1M (5.4)
+
+The radix sort handles N up to 1,048,576.  For larger arrays, the block
+count exceeds 1024.
+
+**Approach:** Multi-level radix sort — partition into segments ≤ 1M,
+sort each, then merge.  Or: extend the histogram to use 2D block grids
+(blockIdx.y for segment index).  ~150 lines.  Alternatively, the fallback
+multi-block bitonic sort already handles larger N (up to ~10M) at
+O(N log²N) cost — practical for correctness, not for performance.
+
+### Device-side function calls (6.3)
+
+Currently, `HIRCall` reaches the GPU expression compiler only for
+functions that survive defunctionalization — recursive calls or
+through-variable calls.  The defunctionalizer inlines everything else.
+
+**Approach: manual callee-body inlining** (~400–500 lines).
+- Add a `functions: dict[str, HIRFunction]` field to `_CompileCtx`
+- When `_lower_hir` encounters `HIRCall`, look up the callee, substitute
+  args for params using `hir_opt.substitute_hir_vars`, and lower the
+  result.
+- This avoids GPU kernel model changes — everything stays in one kernel.
+- Recursive calls still get rejected (they'd infinite-expand).
+
+Tail-recursive functions as a subcase are useful: they compile to
+`scf.for` loops (constant stack depth).  The expression compiler could
+detect tail position and emit a back-edge branch instead of a recursive
+call.  ~200 additional lines for the tail-case detector.
+
+**Device-side function pointers** (~800+ lines) would be needed only if
+there's a use case for *dynamically* selecting callees (call-through-variable).
+That would require a PTX-level function table and indirect call support,
+which PTX supports via `.callprototype` / `call.uni`.
+
+### Recursive device functions (6.4)
+
+Hardest remaining item.  GPU recursion needs bounded stack depth + manual
+stack management (alloca-based call frames), or tail-call trampolining
+for the tail-recursive subset.
+
+**Pragmatic path:** implement tail-recursion as `scf.for` loops (6.3
+tail-case detector), and defer general recursion until a concrete
+application demands it (e.g., tree traversal on GPU).
+
+### Sort beyond 1M (5.4)
+
+The radix sort handles N up to 1,048,576.  For larger arrays, the block
+count exceeds 1024.
+
+**Approach:** Multi-level radix sort — partition into segments ≤ 1M,
+sort each, then merge.  Or: extend the histogram to use 2D block grids
+(blockIdx.y for segment index).  ~150 lines.  The fallback multi-block
+bitonic sort already handles larger N (up to ~10M) at O(N log²N) cost
+— sufficient for correctness, not for performance.
+
+### Scatter-add atomicrmw text (5.2 remainder)
+
+The parallel scatter-add builder handles N ≤ 1024 via shared-memory
+barrier + single-thread add.  For N > 1024, shared memory can't hold
+all elements.  The guard has been relaxed; what remains is emitting
+`llvm.atomicrmw fadd` text (global atomic floating-point add) instead
+of the shared-memory barrier pattern.  ~30 lines of MLIR text
+generation.
+
+### General recursion on GPU (6.4 remainder)
+
+After tail recursion is handled via `scf.for`, general recursion
+requires alloca-based call frames (push/pop arguments, jump to
+callee) or device-side function pointers.  Neither is currently
+needed — tail recursion covers `sum_to`, `repeat`, iterative
+optimizers, and Ackermann-like patterns.  Defer until a concrete
+application (e.g., tree traversal on GPU) demands it.
+
+### Float64 type system frontend (4.6 remainder) — COMPLETE
+
+The GPU infrastructure for f64 was already complete; the frontend
+gaps have now been closed:
+
+- **Grammar / parser:** `Float64` is recognised as a concrete type name
+  alongside `Float`, `Int`, `Bool` in both Lisp and ML syntaxes.
+- **Literal syntax:** `1.0d` produces `Float64Lit` AST nodes in both
+  syntaxes.
+- **Typechecker:** `Float64Lit` → `FLOAT64`; scan/trace/fold/reduce/fold-right
+  use `common_numeric_type` for float↔float64 promotion when both init and
+  element are scalar numeric types.
+- **CPU lowering:** full f64 pipeline through HIR, MLIR, C runtime,
+  and display formatting.
+- **C runtime:** `remora_sort_f64`, `remora_grade_f64`, comparison helpers.
+- **GPU expression compiler:** `_scalar_type_to_mlir` maps FLOAT64 → f64.
 
 ______________________________________________________________________
 
@@ -710,3 +811,108 @@ Removed. The codec abused Python's encoding machinery, required a
 compiler on every module import. Replaced by `remora.define()` which
 accepts Remora source as a Python string and returns a compiled
 callable.
+
+______________________________________________________________________
+
+## Documentation Gaps
+
+### `docs/USER_GUIDE.md` — updates needed
+
+The user guide is a syntax-and-feature reference last updated around
+the dense-core CPU completion.  The following sections need writing
+or updating:
+
+1. **f64 literal syntax and type annotations.**
+   - Document `1.0d` / `-3.14d` literals (Lisp and ML syntax).
+   - Document `Float64` / `float64` type annotations in `define/pi`
+     signatures: `(Array Float64 4)`.
+   - Document float↔float64 promotion rules in scan/reduce/fold.
+   - Update the Literals table to include `Float64`.
+
+2. **GPU coverage.**
+   - The current GPU section describes the IREE path; update it to
+     describe the direct-CUDA descriptor-ABI kernels (Phase 1–6,
+     covering maps, reductions, scans, sort/grade, views, filter,
+     replicate, matmul, scatter-add, pairs, state-fold loops).
+   - Document `--target gpu` vs `--target gpu-nvidia` (IREE legacy).
+   - Document `remora-perf` benchmark CLI and `--device-resident`.
+
+3. **Higher-order functions.**
+   - The recursive functions and ForallType HOF sections exist.
+     Add documentation for closure capture in map/fold/reduce callables.
+
+4. **AD gradient compilation.**
+   - The AD section describes `(grad f)`.  Add documentation for
+     `compile_gradient_function_source` and the per-input gradients
+     API (`compile_gradient_functions_source`).
+
+5. **Python embedding.**
+   - Document `remora.define()`, `RemoraFunction`, the `%%remora` cell
+     magic, and `%remora_eval` line magic (Jupyter integration).
+   - Document GPU buffer pool and device-resident execution APIs
+     (`alloc_and_upload`, `download`, `execute_device`, `DeviceArray`).
+
+6. **Cache behaviour.**
+   - Document the native `.so` cache (`~/.cache/remora/native/`) — when
+     it invalidates (source, toolchain, `remora_rt.c`, pipeline version
+     changes), how to clear it, and the `REMORA_NO_CACHE` env var.
+
+7. **Acceptance test suite.**
+   - Document how to add new acceptance cases (`manifest.json`,
+     `.remora` files in `tests/acceptance/pass/` or `rejected/` or
+     `deferred/`).
+
+### New architecture document (not started yet)
+
+A companion document to the existing design docs (`DENSE_CORE.md`, `ABI.md`,
+`IMPLEMENTATION_NOTES.md`) covering the **end-to-end compilation pipeline**
+for the non-IREE direct-CUDA path:
+
+1. **Pipeline diagram:** source → AST → typed AST → HIR → optimised HIR →
+   GPU kernel builders or CPU MLIR text → PTX/C object → ctypes execution.
+
+2. **GPU codegen cascade** (`codegen.py`):
+   - `generate_mlir_descriptor_abi_ptx` routing tree: which HIR node maps to
+     which kernel builder.
+   - How `ExecutionPlan` multi-kernel orchestration works (buffer specs,
+     kernel steps, host loops, buffer swapping).
+   - How the expression compiler (`_gpu_expr_lowering.py`) handles compound
+     map/scan bodies recursively via `_gpu_emit_expr`.
+
+3. **Descriptor ABI:**
+   - The `(allocated, aligned, offset, size, stride)` memref descriptor
+     convention for GPU kernels.
+   - How the runtime wraps NumPy arrays into descriptors
+     (`make_host_memref_descriptor`).
+   - How device-resident execution and the buffer pool work.
+
+4. **CPU lowering path:**
+   - Text-based MLIR emission (`lowering/tensor_ops.py`, `lowering/scalar.py`).
+   - The `_lower_function_descriptor_module` chain: internal function
+     (tensor-level) → wrapper (memref-interface, `llvm.emit_c_interface`).
+   - MLIR pipeline: `mlir-opt` → LLVM dialect → `mlir-translate` → LLVM IR →
+     `llc` → `.o` → `gcc -shared` → `.so`.
+   - How the C runtime (`remora_rt.c`) is compiled once and linked into
+     every `.so`.
+
+5. **Element-type support matrix:**
+   - Which ops support f32, i32, bool, f64 on CPU and GPU.
+   - The `_replace_elem_type` helper and how type guards route non-f32
+     element types through the GPU kernel builders.
+
+6. **Type system walkthrough:**
+   - From `FLOAT64 = ScalarType("float64")` through `common_numeric_type`
+     promotion to `type_to_mlir` → `"f64"` to `_numpy_dtype` → `np.float64`.
+   - How the typechecker resolves `define/pi`, `define/forall`, dependent
+     types, and function values.
+
+7. **AD pipeline:**
+   - Source-level reverse-mode transformation (`ad_source.py`): tape
+     trace, VJP generation, grad-lifting.
+   - Gradient compilation path (CPU and GPU).
+
+8. **Caching:**
+   - Cache key computation (source, param types, toolchain, C runtime hash,
+     pipeline version).
+   - Cache location and storage format.
+   - When cached artifacts are invalidated.

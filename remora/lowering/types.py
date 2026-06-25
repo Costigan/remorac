@@ -39,6 +39,7 @@ from remora.hir import (
 from remora.types import (
     BOOL,
     FLOAT,
+    FLOAT64,
     INT,
     ArrayType,
     FuncType,
@@ -56,6 +57,8 @@ class RemoraLoweringError(RemoraError):
 def type_to_mlir(value_type: RemoraType) -> str:
     if value_type == FLOAT:
         return "f32"
+    if value_type == FLOAT64:
+        return "f64"
     if value_type == INT:
         return "i32"
     if value_type == BOOL:

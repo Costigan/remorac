@@ -37,6 +37,8 @@ class _Operand:
 def _literal_value(expr: HIRLit, result_type: str) -> str:
     if result_type == "f32":
         return f"{float(expr.value):.6e}"
+    if result_type == "f64":
+        return f"{float(expr.value):.15e}"
     if result_type == "i32":
         return str(int(expr.value))
     if result_type == "i1":
@@ -51,6 +53,10 @@ def _cast_if_needed(
         return []
     if from_type == "i32" and to_type == "f32":
         return [f"      {result_name} = arith.sitofp {value_name} : i32 to f32"]
+    if from_type == "i32" and to_type == "f64":
+        return [f"      {result_name} = arith.sitofp {value_name} : i32 to f64"]
+    if from_type == "f32" and to_type == "f64":
+        return [f"      {result_name} = arith.extf {value_name} : f32 to f64"]
     if from_type == "i32" and to_type == "i64":
         return [f"      {result_name} = arith.extsi {value_name} : i32 to i64"]
     if from_type == "i64" and to_type == "i32":
@@ -68,7 +74,7 @@ def _arith_op(op: str, result_type: str) -> str:
 
 
 def _hir_prim_op(op: str, result_type: str) -> str:
-    if op in {"+f", "-f", "*f", "/f"}:
+    if op in {"+f", "-f", "*f", "/f", "+d", "-d", "*d", "/d"}:
         return _arith_op(op[0], result_type)
     if op in {"+i", "-i", "*i", "/i"}:
         return _arith_op(op[0], result_type)
@@ -120,6 +126,8 @@ def _lower_callable_operand(
 
     if result_type == "f32":
         value = f"{float(expr.value):.6e}"
+    elif result_type == "f64":
+        value = f"{float(expr.value):.15e}"
     elif result_type == "i32":
         value = str(int(expr.value))
     elif result_type == "i1":
@@ -298,22 +306,22 @@ class _RegionEmitter:
         args: list[_Operand],
         result_type: str,
     ) -> _Operand:
-        if op in {"expf", "logf"}:
+        if op in {"expf", "logf", "expd", "logd"}:
             if len(args) != 1:
                 raise RemoraLoweringError(f"{op[:-1]} expects one operand")
-            operand = self._coerce(args[0], "f32")
+            operand = self._coerce(args[0], result_type)
             result = self.temp()
-            mlir_op = "math.exp" if op == "expf" else "math.log"
+            mlir_op = "math.exp" if op.startswith("exp") else "math.log"
             self.lines.append(
-                f"      {result} = {mlir_op} {operand.value} : f32"
+                f"      {result} = {mlir_op} {operand.value} : {result_type}"
             )
-            return _Operand(result, [], "f32")
+            return _Operand(result, [], result_type)
         if len(args) != 2:
             raise RemoraLoweringError(
                 "only binary primitive operations lower to MLIR"
             )
 
-        if op in {"+f", "-f", "*f", "/f", "+i", "-i", "*i", "/i"}:
+        if op in {"+f", "-f", "*f", "/f", "+d", "-d", "*d", "/d", "+i", "-i", "*i", "/i"}:
             coerced_args = [self._coerce(arg, result_type) for arg in args]
             result = self.temp()
             mlir_op = _hir_prim_op(op, result_type)

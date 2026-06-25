@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from remora.types import ArrayType, BOOL, FLOAT, INT, RemoraType, ScalarType
+from remora.types import ArrayType, BOOL, FLOAT, FLOAT64, INT, RemoraType, ScalarType
 
 
 def format_result(value: object, value_type: RemoraType) -> str:
@@ -17,9 +17,11 @@ def format_result(value: object, value_type: RemoraType) -> str:
 
 
 def _format_array(array: np.ndarray, value_type: ArrayType) -> str:
+    elem_type = value_type.element
     formatter = {
         "int_kind": lambda item: _format_scalar(item, INT),
-        "float_kind": lambda item: _format_scalar(item, FLOAT),
+        "float_kind": lambda item: _format_scalar(item,
+            FLOAT64 if elem_type == FLOAT64 else FLOAT),
         "bool": lambda item: _format_scalar(item, BOOL),
     }
     return np.array2string(
@@ -38,6 +40,11 @@ def _format_scalar(value: object, value_type: ScalarType) -> str:
         return str(int(value))
     if value_type == FLOAT:
         text = f"{float(value):.6g}"
+        if "e" not in text and "." not in text:
+            return f"{text}.0"
+        return text
+    if value_type == FLOAT64:
+        text = f"{float(value):.15g}"
         if "e" not in text and "." not in text:
             return f"{text}.0"
         return text

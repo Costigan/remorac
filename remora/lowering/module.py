@@ -1397,7 +1397,7 @@ def _lower_function_descriptor_module(
     )
     externs: list[str] = []
     import re
-    for match in re.finditer(r"func\.call @(remora_sort_(?:f32|i32))\(%\S+\) : \(memref<(\d+x(?:f32|i32))>\)", internal):
+    for match in re.finditer(r"func\.call @(remora_sort_(?:f32|f64|i32))\(%\S+\) : \(memref<(\d+x(?:f32|f64|i32))>\)", internal):
         fname, memref_type = match.group(1), match.group(2)
         decl = f"  func.func private @{fname}(memref<{memref_type}>)"
         if decl not in externs:

@@ -109,6 +109,12 @@ static int _cmp_f32_asc(const void* a, const void* b) {
     return (va > vb) - (va < vb);
 }
 
+static int _cmp_f64_asc(const void* a, const void* b) {
+    double va = *(const double*)a;
+    double vb = *(const double*)b;
+    return (va > vb) - (va < vb);
+}
+
 /* ── Sort (in-place) ────────────────────────────────────────────────────── */
 /* LLVM ABI: (allocated, aligned, offset, size, stride) */
 
@@ -192,6 +198,13 @@ void remora_sort_f32(
     _remora_radix_sort_f32((float*)_mr_data(aligned, offset), size);
 }
 
+void remora_sort_f64(
+    double* allocated, double* aligned, int64_t offset, int64_t size, int64_t stride
+) {
+    (void)allocated; (void)stride;
+    qsort(_mr_data(aligned, offset), (size_t)size, sizeof(double), _cmp_f64_asc);
+}
+
 /* ── Grade (argsort) ────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -213,6 +226,15 @@ static int _cmp_grade_f32(const void* a, const void* b) {
     const _grade_pair_t* gb = (const _grade_pair_t*)b;
     float va = *(const float*)ga->base;
     float vb = *(const float*)gb->base;
+    if (va != vb) return (va > vb) - (va < vb);
+    return ga->index - gb->index;
+}
+
+static int _cmp_grade_f64(const void* a, const void* b) {
+    const _grade_pair_t* ga = (const _grade_pair_t*)a;
+    const _grade_pair_t* gb = (const _grade_pair_t*)b;
+    double va = *(const double*)ga->base;
+    double vb = *(const double*)gb->base;
     if (va != vb) return (va > vb) - (va < vb);
     return ga->index - gb->index;
 }
@@ -253,6 +275,27 @@ void remora_grade_f32(
         pairs[i].index = (int)i;
     }
     qsort(pairs, (size_t)n, sizeof(_grade_pair_t), _cmp_grade_f32);
+    for (int64_t i = 0; i < n; i++) {
+        dst_data[i] = (int32_t)pairs[i].index;
+    }
+    free(pairs);
+}
+
+void remora_grade_f64(
+    double* src_alloc, double* src_align, int64_t src_off, int64_t src_n, int64_t src_str,
+    int32_t* dst_alloc, int32_t* dst_align, int64_t dst_off, int64_t dst_n, int64_t dst_str
+) {
+    (void)src_alloc; (void)src_str; (void)dst_alloc; (void)dst_n; (void)dst_str;
+    double*  src_data = (double*)_mr_data(src_align, src_off);
+    int32_t* dst_data = (int32_t*)_mr_data(dst_align, dst_off);
+    int64_t n = src_n;
+
+    _grade_pair_t* pairs = (_grade_pair_t*)malloc((size_t)n * sizeof(_grade_pair_t));
+    for (int64_t i = 0; i < n; i++) {
+        pairs[i].base = &src_data[i];
+        pairs[i].index = (int)i;
+    }
+    qsort(pairs, (size_t)n, sizeof(_grade_pair_t), _cmp_grade_f64);
     for (int64_t i = 0; i < n; i++) {
         dst_data[i] = (int32_t)pairs[i].index;
     }
@@ -518,8 +561,10 @@ void remora_matmul_f32(
 
 void remora_sort_1d_i32(int32_t* a, int32_t* b, int64_t o, int64_t n, int64_t s) { remora_sort_i32(a, b, o, n, s); }
 void remora_sort_1d_f32(float* a, float* b, int64_t o, int64_t n, int64_t s)   { remora_sort_f32(a, b, o, n, s); }
+void remora_sort_1d_f64(double* a, double* b, int64_t o, int64_t n, int64_t s) { remora_sort_f64(a, b, o, n, s); }
 void remora_grade_1d_i32(int32_t* sa, int32_t* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_i32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
 void remora_grade_1d_f32(float* sa, float* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_f32(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
+void remora_grade_1d_f64(double* sa, double* sb, int64_t so, int64_t sn, int64_t ss, int32_t* da, int32_t* db, int64_t d_o, int64_t dn, int64_t ds) { remora_grade_f64(sa, sb, so, sn, ss, da, db, d_o, dn, ds); }
 
 /* ── Scan (prefix sum) per-row helpers ──────────────────────────────────── */
 

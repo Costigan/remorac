@@ -15,6 +15,7 @@ from remora.ast_nodes import (
     Definition,
     Expr,
     FloatLit,
+    Float64Lit,
     FoldExpr,
     FoldRightExpr,
     FuncDef,
@@ -216,6 +217,10 @@ class ASTBuilder(Transformer):
 
     def float_lit(self, items: list[Any]) -> FloatLit:
         return FloatLit(float(items[0]), self._loc_from(items))
+
+    def float64_lit(self, items: list[Any]) -> Float64Lit:
+        s = str(items[0])
+        return Float64Lit(float(s[:-1]), self._loc_from(items))
 
     def int_lit(self, items: list[Any]) -> IntLit:
         return IntLit(int(items[0]), self._loc_from(items))

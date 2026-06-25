@@ -969,18 +969,57 @@ def generate_mlir_descriptor_abi_ptx(
                                            input_elem_types=["f32"], output_elem_types=["f32"],
                                            output_shape=sc_shape, output_dtype="float32", grid_size=sc_NB),
                             ]
-                            mb_plan = ExecutionPlan(
-                                buffers=[
-                                    BufferSpec("scanned", sc_shape, "f32"),
-                                    BufferSpec("block_sums", (sc_NB,), "f32"),
-                                    BufferSpec("block_prefix", (sc_NB,), "f32"),
-                                ],
-                                steps=[
+                            mb_buffers = [
+                                BufferSpec("scanned", sc_shape, "f32"),
+                                BufferSpec("block_sums", (sc_NB,), "f32"),
+                                BufferSpec("block_prefix", (sc_NB,), "f32"),
+                            ]
+                            mb_steps = [
+                                KernelStep(sc_local, ["input_0"], "scanned"),
+                                KernelStep(sc_extract, ["scanned"], "block_sums"),
+                                KernelStep(sc_sums, ["block_sums"], "block_prefix"),
+                                KernelStep(sc_prop, ["block_prefix"], "scanned"),
+                            ]
+                            # If level-2 (recursive) kernels exist, add them
+                            _l2_text = mb_module.text
+                            if "_l2_local" in _l2_text:
+                                l2_local = f"{name}_l2_local"
+                                l2_extract = f"{name}_l2_extract"
+                                l2_sums = f"{name}_l2_sums"
+                                l2_prop = f"{name}_l2_prop"
+                                sc_L2_NB = (sc_NB + sc_BS - 1) // sc_BS
+                                mb_kernels.extend([
+                                    KernelMeta(name=l2_local, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
+                                               input_elem_types=["f32"], output_elem_types=["f32"],
+                                               output_shape=(sc_NB,), output_dtype="float32", grid_size=sc_L2_NB),
+                                    KernelMeta(name=l2_extract, grid_dims=1, block_size=sc_L2_NB, num_inputs=1, num_outputs=1,
+                                               input_elem_types=["f32"], output_elem_types=["f32"],
+                                               output_shape=(sc_L2_NB,), output_dtype="float32", grid_size=1),
+                                    KernelMeta(name=l2_sums, grid_dims=1, block_size=sc_L2_NB, num_inputs=1, num_outputs=1,
+                                               input_elem_types=["f32"], output_elem_types=["f32"],
+                                               output_shape=(sc_L2_NB,), output_dtype="float32", grid_size=1),
+                                    KernelMeta(name=l2_prop, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
+                                               input_elem_types=["f32"], output_elem_types=["f32"],
+                                               output_shape=(sc_NB,), output_dtype="float32", grid_size=sc_L2_NB),
+                                ])
+                                mb_buffers.extend([
+                                    BufferSpec("l2_scanned", (sc_NB,), "f32"),
+                                    BufferSpec("l2_sums", (sc_L2_NB,), "f32"),
+                                    BufferSpec("l2_prefix", (sc_L2_NB,), "f32"),
+                                ])
+                                # Replace scan_sums step with the 4-kernel L2 plan
+                                mb_steps = [
                                     KernelStep(sc_local, ["input_0"], "scanned"),
                                     KernelStep(sc_extract, ["scanned"], "block_sums"),
-                                    KernelStep(sc_sums, ["block_sums"], "block_prefix"),
-                                    KernelStep(sc_prop, ["block_prefix"], "scanned"),
-                                ],
+                                    KernelStep(l2_local, ["block_sums"], "l2_scanned"),
+                                    KernelStep(l2_extract, ["l2_scanned"], "l2_sums"),
+                                    KernelStep(l2_sums, ["l2_sums"], "l2_prefix"),
+                                    KernelStep(l2_prop, ["l2_prefix"], "l2_scanned"),
+                                    KernelStep(sc_prop, ["l2_scanned"], "scanned"),
+                                ]
+                            mb_plan = ExecutionPlan(
+                                buffers=mb_buffers,
+                                steps=mb_steps,
                                 final_output="scanned",
                                 output_shape=sc_shape,
                                 output_dtype="f32",

@@ -71,6 +71,8 @@ class RemoraFunction:
             if isinstance(expected_type, ArrayType):
                 if expected_type.element.name == "float" and arr.dtype != np.float32:
                     arr = arr.astype(np.float32)
+                elif expected_type.element.name == "float64" and arr.dtype != np.float64:
+                    arr = arr.astype(np.float64)
                 elif expected_type.element.name == "int" and arr.dtype != np.int32:
                     arr = arr.astype(np.int32)
             arrays.append(arr)
