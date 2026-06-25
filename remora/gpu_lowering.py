@@ -1172,6 +1172,390 @@ def _validate_scaffold_names(module_name: str, kernel_name: str) -> None:
         raise GPUScaffoldError("GPU scaffold names must be valid identifiers")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# View-copy kernel builder — standalone GPU kernels for view operations
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _build_view_copy_kernel(
+    function: HIRFunction,
+    kernel_name: str,
+    module_name: str = "remora_gpu",
+    *,
+    index_expr: str,         # MLIR expression for source index from %idx
+    out_shape: tuple[int, ...],
+) -> GPUModuleScaffold:
+    """Build a descriptor-ABI GPU kernel that copies elements from input
+    to output with a view-adjusted index mapping.
+
+    Parameters
+    ----------
+    index_expr : str
+        MLIR expression computing the source linear index from ``%idx``.
+        E.g. ``"llvm.sub %Nm1, %idx  : i64"`` for reverse.
+    out_shape : tuple[int, ...]
+        Output shape (determines total threads).
+    """
+    _validate_scaffold_names(module_name, kernel_name)
+    total = 1
+    for d in out_shape:
+        total *= d
+
+    # Always use rank-1 descriptors: the kernel copies flat linear indices.
+    rank = 1
+    desc_lines = _descriptor_load_lines("in", "%input_desc", rank)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", rank))
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{kernel_name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %vc_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %vc_tid = llvm.sext %vc_tid32 : i32 to i64
+      %vc_N = llvm.mlir.constant({total} : index) : i64
+      %vc_ok = llvm.icmp "ult" %vc_tid, %vc_N : i64
+      llvm.cond_br %vc_ok, ^vc_work, ^vc_done
+
+    ^vc_work:
+      %vc_c0 = llvm.mlir.constant(0 : index) : i64
+      %vc_c1 = llvm.mlir.constant(1 : index) : i64
+      %Nm1 = llvm.mlir.constant({total - 1} : index) : i64
+{index_expr}
+      %vc_si = llvm.add %in_offset, %vc_src_idx  : i64
+      %vc_sp = llvm.getelementptr %in_aligned[%vc_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %vc_val = llvm.load %vc_sp : !llvm.ptr -> f32
+      %vc_di = llvm.add %out_offset, %vc_tid  : i64
+      %vc_dp = llvm.getelementptr %out_aligned[%vc_di] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %vc_val, %vc_dp : f32, !llvm.ptr
+      llvm.br ^vc_done
+
+    ^vc_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, kernel_name)
+
+
+def build_descriptor_abi_reverse_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRReverse."""
+    from remora.hir import HIRReverse as _HR
+    body = function.body
+    if not isinstance(body, _HR):
+        raise GPUScaffoldError("GPU reverse builder requires a reverse body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU reverse supports rank-1 f32 only")
+    N = int(rt.shape[0].value)
+    name = kernel_name or f"remora_{function.name}_reverse"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr="      %vc_src_idx = llvm.sub %Nm1, %vc_tid  : i64",
+        out_shape=(N,),
+    )
+
+
+def build_descriptor_abi_rotate_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRRotate."""
+    from remora.hir import HIRRotate as _HR
+    body = function.body
+    if not isinstance(body, _HR):
+        raise GPUScaffoldError("GPU rotate builder requires a rotate body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU rotate supports rank-1 f32 only")
+    N = int(rt.shape[0].value)
+    S = int(body.shift.value) % N
+    name = kernel_name or f"remora_{function.name}_rotate"
+    if S > 0:
+        idx_block = f"""      %vc_Nshift = llvm.mlir.constant({N - S} : index) : i64
+      %vc_s1 = llvm.add %vc_tid, %vc_Nshift  : i64
+      %vc_src_idx = llvm.urem %vc_s1, %vc_N  : i64"""
+    else:
+        idx_block = "      %vc_src_idx = llvm.add %vc_tid, %vc_c0  : i64"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr=idx_block,
+        out_shape=(N,),
+    )
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr=index_expr,
+        out_shape=(N,),
+    )
+
+
+def build_descriptor_abi_take_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRTake."""
+    from remora.hir import HIRTake as _HT
+    body = function.body
+    if not isinstance(body, _HT):
+        raise GPUScaffoldError("GPU take builder requires a take body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU take supports rank-1 f32 only")
+    count = int(rt.shape[0].value)
+    name = kernel_name or f"remora_{function.name}_take"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr="      %vc_src_idx = llvm.add %vc_tid, %vc_c0  : i64",
+        out_shape=(count,),
+    )
+
+
+def build_descriptor_abi_drop_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRDrop."""
+    from remora.hir import HIRDrop as _HD
+    body = function.body
+    if not isinstance(body, _HD):
+        raise GPUScaffoldError("GPU drop builder requires a drop body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU drop supports rank-1 f32 only")
+    from remora.types import StaticDim as _SD
+    _dc = body.count
+    drop_count = int(_dc.value) if isinstance(_dc, _SD) else int(_dc)
+    out_N = int(rt.shape[0].value)
+    name = kernel_name or f"remora_{function.name}_drop"
+    idx_block = f"      %vc_Dshift = llvm.mlir.constant({drop_count} : index) : i64\n      %vc_src_idx = llvm.add %vc_tid, %vc_Dshift  : i64"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr=idx_block,
+        out_shape=(out_N,),
+    )
+
+
+def build_descriptor_abi_reshape_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRReshape."""
+    from remora.hir import HIRReshape as _HR
+    body = function.body
+    if not isinstance(body, _HR):
+        raise GPUScaffoldError("GPU reshape builder requires a reshape body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU reshape supports f32 only")
+    out_shape = tuple(int(d.value) for d in rt.shape)
+    name = kernel_name or f"remora_{function.name}_reshape"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr="      %vc_src_idx = llvm.add %vc_tid, %vc_c0  : i64",
+        out_shape=out_shape,
+    )
+
+
+def build_descriptor_abi_ravel_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRRavel."""
+    from remora.hir import HIRRavel as _HR
+    body = function.body
+    if not isinstance(body, _HR):
+        raise GPUScaffoldError("GPU ravel builder requires a ravel body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU ravel supports f32 only")
+    out_shape = tuple(int(d.value) for d in rt.shape)
+    name = kernel_name or f"remora_{function.name}_ravel"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr="      %vc_src_idx = llvm.add %vc_tid, %vc_c0  : i64",
+        out_shape=out_shape,
+    )
+
+
+def build_descriptor_abi_slice_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRSlice."""
+    from remora.hir import HIRSlice as _HS
+    body = function.body
+    if not isinstance(body, _HS):
+        raise GPUScaffoldError("GPU slice builder requires a slice body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU slice supports rank-1 f32 only")
+    out_shape = tuple(int(d.value) for d in rt.shape)
+    name = kernel_name or f"remora_{function.name}_slice"
+    start = int(body.start.value) if hasattr(body, 'start') else 0
+    step = int(body.step.value) if hasattr(body, 'step') else 1
+    if step != 1:
+        idx_block = f"      %vc_sstart = llvm.mlir.constant({start} : index) : i64\n      %vc_sstep = llvm.mlir.constant({step} : index) : i64\n      %vc_s1 = llvm.mul %vc_tid, %vc_sstep  : i64\n      %vc_src_idx = llvm.add %vc_s1, %vc_sstart  : i64"
+    else:
+        idx_block = f"      %vc_sstart = llvm.mlir.constant({start} : index) : i64\n      %vc_src_idx = llvm.add %vc_tid, %vc_sstart  : i64"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr=idx_block,
+        out_shape=out_shape,
+    )
+
+
+def build_descriptor_abi_subarray_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRSubarray (rank-1 only)."""
+    from remora.hir import HIRSubarray as _HS
+    body = function.body
+    if not isinstance(body, _HS):
+        raise GPUScaffoldError("GPU subarray builder requires a subarray body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU subarray supports rank-1 f32 only")
+    out_shape = tuple(int(d.value) for d in rt.shape)
+    name = kernel_name or f"remora_{function.name}_subarray"
+    from remora.types import StaticDim as _SD
+    offsets = body.offsets
+    offset0 = int(offsets[0].value) if isinstance(offsets[0], _SD) else int(offsets[0])
+    idx_block = f"      %vc_off = llvm.mlir.constant({offset0} : index) : i64\n      %vc_src_idx = llvm.add %vc_tid, %vc_off  : i64"
+    return _build_view_copy_kernel(
+        function, name,
+        index_expr=idx_block,
+        out_shape=out_shape,
+    )
+
+
+def build_descriptor_abi_transpose_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRTranspose (rank-2 only)."""
+    from remora.hir import HIRTranspose as _HT
+    body = function.body
+    if not isinstance(body, _HT):
+        raise GPUScaffoldError("GPU transpose builder requires a transpose body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 2 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU transpose supports rank-2 f32 only")
+    out_rows = int(rt.shape[0].value)
+    out_cols = int(rt.shape[1].value)
+    name = kernel_name or f"remora_{function.name}_transpose"
+    _validate_scaffold_names("remora_gpu", name)
+    total = out_rows * out_cols
+
+    k1 = _descriptor_load_lines("xp_in", "%input_desc", 1)
+    k1.extend(_descriptor_load_lines("xp_out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @remora_gpu {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k1)}
+      %xp_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %xp_tid = llvm.sext %xp_tid32 : i32 to i64
+      %xp_c0 = llvm.mlir.constant(0 : index) : i64
+      %xp_N = llvm.mlir.constant({total} : index) : i64
+      %xp_OC = llvm.mlir.constant({out_cols} : index) : i64
+      %xp_OR = llvm.mlir.constant({out_rows} : index) : i64
+      %xp_ok = llvm.icmp "ult" %xp_tid, %xp_N : i64
+      llvm.cond_br %xp_ok, ^xp_work, ^xp_done
+
+    ^xp_work:
+      %xp_r = llvm.udiv %xp_tid, %xp_OC  : i64
+      %xp_c = llvm.urem %xp_tid, %xp_OC  : i64
+      %xp_src_r = llvm.mul %xp_c, %xp_OR  : i64
+      %xp_src_idx = llvm.add %xp_src_r, %xp_r  : i64
+      %xp_si = llvm.add %xp_in_offset, %xp_src_idx  : i64
+      %xp_sp = llvm.getelementptr %xp_in_aligned[%xp_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %xp_val = llvm.load %xp_sp : !llvm.ptr -> f32
+      %xp_do = llvm.add %xp_out_offset, %xp_tid  : i64
+      %xp_op = llvm.getelementptr %xp_out_aligned[%xp_do] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %xp_val, %xp_op : f32, !llvm.ptr
+      llvm.br ^xp_done
+
+    ^xp_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, "remora_gpu", name)
+
+
+def build_descriptor_abi_append_gpu_module(
+    function: HIRFunction,
+    *,
+    kernel_name: str | None = None,
+) -> GPUModuleScaffold:
+    """Build a standalone GPU kernel for HIRAppend (rank-1, f32, two inputs)."""
+    from remora.hir import HIRAppend as _HA
+    body = function.body
+    if not isinstance(body, _HA):
+        raise GPUScaffoldError("GPU append builder requires an append body")
+    rt = body.result_type
+    if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
+        raise GPUScaffoldError("GPU append supports rank-1 f32 only")
+    out_N = int(rt.shape[0].value)
+    left_rt = body.left.result_type if hasattr(body.left, 'result_type') else None
+    left_N = int(left_rt.shape[0].value) if isinstance(left_rt, ArrayType) else 0
+    name = kernel_name or f"remora_{function.name}_append"
+    _validate_scaffold_names("remora_gpu", name)
+
+    k1 = _descriptor_load_lines("ap_l", "%left_desc", 1)
+    k1_desc = _descriptor_load_lines("ap_l", "%left_desc", 1)
+    k2_desc = _descriptor_load_lines("ap_r", "%right_desc", 1)
+    k2_desc.extend(_descriptor_load_lines("ap_out", "%output_desc", 1))
+
+    text = f"""module {{
+  gpu.module @remora_gpu {{
+    llvm.func @{name}(%left_desc: !llvm.ptr, %right_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(k1_desc)}
+{chr(10).join(k2_desc)}
+      %ap_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %ap_tid = llvm.sext %ap_tid32 : i32 to i64
+      %ap_c0 = llvm.mlir.constant(0 : index) : i64
+      %ap_c1 = llvm.mlir.constant(1 : index) : i64
+      %ap_N = llvm.mlir.constant({out_N} : index) : i64
+      %ap_LN = llvm.mlir.constant({left_N} : index) : i64
+      %ap_ok = llvm.icmp "ult" %ap_tid, %ap_N : i64
+      llvm.cond_br %ap_ok, ^ap_work, ^ap_done
+
+    ^ap_work:
+      %ap_from_left = llvm.icmp "ult" %ap_tid, %ap_LN : i64
+      %ap_right_idx = llvm.sub %ap_tid, %ap_LN  : i64
+      %ap_src_idx = llvm.select %ap_from_left, %ap_tid, %ap_right_idx : i1, i64
+      %ap_si = llvm.select %ap_from_left, %ap_tid, %ap_right_idx : i1, i64
+      %ap_si_l = llvm.add %ap_l_offset, %ap_si  : i64
+      %ap_si_r = llvm.add %ap_r_offset, %ap_si  : i64
+      %ap_addr = llvm.select %ap_from_left, %ap_si_l, %ap_si_r : i1, i64
+      %ap_base = llvm.select %ap_from_left, %ap_l_aligned, %ap_r_aligned : i1, !llvm.ptr
+      %ap_gep = llvm.getelementptr %ap_base[%ap_addr] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %ap_val = llvm.load %ap_gep : !llvm.ptr -> f32
+      %ap_do = llvm.add %ap_out_offset, %ap_tid  : i64
+      %ap_op = llvm.getelementptr %ap_out_aligned[%ap_do] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %ap_val, %ap_op : f32, !llvm.ptr
+      llvm.br ^ap_done
+
+    ^ap_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, "remora_gpu", name)
+
+
 def _build_f32_map_gpu_scaffold(
     kernel: F32MapKernel,
     *,

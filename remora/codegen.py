@@ -634,6 +634,64 @@ def generate_mlir_descriptor_abi_ptx(
     except GPUScaffoldError:
         pass
 
+    # ── try GPU view ops (Reverse, Rotate, Take, Drop, Slice, Subarray, Reshape, Ravel, Append) ──
+    try:
+        from remora.hir import HIRReverse, HIRRotate, HIRTake, HIRDrop, HIRSlice, HIRSubarray, HIRReshape, HIRRavel, HIRAppend, HIRTranspose
+        from remora.gpu_lowering import (
+            build_descriptor_abi_reverse_gpu_module,
+            build_descriptor_abi_rotate_gpu_module,
+            build_descriptor_abi_take_gpu_module,
+            build_descriptor_abi_drop_gpu_module,
+            build_descriptor_abi_slice_gpu_module,
+            build_descriptor_abi_subarray_gpu_module,
+            build_descriptor_abi_reshape_gpu_module,
+            build_descriptor_abi_ravel_gpu_module,
+            build_descriptor_abi_append_gpu_module,
+            build_descriptor_abi_transpose_gpu_module,
+        )
+        body = function.body
+        if isinstance(body, HIRReverse):
+            gpu_module = build_descriptor_abi_reverse_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRRotate):
+            gpu_module = build_descriptor_abi_rotate_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRTake):
+            gpu_module = build_descriptor_abi_take_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRDrop):
+            gpu_module = build_descriptor_abi_drop_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRSlice):
+            gpu_module = build_descriptor_abi_slice_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRSubarray):
+            gpu_module = build_descriptor_abi_subarray_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRReshape):
+            gpu_module = build_descriptor_abi_reshape_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRRavel):
+            gpu_module = build_descriptor_abi_ravel_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRAppend):
+            gpu_module = build_descriptor_abi_append_gpu_module(function, kernel_name=name)
+        elif isinstance(body, HIRTranspose):
+            gpu_module = build_descriptor_abi_transpose_gpu_module(function, kernel_name=name)
+        else:
+            raise GPUScaffoldError("not a supported view op")
+        rt = body.result_type
+        v_shape = tuple(int(d.value) for d in rt.shape) if isinstance(rt, ArrayType) else ()
+        v_total = 1
+        for d in v_shape:
+            v_total *= d
+        v_num_inputs = 2 if isinstance(body, HIRAppend) else 1
+        v_ie = ["f32"] * v_num_inputs
+        meta = KernelMeta(
+            name=name, grid_dims=1, block_size=max(1, min(v_total, 1024)),
+            num_inputs=v_num_inputs, num_outputs=1,
+            input_elem_types=v_ie, output_elem_types=["f32"],
+            output_shape=v_shape, output_dtype="float32",
+        )
+        device_module = extract_gpu_module_body_as_module(gpu_module.text)
+        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+        return ptx, [meta], None
+    except (GPUScaffoldError, CodegenUnavailable):
+        pass
+
     # ── try GPU Sobel (combined 2-kernel cell-fold) ──
     try:
         from remora.gpu_lowering import _sobel_kernel
