@@ -355,7 +355,7 @@
     "name": "gpu_gpu_map_scale",
     "category": "supported",
     "path": "pass/gpu_map_scale.remora",
-    "target": "gpu-nvidia",
+    "target": "cuda",
     "expect_exit": 0,
     "expect_stdout": "[0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]\n"
   },
@@ -363,7 +363,7 @@
     "name": "gpu_gpu_binary_map",
     "category": "supported",
     "path": "pass/gpu_binary_map.remora",
-    "target": "gpu-nvidia",
+    "target": "cuda",
     "expect_exit": 0,
     "expect_stdout": "[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]\n"
   },
@@ -371,7 +371,7 @@
     "name": "gpu_gpu_fold_i32",
     "category": "supported",
     "path": "pass/gpu_fold_i32.remora",
-    "target": "gpu-nvidia",
+    "target": "cuda",
     "expect_exit": 0,
     "expect_stdout": "45\n"
   },
@@ -379,7 +379,7 @@
     "name": "gpu_gpu_sum",
     "category": "supported",
     "path": "pass/gpu_sum.remora",
-    "target": "gpu-nvidia",
+    "target": "cuda",
     "expect_exit": 0,
     "expect_stdout": "45.0\n"
   },

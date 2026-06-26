@@ -167,8 +167,7 @@ def test_cli_cpu_target_prints_result(tmp_path, capsys):
     source_file = tmp_path / "prog.remora"
     source_file.write_text("fold (+) 0.0 (iota 10)", encoding="utf-8")
 
-    exit_code = main([str(source_file)])
-
+    exit_code = main(["--shared", "-o", str(tmp_path / "out.so"), str(source_file)])
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.strip() == "45.0"
@@ -178,8 +177,7 @@ def test_cli_cpu_target_prints_shape(tmp_path, capsys):
     source_file = tmp_path / "prog.remora"
     source_file.write_text("shape [[1, 2], [3, 4]]", encoding="utf-8")
 
-    exit_code = main([str(source_file)])
-
+    exit_code = main(["--shared", "-o", str(tmp_path / "out.so"), str(source_file)])
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.strip() == "[2, 2]"
@@ -193,7 +191,7 @@ def test_cli_cpu_target_prints_remora_bool(tmp_path, capsys):
     source_file = tmp_path / "prog.remora"
     source_file.write_text("(1 < 2) && (2 < 3)", encoding="utf-8")
 
-    exit_code = main([str(source_file)])
+    exit_code = main(["--shared", "-o", str(tmp_path / "out.so"), str(source_file)])
 
     captured = capsys.readouterr()
     assert exit_code == 0

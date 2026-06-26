@@ -1,6 +1,7 @@
 import pytest
 
-from remora.repl import ReplSession, main
+from remora.cli import main
+from remora.repl import ReplSession
 
 
 def test_repl_evaluates_expression():
@@ -241,7 +242,7 @@ def test_repl_target_command():
     assert session.eval_input(":target interp") == "Target: interp"
     assert session.eval_input(":target") == "Current target: interp"
     assert session.eval_input(":target cpu") == "Target: cpu"
-    assert session.eval_input(":target gpu-nvidia") == "Target: gpu-nvidia"
+    assert session.eval_input(":target cuda") == "Target: cuda"
 
 
 def test_repl_quit_command_raises_system_exit():
@@ -254,12 +255,12 @@ def test_repl_quit_command_raises_system_exit():
 def test_repl_main_accepts_cpu_target(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
 
-    assert main(["--target", "cpu"]) == 0
+    assert main(["--repl", "--target", "cpu"]) == 0
     assert "Remora REPL" in capsys.readouterr().out
 
 
 def test_repl_main_accepts_interp_target(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
 
-    assert main(["--target", "interp"]) == 0
+    assert main(["--repl", "--target", "interp"]) == 0
     assert "Remora REPL" in capsys.readouterr().out

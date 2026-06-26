@@ -50,7 +50,7 @@ uv run remorac --emit-hir examples/prelude_sum.remora
 uv run remorac --emit-mlir examples/prelude_sum.remora
 
 # Start the REPL
-uv run remora
+uv run remorac --repl
 ```
 
 There is no configured linter, formatter, or Python type checker. Use `uv run python -m compileall -q remora` as the fast verification step after edits.
@@ -69,7 +69,7 @@ Source (.remora / .lisp)
   → GPU: LLVM dialect → LLVM IR → PTX      (gpu_lowering.py, codegen.py)
 ```
 
-Entry points: `remorac` (CLI, `remora/cli.py`), `remora` (REPL, `remora/repl.py`), `remora-bench` (benchmark, `remora/benchmark.py`).
+Entry points: `remorac` (CLI + REPL, `remora/cli.py`), `remora-bench` (benchmark, `remora/benchmark.py`).
 
 ## Key conventions
 
@@ -77,7 +77,7 @@ Entry points: `remorac` (CLI, `remora/cli.py`), `remora` (REPL, `remora/repl.py`
 - **Static shapes only.** All dimensions come from HIR type annotations.
 - **Descriptor ABI** for GPU kernels (aligned pointer + offset + sizes + strides).
 - **Prelude auto-prepended.** `stdlib/prelude.rem` is injected by `remora/prelude.py` before compilation.
-- **Two syntaxes.** ML syntax is the default; Lisp syntax is selected with `--syntax lisp`. The ML grammar is in `remora/grammar.lark` (Lark). The Lisp grammar is inline in `remora/lisp_reader.py`.
+- **Two syntaxes.** ML syntax is the default; Lisp syntax is selected with `--syntax lisp` (or inferred from `.remora`/`.lisp` extension). The ML grammar is in `remora/grammar.lark` (Lark). The Lisp grammar is inline in `remora/lisp_reader.py`.
 - **`_` prefix** on filenames means internal helper module.
 - **Lisp syntax local bindings.** Use `let`/`let*` for local bindings (standard Scheme-style). The `::` let-form was removed.
 

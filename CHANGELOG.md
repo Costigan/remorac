@@ -3,6 +3,66 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## CLI Reshape — AOT Compiler Model (June 2026)
+
+Redesigned `remorac` from a script-interpreter-with-compiler-backend into a
+proper compiler toolchain, modeled after `cc`/`gcc`.
+
+### Compiler model
+
+- **Default output is `a.out`** (ELF executable, `./a.out` works standalone).
+- **`--shared`** produces `a.so` (shared library, callable via `ctypes`).
+- **`-o FILE`** names the output regardless of mode.
+- **`--compile-only`** produces the binary but does not run it.
+- **`--cleanup` / `--rm`** deletes the output binary and metadata after execution.
+
+### Standalone executables
+
+- Compiler auto-generates a C `main()` stub from the Remora program's return
+  type (scalar/array, int/float/bool), compiles it with `gcc`, and links it
+  with the Remora object code and `remora_rt.o` to produce a PIE binary.
+- The C stub allocates an output buffer, calls `_mlir_ciface_remora_main_out`,
+  prints the result, and exits.
+- `@main` in the LLVM IR is renamed to `@_remora_main_body` to avoid symbol
+  collision with the C stub.
+
+### Metadata and incremental rebuild
+
+- Each compilation writes a `.json` metadata file alongside the output binary.
+  Contains: SHA-256 key of all source files, per-file hashes, compiler version
+  (git commit), and toolchain fingerprint.
+- On recompilation, if the metadata key matches, the entire parse→codegen
+  pipeline is skipped and the existing binary is reused.
+- Supersedes the `~/.cache/remora/native/` directory.
+
+### CLI interface
+
+- Accepts **multiple source files** (concatenated; later definitions shadow
+  earlier ones).
+- Syntax **inferred from file extension** (`.remora` → ML, `.lisp` → Lisp);
+  `--syntax` remains as an override.
+- `remorac --repl` unified with the CLI (previously a separate `remora` binary);
+  `remora` console_script entry point removed from `pyproject.toml`.
+- **`--target cuda`** replaces `--target gpu-nvidia` everywhere (pipeline
+  functions, constants, REPL target, acceptance manifest).
+- Removed `--target mlir` and `--target ptx` (redundant with `--emit-mlir`
+  and `--emit-ptx`).
+- **`--args`** and **`--call`/`--input`** flags reserved for Phase 2.
+
+### Test suite
+
+- All tests that compile-and-run now use `--shared -o $tmp_path/out.so` to
+  avoid a `ctypes.CDLL` in-process library caching bug on Linux.
+- `gpu-nvidia` → `cuda` updated in all test files, manifest, and pipeline
+  imports.
+- 150 tests pass in the core CLI/REPL/acceptance/runtime/execution group.
+
+### Removals
+
+- `remora` console_script entry point removed (`remora.repl:main`).
+- `remora/cache.py` kept but no longer used by the execution path; superseded
+  by metadata JSON alongside the output binary.
+
 ## Recursive Functions Across Interpreter, CPU, and GPU (June 2026)
 
 Expanded recursion support from scalar-only/common cases toward the planned

@@ -17,15 +17,17 @@ def load_cases():
     return json.loads((ACCEPTANCE_DIR / "manifest.json").read_text(encoding="utf-8"))
 
 
-def test_acceptance_manifest_cases(capsys):
+def test_acceptance_manifest_cases(tmp_path, capsys):
     for case_num, case in enumerate(load_cases()):
         assert case["category"] in {"supported", "rejected", "deferred"}, case["name"]
         source = ACCEPTANCE_DIR / case["path"]
 
-        if case["target"].startswith("gpu") and not _GPU_REQUIRED:
+        if case["target"] == "cuda" and not _GPU_REQUIRED:
             continue
 
         args = ["--target", case["target"], str(source)]
+        if case["target"] == "cpu":
+            args = ["--shared", "-o", str(tmp_path / f"case_{case_num}.so")] + args
 
         exit_code = main(args)
         captured = capsys.readouterr()

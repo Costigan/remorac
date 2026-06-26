@@ -11,8 +11,8 @@ from remora.pipeline import (
     CPU_PIPELINE,
     CPU_VECTORIZED_PIPELINE,
     FUSION_PIPELINE,
-    GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
-    GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
+    CUDA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
+    CUDA_SCAFFOLD_NVVM_PIPELINE,
     PipelineUnavailable,
     build_cpu_pipeline,
     build_pipeline,
@@ -156,8 +156,8 @@ def test_pipeline_artifacts_match_code_constants():
     assert "linalg-fuse-elementwise-ops" in FUSION_PIPELINE
     assert "convert-to-llvm" in CPU_PIPELINE
     assert "affine-super-vectorize" in CPU_VECTORIZED_PIPELINE
-    assert "gpu.module(convert-gpu-to-nvvm" in GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE
-    assert "convert-cf-to-llvm" in GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE
+    assert "gpu.module(convert-gpu-to-nvvm" in CUDA_SCAFFOLD_NVVM_PIPELINE
+    assert "convert-cf-to-llvm" in CUDA_SCAFFOLD_LLVM_DIALECT_PIPELINE
 
 
 def test_threaded_pipeline_strips_only_trivial_alloca_scopes():

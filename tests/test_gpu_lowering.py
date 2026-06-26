@@ -25,8 +25,8 @@ from remora.pipeline import (
     assemble_ptx_text,
     detect_toolchain,
     lower_gpu_scaffold_to_nvptx_text,
-    run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text,
-    run_gpu_nvidia_scaffold_nvvm_pipeline_text,
+    run_cuda_scaffold_llvm_dialect_pipeline_text,
+    run_cuda_scaffold_nvvm_pipeline_text,
     translate_mlir_to_llvmir,
     verify_module_text,
 )
@@ -327,7 +327,7 @@ def test_gpu_scaffold_runs_minimal_nested_nvvm_pipeline_when_available():
 
     scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
     try:
-        lowered = run_gpu_nvidia_scaffold_nvvm_pipeline_text(
+        lowered = run_cuda_scaffold_nvvm_pipeline_text(
             scaffold.text,
             toolchain=toolchain,
         )
@@ -347,7 +347,7 @@ def test_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available():
 
     scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
     try:
-        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
             scaffold.text,
             toolchain=toolchain,
         )
@@ -378,7 +378,7 @@ def test_rank2_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available()
         kernel_name="remora_scale2d",
     )
     try:
-        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
             scaffold.text,
             toolchain=toolchain,
         )
@@ -401,7 +401,7 @@ def test_binary_gpu_scaffold_runs_scaffold_llvm_dialect_pipeline_when_available(
         kernel_name="remora_add1d",
     )
     try:
-        lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+        lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
             scaffold.text,
             toolchain=toolchain,
         )
@@ -419,7 +419,7 @@ def test_extracts_converted_gpu_module_for_device_translation():
         pytest.skip("mlir-opt is not available")
 
     scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
-    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+    lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
         scaffold.text,
         toolchain=toolchain,
     )
@@ -438,7 +438,7 @@ def test_extracted_gpu_module_translates_to_nonempty_llvm_ir_when_available():
         pytest.skip("standalone MLIR tools are not available")
 
     scaffold = build_rank1_f32_unary_map_gpu_scaffold(size=4)
-    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+    lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
         scaffold.text,
         toolchain=toolchain,
     )

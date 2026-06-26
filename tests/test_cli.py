@@ -12,6 +12,11 @@ def write_source(tmp_path, text: str):
     return path
 
 
+def so_path(tmp_path) -> str:
+    """Return a unique .so path under tmp_path to avoid CDLL caching in-process."""
+    return str(tmp_path / "out.so")
+
+
 def test_cli_emit_ast(tmp_path, capsys):
     source = write_source(tmp_path, "map (* 2) (iota 4)")
 
@@ -55,26 +60,10 @@ def test_cli_emit_ptx(tmp_path, capsys):
     assert ".visible .entry" in output
 
 
-def test_cli_target_mlir_alias(tmp_path, capsys):
-    source = write_source(tmp_path, "map (* 2) (iota 4)")
-
-    assert main(["--target", "mlir", str(source)]) == 0
-    output = capsys.readouterr().out
-    assert "func.func @main() -> tensor<4xi32>" in output
-
-
-def test_cli_target_ptx_alias(tmp_path, capsys):
-    source = write_source(tmp_path, "map (* 2) (iota 4)")
-
-    assert main(["--target", "ptx", str(source)]) == 0
-    output = capsys.readouterr().out
-    assert ".visible .entry" in output
-
-
 def test_cli_loads_prelude_for_cpu_target(tmp_path, capsys):
     source = write_source(tmp_path, "sum (iota 10)")
 
-    assert main([str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == "45.0"
     assert captured.err == ""
@@ -83,7 +72,7 @@ def test_cli_loads_prelude_for_cpu_target(tmp_path, capsys):
 def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
     source = write_source(tmp_path, "1 + 2")
 
-    assert main(["--cpu-threads", "1", str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), "--cpu-threads", "1", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "3\n"
     assert captured.err == ""
@@ -92,7 +81,7 @@ def test_cli_accepts_cpu_threads_option(tmp_path, capsys):
 def test_cli_accepts_cpu_vectorize_option(tmp_path, capsys):
     source = write_source(tmp_path, "map (* 2.0) (iota 4)")
 
-    assert main(["--cpu-vectorize", str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), "--cpu-vectorize", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "[0.0, 2.0, 4.0, 6.0]\n"
     assert captured.err == ""
@@ -101,7 +90,7 @@ def test_cli_accepts_cpu_vectorize_option(tmp_path, capsys):
 def test_cli_accepts_no_cpu_vectorize_option(tmp_path, capsys):
     source = write_source(tmp_path, "1 + 2")
 
-    assert main(["--no-cpu-vectorize", str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), "--no-cpu-vectorize", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "3\n"
     assert captured.err == ""
@@ -113,7 +102,7 @@ def test_cli_runs_threaded_cpu_when_openmp_available(tmp_path, capsys):
 
     source = write_source(tmp_path, "map (* 2) (iota 4)")
 
-    assert main(["--cpu-threads", "4", str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), "--cpu-threads", "4", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "[0, 2, 4, 6]\n"
     assert captured.err == ""
@@ -144,7 +133,7 @@ def test_cli_emit_ptx_for_top_level_function_map(tmp_path, capsys):
     assert ".visible .entry" in output
 
 
-def test_cli_cpu_runs_checked_in_examples(capsys):
+def test_cli_cpu_runs_checked_in_examples(tmp_path, capsys):
     compiled_examples = {
         "bool_logic.remora",
         "chained_maps.remora",
@@ -171,7 +160,7 @@ def test_cli_cpu_runs_checked_in_examples(capsys):
     for path in sorted(
         p for p in Path("examples").glob("*.remora") if not p.name.startswith(".")
     ):
-        args = [str(path)] if path.name in compiled_examples else ["--target", "interp", str(path)]
+        args = ["--shared", "-o", str(tmp_path / f"{path.stem}.so"), str(path)] if path.name in compiled_examples else ["--target", "interp", str(path)]
         assert main(args) == 0, path
         captured = capsys.readouterr()
         assert captured.out.strip(), path
@@ -181,7 +170,7 @@ def test_cli_cpu_runs_checked_in_examples(capsys):
 def test_cli_invalid_source_exits_one(tmp_path, capsys):
     source = write_source(tmp_path, "missing")
 
-    assert main([str(source)]) == 1
+    assert main(["--shared", "-o", so_path(tmp_path), str(source)]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "remorac: unbound variable 'missing'" in captured.err
@@ -190,7 +179,7 @@ def test_cli_invalid_source_exits_one(tmp_path, capsys):
 def test_cli_top_level_function_definition_runs_on_cpu(tmp_path, capsys):
     source = write_source(tmp_path, "def f x = x\nf 1")
 
-    assert main([str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == "1"
     assert captured.err == ""

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -304,13 +306,14 @@ class DeviceMemoryPool:
 @dataclass(frozen=True)
 class CompiledCPUArtifact:
     library_path: Path
-    temp_dir: tempfile.TemporaryDirectory[str]
+    temp_dir: tempfile.TemporaryDirectory[str] | None
     return_type: RemoraType
     cpu_threads: int | None = None
     cpu_vectorize: bool = False
 
     def close(self) -> None:
-        self.temp_dir.cleanup()
+        if self.temp_dir is not None:
+            self.temp_dir.cleanup()
 
 
 @dataclass(frozen=True)
@@ -871,8 +874,6 @@ class CPUFunctionExecutor:
         cpu_threads: int | None = None,
         cpu_vectorize: bool = False,
     ) -> CompiledCPUFunctionArtifact:
-        import remora.cache as cache_module
-
         resolved_cpu_threads = resolve_cpu_threads(cpu_threads)
         compiler_artifact = compile_function_source(
             source,
@@ -883,20 +884,6 @@ class CPUFunctionExecutor:
             syntax=syntax,
         )
         toolchain = detect_toolchain() if toolchain is None else toolchain
-
-        # Check cache — covers the expensive MLIR→llc→linker pipeline.
-        if not cache_module.cache_disabled():
-            key = cache_module.compute_cache_key(
-                source, function_name, param_types,
-                cpu_threads=resolved_cpu_threads, cpu_vectorize=cpu_vectorize,
-            )
-            cached = cache_module.load_from_cache(key)
-            if cached is not None:
-                return CompiledCPUFunctionArtifact(
-                    cached.so_path, None, function_name, param_types,
-                    compiler_artifact.return_type,
-                    "remora_call", resolved_cpu_threads, cpu_vectorize,
-                )
 
         threaded = _use_threaded_cpu_pipeline(resolved_cpu_threads)
         if threaded and not has_openmp_runtime():
@@ -919,25 +906,6 @@ class CPUFunctionExecutor:
             raise
         llvm_ir = translate_mlir_to_llvmir(lowered, toolchain=toolchain)
         temp_dir = _compile_llvm_ir_to_shared_library(llvm_ir, toolchain, threaded=threaded)
-
-        # Store in cache
-        if not cache_module.cache_disabled():
-            key = cache_module.compute_cache_key(
-                source, function_name, param_types,
-                cpu_threads=resolved_cpu_threads, cpu_vectorize=cpu_vectorize,
-            )
-            try:
-                cache_module.store_in_cache(
-                    key,
-                    so_path=temp_dir[1],
-                    function_name=function_name,
-                    param_types=param_types,
-                    return_type_str=str(compiler_artifact.return_type),
-                    cpu_threads=resolved_cpu_threads,
-                    cpu_vectorize=cpu_vectorize,
-                )
-            except Exception:
-                pass  # Cache store failure is non-fatal
 
         return CompiledCPUFunctionArtifact(
             temp_dir[1],
@@ -2047,3 +2015,300 @@ def _numpy_dtype(element_type: ScalarType) -> np.dtype:
     if element_type == BOOL:
         return np.dtype(np.bool_)
     raise EvaluationError(f"unsupported array element type {element_type}")
+
+
+def compile_llvm_ir_to_path(
+    llvm_ir: str,
+    output_path: Path,
+    *,
+    toolchain: PipelineToolchain,
+    threaded: bool = False,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    work_dir = tempfile.TemporaryDirectory(prefix="remora-build-")
+    try:
+        root = Path(work_dir.name)
+        ll_path = root / "module.ll"
+        obj_path = root / "module.o"
+        ll_path.write_text(llvm_ir, encoding="utf-8")
+
+        llc = toolchain.llc
+        if llc is None:
+            raise PipelineUnavailable("llc is required for compiled CPU execution")
+        linker = which("gcc") or which("cc")
+        if linker is None:
+            raise PipelineUnavailable("gcc or cc is required for compiled CPU execution")
+
+        _run_checked(
+            [llc, "-filetype=obj", "-relocation-model=pic", str(ll_path), "-o", str(obj_path)],
+            "llc failed during compiled CPU execution",
+            work_dir,
+        )
+        _run_checked(
+            [
+                linker,
+                "-shared",
+                str(obj_path),
+                str(Path(_get_remora_rt_o())),
+                "-o",
+                str(output_path),
+                *_blas_link_args(),
+                *_openmp_link_args(threaded),
+            ],
+            "system linker failed during compiled CPU execution",
+            work_dir,
+        )
+    finally:
+        work_dir.cleanup()
+
+
+def _remora_version() -> str:
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()[:12]
+    except Exception:
+        pass
+    return "0.1.0"
+
+
+def _toolchain_fingerprint() -> str:
+    from remora.pipeline import detect_toolchain
+    try:
+        tc = detect_toolchain()
+        parts: list[str] = []
+        for attr in ("mlir_opt", "mlir_translate", "llc"):
+            val = getattr(tc, attr, None)
+            parts.append(f"{attr}:{val}")
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    except Exception:
+        return "unknown"
+
+
+def _source_key(sources: dict[str, str]) -> str:
+    parts = [f"{name}:{hashlib.sha256(content.encode()).hexdigest()}" for name, content in sorted(sources.items())]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def check_metadata(so_path: Path, sources: dict[str, str], *, cpu_threads: int = 1, cpu_vectorize: bool = False) -> bool:
+    """Return True if the .so at *so_path* is up-to-date with the given sources."""
+    metadata_path = so_path.with_suffix(".json")
+    if not so_path.is_file() or not metadata_path.is_file():
+        return False
+    try:
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        expected_key = _source_key(sources)
+        return meta.get("key") == expected_key
+    except (json.JSONDecodeError, KeyError, OSError):
+        return False
+
+
+def write_metadata(so_path: Path, sources: dict[str, str], *, cpu_threads: int = 1, cpu_vectorize: bool = False) -> None:
+    """Write a metadata.json alongside the .so for incremental rebuild detection."""
+    metadata_path = so_path.with_suffix(".json")
+    meta = {
+        "key": _source_key(sources),
+        "sources": {name: hashlib.sha256(content.encode()).hexdigest() for name, content in sorted(sources.items())},
+        "remora_version": _remora_version(),
+        "toolchain_fingerprint": _toolchain_fingerprint(),
+        "cpu_threads": cpu_threads,
+        "cpu_vectorize": cpu_vectorize,
+    }
+    _write_atomic_text(metadata_path, json.dumps(meta, indent=2) + "\n")
+
+
+def _write_atomic_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.rename(path)
+    finally:
+        if tmp.exists() and tmp != path:
+            tmp.unlink(missing_ok=True)
+
+
+def _generate_standalone_stub(return_type: RemoraType) -> str:
+
+    if isinstance(return_type, ScalarType):
+        elem = return_type
+        rank = 0
+        sizes: tuple = ()
+        total_elements = 1
+    elif isinstance(return_type, ArrayType):
+        elem = return_type.element
+        rank = len(return_type.shape)
+        sizes = tuple(d.value for d in return_type.shape if hasattr(d, "value"))
+        total_elements = 1
+        for s in sizes:
+            total_elements *= s
+    else:
+        raise EvaluationError(f"unsupported return type for standalone executable: {return_type}")
+
+    if elem == INT:
+        c_type = "int32_t"
+        printf_fmt = 'PRId32'
+        include_inttypes = True
+    elif elem == FLOAT:
+        c_type = "float"
+        printf_fmt = 'g'
+        include_inttypes = False
+    elif elem == FLOAT64:
+        c_type = "double"
+        printf_fmt = 'g'
+        include_inttypes = False
+    elif elem == BOOL:
+        c_type = "int32_t"
+        printf_fmt = 's'
+        include_inttypes = False
+    else:
+        raise EvaluationError(f"unsupported element type for standalone executable: {elem}")
+
+    lines: list[str] = []
+    if include_inttypes:
+        lines.append('#include <inttypes.h>')
+    lines.append('#include <stdint.h>')
+    lines.append('#include <stdio.h>')
+    lines.append('#include <stdlib.h>')
+    lines.append('')
+
+    # Declare descriptor struct — must match MLIR C-interface layout
+    # For scalars: { allocated, aligned, offset }
+    # For arrays: { allocated, aligned, offset, sizes[rank], strides[rank] }
+    lines.append('struct remora_desc {')
+    lines.append('    void *allocated;')
+    lines.append('    void *aligned;')
+    lines.append('    int64_t offset;')
+    if rank > 0:
+        for i in range(rank):
+            lines.append(f'    int64_t size{i};')
+        for i in range(rank):
+            lines.append(f'    int64_t stride{i};')
+    lines.append('};')
+    lines.append('')
+
+    # Use the MLIR-generated C-interface wrapper, renamed to avoid main() conflict
+    # Compile_llvm_ir_to_executable renames @main -> @_remora_entry in LLVM IR
+    # but @_mlir_ciface_remora_main_out is left as-is (it's already a separate symbol)
+    lines.append('extern void _mlir_ciface_remora_main_out(struct remora_desc *desc);')
+    lines.append('')
+
+    # main function
+    lines.append('int main(int argc, char **argv) {')
+
+    if rank == 0:
+        lines.append(f'    {c_type} result = 0;')
+        lines.append(f'    struct remora_desc desc = {{.allocated = &result, .aligned = &result, .offset = 0}};')
+        lines.append(f'    _mlir_ciface_remora_main_out(&desc);')
+        buffer_ref = 'result'
+    else:
+        lines.append(f'    {c_type} *buffer = calloc({total_elements}, sizeof({c_type}));')
+        lines.append('    if (!buffer) return 1;')
+        init_fields = ['.allocated = buffer', '.aligned = buffer', '.offset = 0']
+        for s in sizes:
+            init_fields.append(str(s))
+        stride = total_elements
+        for s in sizes:
+            stride //= s
+            init_fields.append(str(stride))
+        init_str = ', '.join(init_fields)
+        lines.append(f'    struct remora_desc desc = {{{init_str}}};')
+        lines.append(f'    _mlir_ciface_remora_main_out(&desc);')
+        buffer_ref = 'buffer'
+
+    # Print logic
+    if rank == 0:
+        if elem == BOOL:
+            lines.append('    printf("%s\\n", ' + buffer_ref + ' ? "true" : "false");')
+        elif elem == INT:
+            lines.append('    printf("%" PRId32 "\\n", ' + buffer_ref + ');')
+        else:
+            lines.append('    printf("%g\\n", (double)' + buffer_ref + ');')
+    else:
+        lines.append('    printf("[");')
+        lines.append('    for (int64_t i = 0; i < ' + str(total_elements) + '; i++) {')
+        lines.append('        if (i > 0) printf(", ");')
+        if elem == BOOL:
+            lines.append('        printf("%s", ' + buffer_ref + '[i] ? "true" : "false");')
+        elif elem == INT:
+            lines.append('        printf("%" PRId32, ' + buffer_ref + '[i]);')
+        else:
+            lines.append('        printf("%g", (double)' + buffer_ref + '[i]);')
+        lines.append('    }')
+        lines.append('    printf("]\\n");')
+
+    # Cleanup
+    if rank > 0:
+        lines.append('    free(buffer);')
+
+    lines.append('    return 0;')
+    lines.append('}')
+
+    return '\n'.join(lines) + '\n'
+
+
+def compile_llvm_ir_to_executable(
+    llvm_ir: str,
+    output_path: Path,
+    return_type: RemoraType,
+    *,
+    toolchain: PipelineToolchain,
+    threaded: bool = False,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    work_dir = tempfile.TemporaryDirectory(prefix="remora-build-")
+    try:
+        root = Path(work_dir.name)
+        ll_path = root / "module.ll"
+        obj_path = root / "module.o"
+        renamed_obj_path = root / "module_renamed.o"
+        stub_c_path = root / "stub.c"
+        stub_o_path = root / "stub.o"
+
+        # Rename @main to avoid collision with the C stub's main().
+        # Don't touch @_mlir_ciface_remora_main_out or other symbols.
+        import re as _re
+        llvm_ir = _re.sub(r'(?<![a-z])@main\b', '@_remora_main_body', llvm_ir)
+        ll_path.write_text(llvm_ir, encoding="utf-8")
+
+        stub_source = _generate_standalone_stub(return_type)
+        stub_c_path.write_text(stub_source, encoding="utf-8")
+
+        llc = toolchain.llc
+        if llc is None:
+            raise PipelineUnavailable("llc is required for compiled CPU execution")
+        cc = which("gcc") or which("cc")
+        if cc is None:
+            raise PipelineUnavailable("gcc or cc is required for compiled CPU execution")
+
+        _run_checked(
+            [llc, "-filetype=obj", "-relocation-model=pic", str(ll_path), "-o", str(obj_path)],
+            "llc failed during CPU compilation",
+            work_dir,
+        )
+        _run_checked(
+            [cc, "-c", str(stub_c_path), "-o", str(stub_o_path)],
+            "stub compilation failed",
+            work_dir,
+        )
+        _run_checked(
+            [
+                cc,
+                str(obj_path),
+                str(stub_o_path),
+                str(Path(_get_remora_rt_o())),
+                "-o",
+                str(output_path),
+                *_blas_link_args(),
+                *_openmp_link_args(threaded),
+            ],
+            "system linker failed during CPU compilation",
+            work_dir,
+        )
+    finally:
+        work_dir.cleanup()

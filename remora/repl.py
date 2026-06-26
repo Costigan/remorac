@@ -17,7 +17,7 @@ from remora.prelude import prelude_definition_sources
 from remora.runtime import EvaluationResult, evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
 
-REPL_TARGETS = ("cpu", "interp", "gpu-nvidia")
+REPL_TARGETS = ("cpu", "interp", "cuda")
 REPL_SYNTAXES = ("ml", "lisp")
 
 
@@ -31,7 +31,7 @@ class ReplState:
 
 def make_initial_state(target: str = "cpu") -> ReplState:
     if target not in REPL_TARGETS:
-        raise ReplError("available REPL targets: cpu, interp, gpu-nvidia")
+        raise ReplError("available REPL targets: cpu, interp, cuda")
     return ReplState(target=target)
 
 
@@ -111,7 +111,7 @@ class ReplSession:
             return evaluate_source(
                 program_source, include_prelude=False, syntax=self.state.syntax
             )
-        if self.state.target == "gpu-nvidia":
+        if self.state.target == "cuda":
             from remora.compiler import compile_source_to_ptx
             from remora.codegen import CodegenUnavailable
             try:
@@ -348,7 +348,7 @@ Remora REPL commands:
   :defs          Show user definitions in this session
   :load <file>   Load definitions and evaluate the file body
   :reset         Clear accumulated definitions
-  :target [cpu|interp|gpu-nvidia]
+  :target [cpu|interp|cuda]
                  Show or set the current target
   :syntax [ml|lisp]
                  Show or set the current syntax

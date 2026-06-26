@@ -123,7 +123,7 @@ CPU_THREADED_POST_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
-GPU_NVIDIA_PIPELINE = "builtin.module(" + ",".join(
+CUDA_PIPELINE = "builtin.module(" + ",".join(
     [
         "linalg-fuse-elementwise-ops",
         "linalg-generalize-named-ops",
@@ -147,11 +147,11 @@ GPU_NVIDIA_PIPELINE = "builtin.module(" + ",".join(
     ]
 ) + ")"
 
-GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE = (
+CUDA_SCAFFOLD_NVVM_PIPELINE = (
     "builtin.module(gpu.module(convert-gpu-to-nvvm{index-bitwidth=64}))"
 )
 
-GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE = (
+CUDA_SCAFFOLD_LLVM_DIALECT_PIPELINE = (
     "builtin.module("
     "gpu.module(convert-gpu-to-nvvm{index-bitwidth=64},convert-scf-to-cf),"
     "convert-cf-to-llvm,"
@@ -223,30 +223,30 @@ def build_cpu_threaded_pipeline() -> Any:
     return build_pipeline(CPU_THREADED_PIPELINE)
 
 
-def build_gpu_nvidia_pipeline() -> Any:
-    return build_pipeline(GPU_NVIDIA_PIPELINE)
+def build_cuda_pipeline() -> Any:
+    return build_pipeline(CUDA_PIPELINE)
 
 
-def run_gpu_nvidia_scaffold_nvvm_pipeline_text(
+def run_cuda_scaffold_nvvm_pipeline_text(
     mlir_text: str,
     *,
     toolchain: PipelineToolchain | None = None,
 ) -> str:
     return run_external_pipeline_text(
         mlir_text,
-        GPU_NVIDIA_SCAFFOLD_NVVM_PIPELINE,
+        CUDA_SCAFFOLD_NVVM_PIPELINE,
         toolchain=toolchain,
     )
 
 
-def run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+def run_cuda_scaffold_llvm_dialect_pipeline_text(
     mlir_text: str,
     *,
     toolchain: PipelineToolchain | None = None,
 ) -> str:
     return run_external_pipeline_text(
         mlir_text,
-        GPU_NVIDIA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
+        CUDA_SCAFFOLD_LLVM_DIALECT_PIPELINE,
         toolchain=toolchain,
     )
 
@@ -623,7 +623,7 @@ def lower_gpu_scaffold_to_nvptx_text(
     from remora.gpu_lowering import extract_gpu_module_body_as_module
 
     toolchain = detect_toolchain() if toolchain is None else toolchain
-    lowered = run_gpu_nvidia_scaffold_llvm_dialect_pipeline_text(
+    lowered = run_cuda_scaffold_llvm_dialect_pipeline_text(
         mlir_text,
         toolchain=toolchain,
     )
