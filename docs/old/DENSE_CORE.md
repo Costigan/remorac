@@ -48,8 +48,8 @@ Implemented forms:
 Deferred or not yet implemented:
 - `compose`, `flip`, and higher-order combinators (require function-typed parameters)
 - `zipwith` / `zip` implemented via indexing (requires closure conversion for arrays)
-- GPU whole-program execution (descriptor-ABI lowering infrastructure in place and
-  PTX validation works via `--target gpu-nvidia`; full execution needs CUDA hardware)
+- GPU whole-program execution is available through CUDA descriptor-ABI lowering
+  for supported dense patterns via `--target cuda`
 - AMD/ROCm backend
 
 Rejected or deferred forms must produce stable diagnostics. They should not be

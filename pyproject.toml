@@ -2,7 +2,7 @@
 name = "remora"
 version = "0.0.0"
 description = "Remora Dense Core compiler prototype"
-readme = "docs/MLIR_IMPLEMENTATION_PLAN.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cuda-python",

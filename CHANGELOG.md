@@ -3,6 +3,74 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Documentation, Benchmarks, and Project Landing Page (June 2026)
+
+Collected the post-AOT project status into current-facing docs, benchmark
+reports, and a top-level README.
+
+### Project landing page
+
+- Added a top-level `README.md` describing RemoraC's goals, current dense-core
+  status, architecture, quick-start commands, testing expectations, benchmark
+  highlights, roadmap, and project maturity.
+- Updated `pyproject.toml` so package metadata uses `README.md` instead of the
+  long MLIR implementation plan as the project readme.
+
+### Documentation reorganization
+
+- Added `docs/BACKEND_GAPS.md` as the current source of truth for full-language
+  and backend gaps, including dynamic shapes, runtime boxes/ragged arrays,
+  segmented reductions, GPU scale limits, higher-order gaps, AD limits, dtype
+  coverage, and support-matrix ambiguities.
+- Added `docs/ROADMAP.md` for user-visible milestones and research directions:
+  dynamic shapes, staged shape specialization, GPU execution planning, full GPU
+  AD, property/differential testing, diagnostics, and library/domain examples.
+- Added `docs/IMPLEMENTATION_LOG.md` to separate completed work from active
+  roadmap items, including GPU dense-subset milestones, recursion, higher-order
+  CPU support, scan/Thomas-solver work, buffer pooling, matmul, sort/grade, and
+  abandoned codec work.
+- Added `docs/DOCS_TODO.md` to track remaining user-guide and architecture-doc
+  work, including Float64 docs, GPU coverage, AD compilation, Python embedding,
+  metadata behavior, acceptance tests, GPU codegen cascade, CPU lowering, and an
+  executable support matrix.
+- Added `docs/PLAN_TO_IMPLEMENT_FULL_REMORA.md` for the longer full-language
+  implementation path.
+- Refined `docs/PROJECT_OVERVIEW_AND_ARCHITECTURE.md`,
+  `docs/IMPLEMENTATION_NOTES.md`, `docs/BENCHMARK_PLAN.md`, and
+  `docs/remorac-vs-futhark.md` to reflect the current dense-core CPU/GPU state.
+- Added `docs/CODEX_PROJECT_REVIEW.md` and refined `docs/USER_GUIDE.md` with a
+  broader project assessment, risk review, and user-facing guidance.
+- Moved older or superseded planning docs under `docs/old/`, and archived the
+  stale top-level Dense Core document rather than keeping it as a competing
+  current-status page.
+- Added the Remora reference paper "Records with Rank Polymorphism" in both PDF
+  and extracted text form.
+
+### Benchmarks and examples
+
+- Added `docs/BENCHMARK_RESULTS.md` with the June 26, 2026 benchmark snapshot
+  on Linux x86_64, 24 CPU cores, and an NVIDIA RTX 5090 Laptop GPU.
+- Recorded benchmark highlights: competitive CPU scan, strong CPU/GPU stencil
+  results, GPU fold scaling, GPU sort at 1M elements, and remaining performance
+  gaps in CPU map/fold, small GPU workloads, CPU sort, large CPU matmul, kernel
+  fusion, and GPU plan composition.
+- Made CPU vectorization the default for `remora-bench` and the CLI CPU path,
+  while retaining `--no-cpu-vectorize` for the scalar pipeline.
+- Added `examples/fft.txt` as notes for future FFT/signal-processing work.
+
+### CLI and tests
+
+- Added initial `remorac --args ...` support for CPU and interpreter execution:
+  the CLI now resolves `main` or a single defined function, evaluates literal
+  arguments with the interpreter, compiles descriptor-ABI CPU functions, and
+  invokes them with typed NumPy values.
+- Added an acceptance case for main/function arguments and updated CLI and
+  acceptance tests around the new `--args` path.
+- Kept `--args` unsupported for CUDA and `--compile-only` for now, with explicit
+  diagnostics instead of silent fallback.
+- Removed the obsolete native cache module and its tests after the AOT metadata
+  path superseded `~/.cache/remora/native/`.
+
 ## CLI Reshape — AOT Compiler Model (June 2026)
 
 Redesigned `remorac` from a script-interpreter-with-compiler-backend into a
