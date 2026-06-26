@@ -212,8 +212,8 @@ RemoraC's memory management is minimal:
   executes kernel steps, frees at the end.  Better for
   multi-kernel operations but still no reuse across plan
   executions.
-- **Cache**: compiled `.so` files cached by source hash
-  (`cache.py`).  Avoids recompilation but not re-allocation.
+- **Incremental rebuilds**: CLI artifacts use sidecar metadata JSON next to
+  `a.out` / `.so` outputs to skip redundant recompilation.
 
 This is the largest gap between RemoraC and Futhark.  A buffer
 arena and last-use analysis would bring RemoraC closer to

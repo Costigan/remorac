@@ -11,11 +11,12 @@ Surface-level changes. No new compiler passes or lowering stages.
 
 One binary: `remorac`. The REPL is accessed via `remorac --repl`.
 
-- Merge `remora/cli.py` and `remora/repl.py` into a single entry point.
 - Remove the `remora` console_script entry point from `pyproject.toml`.
 - `remorac --repl` starts the interactive REPL.
 - `--repl` loads any source files provided, then drops into the REPL with those
   definitions in the environment.
+- `remora/repl.py` may remain a separate implementation module; the user-facing
+  requirement is the `remorac --repl` entry point and preloaded environment.
 
 ### 1.2 Accept multiple source files
 
@@ -80,33 +81,36 @@ of all loaded files (type-check and add definitions without executing a body).
 ### 1.7 `--compile-only` flag
 
 ```
-remorac --compile-only file.remora           # produces a.so, a.json
-remorac --compile-only -o libfoo.so file.remora  # produces libfoo.so, libfoo.json
+remorac --compile-only file.remora                # produces a.out, a.json
+remorac --compile-only --shared file.remora       # produces a.so, a.json
+remorac --compile-only -o myprog file.remora      # produces myprog, myprog.json
+remorac --compile-only --shared -o libfoo.so file.remora  # produces libfoo.so, libfoo.json
 ```
 
 - Does not run the program.
-- Produces a `.so` shared library in the current working directory.
+- Produces the same artifact kind as normal compilation: an executable by
+  default, or a shared library with `--shared`.
 - Also produces a metadata `.json` file (same basename, `.json` extension) with
   the hash of all input sources, function signatures, etc. Used for incremental
   rebuild skipping (see §1.9).
 
 ### 1.8 `-o` flag
 
-Specify output path for the compiled `.so`.
+Specify output path for the compiled artifact.
 
 ```
-remorac --compile-only -o libfoo.so file.remora
+remorac -o myprog file.remora
+remorac --shared -o libfoo.so file.remora
 ```
 
-- The metadata file uses the same basename: `libfoo.json`.
-- Defaults to `a.so` / `a.json` when `-o` is not given.
-- When `--compile-only` is not set but `-o` is given, produce the named `.so`
-  AND run it, then leave it on disk (same as now but the file is named instead
-  of a temp path).
+- The metadata file uses the same basename: `myprog.json` or `libfoo.json`.
+- Defaults to `a.out` / `a.json` when `-o` is not given.
+- When `--compile-only` is not set but `-o` is given, produce the named artifact
+  AND run it, then leave it on disk.
 
 ### 1.9 Metadata `.json` and incremental rebuild
 
-Each compilation writes a metadata file alongside the `.so`:
+Each compilation writes a metadata file alongside the output artifact:
 
 ```json
 {
@@ -122,15 +126,15 @@ Each compilation writes a metadata file alongside the `.so`:
 On the next compilation with the same output path:
 - Compute a new key from the current inputs.
 - If the metadata file exists and the key matches, skip the compilation pipeline
-  (`.so` is already up-to-date).
+  (the artifact is already up-to-date).
 - If the key differs, recompile and overwrite the metadata.
 
 This replaces the `~/.cache/remora/native/` directory entirely.
 
 ### 1.10 Remove cache directory
 
-- Delete `remora/cache.py` or repurpose it for the new `.json` metadata
-  approach.
+- Delete `remora/cache.py`; the CLI rebuild shortcut is sidecar metadata next
+  to the output artifact.
 - Remove `~/.cache/remora/native/` references throughout the codebase.
 - Existing cache directories on disk are NOT cleaned up automatically (the user
   can delete `~/.cache/remora/` manually).
@@ -138,13 +142,13 @@ This replaces the `~/.cache/remora/native/` directory entirely.
 ### 1.11 `--cleanup` / `--rm` flag
 
 ```
-remorac --cleanup file.remora       # run, then delete a.so + a.json
+remorac --cleanup file.remora       # run, then delete a.out + a.json
 remorac --rm file.remora            # alias
 ```
 
-After successful execution, removes the `.so` and `.json` files that were
-produced. If `-o` was given, removes the specified `.so` and its `.json`.
-Without `-o`, removes `a.so` / `a.json`.
+After successful execution, removes the output artifact and `.json` files that
+were produced. If `-o` was given, removes the specified artifact and its
+`.json`. Without `-o`, removes `a.out` / `a.json`.
 
 When combined with `--compile-only`, `--cleanup` is an error: producing an
 artifact and immediately deleting it makes no sense.
@@ -158,9 +162,10 @@ remorac prog.remora --args 1 2.0 true
 remorac prog.remora --args '[1, 2, 3]' '[4.0, 5.0]'
 ```
 
-- Everything after `--args` up to the next flag or end-of-argv is collected.
-- Individual tokens are joined with spaces and parsed as Remora expression
-  literals in the source's syntax (ML or Lisp, inferred from extension).
+- Everything after `--args` is collected as Remora argument expressions.
+- Each shell argument after `--args` is parsed as one Remora expression literal
+  in the source's syntax (ML or Lisp, inferred from extension). Values that
+  contain spaces, such as ML array literals with spaces, must be shell-quoted.
 - The collected expressions become arguments to the entry function.
 - Shell quoting (`'...'`) handles tokens that contain spaces.
 
@@ -192,20 +197,24 @@ main <arg1>
 
 This allows simple scripts to accept arguments without boilerplate.
 
-### 2.4 `--compile-only` with `--args`
+### 2.4 `--compile-only` with `--args` — deferred
 
-When `--compile-only` is combined with `--args`, the arguments are used to
-infer the parameter types for the compiled function. For example:
+Current implementation rejects `--compile-only --args`. Supporting it properly
+requires deciding whether the artifact should be:
+
+1. a no-argument executable with argument values baked into a generated call; or
+1. a shared function artifact specialized by argument-derived parameter types.
+
+The default `remorac` behavior is now executable-first (`a.out`), so this should
+be designed explicitly instead of inheriting the older `.so`-first cleanup plan.
+An eventual implementation may use the arguments to infer parameter types:
 
 ```
 remorac --compile-only prog.remora --args 5 3.0 true
 ```
 
-Infers `main` has signature `(Int, Float, Bool) -> <return type>`. The `.so`
-contains the compiled `main` function with those parameter types.
-
-Without `--args`, `--compile-only` produces an `.so` with the program's main
-body or `main()` with no parameters.
+For now, without `--args`, `--compile-only` produces the default no-argument
+artifact for the program body or `main()`.
 
 ## Phase 3 — Future (separate plans)
 
@@ -235,17 +244,18 @@ own design document.**
 - `--target gpu-nvidia` removed. Users must use `--target cuda`.
 - `--target mlir` and `--target ptx` removed.
 - `--syntax` remains but is no longer required when filenames have extensions.
-- `~/.cache/remora/` is no longer used; new artifacts go to CWD.
+- `~/.cache/remora/native/` is no longer used for CLI native artifacts; new
+  artifacts and rebuild metadata go to CWD or the explicit `-o` path.
 
 ### Files to modify
 
 | File | Change |
 |------|--------|
 | `remora/cli.py` | Major rewrite: multiple files, `--repl`, `--compile-only`, `-o`, `--args`, `--cleanup`, entry point resolution |
-| `remora/repl.py` | Pre-populate from loaded source files; integrate with CLI |
-| `remora/compiler.py` | `--compile-only` mode (produce .so, don't execute); `--args` type inference |
+| `remora/repl.py` | Pre-populate from loaded source files for `remorac --repl` |
+| `remora/compiler.py` | `--compile-only` mode; `--args` type inference |
 | `remora/runtime.py` | `--compile-only` path; remove or separate the execution step |
-| `remora/cache.py` | Replace with metadata.json approach or remove |
+| `remora/cache.py` | Remove; use sidecar metadata next to CLI output artifacts |
 | `remora/pipeline.py` | `gpu-nvidia` → `cuda` rename |
 | `remora/codegen.py` | `gpu-nvidia` → `cuda` rename |
 | `remora/gpu_lowering.py` | `gpu-nvidia` → `cuda` rename |

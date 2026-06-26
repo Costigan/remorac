@@ -26,6 +26,7 @@ def test_acceptance_manifest_cases(tmp_path, capsys):
             continue
 
         args = ["--target", case["target"], str(source)]
+        args.extend(case.get("args", []))
         if case["target"] == "cpu":
             args = ["--shared", "-o", str(tmp_path / f"case_{case_num}.so")] + args
 

@@ -97,7 +97,7 @@ def test_benchmark_source_records_cpu_thread_request():
 
     assert result.name == "tiny"
     assert result.cpu_threads == 1
-    assert result.cpu_vectorize is False
+    assert result.cpu_vectorize is True
     assert result.linalg_generic_before >= result.linalg_generic_after_fusion
     assert result.llvm_func_count >= 1
     assert result.allocation_count >= 0
@@ -361,7 +361,7 @@ def test_benchmark_cli_emits_json(tmp_path, capsys):
 
     assert payload["name"] == "bench"
     assert payload["cpu_threads"] == 1
-    assert payload["cpu_vectorize"] is False
+    assert payload["cpu_vectorize"] is True
     assert "allocation_count" in payload
     assert captured.err == ""
 

@@ -189,7 +189,7 @@ Source (ML or Lisp syntax)
 | `remora/executor.py` | 801   | `RemoraExecutor`: GPU kernel launch, `DeviceArray`, `_DeviceBuffer`, memory pool, kernel chaining        |
 | `remora/compiler.py` | 1,535 | Public compiler API: `compile_function_source()`, `compile_gradient_function_source()`, monomorphization |
 | `remora/api.py`      | —     | `RemoraFunction` and `compile_function()`: call compiled Remora from NumPy                               |
-| `remora/cache.py`    | —     | Legacy on-disk cache; superseded by metadata JSON alongside the output binary |
+| output metadata JSON | —     | Sidecar rebuild metadata (`a.json` / `<output>.json`) written alongside CLI artifacts |
 | `remora/limits.py`   | —     | Shared Dense Core implementation limits (`MAX_DENSE_RANK = 10`)                                          |
 | `remora/lowering.py` | —     | Compatibility shim re-exporting the `remora.lowering` package                                            |
 
@@ -324,9 +324,10 @@ are the worst failure mode. Follow these rules:
 1. **No example-specific code.** Lowering paths must handle arbitrary HIR, not
    pattern-match against specific programs.
 1. **Static shapes only.** All dimensions come from HIR type annotations.
-1. **Descriptor ABI.** GPU kernels use Remora descriptor structs
-   (aligned pointer + offset + sizes + strides) for input/output, defined in
-   `remora/abi.py`.
+1. **Descriptor ABI.** GPU and CPU kernels use Remora descriptor structs
+   (aligned pointer + offset + sizes + strides) for input/output.  Normative
+   specification in [`docs/ABI.md`](ABI.md); ctypes implementation in
+   `remora/abi.py`.  LLMs working on lowering code should read ABI.md first.
 1. **File naming.** `_` prefix for internal helper modules.
 1. **Naming in HIR.** `HIRMap`, `HIRFold`, `HIRReduce`, `HIRScan`, `HIRTrace`,
    `HIRIndex`, `HIRLet`, `HIRApply`, `HIRPrimOp`, `HIRIf`, `HIRVar`, `HIRLit`,

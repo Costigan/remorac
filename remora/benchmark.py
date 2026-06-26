@@ -797,7 +797,7 @@ def benchmark_source(
     *,
     name: str = "program",
     cpu_threads: int | None = None,
-    cpu_vectorize: bool = False,
+    cpu_vectorize: bool = True,
     toolchain: PipelineToolchain | None = None,
 ) -> BenchmarkResult:
     """Compile and execute one source string, returning coarse timing metrics."""
@@ -873,7 +873,7 @@ def run_benchmark_suite(
     baseline_path: Path,
     *,
     cpu_threads: int | None = None,
-    cpu_vectorize: bool = False,
+    cpu_vectorize: bool = True,
 ) -> tuple[list[BenchmarkResult], list[str]]:
     """Run all cases defined in the baseline file."""
     baselines = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -971,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cpu-vectorize",
         dest="cpu_vectorize",
         action="store_true",
-        help="use the experimental affine/vector CPU lowering pipeline",
+        help="use the affine/vector CPU lowering pipeline (default)",
     )
     vectorize_group.add_argument(
         "--no-cpu-vectorize",
@@ -979,7 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="use the scalar CPU lowering pipeline",
     )
-    parser.set_defaults(cpu_vectorize=False)
+    parser.set_defaults(cpu_vectorize=True)
     parser.add_argument(
         "--baseline",
         type=Path,

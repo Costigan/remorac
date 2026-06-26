@@ -560,9 +560,9 @@ Deferred pipeline/codegen work:
   automatically by the compiler facade and CPU evaluator; the REPL initializes
   and resets its session definitions with the same prelude definitions.
 - The `remorac` console script defaults to `--target cpu`, printing the
-  compiled CPU result. It also supports `--target interp`, `--emit-ast`,
-  `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, `--emit-ptx`, plus
-  `--target mlir` and `--target ptx` aliases for artifact inspection.
+  compiled CPU result. It also supports `--target interp`, `--target cuda`,
+  `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, `--emit-mlir`, and
+  `--emit-ptx`.
 - The `remora` REPL defaults to `:target cpu`, which recompiles each expression
   through the compiled CPU path with the accumulated session definitions. The
   `:target interp` command switches to the typed-AST reference evaluator.

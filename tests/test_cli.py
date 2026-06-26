@@ -102,7 +102,7 @@ def test_cli_runs_threaded_cpu_when_openmp_available(tmp_path, capsys):
 
     source = write_source(tmp_path, "map (* 2) (iota 4)")
 
-    assert main(["--shared", "-o", so_path(tmp_path), "--cpu-threads", "4", str(source)]) == 0
+    assert main(["--shared", "-o", so_path(tmp_path), "--no-cpu-vectorize", "--cpu-threads", "4", str(source)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "[0, 2, 4, 6]\n"
     assert captured.err == ""
@@ -183,6 +183,33 @@ def test_cli_top_level_function_definition_runs_on_cpu(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out.strip() == "1"
     assert captured.err == ""
+
+
+def test_cli_args_call_main_interp(tmp_path, capsys):
+    source = write_source(tmp_path, "def main x y = x + y")
+
+    assert main(["--target", "interp", str(source), "--args", "2", "3"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "5\n"
+    assert captured.err == ""
+
+
+def test_cli_args_call_single_function_interp(tmp_path, capsys):
+    source = write_source(tmp_path, "def add1 x = x + 1")
+
+    assert main(["--target", "interp", str(source), "--args", "41"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "42\n"
+    assert captured.err == ""
+
+
+def test_cli_args_reject_body_only_program(tmp_path, capsys):
+    source = write_source(tmp_path, "1 + 2")
+
+    assert main(["--target", "interp", str(source), "--args", "3"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--args requires" in captured.err
 
 
 def test_cli_recursive_function_definition_exits_one(tmp_path, capsys):

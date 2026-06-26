@@ -1,0 +1,18 @@
+(define (fft v)
+  (let* ((M (length v))
+         (K (/ M 2)))
+    (if (< K 1)
+        v
+        (let* ((odd-mask  (repeat [M] [1 0]))
+               (even-mask (repeat [M] [0 1]))
+               ;; Recursively compute odd and even sub-FFTs via filtering
+               (odd-fft   (fft (filter odd-mask v)))
+               (even-fft  (fft (filter even-mask v)))
+               ;; Generate indices 0 to K-1 as a vector
+               (k-indices (iota K))
+               ;; Compute twiddle factors (exp)
+               (twiddles  (exp (* 0+2i pi k-indices (/ -1 M))))
+               ;; Multiply even FFT results by the twiddle factors
+               (T         (* even-fft twiddles)))
+          ;; Concatenate (odd + T) with (odd - T)
+          (append (+ odd-fft T) (- odd-fft T))))))

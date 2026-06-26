@@ -1,5 +1,14 @@
 [
   {
+    "name": "cpu_main_args",
+    "category": "supported",
+    "path": "pass/main_args.remora",
+    "target": "cpu",
+    "args": ["--args", "20", "22"],
+    "expect_exit": 0,
+    "expect_stdout": "42\n"
+  },
+  {
     "name": "cpu_array_fold_mapped_init",
     "category": "supported",
     "path": "pass/array_fold_mapped_init.remora",

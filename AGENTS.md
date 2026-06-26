@@ -75,7 +75,7 @@ Entry points: `remorac` (CLI + REPL, `remora/cli.py`), `remora-bench` (benchmark
 
 - **No example-specific code.** Lowering paths must handle arbitrary HIR, not pattern-match specific programs.
 - **Static shapes only.** All dimensions come from HIR type annotations.
-- **Descriptor ABI** for GPU kernels (aligned pointer + offset + sizes + strides).
+- **Descriptor ABI** for GPU and CPU kernels: aligned pointer + offset + sizes + strides. Normative spec in [`docs/ABI.md`](docs/ABI.md); ctypes implementation in `remora/abi.py`.
 - **Prelude auto-prepended.** `stdlib/prelude.rem` is injected by `remora/prelude.py` before compilation.
 - **Two syntaxes.** ML syntax is the default; Lisp syntax is selected with `--syntax lisp` (or inferred from `.remora`/`.lisp` extension). The ML grammar is in `remora/grammar.lark` (Lark). The Lisp grammar is inline in `remora/lisp_reader.py`.
 - **`_` prefix** on filenames means internal helper module.

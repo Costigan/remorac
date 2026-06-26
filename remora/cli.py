@@ -25,6 +25,7 @@ from remora.pipeline import (
 from remora.prelude import prelude_definition_sources, with_prelude
 from remora.runtime import (
     CPUExecutor,
+    CPUFunctionExecutor,
     CompiledCPUArtifact,
     EvaluationResult,
     check_metadata,
@@ -33,6 +34,7 @@ from remora.runtime import (
     resolve_cpu_threads,
     write_metadata,
 )
+from remora.types import ArrayType, BOOL, FLOAT, FLOAT64, INT, RemoraType, ScalarType
 from remora.typechecker import TypeChecker
 
 
@@ -82,10 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     vectorize_group = parser.add_mutually_exclusive_group()
     vectorize_group.add_argument("--cpu-vectorize", dest="cpu_vectorize", action="store_true",
-                                 help="use the affine/vector CPU lowering pipeline")
+                                 help="use the affine/vector CPU lowering pipeline (default)")
     vectorize_group.add_argument("--no-cpu-vectorize", dest="cpu_vectorize", action="store_false",
-                                 help="use the scalar CPU lowering pipeline (default)")
-    parser.set_defaults(cpu_vectorize=False)
+                                 help="use the scalar CPU lowering pipeline")
+    parser.set_defaults(cpu_vectorize=True)
     parser.add_argument(
         "--call", type=str, default=None,
         help="call a named function with descriptor ABI (requires --input for each param)",
@@ -93,6 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--input", type=Path, action="append", default=None,
         help="load a .npy file as input to a --call function",
+    )
+    parser.add_argument(
+        "--args",
+        nargs=argparse.REMAINDER,
+        default=None,
+        help="Remora literal arguments passed to main or the sole defined function",
     )
     args = parser.parse_args(argv)
 
@@ -146,6 +154,15 @@ def _run(args: argparse.Namespace) -> int:
         sources[str(f)] = f.read_text(encoding="utf-8")
 
     combined_source = _concat_sources(list(sources.items()), syntax)
+    entry_name: str | None = None
+    if args.args is not None:
+        entry_name = _resolve_args_entry_name(combined_source, str(args.files[-1]), syntax)
+        if entry_name is None:
+            print(
+                "remorac: --args requires a function named 'main' or a single function definition",
+                file=sys.stderr,
+            )
+            return 1
 
     # --- --repl ---
     if args.repl:
@@ -185,14 +202,30 @@ def _run(args: argparse.Namespace) -> int:
 
     # --- target dispatch ---
     if args.target == "interp":
+        if entry_name is not None:
+            combined_source = _source_with_entry_call(combined_source, syntax, entry_name, args.args)
         result = _evaluate_interp(combined_source, syntax)
         print(format_result(result.value, result.type))
         return 0
     if args.target == "cuda":
+        if entry_name is not None:
+            print("remorac: --args is not supported with --target cuda yet", file=sys.stderr)
+            return 1
         _handle_gpu_target(combined_source, syntax)
         return 0
 
     # --- cpu target: compile and optionally run ---
+    if entry_name is not None:
+        return _run_cpu_function_with_args(
+            combined_source,
+            syntax,
+            entry_name,
+            args.args,
+            args.compile_only,
+            resolved_threads=resolve_cpu_threads(args.cpu_threads),
+            cpu_vectorize=args.cpu_vectorize,
+        )
+
     resolved_threads = resolve_cpu_threads(args.cpu_threads)
     threaded = resolved_threads is not None and resolved_threads > 1
 
@@ -430,25 +463,93 @@ def _extract_body_source(source: str) -> str | None:
     if start >= len(lines):
         return None
     return "\n".join(lines[start:])
-    """Extract the source text of a definition from the original source."""
-    lines = source.splitlines()
-    loc = getattr(definition, "loc", None)
-    if loc is not None and hasattr(loc, "line") and loc.line > 0:
-        start_line = loc.line - 1
-        end_line = start_line
-        if hasattr(loc, "end_line") and loc.end_line > 0:
-            end_line = loc.end_line - 1
-        elif hasattr(loc, "ecl") and loc.ecl > 0:
-            end_line = loc.ecl - 1
-        end_line = min(end_line, len(lines) - 1)
-        return "\n".join(lines[start_line:end_line + 1])
-    name = getattr(definition, "name", None)
-    if name and hasattr(name, "__str__"):
-        if hasattr(definition, "params"):
-            params = " ".join(str(p) for p in definition.params) if hasattr(definition, "params") else ""
-            return f"def {name} {params} = ..."
-        return f"def {name} = ..."
+
+
+def _resolve_args_entry_name(source: str, filename: str, syntax: str) -> str | None:
+    from remora.ast_nodes import FuncDef
+
+    program = _parse_source(source, filename, syntax)
+    functions = [definition for definition in program.definitions if isinstance(definition, FuncDef)]
+    main_defs = [definition for definition in functions if str(definition.name) == "main"]
+
+    if main_defs:
+        return "main"
+    if len(functions) == 1 and program.body is None:
+        return str(functions[0].name)
     return None
+
+
+def _source_with_entry_call(source: str, syntax: str, entry: str, arg_exprs: list[str]) -> str:
+    if syntax == "lisp":
+        call = f"({entry}{(' ' + ' '.join(arg_exprs)) if arg_exprs else ''})"
+    else:
+        call = " ".join([entry, *arg_exprs])
+    return f"{source.rstrip()}\n{call}\n"
+
+
+def _run_cpu_function_with_args(
+    source: str,
+    syntax: str,
+    entry_name: str,
+    arg_exprs: list[str],
+    compile_only: bool,
+    *,
+    resolved_threads: int | None,
+    cpu_vectorize: bool,
+) -> int:
+    if compile_only:
+        print("remorac: --compile-only with --args is not supported yet", file=sys.stderr)
+        return 1
+
+    values, param_types = _evaluate_arg_exprs(arg_exprs, syntax)
+    artifact = CPUFunctionExecutor.compile_source(
+        source,
+        entry_name,
+        param_types,
+        include_prelude=(syntax == "ml"),
+        syntax=syntax,
+        cpu_threads=resolved_threads,
+        cpu_vectorize=cpu_vectorize,
+    )
+    result = CPUFunctionExecutor(artifact).execute(*values)
+    print(format_result(result.value, result.type))
+    return 0
+
+
+def _evaluate_arg_exprs(arg_exprs: list[str], syntax: str) -> tuple[list[object], tuple[RemoraType, ...]]:
+    values: list[object] = []
+    types: list[RemoraType] = []
+    for expr in arg_exprs:
+        result = _evaluate_interp(expr, syntax)
+        values.append(_value_for_compiled_arg(result.value, result.type))
+        types.append(result.type)
+    return values, tuple(types)
+
+
+def _value_for_compiled_arg(value: object, value_type: RemoraType) -> object:
+    import numpy as np
+
+    if isinstance(value_type, ScalarType):
+        dtype = {
+            INT.name: np.int32,
+            FLOAT.name: np.float32,
+            FLOAT64.name: np.float64,
+            BOOL.name: np.bool_,
+        }.get(value_type.name)
+        if dtype is None:
+            return np.asarray(value)
+        return np.asarray(value, dtype=dtype)
+    if isinstance(value_type, ArrayType):
+        dtype = {
+            INT.name: np.int32,
+            FLOAT.name: np.float32,
+            FLOAT64.name: np.float64,
+            BOOL.name: np.bool_,
+        }.get(value_type.element.name)
+        if dtype is None:
+            return np.asarray(value)
+        return np.asarray(value, dtype=dtype)
+    return value
 
 
 def _resolve_syntax(files: list[Path], explicit_syntax: str | None) -> str | None:
