@@ -313,9 +313,12 @@ class MLIRLowering:
         function: HIRFunction,
         *,
         export_name: str = "remora_call",
+        functions: dict[str, HIRFunction] | None = None,
     ) -> LoweredModule:
         """Lower one typed HIR function to descriptor-in/descriptor-out MLIR."""
-        text = _lower_function_descriptor_module(function, export_name)
+        text = _lower_function_descriptor_module(
+            function, export_name, functions or {}
+        )
         with self.context, self.ir.Location.unknown(self.context):
             module = self.ir.Module.parse(text)
         return LoweredModule(str(module), module)
@@ -602,7 +605,10 @@ def _lower_main_module(
         _expr_result_type(node.condition), ArrayType
     ):
         return _lower_tensor_if_module(node)
-    if isinstance(node, HIRCall) and isinstance(node.result_type, ArrayType):
+    if isinstance(node, HIRCall) and (
+        isinstance(node.result_type, ArrayType)
+        or any(isinstance(_expr_result_type(arg), ArrayType) for arg in node.args)
+    ):
         from remora.lowering.tensor_ops import _lower_tensor_input
         from remora.lowering.module import _MLIRMainModuleBuilder
         func = functions.get(node.func_name)
@@ -893,7 +899,27 @@ def _lower_tensor_if_result(
 
 def _lower_functions(functions: dict[str, HIRFunction]) -> str:
     lowered: list[str] = []
+    emitted: set[str] = set()
+    tensor_recursive_groups = _recursive_tensor_sccs(functions)
+
     for function in functions.values():
+        if function.name in emitted:
+            continue
+        group = tensor_recursive_groups.get(function.name)
+        if group is not None:
+            impl_map = {
+                name: _mref_interface_function(functions[name])
+                for name in group
+            }
+            for name in group:
+                text = _lower_recursive_tensor_function(
+                    functions[name], {**functions, **impl_map}
+                )
+                if text.strip().startswith("func.func"):
+                    lowered.append(text)
+                emitted.add(name)
+            continue
+
         text = _lower_function(function, functions)
         # Only include functions whose lowering produces a proper
         # func.func definition.  Scalar-returning fold/reduce bodies
@@ -902,7 +928,108 @@ def _lower_functions(functions: dict[str, HIRFunction]) -> str:
         # into their callers.
         if text.strip().startswith("func.func"):
             lowered.append(text)
+        emitted.add(function.name)
     return "\n\n".join(lowered)
+
+
+def _mref_interface_function(function: HIRFunction) -> HIRFunction:
+    return HIRFunction(
+        name=f"__{function.name}_mref",
+        params=function.params,
+        body=function.body,
+        return_type=function.return_type,
+    )
+
+
+def _recursive_tensor_sccs(
+    functions: dict[str, HIRFunction],
+) -> dict[str, tuple[str, ...]]:
+    graph = {
+        name: {
+            callee
+            for callee in _hir_call_names(function.body)
+            if callee in functions
+        }
+        for name, function in functions.items()
+    }
+    groups: dict[str, tuple[str, ...]] = {}
+    for component in _strongly_connected_components(graph):
+        recursive = len(component) > 1 or component[0] in graph[component[0]]
+        if not recursive:
+            continue
+        if not any(_function_touches_array(functions[name]) for name in component):
+            continue
+        group = tuple(name for name in functions if name in set(component))
+        for name in group:
+            groups[name] = group
+    return groups
+
+
+def _function_touches_array(function: HIRFunction) -> bool:
+    return isinstance(function.return_type, ArrayType) or any(
+        isinstance(param.type, ArrayType) for param in function.params
+    )
+
+
+def _hir_call_names(expr: HIRExpr) -> set[str]:
+    result: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, HIRCall):
+            result.add(value.func_name)
+        if not is_dataclass(value):
+            return
+        for field in fields(value):
+            child = getattr(value, field.name)
+            if isinstance(child, (list, tuple)):
+                for item in child:
+                    visit(item)
+            else:
+                visit(child)
+
+    visit(expr)
+    return result
+
+
+def _strongly_connected_components(
+    graph: dict[str, set[str]],
+) -> list[list[str]]:
+    index = 0
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    components: list[list[str]] = []
+
+    def strongconnect(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for successor in graph[node]:
+            if successor not in indices:
+                strongconnect(successor)
+                lowlinks[node] = min(lowlinks[node], lowlinks[successor])
+            elif successor in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[successor])
+
+        if lowlinks[node] == indices[node]:
+            component: list[str] = []
+            while True:
+                successor = stack.pop()
+                on_stack.remove(successor)
+                component.append(successor)
+                if successor == node:
+                    break
+            components.append(component)
+
+    for node in graph:
+        if node not in indices:
+            strongconnect(node)
+    return components
 
 
 def _lower_function(
@@ -1261,23 +1388,204 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
                 f"%arg{i}", mlir_type, mlir_type
             )
 
-    if is_scalar_return:
-        # Scalar-returning recursive functions with array params are not
-        # supported yet.  The impl path would need to route self-calls through
-        # the memref interface, but _lower_tensor_input only handles
-        # tensor literals, iota, and array-valued HIRIf (via
-        # _lower_if_tensor_input_scalar_cond).  Continue to reject for now.
-        raise RemoraLoweringError(
-            "scalar-returning recursive function with array params is not supported"
+    if is_scalar_return and isinstance(function.body, HIRIf):
+        recursive_functions = {**all_functions, function.name: impl_function}
+
+        def _indent_block(text: str, spaces: int = 6) -> str:
+            prefix = " " * spaces
+            return "\n".join(
+                prefix + line.lstrip()
+                for line in text.split("\n")
+                if line.strip()
+            )
+
+        def _lower_scalar_expr_with_tensor_calls(
+            expr: HIRExpr,
+            prefix: str,
+            emitter: _RegionEmitter,
+        ) -> _Operand:
+            if isinstance(expr, HIRVar):
+                try:
+                    operand = scalar_env[expr.name]
+                except KeyError as exc:
+                    raise RemoraLoweringError(
+                        f"unbound HIR variable {expr.name}"
+                    ) from exc
+                return _Operand(operand.value, [], operand.type)
+
+            if isinstance(expr, HIRLit):
+                expr_type = type_to_mlir(expr.type)
+                name = emitter.temp()
+                emitter.lines.append(
+                    f"      {name} = arith.constant "
+                    f"{_literal_value(expr, expr_type)} : {expr_type}"
+                )
+                return _Operand(name, [], expr_type)
+
+            if isinstance(expr, HIRCast):
+                value = _lower_scalar_expr_with_tensor_calls(
+                    expr.value, _join_prefix(prefix, "cast"), emitter
+                )
+                result_type = type_to_mlir(expr.result_type)
+                cast_lines = _cast_if_needed(
+                    value.value, value.type, result_type, emitter.temp()
+                )
+                if not cast_lines:
+                    return value
+                emitter.lines.extend(cast_lines)
+                return _Operand(
+                    cast_lines[-1].split(" = ", 1)[0].strip(), [], result_type
+                )
+
+            if isinstance(expr, HIRLet):
+                if not isinstance(expr.value_type, ScalarType) or not isinstance(
+                    expr.result_type, ScalarType
+                ):
+                    raise RemoraLoweringError(
+                        "only scalar lets lower in scalar recursive HIRIf branches"
+                    )
+                value = _lower_scalar_expr_with_tensor_calls(
+                    expr.value, _join_prefix(prefix, "let"), emitter
+                )
+                old = scalar_env.get(expr.name)
+                scalar_env[expr.name] = value
+                try:
+                    return _lower_scalar_expr_with_tensor_calls(
+                        expr.body, _join_prefix(prefix, "body"), emitter
+                    )
+                finally:
+                    if old is None:
+                        scalar_env.pop(expr.name, None)
+                    else:
+                        scalar_env[expr.name] = old
+
+            if isinstance(expr, HIRIf):
+                condition = _lower_scalar_expr_with_tensor_calls(
+                    expr.condition, _join_prefix(prefix, "cond"), emitter
+                )
+                result_type = type_to_mlir(expr.result_type)
+                condition = emitter._coerce(condition, "i1")
+                then_emitter = _RegionEmitter(
+                    input_name="",
+                    input_type="",
+                    functions=recursive_functions,
+                    prefix=_join_prefix(prefix, "then"),
+                )
+                then_value = _lower_scalar_expr_with_tensor_calls(
+                    expr.then_branch, _join_prefix(prefix, "then"), then_emitter
+                )
+                then_value = then_emitter._coerce(then_value, result_type)
+                else_emitter = _RegionEmitter(
+                    input_name="",
+                    input_type="",
+                    functions=recursive_functions,
+                    prefix=_join_prefix(prefix, "else"),
+                )
+                else_value = _lower_scalar_expr_with_tensor_calls(
+                    expr.else_branch, _join_prefix(prefix, "else"), else_emitter
+                )
+                else_value = else_emitter._coerce(else_value, result_type)
+                result = emitter.temp()
+                emitter.lines.append(
+                    f"      {result} = scf.if {condition.value} "
+                    f"-> ({result_type}) {{"
+                )
+                emitter.lines.append(
+                    _indent_block("\n".join(then_emitter.lines), 8)
+                )
+                emitter.lines.append(
+                    f"        scf.yield {then_value.value} : {result_type}"
+                )
+                emitter.lines.append("      } else {")
+                emitter.lines.append(
+                    _indent_block("\n".join(else_emitter.lines), 8)
+                )
+                emitter.lines.append(
+                    f"        scf.yield {else_value.value} : {result_type}"
+                )
+                emitter.lines.append("      }")
+                return _Operand(result, [], result_type)
+
+            if isinstance(expr, HIRCall):
+                call_code, call_name, call_type, _call_elem = _lower_tensor_input(
+                    expr,
+                    prefix,
+                    recursive_functions,
+                    tensor_env,
+                    scalar_env,
+                )
+                if call_code:
+                    emitter.lines.append(call_code)
+                return _Operand(call_name, [], call_type)
+
+            if isinstance(expr, (HIRFold, HIRReduce)):
+                result_type = type_to_mlir(expr.result_type)
+                fold_code, fold_value = _lower_descriptor_scalar_result_body(
+                    expr,
+                    result_type,
+                    scalar_env,
+                    tensor_env,
+                    prefix=prefix,
+                    functions=recursive_functions,
+                )
+                if fold_code:
+                    emitter.lines.append(fold_code)
+                return _Operand(fold_value, [], result_type)
+
+            if isinstance(expr, HIRPrimOp):
+                args = [
+                    _lower_scalar_expr_with_tensor_calls(
+                        arg, _join_prefix(prefix, f"a{i}"), emitter
+                    )
+                    for i, arg in enumerate(expr.args)
+                ]
+                result_type = type_to_mlir(expr.result_type)
+                return emitter._emit_prim_op(expr.op, args, result_type)
+
+            raise RemoraLoweringError(
+                f"cannot lower {type(expr).__name__} in scalar recursive HIRIf branch"
+            )
+
+        cond_emitter = _RegionEmitter(
+            input_name="", input_type="", functions=recursive_functions,
+            prefix="result_cond",
         )
+        cond_op = cond_emitter.emit_expr(function.body.condition, scalar_env)
+        cond_op = cond_emitter._coerce(cond_op, "i1")
+
+        then_emitter = _RegionEmitter(
+            input_name="", input_type="", functions=recursive_functions,
+            prefix="result_then",
+        )
+        then_op = _lower_scalar_expr_with_tensor_calls(
+            function.body.then_branch, "result_then", then_emitter
+        )
+        then_op = then_emitter._coerce(then_op, result_type_mlir)
+
+        else_emitter = _RegionEmitter(
+            input_name="", input_type="", functions=recursive_functions,
+            prefix="result_else",
+        )
+        else_op = _lower_scalar_expr_with_tensor_calls(
+            function.body.else_branch, "result_else", else_emitter
+        )
+        else_op = else_emitter._coerce(else_op, result_type_mlir)
+
+        result_name = "%result"
+        cond_code = "\n".join(cond_emitter.lines)
+        then_code = _indent_block("\n".join(then_emitter.lines))
+        else_code = _indent_block("\n".join(else_emitter.lines))
+        body_code = f"""{cond_code}
+    {result_name} = scf.if {cond_op.value} -> ({result_type_mlir}) {{
+{then_code}
+      scf.yield {then_op.value} : {result_type_mlir}
+    }} else {{
+{else_code}
+      scf.yield {else_op.value} : {result_type_mlir}
+    }}"""
+        lowered_type = result_type_mlir
+        _elem = result_type_mlir
     else:
-        body_code, result_name, lowered_type, _elem = _lower_tensor_input(
-            function.body,
-            "result",
-            {**all_functions, function.name: impl_function},
-            tensor_env,
-            scalar_env,
-        )
         body_code, result_name, lowered_type, _elem = _lower_tensor_input(
             function.body,
             "result",
@@ -1395,13 +1703,16 @@ def _has_self_hir_call(expr: HIRExpr, func_name: str) -> bool:
 
 
 def _lower_function_descriptor_module(
-    function: HIRFunction, export_name: str
+    function: HIRFunction,
+    export_name: str,
+    functions: dict[str, HIRFunction] | None = None,
 ) -> str:
+    functions = functions or {}
     is_recursive = _has_self_hir_call(function.body, function.name)
     if is_recursive:
-        funcs = {function.name: function}
+        funcs = {**functions, function.name: function}
         internal_name = "__remora_entry"
-        target_def = _lower_function(function, funcs)
+        target_def = _lower_functions(funcs)
         result_type = type_to_mlir(function.return_type)
         param_decls = ", ".join(
             f"%arg{index}: {type_to_mlir(param.type)}"
@@ -1420,9 +1731,12 @@ def _lower_function_descriptor_module(
 {target_def}"""
     else:
         internal_name = "__remora_entry"
+        helper_defs = _lower_functions(functions)
         internal = _lower_descriptor_internal_function(
-            function, internal_name
+            function, internal_name, functions
         )
+        if helper_defs:
+            internal = f"{helper_defs}\n\n{internal}"
     wrapper = _lower_descriptor_export_wrapper(
         function, internal_name, export_name
     )
@@ -1575,8 +1889,11 @@ def _lower_top_level_lets(
 
 
 def _lower_descriptor_internal_function(
-    function: HIRFunction, name: str
+    function: HIRFunction,
+    name: str,
+    functions: dict[str, HIRFunction] | None = None,
 ) -> str:
+    functions = functions or {}
     arg_decls = [
         f"%arg{index}: {type_to_mlir(param.type)}"
         for index, param in enumerate(function.params)
@@ -1640,7 +1957,7 @@ def _lower_descriptor_internal_function(
             _code, _val, _mlir_type, _elem_type = _lower_tensor_input(
                 cse_expr,
                 f"__cse_value_{cse_ordinal}",
-                {},
+                functions,
                 tensor_env,
                 scalar_env,
             )
@@ -1676,7 +1993,7 @@ def _lower_descriptor_internal_function(
             _lower_tensor_input(
                 cse_body,
                 "result",
-                {},
+                functions,
                 tensor_env,
                 scalar_env,
             )
@@ -1695,6 +2012,7 @@ def _lower_descriptor_internal_function(
                 result_type,
                 scalar_env,
                 tensor_env,
+                functions=functions,
             )
         )
         result_parts = [(result_value, result_type)]
@@ -1800,13 +2118,15 @@ def _lower_descriptor_scalar_result_body(
     scalar_env: dict[str, _Operand],
     tensor_env: TensorEnv,
     prefix: str = "",
+    functions: dict[str, HIRFunction] | None = None,
 ) -> tuple[str, str]:
+    functions = functions or {}
     expr = _inline_lets(expr)
     if isinstance(expr, (HIRFold, HIRReduce)):
         input_code, input_name, input_type, input_element_type = (
             _lower_fold_input(
                 expr.array,
-                {},
+                functions,
                 prefix=_join_prefix(prefix, "input"),
                 tensor_env=tensor_env,
                 scalar_env=scalar_env,
@@ -1815,13 +2135,13 @@ def _lower_descriptor_scalar_result_body(
         init_code, init_value = _lower_scalar_value_for_fold_init(
             expr.init,
             result_type,
-            functions={},
+            functions=functions,
             env=scalar_env,
             result_prefix=_join_prefix(prefix, "init_scalar"),
         )
         fold_body = _lower_fold_callable_body(
             expr.func,
-            {},
+            functions,
             input_name="%in",
             input_type=input_element_type,
             acc_name="%acc",
@@ -1845,7 +2165,9 @@ def _lower_descriptor_scalar_result_body(
     {extracted_name} = tensor.extract {folded_name}[] : tensor<{result_type}>"""
         return body, extracted_name
 
-    emitter = _RegionEmitter(input_name="", input_type="", prefix=prefix)
+    emitter = _RegionEmitter(
+        input_name="", input_type="", functions=functions, prefix=prefix
+    )
     value = emitter.emit_expr(expr, scalar_env)
     cast_name = f"%{_join_prefix(prefix, 'result_cast')}"
     lines = [

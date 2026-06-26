@@ -890,6 +890,107 @@ def test_array_valued_recursion_with_multiple_params():
     np.testing.assert_array_equal(result.value, [0, 9, 18])
 
 
+def test_scalar_valued_recursion_with_array_param_compiled():
+    """Scalar self-recursion with an array param routes through memref shim."""
+    source = (
+        "(define/pi () (rec_sum [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) 0.0 (+ n (rec_sum a (- n 1.0)))))"
+    )
+    artifact = CPUFunctionExecutor.compile_source(
+        source,
+        "rec_sum",
+        [ArrayType(FLOAT, (StaticDim(4),)), FLOAT],
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.arange(4, dtype=np.float32),
+            np.asarray(4.0, dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    assert result.value == pytest.approx(10.0)
+
+
+def test_scalar_valued_recursion_with_array_literal_compiled():
+    """Top-level scalar recursive calls can pass array literal arguments."""
+    result = evaluate_source_compiled(
+        "(define/pi () (rec_sum [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) 0.0 (+ n (rec_sum a (- n 1.0))))) "
+        "(rec_sum [1.0 2.0 3.0 4.0] 4.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+
+    assert result.value == pytest.approx(10.0)
+
+
+def test_scalar_valued_recursion_reads_array_param_compiled():
+    """Scalar recursion with array params reads the array, not just carries it."""
+    source = (
+        "(define/pi () (rec_sum [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) (fold + 0.0 a) (+ n (rec_sum a (- n 1.0)))))"
+    )
+    artifact = CPUFunctionExecutor.compile_source(
+        source,
+        "rec_sum",
+        (ArrayType(FLOAT, (StaticDim(4),)), FLOAT),
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+            np.asarray(4.0, dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    assert result.value == pytest.approx(20.0)
+
+
+def test_mutual_scalar_recursion_with_array_params_compiled():
+    """Mutual recursive array-param functions share memref-interface shims."""
+    result = evaluate_source_compiled(
+        "(define/pi () (even [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) 1.0 (odd a (- n 1.0)))) "
+        "(define/pi () (odd [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) 0.0 (even a (- n 1.0)))) "
+        "(even [1.0 2.0 3.0 4.0] 4.0)",
+        include_prelude=False,
+        syntax="lisp",
+    )
+
+    assert result.value == pytest.approx(1.0)
+
+
+def test_recursive_scalar_helper_inside_map_compiled_function():
+    """Descriptor-exported CPU functions carry recursive helper definitions."""
+    source = (
+        "(define/pi () (tri [n Float acc Float] Float) "
+        "  (if (== n 0.0) acc (tri (- n 1.0) (+ acc n)))) "
+        "(define/pi () (apply_tri [xs (Array Float 4)] (Array Float 4)) "
+        "  (map (lambda (x) (tri x 0.0)) xs))"
+    )
+    artifact = CPUFunctionExecutor.compile_source(
+        source,
+        "apply_tri",
+        (ArrayType(FLOAT, (StaticDim(4),)),),
+        include_prelude=False,
+        syntax="lisp",
+    )
+    try:
+        result = CPUFunctionExecutor(artifact).execute(
+            np.asarray([0.0, 1.0, 2.0, 4.0], dtype=np.float32),
+        )
+    finally:
+        artifact.close()
+
+    np.testing.assert_allclose(result.value, [0.0, 1.0, 3.0, 10.0])
+
+
 def test_array_valued_recursion_deeper():
     """12.26: array-valued recursion with depth > 2."""
     result = evaluate_source_compiled(

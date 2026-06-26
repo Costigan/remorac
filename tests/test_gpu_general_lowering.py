@@ -1439,6 +1439,68 @@ class TestGPUNumericParity:
                 include_prelude=False, syntax="lisp",
             )
 
+    def test_non_tail_recursion_rejected_with_specific_error(self):
+        src = (
+            "(define/pi () (sum_to [n Float] Float) "
+            "  (if (== n 0.0) 0.0 (+ n (sum_to (- n 1.0))))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (sum_to x)) xs))"
+        )
+
+        with pytest.raises(
+            (CodegenUnavailable, GPUScaffoldError),
+            match="GPU recursion supports tail-recursive scalar helpers inside map bodies only",
+        ):
+            compile_function_source_to_mlir_gpu_ptx(
+                src,
+                "f",
+                (ArrayType(FLOAT, (StaticDim(4),)),),
+                include_prelude=False,
+                syntax="lisp",
+            )
+
+    def test_mutual_recursion_rejected_with_specific_error(self):
+        src = (
+            "(define/pi () (even [n Float] Float) "
+            "  (if (== n 0.0) 1.0 (odd (- n 1.0)))) "
+            "(define/pi () (odd [n Float] Float) "
+            "  (if (== n 0.0) 0.0 (even (- n 1.0)))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (even x)) xs))"
+        )
+
+        with pytest.raises(
+            (CodegenUnavailable, GPUScaffoldError),
+            match="GPU recursion supports tail-recursive scalar helpers inside map bodies only",
+        ):
+            compile_function_source_to_mlir_gpu_ptx(
+                src,
+                "f",
+                (ArrayType(FLOAT, (StaticDim(4),)),),
+                include_prelude=False,
+                syntax="lisp",
+            )
+
+    def test_recursive_array_param_helper_rejected_with_specific_error(self):
+        src = (
+            "(define/pi () (sum_to [xs (Array Float 4) n Float acc Float] Float) "
+            "  (if (== n 0.0) acc (sum_to xs (- n 1.0) (+ acc n)))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (sum_to xs x 0.0)) xs))"
+        )
+
+        with pytest.raises(
+            (CodegenUnavailable, GPUScaffoldError),
+            match="GPU recursion supports tail-recursive scalar helpers inside map bodies only",
+        ):
+            compile_function_source_to_mlir_gpu_ptx(
+                src,
+                "f",
+                (ArrayType(FLOAT, (StaticDim(4),)),),
+                include_prelude=False,
+                syntax="lisp",
+            )
+
     # ------------------------------------------------------------------
     # Scan: previously only compile-checked. Now executed and compared to
     # the interpreter oracle (single-block path). The multi-block path

@@ -1105,6 +1105,9 @@ def generate_mlir_descriptor_abi_ptx(
                                 input_kinds=_kind2,
                             )
                         except (GPUScaffoldError, CodegenUnavailable) as general_error:
+                            general_message = str(general_error)
+                            if "GPU recursion supports" in general_message:
+                                raise CodegenUnavailable(general_message) from general_error
                             raise CodegenUnavailable(str(bool_map_error)) from general_error
 
     device_module = extract_gpu_module_body_as_module(gpu_module.text)

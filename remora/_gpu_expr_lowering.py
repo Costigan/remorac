@@ -553,7 +553,28 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
             callee_fn = ctx.functions[callee_name]
             # Phase 6.4: check for self-recursion BEFORE substitution
             _is_self_recursive = _detect_self_call(callee_fn.body, callee_name)
+            if (
+                not _is_self_recursive
+                and _function_is_in_recursive_cycle(callee_name, ctx.functions)
+            ):
+                raise GPUScaffoldError(
+                    f"{ctx.context}: GPU recursion supports tail-recursive "
+                    "scalar helpers inside map bodies only"
+                )
             if _is_self_recursive and ctx.tail_context is None:
+                if not _is_supported_tail_recursive_shape(callee_fn.body, callee_name):
+                    raise GPUScaffoldError(
+                        f"{ctx.context}: GPU recursion supports tail-recursive "
+                        "scalar helpers inside map bodies only"
+                    )
+                if not isinstance(callee_fn.return_type, ScalarType) or any(
+                    not isinstance(param.type, ScalarType)
+                    for param in callee_fn.params
+                ):
+                    raise GPUScaffoldError(
+                        f"{ctx.context}: GPU recursion supports tail-recursive "
+                        "scalar helpers inside map bodies only"
+                    )
                 saved_tail = (ctx.tail_context, ctx.tail_params, ctx.tail_init_map,
                               ctx.tail_base, ctx.tail_cond, ctx.tail_elem_type)
                 ctx.tail_context = callee_name
@@ -962,6 +983,72 @@ def _detect_self_call(expr, func_name: str) -> bool:
     return False
 
 
+def _is_supported_tail_recursive_shape(expr, func_name: str) -> bool:
+    """Return True for the GPU-supported ``if base else self(...)`` subset."""
+    from remora.hir import HIRCall as _HC, HIRIf as _HI
+
+    if not isinstance(expr, _HI):
+        return False
+    then_has_call = _detect_self_call(expr.then_branch, func_name)
+    else_is_tail_call = (
+        isinstance(expr.else_branch, _HC)
+        and expr.else_branch.func_name == func_name
+    )
+    return not then_has_call and else_is_tail_call
+
+
+def _function_is_in_recursive_cycle(func_name: str, functions: dict) -> bool:
+    visiting: set[str] = set()
+
+    def reaches_current(name: str) -> bool:
+        if name in visiting:
+            return name == func_name
+        function = functions.get(name)
+        if function is None:
+            return False
+        visiting.add(name)
+        try:
+            for callee in _direct_call_names(function.body):
+                if callee == func_name:
+                    return True
+                if callee in functions and reaches_current(callee):
+                    return True
+            return False
+        finally:
+            visiting.remove(name)
+
+    function = functions.get(func_name)
+    if function is None:
+        return False
+    return any(
+        callee in functions and reaches_current(callee)
+        for callee in _direct_call_names(function.body)
+    )
+
+
+def _direct_call_names(expr) -> set[str]:
+    from remora.hir import HIRCall as _HC
+
+    names: set[str] = set()
+
+    def visit(value) -> None:
+        if isinstance(value, _HC):
+            names.add(value.func_name)
+        for attr_name in ("args", "arrays", "init", "array", "body", "func", "value",
+                          "components", "predicate", "index", "target", "update",
+                          "condition", "then_branch", "else_branch",
+                          "left", "right", "elements"):
+            val = getattr(value, attr_name, None)
+            if val is None:
+                continue
+            items = val if isinstance(val, list) else [val]
+            for item in items:
+                visit(item)
+
+    visit(expr)
+    return names
+
+
 def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
     return _CompileCtx(
         input_map=dict(ctx.input_map),
@@ -974,6 +1061,13 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
         input_flat_shapes=dict(ctx.input_flat_shapes),
         input_broadcast_skip=dict(ctx.input_broadcast_skip),
         input_element_types=dict(ctx.input_element_types),
+        functions=dict(ctx.functions),
+        tail_context=ctx.tail_context,
+        tail_params=list(ctx.tail_params),
+        tail_init_map=dict(ctx.tail_init_map),
+        tail_base=ctx.tail_base,
+        tail_cond=ctx.tail_cond,
+        tail_elem_type=ctx.tail_elem_type,
     )
 
 

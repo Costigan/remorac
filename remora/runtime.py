@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from shutil import which
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable
 
@@ -732,14 +733,21 @@ def evaluate_typed_program(program: TypedProgram) -> EvaluationResult:
     if program.body is None or program.type is None:
         raise EvaluationError("definition-only programs cannot be evaluated")
 
-    env: Env = {}
-    if program.body is not None:
-        func_lambdas = _gather_func_lambdas(program.body)
-        for name, typed_lam in func_lambdas.items():
-            env[name] = _trampoline_closure(typed_lam, env, name, func_lambdas)
-    for definition in program.definitions:
-        _bind_definition(definition, env)
-    return EvaluationResult(_eval_expr(program.body, env), program.type)
+    old_limit = sys.getrecursionlimit()
+    if old_limit < 100_000:
+        sys.setrecursionlimit(100_000)
+    try:
+        env: Env = {}
+        if program.body is not None:
+            func_lambdas = _gather_func_lambdas(program.body)
+            for name, typed_lam in func_lambdas.items():
+                env[name] = _trampoline_closure(typed_lam, env, name, func_lambdas)
+        for definition in program.definitions:
+            _bind_definition(definition, env)
+        return EvaluationResult(_eval_expr(program.body, env), program.type)
+    finally:
+        if sys.getrecursionlimit() != old_limit:
+            sys.setrecursionlimit(old_limit)
 
 
 class CPUExecutor:

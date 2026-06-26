@@ -284,36 +284,63 @@ def _collect_callee_hir_functions(
         return {}
 
     result: dict = {}
-    for callee_name in callee_names:
-        try:
-            # Gather param types from the call site
-            callee_param_types = None
-            def _find_call_args(expr):
-                nonlocal callee_param_types
-                if isinstance(expr, _HC) and expr.func_name == callee_name:
-                    pts = []
-                    for arg in expr.args:
-                        if isinstance(arg, _HL):
-                            pts.append(arg.type)
-                        elif isinstance(arg, _HV):
-                            pts.append(arg.type)
-                        else:
-                            pts.append(_SType("float"))
-                    callee_param_types = tuple(pts)
+    queue = list(callee_names)
+    processed: set[str] = set()
+
+    def _find_call_args(root, callee_name: str):
+        callee_param_types = None
+
+        def walk(expr):
+            nonlocal callee_param_types
+            if isinstance(expr, _HC) and expr.func_name == callee_name:
+                pts = []
+                for arg in expr.args:
+                    if isinstance(arg, _HL):
+                        pts.append(arg.type)
+                    elif isinstance(arg, _HV):
+                        pts.append(arg.type)
+                    else:
+                        pts.append(_SType("float"))
+                callee_param_types = tuple(pts)
+                return True
+            for child in _hir_children(expr):
+                if walk(child):
                     return True
-                for child in _hir_children(expr):
-                    if _find_call_args(child):
-                        return True
-                return False
-            _find_call_args(hir_function.body)
+            return False
+
+        walk(root)
+        return callee_param_types
+
+    search_roots = [hir_function.body]
+    while queue:
+        callee_name = queue.pop(0)
+        if callee_name in processed or callee_name == main_name:
+            continue
+        processed.add(callee_name)
+        try:
+            callee_param_types = None
+            for root in search_roots:
+                callee_param_types = _find_call_args(root, callee_name)
+                if callee_param_types is not None:
+                    break
             if callee_param_types is None:
                 callee_param_types = (_SType("float"),)
             prepared = prepare_function_source(
                 source, callee_name,
                 callee_param_types,
                 include_prelude=include_prelude, syntax=syntax,
+                collect_callees=False,
             )
             result[callee_name] = prepared.hir_function
+            search_roots.append(prepared.hir_function.body)
+            nested: set[str] = set()
+            old_callees = callee_names
+            callee_names = nested
+            _collect(prepared.hir_function.body)
+            callee_names = old_callees
+            for nested_name in nested:
+                if nested_name not in processed and nested_name != main_name:
+                    queue.append(nested_name)
         except Exception:
             pass
     return result
@@ -323,7 +350,9 @@ def _hir_children(expr) -> list:
     """Return immediate HIR child nodes for tree traversal."""
     children = []
     for attr_name in ("args", "arrays", "init", "array", "body", "func", "value",
-                      "components", "predicate", "index", "target", "update"):
+                      "components", "predicate", "index", "target", "update",
+                      "condition", "then_branch", "else_branch", "left", "right",
+                      "elements"):
         val = getattr(expr, attr_name, None)
         if val is None:
             continue
@@ -972,6 +1001,7 @@ def prepare_function_source(
     *,
     include_prelude: bool = True,
     syntax: str = "ml",
+    collect_callees: bool = True,
 ) -> PreparedFunctionArtifact:
     """Parse, specialize, and lower one function to HIR without emitting MLIR."""
     _maybe_include_prelude = include_prelude and syntax == "ml"
@@ -1028,6 +1058,18 @@ def prepare_function_source(
         hir_function=hir_function,
         specialization_name=typed_function.specialization_name,
         index_args=typed_function.index_args,
+        hir_functions=(
+            _collect_callee_hir_functions(
+                hir_function,
+                source,
+                function_name,
+                param_types,
+                include_prelude=include_prelude,
+                syntax=syntax,
+            )
+            if collect_callees
+            else None
+        ),
     )
 
 
@@ -1042,6 +1084,7 @@ def compile_prepared_function(
         lowered = MLIRLowering().lower_function_descriptor_export(
             prepared.hir_function,
             export_name=export_name,
+            functions=prepared.hir_functions,
         )
         if verify:
             run_validation_pipeline(lowered.module)

@@ -3,6 +3,61 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Recursive Functions Across Interpreter, CPU, and GPU (June 2026)
+
+Expanded recursion support from scalar-only/common cases toward the planned
+full interpreter + CPU goal and the supported GPU helper subset.
+
+### Interpreter recursion
+
+- Deep non-tail recursive programs no longer fail at Python's default
+  recursion depth in the tested oracle cases.
+- Added interpreter regression coverage for deep non-tail recursion with
+  scalar-only parameters and with array parameters carried through the call
+  chain.
+
+### CPU compiled recursion
+
+- Generalized recursive tensor-touching function lowering to compute HIR
+  call-graph SCCs and emit memref-interface shims for recursive groups.
+- Scalar-returning recursive functions with array parameters now lower
+  through the memref-interface path, including nested recursive calls inside
+  scalar arithmetic.
+- Top-level scalar-returning recursive calls can pass array literals.
+- Mutual recursive `define/pi` functions with array parameters compile and
+  run on CPU.
+- Descriptor-exported CPU functions now retain helper HIR functions, so an
+  exported function can call a recursive scalar helper from inside `map`.
+- Scalar recursive branches can lower scalar folds/reduces over array
+  parameters, proving array params are actually read rather than only carried.
+- Memref-interface recursive calls now support scalar result buffers via
+  `memref<scalar>` output allocation and `memref.load`.
+
+### GPU recursion subset
+
+- GPU general-map lowering supports scalar self-tail-recursive helper calls
+  inside map bodies, including accumulator-style helpers.
+- Added transitive helper-function collection for GPU compilation so helper
+  recursion is visible during lowering.
+- Unsupported GPU recursion now fails with the specific message:
+  `GPU recursion supports tail-recursive scalar helpers inside map bodies only`.
+- GPU lowering rejects non-tail recursion, mutual recursion, and recursive
+  helpers with array parameters instead of masking them behind fallback
+  builder errors.
+
+### Recursion tests
+
+- Added CPU regression tests for scalar recursion with array params, top-level
+  array literal arguments, mutual recursion with array params, recursive
+  helpers inside descriptor-exported map functions, and array params consumed
+  by scalar folds.
+- Added interpreter deep non-tail recursion tests, including an array-param
+  case.
+- Added GPU numeric parity tests for supported float and int tail-recursive
+  scalar helpers inside `map`.
+- Added GPU rejected-not-silent tests for non-tail recursion, mutual
+  recursion, and recursive helpers with array parameters.
+
 ## f64 CPU Lowering + f64 Literal Syntax (June 2026)
 
 ### f64 CPU lowering pipeline

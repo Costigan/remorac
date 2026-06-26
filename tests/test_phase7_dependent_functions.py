@@ -800,6 +800,32 @@ def test_mutual_recursion_deep_interpreted_and_compiled():
     assert compiled.value is True
 
 
+def test_deep_non_tail_recursion_interpreted():
+    """Interpreter handles non-tail recursion beyond Python's default limit."""
+    src = (
+        "(define/pi () (sum_to [n Float] Float) "
+        "  (if (== n 0.0) 0.0 (+ n (sum_to (- n 1.0))))) "
+        "(sum_to 1500.0)"
+    )
+
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+
+    assert result.value == pytest.approx(1125750.0)
+
+
+def test_deep_non_tail_recursion_with_array_param_interpreted():
+    """Interpreter keeps array params alive through deep non-tail recursion."""
+    src = (
+        "(define/pi () (sum_to [a (Array Float 4) n Float] Float) "
+        "  (if (== n 0.0) (fold + 0.0 a) (+ n (sum_to a (- n 1.0))))) "
+        "(sum_to [1.0 2.0 3.0 4.0] 1500.0)"
+    )
+
+    result = evaluate_source(src, include_prelude=False, syntax="lisp")
+
+    assert result.value == pytest.approx(1125760.0)
+
+
 def test_mutual_recursion_define_pi_typechecks():
     """12.3.5: mutual recursion with define/pi explicit annotations typechecks."""
     src = (

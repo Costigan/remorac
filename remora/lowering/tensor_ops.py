@@ -148,7 +148,10 @@ def _lower_mref_call(
     call_types: list[str] = []  # MLIR types for call signature
 
     # Output memref (allocated first; callee stores result into it)
-    mref_out_type = _plain_memref_type(node.result_type)
+    if isinstance(node.result_type, _ScalarType):
+        mref_out_type = f"memref<{result_type}>"
+    else:
+        mref_out_type = _plain_memref_type(node.result_type)
     out_memref = f"%{prefix}_out"
     arg_lines.append(f"    {out_memref} = memref.alloc() : {mref_out_type}")
     call_args.append(out_memref)
@@ -206,11 +209,16 @@ def _lower_mref_call(
         f"    func.call @{func.name}({arg_list})"
         f" : ({type_list}) -> ()"
     )
-    # Read result tensor from the output memref
-    arg_lines.append(
-        f"    {call_name} = bufferization.to_tensor {out_memref}"
-        f" restrict writable : {mref_out_type}"
-    )
+    # Read result from the output memref.
+    if isinstance(node.result_type, _ScalarType):
+        arg_lines.append(
+            f"    {call_name} = memref.load {out_memref}[] : {mref_out_type}"
+        )
+    else:
+        arg_lines.append(
+            f"    {call_name} = bufferization.to_tensor {out_memref}"
+            f" restrict writable : {mref_out_type}"
+        )
 
     code = "\n".join(arg_lines)
     return code, call_name, result_type, result_elem
