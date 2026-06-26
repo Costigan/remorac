@@ -94,6 +94,7 @@ class PreparedFunctionArtifact:
     hir_function: HIRFunction
     specialization_name: str | None = None
     index_args: tuple[DimExpr | ShapeExpr, ...] = ()
+    hir_functions: dict[str, object] | None = None  # name → HIRFunction for HIRCall inlining
 
 
 @dataclass(frozen=True)
@@ -243,8 +244,94 @@ def compile_function_source_to_mlir_gpu_ptx(
     ptx, kernels, _plan = generate_mlir_descriptor_abi_ptx(
         artifact.hir_function,
         kernel_name=kernel_name,
+        functions=_collect_callee_hir_functions(
+            artifact.hir_function, source, function_name, param_types,
+            include_prelude=include_prelude, syntax=syntax,
+        ),
     )
     return ptx, kernels, artifact
+
+
+def _collect_callee_hir_functions(
+    hir_function: HIRFunction,
+    source: str,
+    main_name: str,
+    param_types: tuple[RemoraType, ...],
+    *,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+) -> dict:
+    """Collect HIRFunctions for non-recursive HIRCall targets in the function body.
+
+    Walks the HIR body to find HIRCall nodes, then re-typechecks and lowers
+    each referenced function (excluding self-calls and prelude functions)
+    for GPU inlining.
+    """
+    from remora.hir import HIRCall as _HC, HIRLit as _HL, HIRVar as _HV
+    from remora.types import ScalarType as _SType
+
+    callee_names: set[str] = set()
+
+    def _collect(expr):
+        if isinstance(expr, _HC):
+            if expr.func_name != main_name:
+                callee_names.add(expr.func_name)
+        for child in _hir_children(expr):
+            _collect(child)
+
+    _collect(hir_function.body)
+    if not callee_names:
+        return {}
+
+    result: dict = {}
+    for callee_name in callee_names:
+        try:
+            # Gather param types from the call site
+            callee_param_types = None
+            def _find_call_args(expr):
+                nonlocal callee_param_types
+                if isinstance(expr, _HC) and expr.func_name == callee_name:
+                    pts = []
+                    for arg in expr.args:
+                        if isinstance(arg, _HL):
+                            pts.append(arg.type)
+                        elif isinstance(arg, _HV):
+                            pts.append(arg.type)
+                        else:
+                            pts.append(_SType("float"))
+                    callee_param_types = tuple(pts)
+                    return True
+                for child in _hir_children(expr):
+                    if _find_call_args(child):
+                        return True
+                return False
+            _find_call_args(hir_function.body)
+            if callee_param_types is None:
+                callee_param_types = (_SType("float"),)
+            prepared = prepare_function_source(
+                source, callee_name,
+                callee_param_types,
+                include_prelude=include_prelude, syntax=syntax,
+            )
+            result[callee_name] = prepared.hir_function
+        except Exception:
+            pass
+    return result
+
+
+def _hir_children(expr) -> list:
+    """Return immediate HIR child nodes for tree traversal."""
+    children = []
+    for attr_name in ("args", "arrays", "init", "array", "body", "func", "value",
+                      "components", "predicate", "index", "target", "update"):
+        val = getattr(expr, attr_name, None)
+        if val is None:
+            continue
+        if isinstance(val, list):
+            children.extend(val)
+        else:
+            children.append(val)
+    return children
 
 
 def compile_function_source_to_supported_gpu_artifacts(
@@ -850,6 +937,31 @@ def _substitute_hir(expr, subs: dict, functions: dict | None = None):
         value = _substitute_hir(expr.value, subs, functions)
         body = _substitute_hir(expr.body, subs, functions)
         return _HIRLet(expr.name, expr.value_type, value, body, expr.result_type)
+    # Fallback: recursively substitute in child expressions via dataclass fields
+    if hasattr(expr, '__dataclass_fields__'):
+        try:
+            kwargs = {}
+            changed = False
+            for f in expr.__dataclass_fields__:
+                val = getattr(expr, f)
+                if val is None:
+                    continue
+                if isinstance(val, list):
+                    new_val = [_substitute_hir(v, subs, functions) for v in val]
+                    if any(v is not o for v, o in zip(new_val, val)):
+                        changed = True
+                    kwargs[f] = new_val
+                elif hasattr(val, '__dataclass_fields__') or isinstance(val, (_HIRVar, _HIRCall, _HIRIf, _HIRFold, _HIRReduce, _HIRMap, _HIRApply, _HIRLet)):
+                    new_val = _substitute_hir(val, subs, functions)
+                    if new_val is not val:
+                        changed = True
+                    kwargs[f] = new_val
+                else:
+                    kwargs[f] = val
+            if changed:
+                return type(expr)(**kwargs)
+        except Exception:
+            pass
     return expr
 
 

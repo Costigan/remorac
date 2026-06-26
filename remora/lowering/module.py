@@ -1024,6 +1024,10 @@ def _lower_function_with_tensor(function: HIRFunction, functions: dict[str, HIRF
                 if len(function.params) > 0
                 else ""
             )
+        elif isinstance(body_expr, HIRIf) and _has_self_hir_call(body_expr, function.name):
+            # Self-recursive HIRIf body with scalar return + array params.
+            # Use the memref-interface pattern to break the tensor callgraph cycle.
+            return _lower_recursive_tensor_function(function, {function.name: function})
         else:
             raise RemoraLoweringError(
                 "scalar-returning function with array params must have a map or fold body"
@@ -1211,6 +1215,7 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
     self-loop for *all* recursion forms (tail, non-tail, mutual).
     """
     impl_name = f"__{function.name}_mref"
+    is_scalar_return = isinstance(function.return_type, ScalarType)
 
     # Memref shim HIRFunction so _lower_tensor_input resolves recursive
     # HIRCalls to @__{name}_mref and the HIRCall handler emits memref callees.
@@ -1221,7 +1226,10 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
         return_type=function.return_type,
     )
 
-    mref_out = _plain_memref_type(function.return_type)
+    if is_scalar_return:
+        mref_out = f"memref<{type_to_mlir(function.return_type)}>"
+    else:
+        mref_out = _plain_memref_type(function.return_type)
     result_type_mlir = type_to_mlir(function.return_type)
 
     # ── impl function @__{name}_mref ──────────────────────────────────
@@ -1253,13 +1261,30 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
                 f"%arg{i}", mlir_type, mlir_type
             )
 
-    body_code, result_name, lowered_type, _elem = _lower_tensor_input(
-        function.body,
-        "result",
-        {**all_functions, function.name: impl_function},
-        tensor_env,
-        scalar_env,
-    )
+    if is_scalar_return:
+        # Scalar-returning recursive functions with array params are not
+        # supported yet.  The impl path would need to route self-calls through
+        # the memref interface, but _lower_tensor_input only handles
+        # tensor literals, iota, and array-valued HIRIf (via
+        # _lower_if_tensor_input_scalar_cond).  Continue to reject for now.
+        raise RemoraLoweringError(
+            "scalar-returning recursive function with array params is not supported"
+        )
+    else:
+        body_code, result_name, lowered_type, _elem = _lower_tensor_input(
+            function.body,
+            "result",
+            {**all_functions, function.name: impl_function},
+            tensor_env,
+            scalar_env,
+        )
+        body_code, result_name, lowered_type, _elem = _lower_tensor_input(
+            function.body,
+            "result",
+            {**all_functions, function.name: impl_function},
+            tensor_env,
+            scalar_env,
+        )
 
     if lowered_type != result_type_mlir:
         raise RemoraLoweringError(
@@ -1269,14 +1294,17 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
 
     impl_lines.append(body_code)
 
-    store_lines = _output_descriptor_store_lines(
-        function.return_type,
-        result_type_mlir,
-        mref_out,
-        result_name=result_name,
-        out_name="%out",
-    )
-    impl_lines.extend(store_lines)
+    if is_scalar_return:
+        impl_lines.append(f"    memref.store {result_name}, %out[] : {mref_out}")
+    else:
+        store_lines = _output_descriptor_store_lines(
+            function.return_type,
+            result_type_mlir,
+            mref_out,
+            result_name=result_name,
+            out_name="%out",
+        )
+        impl_lines.extend(store_lines)
     impl_lines.append("    return")
 
     impl_body = "\n".join(impl_lines)
@@ -1321,10 +1349,13 @@ def _lower_recursive_tensor_function(function: HIRFunction, all_functions: dict[
         f"    func.call @{impl_name}({', '.join(call_args)})"
         f" : ({', '.join(call_types)}) -> ()"
     )
-    wrapper_lines.append(
-        f"    %result = bufferization.to_tensor %out restrict writable"
-        f" : {mref_out}"
-    )
+    if is_scalar_return:
+        wrapper_lines.append(f"    %result = memref.load %out[] : {mref_out}")
+    else:
+        wrapper_lines.append(
+            f"    %result = bufferization.to_tensor %out restrict writable"
+            f" : {mref_out}"
+        )
     wrapper_lines.append(f"    return %result : {result_type_mlir}")
 
     wrapper_body = "\n".join(wrapper_lines)

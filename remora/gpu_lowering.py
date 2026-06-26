@@ -693,6 +693,8 @@ def build_descriptor_abi_f32_scan_gpu_module(
     if (
         N > 1024
         and not is_compound
+        and not is_exclusive
+        and not is_right
         and _NB <= 1024
     ):
         raise GPUScaffoldError("Use multi-block scan for N > 1024")
@@ -818,12 +820,12 @@ def build_descriptor_abi_f32_scan_gpu_module(
     }}
   }}
 }}"""
-    # Post-process for non-f32 scans
-    if _is_int_scan:
-        text = _replace_elem_type(text, "f32", "i32", replace_ops=True, replace_identity=True)
-    elif _is_f64_scan:
-        text = _replace_elem_type(text, "f32", "f64")
-    return GPUModuleScaffold(text, module_name, name)
+        # Post-process for non-f32 scans
+        if _is_int_scan:
+            text = _replace_elem_type(text, "f32", "i32", replace_ops=True, replace_identity=True)
+        elif _is_f64_scan:
+            text = _replace_elem_type(text, "f32", "f64")
+        return GPUModuleScaffold(text, module_name, name)
 
     import math
     max_d = math.ceil(math.log2(N)) if N > 1 else 0
@@ -5212,6 +5214,7 @@ def build_descriptor_abi_general_map_gpu_module(
     *,
     module_name: str = "remora_gpu",
     kernel_name: str | None = None,
+    functions: dict | None = None,
 ) -> GPUModuleScaffold:
     """Build a descriptor-ABI GPU module for a general map kernel.
 
@@ -5510,6 +5513,7 @@ def build_descriptor_abi_general_map_gpu_module(
         input_flat_shapes=input_flat_shapes,
         input_broadcast_skip=input_broadcast_skip,
         input_element_types=input_element_types,
+        functions=functions,
     )
 
     # Emit the kernel body lines
@@ -5692,6 +5696,7 @@ def _gpu_emit_expr(
         GpuScalarParam,
         GpuSelect,
         _GpuLetExpr,
+        _GpuTailLoop,
     )
 
     def _fresh() -> str:
@@ -5894,6 +5899,10 @@ def _gpu_emit_expr(
             # `let D = (3-vector) in D` produced [c0, c0, c0]).
             new_env[expr.name] = val_ssa
             return emit(expr.body, new_env)
+
+        # _GpuTailLoop (Phase 6.4): tail-recursive scf.for loop
+        if isinstance(expr, _GpuTailLoop):
+            return _emit_tail_loop(expr, env)
 
         # GpuArrayExpr: emit all components, return list of SSA names
         if isinstance(expr, GpuArrayExpr):
@@ -6393,6 +6402,66 @@ def _gpu_emit_expr(
             f"    ^{done_label}({result_params}):"
         )
         return result_ssas
+
+    def _emit_tail_loop(expr: _GpuTailLoop, env: dict[str, str]) -> str:
+        """Emit a tail-recursive scf.for loop (Phase 6.4)."""
+        K = len(expr.init_args)
+        if K == 0:
+            raise GPUScaffoldError("tail loop needs at least one loop variable")
+
+        elem_type = expr.element_type or "f32"
+
+        # Emit init values (these use the caller env to resolve inputs)
+        init_ssas = [emit(expr.init_args[k], env) for k in range(K)]
+
+        blk = _fresh_block()
+        loop_label = f"{blk}_loop"
+        body_label = f"{blk}_body"
+        done_label = f"{blk}_done"
+
+        # Branch to loop header with init values
+        iter_types = ", ".join(elem_type for _ in range(K))
+        iter_args = ", ".join(init_ssas)
+        lines.append(
+            f"      llvm.br ^{loop_label}({iter_args} : {iter_types})"
+        )
+
+        # Loop header: define block arguments and bind to param names
+        acc_ssas = [_fresh_ssa() for _ in range(K)]
+        iter_params = ", ".join(f"{a}: {elem_type}" for a in acc_ssas)
+        lines.append(f"    ^{loop_label}({iter_params}):")
+        loop_env = dict(env)
+        for k in range(K):
+            loop_env[expr.param_names[k]] = acc_ssas[k]
+
+        # Emit condition in loop context
+        cond_ssa = emit(expr.condition_expr, loop_env)
+        done_vals = ", ".join(acc_ssas)
+        done_types = ", ".join(elem_type for _ in range(K))
+        lines.append(
+            f"      llvm.cond_br {cond_ssa}, ^{done_label}({done_vals} : {done_types}), ^{body_label}"
+        )
+
+        # Body: emit updates and branch back
+        lines.append(f"    ^{body_label}:")
+        body_env = dict(env)
+        for k in range(K):
+            body_env[expr.param_names[k]] = acc_ssas[k]
+        next_ssas = [emit(expr.body_updates[k], body_env) for k in range(K)]
+        next_types = ", ".join(elem_type for _ in range(K))
+        next_args = ", ".join(next_ssas)
+        lines.append(
+            f"      llvm.br ^{loop_label}({next_args} : {next_types})"
+        )
+
+        # Done: receive loop variables, emit base result
+        done_ssas = [_fresh_ssa() for _ in range(K)]
+        done_params = ", ".join(f"{r}: {elem_type}" for r in done_ssas)
+        lines.append(f"    ^{done_label}({done_params}):")
+        done_env = dict(env)
+        for k in range(K):
+            done_env[expr.param_names[k]] = done_ssas[k]
+        return emit(expr.result_expr, done_env)
 
     result = emit(expr, env)
     return result

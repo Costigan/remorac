@@ -143,6 +143,7 @@ def generate_mlir_descriptor_abi_ptx(
     *,
     kernel_name: str | None = None,
     toolchain: PipelineToolchain | None = None,
+    functions: dict | None = None,
 ) -> tuple[str, list[KernelMeta], ExecutionPlan | None]:
     """Generate the first MLIR-derived descriptor-ABI PTX execution slice.
 
@@ -734,7 +735,7 @@ def generate_mlir_descriptor_abi_ptx(
                 and isinstance(function.body.func, HIRLambda)
                 and _body_needs_tensor_lowering(function.body.func.body)):
             gpu_module = build_descriptor_abi_general_map_gpu_module(
-                function, kernel_name=name,
+                function, kernel_name=name, functions=functions,
             )
 
             body_map = function.body
@@ -1041,7 +1042,7 @@ def generate_mlir_descriptor_abi_ptx(
                                     "general GPU fallback requires a HIRMap with HIRLambda"
                                 )
                             gpu_module = build_descriptor_abi_general_map_gpu_module(
-                                function, kernel_name=name,
+                                function, kernel_name=name, functions=functions,
                             )
                             body_map2 = function.body
                             result_type2 = body_map2.result_type

@@ -243,6 +243,28 @@ class GpuAppendLoad:
     element_type: str = "f32"
 
 
+@dataclass(frozen=True)
+class _GpuTailLoop:
+    """Tail-recursive loop generated from a self-recursive HIRCall.
+
+    Represents a ``scf.for``-style loop where the function params are
+    loop-carried variables and the self-call becomes a back-edge.
+
+    ``param_names``: the loop variable names (callee param names).
+    ``init_args``: initial values for the loop variables (GpuExpr list).
+    ``condition_expr``: the loop exit condition (GpuExpr).
+    ``body_updates``: per-param update expressions (GpuExpr list).
+    ``result_expr``: the base-case result (GpuExpr).
+    """
+
+    param_names: list[str] = field(default_factory=list)
+    init_args: list = field(default_factory=list)
+    condition_expr: object = None
+    body_updates: list = field(default_factory=list)
+    result_expr: object = None
+    element_type: str = "f32"
+
+
 GpuExpr: TypeAlias = (
     GpuInputLoad
     | GpuConstant
@@ -260,6 +282,7 @@ GpuExpr: TypeAlias = (
     | GpuFlatLoad
     | GpuAppendLoad
     | _GpuLetExpr
+    | _GpuTailLoop
 )
 
 
@@ -283,6 +306,14 @@ class _CompileCtx:
     # Phase 6.3: function definitions for HIRCall inlining.
     # Populated by the general map builder from the containing HIRFunction.
     functions: dict = field(default_factory=dict)
+    # Phase 6.4: tail-recursion context for self-recursive calls.
+    # When set, a self-call generates a _GpuTailLoop instead of inlining.
+    tail_context: str | None = None       # callee name being compiled
+    tail_params: list[str] = field(default_factory=list)  # callee param names
+    tail_init_map: dict = field(default_factory=dict)     # param name → GpuExpr init
+    tail_base: object = None              # base case result GpuExpr
+    tail_cond: object = None              # loop condition GpuExpr
+    tail_elem_type: str | None = None     # element type for loop vars
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
@@ -337,6 +368,10 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
     if isinstance(expr, HIRVar):
         if expr.name in ctx.let_env:
             return GpuLetBinding(expr.name)
+        # Phase 6.4: tail-recursion loop variables → GpuLetBinding
+        # These resolve to the loop-carried SSA values during emission.
+        if expr.name in ctx.tail_params:
+            return GpuLetBinding(expr.name)
         if expr.name in ctx.input_map:
             slot = ctx.input_map[expr.name]
             et = ctx.input_element_types.get(expr.name, "f32")
@@ -379,6 +414,23 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
     # HIRIf
     if isinstance(expr, HIRIf):
         cond = _lower_hir(expr.condition, ctx)
+        # Phase 6.4: detect tail-recursive pattern
+        # HIRIf(cond, base, HIRCall(self, update_args, result)) → _GpuTailLoop
+        if ctx.tail_context is not None and isinstance(expr.else_branch, HIRCall):
+            _scall = expr.else_branch
+            if _scall.func_name == ctx.tail_context:
+                then_val = _lower_hir(expr.then_branch, ctx)
+                # Lower the update args (these replace the self-call)
+                update_args = [_lower_hir(a, ctx) for a in _scall.args]
+                elem_type = _scalar_type_to_mlir(expr.result_type) if isinstance(expr.result_type, ScalarType) else "f32"
+                return _GpuTailLoop(
+                    param_names=list(ctx.tail_params),
+                    init_args=[ctx.tail_init_map.get(p) for p in ctx.tail_params],
+                    condition_expr=cond,
+                    result_expr=then_val,
+                    body_updates=update_args,
+                    element_type=elem_type,
+                )
         then_val = _lower_hir(expr.then_branch, ctx)
         else_val = _lower_hir(expr.else_branch, ctx)
         if isinstance(then_val, GpuArrayExpr) and isinstance(else_val, GpuArrayExpr):
@@ -493,17 +545,51 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
         )
 
     # HIRCall — inline callee body for non-recursive calls (Phase 6.3)
+    # Tail-recursive self-calls converted to scf.for loops (Phase 6.4)
     if isinstance(expr, HIRCall):
         callee_name = expr.func_name if hasattr(expr, 'func_name') else None
         if callee_name and callee_name in ctx.functions:
             from remora.compiler import _substitute_hir
             callee_fn = ctx.functions[callee_name]
+            # Phase 6.4: check for self-recursion BEFORE substitution
+            _is_self_recursive = _detect_self_call(callee_fn.body, callee_name)
+            if _is_self_recursive and ctx.tail_context is None:
+                saved_tail = (ctx.tail_context, ctx.tail_params, ctx.tail_init_map,
+                              ctx.tail_base, ctx.tail_cond, ctx.tail_elem_type)
+                ctx.tail_context = callee_name
+                ctx.tail_params = [p.name for p in callee_fn.params]
+                ctx.tail_init_map = {}
+                for i, p in enumerate(callee_fn.params):
+                    if i < len(expr.args):
+                        ctx.tail_init_map[p.name] = _lower_hir(expr.args[i], ctx)
+                ctx.tail_base = None
+                ctx.tail_cond = None
+                ctx.tail_elem_type = _scalar_type_to_mlir(callee_fn.return_type) if isinstance(callee_fn.return_type, ScalarType) else "f32"
+                # Lower the ORIGINAL callee body WITHOUT substitution.
+                # HIRVar("n") and HIRVar("acc") resolve via ctx.tail_params
+                # to GpuLetBinding nodes, which the tail-loop emitter binds
+                # to loop-carried SSA values.
+                result = _lower_hir(callee_fn.body, ctx)
+                (ctx.tail_context, ctx.tail_params, ctx.tail_init_map,
+                 ctx.tail_base, ctx.tail_cond, ctx.tail_elem_type) = saved_tail
+                return result
+            # Non-recursive: substitute and inline as before
             subs = {}
             for i, p in enumerate(callee_fn.params):
                 if i < len(expr.args):
                     subs[p.name] = expr.args[i]
             inlined = _substitute_hir(callee_fn.body, subs)
             return _lower_hir(inlined, ctx)
+        # Phase 6.4: self-recursive call → tail-recursive loop
+        if callee_name and ctx.tail_context is not None and callee_name == ctx.tail_context:
+            return _GpuTailLoop(
+                param_names=ctx.tail_params,
+                init_args=[ctx.tail_init_map.get(p) for p in ctx.tail_params],
+                result_expr=ctx.tail_base,
+                condition_expr=ctx.tail_cond,
+                body_updates=list(expr.args) if isinstance(expr.args, list) else [],
+                element_type=ctx.tail_elem_type or "f32",
+            )
         raise GPUScaffoldError(
             f"{ctx.context}: function calls are not supported on GPU"
         )
@@ -855,6 +941,25 @@ def _lower_map_apply(expr: HIRMap | HIRApply, ctx: _CompileCtx) -> GpuExpr:
     raise GPUScaffoldError(
         f"{ctx.context}: unsupported callable {type(callable_expr).__name__}"
     )
+
+
+def _detect_self_call(expr, func_name: str) -> bool:
+    """Return True if *expr* contains a HIRCall to *func_name*."""
+    from remora.hir import HIRCall as _HC
+    if isinstance(expr, _HC) and expr.func_name == func_name:
+        return True
+    for attr_name in ("args", "arrays", "init", "array", "body", "func", "value",
+                      "components", "predicate", "index", "target", "update",
+                      "condition", "then_branch", "else_branch",
+                      "left", "right", "elements"):
+        val = getattr(expr, attr_name, None)
+        if val is None:
+            continue
+        items = val if isinstance(val, list) else [val]
+        for item in items:
+            if _detect_self_call(item, func_name):
+                return True
+    return False
 
 
 def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
