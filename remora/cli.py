@@ -354,7 +354,6 @@ def _evaluate_interp(source: str, syntax: str) -> EvaluationResult:
 
 def _run_repl(source_items: list[tuple[str, str]], syntax_override: str | None, target: str) -> int:
     from remora.repl import ReplSession, ReplError
-    from remora.ast_nodes import FuncDef, ValDef
 
     try:
         session = ReplSession(target=target)
@@ -368,20 +367,16 @@ def _run_repl(source_items: list[tuple[str, str]], syntax_override: str | None, 
         effective_syntax = syntax_override or file_syntax
         session.state.syntax = effective_syntax
 
-        source = with_prelude(content) if file_syntax == "ml" else content
         try:
-            program = (parse_lisp_program(source, filename) if file_syntax == "lisp"
-                     else parse_program(source, filename))
-            TypeChecker().check_program(program)
+            session.load_source(
+                content,
+                filename,
+                syntax=effective_syntax,
+                evaluate_body=False,
+            )
         except RemoraError as exc:
             print(f"remorac: error loading {filename}: {exc}", file=sys.stderr)
             return 1
-
-        for definition in program.definitions:
-            if isinstance(definition, (FuncDef, ValDef)):
-                def_source = _extract_definition_source(content, definition)
-                if def_source:
-                    session.state.definition_sources.append(def_source)
 
     try:
         session.run()

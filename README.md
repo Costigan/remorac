@@ -14,21 +14,21 @@ implementation is at github.com/jrslepak/Remora.
 
 RemoraC compiles a subset of the Remora language. It currently
 implements the dense, statically shaped core of Remora and compiles
-ML-syntax and Lisp-syntax programs to CPU and NVIDIA GPU execution
-paths via MLIR and LLVM.
+ML-syntax and Lisp-syntax programs to CPU and NVIDIA GPU via MLIR and
+LLVM.
 		
 While RemoraC is useful now for regular dense numeric programs, tests,
 examples, and compiler experiments, we do intend to fully implement
-the language.  Here are the known gaps in implementing the full language:
+the language.  Here are the known gaps:
 
-1. true dynamic shapes;
-2. runtime boxes and existential dimension witnesses;
-3. ragged arrays and irregular data;
-4. segmented reductions;
-5. ordered structural records and data-frame-style arrays of records;
-6. full dynamic higher-order semantics;
-7. arrays of functions / MIMD function application;
-8. CPU lowering for dynamic and irregular values;
+1. true dynamic shapes
+2. runtime boxes and existential dimension witnesses
+3. ragged arrays and irregular data
+4. segmented reductions
+5. ordered structural records and data-frame-style arrays of records
+6. full dynamic higher-order semantics
+7. arrays of functions / MIMD function application
+8. CPU lowering for dynamic and irregular values
 
 This project was created to achieve these goals:
 
@@ -48,7 +48,7 @@ This project was created to achieve these goals:
 The dense core supports static rectangular arrays with ranks 0 through 10,
 `Int`, `Float`, `Float64`, and `Bool` values, rank-polymorphic lifting,
 `map`, `fold`/`reduce`, scans, conditionals, views, top-level definitions,
-monomorphized higher-order calls, recursion, and a starter prelude.
+monomorphized higher-order calls, recursion, and a small standard library.
 
 Backend support is strongest on the interpreter and compiled CPU paths. The CPU
 backend covers the current dense-core typechecker surface, including recursion,

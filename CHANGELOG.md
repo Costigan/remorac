@@ -68,6 +68,18 @@ reports, and a top-level README.
   acceptance tests around the new `--args` path.
 - Kept `--args` unsupported for CUDA and `--compile-only` for now, with explicit
   diagnostics instead of silent fallback.
+- Fixed `remorac FILE --repl` preloading so it validates loaded files in the
+  current session context and appends only top-level definitions, avoiding the
+  previous line-offset bug where a file body could be stored as a REPL
+  definition.
+- Reworked REPL source loading into a transactional batch loader shared by
+  startup preload and `:load`, so mutually recursive definitions typecheck as a
+  unit and failed loads do not partially mutate session state.
+- Fixed REPL syntax switching by keeping separate definition buffers for ML and
+  Lisp syntax, adding a Lisp-syntax prelude, and making `:load` switch to the
+  detected file syntax after a successful load.
+- Added REPL regression coverage for syntax switching, Lisp prelude use,
+  Lisp file loading, batch definition loading, and file-body preload isolation.
 - Removed the obsolete native cache module and its tests after the AOT metadata
   path superseded `~/.cache/remora/native/`.
 

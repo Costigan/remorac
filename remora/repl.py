@@ -7,13 +7,13 @@ from pathlib import Path
 
 from lark import LarkError
 
-from remora.ast_nodes import FuncDef, ValDef
+from remora.ast_nodes import Definition, FuncDef, Program, ValDef
 from remora.compiler import compile_source_to_mlir
 from remora.display import format_result
 from remora.errors import RemoraError
 from remora.parser import parse_program, parse_repl_input
 from remora.lisp_reader import parse_lisp as parse_lisp_program
-from remora.prelude import prelude_definition_sources
+from remora.prelude import prelude_definition_sources_for_syntax
 from remora.runtime import EvaluationResult, evaluate_source, evaluate_source_compiled
 from remora.typechecker import TypeChecker
 
@@ -26,7 +26,20 @@ class ReplState:
     target: str = "cpu"
     debug: bool = False
     syntax: str = "ml"
-    definition_sources: list[str] = field(default_factory=prelude_definition_sources)
+    definition_sources_by_syntax: dict[str, list[str]] = field(
+        default_factory=lambda: {
+            syntax: prelude_definition_sources_for_syntax(syntax)
+            for syntax in REPL_SYNTAXES
+        }
+    )
+
+    @property
+    def definition_sources(self) -> list[str]:
+        return self.definition_sources_by_syntax[self.syntax]
+
+    @definition_sources.setter
+    def definition_sources(self, sources: list[str]) -> None:
+        self.definition_sources_by_syntax[self.syntax] = sources
 
 
 def make_initial_state(target: str = "cpu") -> ReplState:
@@ -98,9 +111,64 @@ class ReplSession:
         return format_result(result.value, result.type)
 
     def _parse_program(self, source: str, filename: str = "<repl>"):
-        if self.state.syntax == "lisp":
+        return self._parse_program_with_syntax(source, filename, self.state.syntax)
+
+    def _parse_program_with_syntax(self, source: str, filename: str, syntax: str):
+        if syntax == "lisp":
             return parse_lisp_program(source, filename)
         return parse_program(source, filename)
+
+    def load_source(
+        self,
+        source: str,
+        filename: str,
+        *,
+        syntax: str | None = None,
+        evaluate_body: bool = False,
+    ) -> str:
+        """Load top-level definitions from a source file into the session.
+
+        The load is transactional: parse and type-check the whole source in the
+        current session context before appending any definitions. Definition
+        source text is sliced from the same raw file text that produced the AST
+        locations, so prelude/session context cannot skew line numbers.
+        """
+        syntax = syntax or self.state.syntax
+        program = self._parse_program_with_syntax(source, filename, syntax)
+        active_definitions = self.state.definition_sources_by_syntax[syntax]
+        candidate_source = _program_source(active_definitions, source)
+        typed = TypeChecker().check_program(
+            self._parse_program_with_syntax(candidate_source, filename, syntax)
+        )
+
+        definition_sources = _definition_sources_from_program(source, program, syntax)
+        new_typed_definitions = (
+            typed.definitions[-len(program.definitions):]
+            if program.definitions else []
+        )
+        if len(definition_sources) != len(new_typed_definitions):
+            raise ReplError(
+                f"could not recover top-level definitions from {filename}"
+            )
+
+        messages: list[str] = []
+        for definition_source, typed_definition in zip(definition_sources, new_typed_definitions):
+            active_definitions.append(definition_source)
+            definition = typed_definition.definition
+            if isinstance(definition, FuncDef):
+                messages.append(f"Defined: {definition.name} : <function>")
+            else:
+                messages.append(f"Defined: {definition.name} : {typed_definition.type}")
+
+        self.state.syntax = syntax
+        if evaluate_body and program.body is not None:
+            body_source = _body_source_from_program(source, program, syntax)
+            result = self._evaluate_program_source(
+                _program_source(active_definitions, body_source)
+            )
+            messages.append(format_result(result.value, result.type))
+
+        return "\n".join(messages) if messages else "Loaded."
 
     def _evaluate_program_source(self, program_source: str) -> EvaluationResult:
         if self.state.target == "cpu":
@@ -157,7 +225,9 @@ class ReplSession:
             if name == ":load":
                 return self._load_file(arg)
             if name == ":reset":
-                self.state.definition_sources = prelude_definition_sources()
+                self.state.definition_sources = prelude_definition_sources_for_syntax(
+                    self.state.syntax
+                )
                 return "State reset."
             return f"Unknown command: {name}. Type :help for help."
         except RemoraError as exc:
@@ -200,10 +270,10 @@ class ReplSession:
         )
 
     def _prelude_command(self) -> str:
-        return "\n".join(prelude_definition_sources())
+        return "\n".join(prelude_definition_sources_for_syntax(self.state.syntax))
 
     def _defs_command(self) -> str:
-        prelude_count = len(prelude_definition_sources())
+        prelude_count = len(prelude_definition_sources_for_syntax(self.state.syntax))
         definitions = self.state.definition_sources[prelude_count:]
         return "\n".join(definitions) if definitions else "No user definitions."
 
@@ -220,20 +290,12 @@ class ReplSession:
         elif path.suffix == ".remora":
             detected_syntax = "ml"
 
-        program = self._parse_program(source, str(path)) if detected_syntax == "ml" else parse_lisp_program(source, str(path))
-        messages: list[str] = []
-        for definition_source in _top_level_definition_lines(source):
-            item = self._parse_repl_input(definition_source)
-            if not isinstance(item, (FuncDef, ValDef)):
-                continue
-            message = self._process_definition(definition_source, item)
-            messages.append(message)
-        if program.body is not None:
-            result = self._evaluate_program_source(
-                _program_source(self.state.definition_sources, _body_source(source))
-            )
-            messages.append(format_result(result.value, result.type))
-        return "\n".join(messages) if messages else "Loaded."
+        return self.load_source(
+            source,
+            str(path),
+            syntax=detected_syntax,
+            evaluate_body=True,
+        )
 
     def _collect_full_input(self, first_line: str) -> str:
         buffer = first_line
@@ -301,21 +363,110 @@ def _program_source(definitions: list[str], body: str) -> str:
     return body
 
 
-def _top_level_definition_lines(source: str) -> list[str]:
-    return [
-        line.strip()
-        for line in source.splitlines()
-        if line.strip().startswith("def ")
-    ]
+def _definition_sources_from_program(source: str, program: Program, syntax: str) -> list[str]:
+    if syntax == "lisp":
+        return [
+            form for form in _top_level_lisp_forms(source)
+            if _is_lisp_definition_form(form)
+        ][:len(program.definitions)]
+
+    lines = source.splitlines()
+    starts = [_definition_start_line(definition) for definition in program.definitions]
+    body_start = getattr(getattr(program.body, "loc", None), "line", 0) if program.body else 0
+    boundaries = [*starts, body_start or len(lines) + 1]
+
+    sources: list[str] = []
+    for idx, start in enumerate(starts):
+        if start <= 0:
+            continue
+        end = boundaries[idx + 1] - 1
+        sources.append(_slice_top_level_source(lines, start, end))
+    return sources
 
 
-def _body_source(source: str) -> str:
-    lines = [
-        line
-        for line in source.splitlines()
-        if line.strip() and not line.strip().startswith("--") and not line.strip().startswith("def ")
-    ]
-    return "\n".join(lines)
+def _definition_start_line(definition: Definition) -> int:
+    return getattr(getattr(definition, "loc", None), "line", 0)
+
+
+def _body_source_from_program(source: str, program: Program, syntax: str) -> str:
+    if program.body is None:
+        return ""
+    if syntax == "lisp":
+        for form in _top_level_lisp_forms(source):
+            if not _is_lisp_definition_form(form):
+                return form
+        return ""
+    start = getattr(getattr(program.body, "loc", None), "line", 0)
+    if start <= 0:
+        return ""
+    return _slice_top_level_source(source.splitlines(), start, len(source.splitlines()))
+
+
+def _slice_top_level_source(lines: list[str], start_line: int, end_line: int) -> str:
+    start = max(start_line - 1, 0)
+    end = min(end_line, len(lines))
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end]).strip()
+
+
+def _top_level_lisp_forms(source: str) -> list[str]:
+    forms: list[str] = []
+    i = 0
+    n = len(source)
+    while i < n:
+        i = _skip_lisp_ignored(source, i)
+        if i >= n:
+            break
+        start = i
+        if source[i] in "([":
+            close_for = {"(": ")", "[": "]"}
+            stack = [close_for[source[i]]]
+            i += 1
+            while i < n and stack:
+                if source[i] == ";":
+                    while i < n and source[i] not in "\r\n":
+                        i += 1
+                    continue
+                if source[i] in close_for:
+                    stack.append(close_for[source[i]])
+                elif source[i] == stack[-1]:
+                    stack.pop()
+                i += 1
+            forms.append(source[start:i].strip())
+            continue
+
+        while i < n and not source[i].isspace():
+            if source[i] == ";":
+                break
+            i += 1
+        forms.append(source[start:i].strip())
+    return [form for form in forms if form]
+
+
+def _skip_lisp_ignored(source: str, index: int) -> int:
+    n = len(source)
+    while index < n:
+        if source[index].isspace():
+            index += 1
+            continue
+        if source[index] == ";":
+            while index < n and source[index] not in "\r\n":
+                index += 1
+            continue
+        break
+    return index
+
+
+def _is_lisp_definition_form(form: str) -> bool:
+    stripped = form.lstrip()
+    return (
+        stripped.startswith("(define ")
+        or stripped.startswith("(define\t")
+        or stripped.startswith("(define\n")
+        or stripped.startswith("(define\r")
+        or stripped.startswith("(define/")
+    )
 
 
 def _balanced(text: str, open_char: str, close_char: str) -> bool:

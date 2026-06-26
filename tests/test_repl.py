@@ -109,6 +109,31 @@ def test_repl_shows_prelude_and_user_definitions():
     assert session.eval_input(":defs") == "def xs = iota 4"
 
 
+def test_repl_syntax_switch_uses_matching_prelude_and_definition_state():
+    session = ReplSession()
+
+    assert session.eval_input("def x = 41") == "Defined: x : int"
+    assert session.eval_input(":syntax lisp") == "Syntax: lisp"
+    assert session.eval_input("(+ [1 2 3] [4 5 6])") == "[5, 7, 9]"
+    assert session.eval_input("(sum (iota 4))") == "6.0"
+    assert session.eval_input("(define y 7)") == "Defined: y : int"
+    assert session.eval_input(":defs") == "(define y 7)"
+
+    assert session.eval_input(":syntax ml") == "Syntax: ml"
+    assert session.eval_input(":defs") == "def x = 41"
+    assert session.eval_input("x + 1") == "42"
+
+
+def test_repl_load_lisp_file_switches_to_lisp_state(tmp_path):
+    source = tmp_path / "prog.lisp"
+    source.write_text("(define (double [x]) (* x 2)) (double 21)", encoding="utf-8")
+    session = ReplSession()
+
+    assert session.eval_input(f":load {source}") == "Defined: double : <function>\n42"
+    assert session.eval_input(":syntax") == "Current syntax: lisp"
+    assert session.eval_input("(double 5)") == "10"
+
+
 def test_repl_type_command_uses_session_definitions():
     session = ReplSession()
     session.eval_input("def xs = iota 4")
@@ -196,6 +221,55 @@ def test_repl_load_file(tmp_path):
 
     assert session.eval_input(f":load {source}") == "Defined: xs : int[4]\n[0.0, 2.0, 4.0, 6.0]"
     assert session.eval_input("fold (+) 0.0 xs") == "6.0"
+
+
+def test_repl_load_file_typechecks_definitions_as_batch(tmp_path):
+    source = tmp_path / "mutual.remora"
+    source.write_text(
+        "\n".join(
+            [
+                "def even n = if n == 0 then true else odd (n - 1)",
+                "def odd n = if n == 0 then false else even (n - 1)",
+                "even 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    session = ReplSession()
+
+    assert (
+        session.eval_input(f":load {source}")
+        == "Defined: even : <function>\nDefined: odd : <function>\ntrue"
+    )
+    assert session.eval_input("odd 7") == "true"
+
+
+def test_repl_preload_keeps_file_body_out_of_session_definitions(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "tail_recursion2.remora"
+    source.write_text(
+        "\n".join(
+            [
+                "def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)",
+                "sum_to 1000000 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    inputs = iter(["sum_to 100 0"])
+
+    def fake_input(_prompt):
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.chdir(tmp_path)
+
+    assert main([str(source), "--repl"]) == 0
+    output = capsys.readouterr().out
+    assert "5050" in output
+    assert "Unexpected token" not in output
 
 
 def test_repl_supports_recursive_function_definition():

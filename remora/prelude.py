@@ -20,6 +20,33 @@ def prelude_definition_sources() -> list[str]:
     ]
 
 
+def lisp_prelude_definition_sources() -> list[str]:
+    return [
+        "(define (add [x y]) (+ x y))",
+        "(define (sub [x y]) (- x y))",
+        "(define (mul [x y]) (* x y))",
+        "(define (div [x y]) (/ x y))",
+        "(define (neg [x]) (- 0 x))",
+        "(define (id [x]) x)",
+        "(define (const [a b]) a)",
+        "(define (sum [xs]) (fold + 0.0 xs))",
+        "(define (product [xs]) (fold * 1.0 xs))",
+        "(define (scale [s xs]) (map (* s) xs))",
+        "(define (dot [a b]) (sum (map * a b)))",
+        "(define (max [a b]) (if (< a b) b a))",
+        "(define (min [a b]) (if (< a b) a b))",
+        "(define (abs [x]) (if (< x 0) (- 0 x) x))",
+        "(define (any [xs]) (fold (lambda (a x) (|| a x)) #f xs))",
+        "(define (all [xs]) (fold (lambda (a x) (&& a x)) #t xs))",
+    ]
+
+
+def prelude_definition_sources_for_syntax(syntax: str) -> list[str]:
+    if syntax == "lisp":
+        return lisp_prelude_definition_sources()
+    return prelude_definition_sources()
+
+
 def with_prelude(source: str) -> str:
     source = _strip_leading_ignored_lines(source)
     prelude = prelude_source()
