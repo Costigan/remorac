@@ -8,36 +8,72 @@ operate on whole arrays at once. Remora adds a static type system that catches s
 errors before execution and enables efficient compilation to parallel hardware via
 MLIR.
 
-The current implementation supports **two syntaxes**:
-
-- **ML-like syntax** (`.remora` files) — Rank-ordered: arrays have a fixed number of
-  dimensions (rank). The dense-core subset (static shapes only) compiles to CPU and
-  GPU.
-- **Lisp s-expression syntax** (`.lisp` files) — Rank-polymorphic: auto-lifting allows
-  scalar functions to work on arrays transparently via `define`, `define/pi`, and
-  `define/forall`.
-
-## References and prior work
-
 Remora was designed by Justin Slepak as part of his dissertation at Northeastern
-University. The original Racket/OCaml implementation is at
-[github.com/jrslepak/Remora](https://github.com/jrslepak/Remora).
+University. The original Racket/OCaml implementation is at github.com/jrslepak/Remora.
 
-Key papers (local copies in `docs/remora-reference/`):
+Here are key papers (local copies in `docs/remora-reference/`):
 
 - *Remora Tutorial Draft* — best first read; covers the
   rank-polymorphic programming model, arrays, frames, cells, lifting,
   reranking, and static types
-  (https://www.ccs.neu.edu/home/shivers/papers/remora-tutorial-draft.pdf)
+  (www.ccs.neu.edu/home/shivers/papers/remora-tutorial-draft.pdf)
 - *An Introduction to Rank-polymorphic Programming in Remora* —
   published arXiv entry for the tutorial
-  (https://arxiv.org/abs/1912.13451)
+  (arxiv.org/abs/1912.13451)
 - *The Semantics of Rank Polymorphism* — formal dynamic/static
   semantics, frame/cell typing rules, shape soundness
-  (https://arxiv.org/abs/1907.00509)
+  (arxiv.org/abs/1907.00509)
 - *Slepak Dissertation* — deep reference for Remora's type system,
   bidirectional typing, shape inference, constraint solving, and type erasure
-  (https://ccs.neu.edu/~jrslepak/Dissertation.pdf)
+  (ccs.neu.edu/~jrslepak/Dissertation.pdf)
+
+## What is remorac?
+
+This implementation, remorac for Remora Compiler, implements the
+dense, statically shaped core of Remora, plus several extensions.  It
+does not yet implement the full language from the papers.
+
+What is currently implemented:
+
+- Dense rectangular arrays only, ranks 0-10.
+- Scalar types: Int, Float, Float64, Bool.
+- Static shapes at lowering time: compiled CPU/GPU artifacts specialize all dimensions.
+- Two syntaxes: ML-like (.remora files) and Lisp s-expression (.lisp)
+- Rank-polymorphic behavior, especially through Lisp syntax auto-lifting and explicit define/pi / define/forall.
+- Core array operators: map, fold, reduce, fold-right, scan, iscan,
+  escan, right/left variants, trace, trace-right, rerank
+- Views and shape operations: indexing, slicing, transpose, reshape,
+  ravel, reverse, take, drop, rotate, subarray, shape, rank, length
+- Higher-order functions on CPU/interpreter: lambdas, functions as
+  arguments, closure capture, define/forall, monomorphization of
+  higher-order calls
+- Recursion on CPU/interpreter: self recursion, mutual recursion, tail
+  and non-tail recursion
+- Special operations: sort, grade, matmul, im2col, col2im, pair,
+  first, second, box, unbox as mostly type-erasure/static-shape
+  machinery, reverse-mode grad for scalar-cost functions
+
+Backend coverage differs:
+
+- Interpreter: broadest semantic coverage; used as oracle.
+- CPU compiled backend: essentially complete for the current dense 
+  static core accepted by the typechecker.
+- GPU backend: a subset. Strong for maps, reductions, scans, views,
+  sort/grade, matmul, some AD/state-fold loops, and descriptor-based
+  kernels; limited for closures, full higher-order behavior, boxes,
+  general recursion, irregular/dynamic data, and some dtype/op
+  combinations.
+
+What is not implemented from full Remora:
+
+- True dynamic shapes in compiled code.
+- Runtime ragged/irregular arrays via real existential boxes.
+- MIMD arrays of functions / function-valued arrays.
+- Full dynamic higher-order function dispatch, especially call-through-variable in all contexts.
+- Full GPU support for all CPU/interpreter features.
+- Segmented reductions from the papers.
+- Some paper surface forms, such as explicit frame, explicit array, and all parameter syntax.
+- Full dynamic shape polymorphism without per-shape specialization.
 
 ## Installation
 
