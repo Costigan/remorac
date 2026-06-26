@@ -176,3 +176,47 @@ def test_gpu_tail_recursive_int_helper_numeric_parity_when_available():
     finally:
         if runtime is not None:
             runtime.close()
+
+
+def test_gpu_tail_recursive_bool_helper_numeric_parity_when_available():
+    runtime = None
+    try:
+        try:
+            runtime = CUDARuntime()
+        except RuntimeUnavailable as exc:
+            gpu_required_or_skip(str(exc))
+
+        src = (
+            "def flip n acc = "
+            "if n == 0 then acc else flip (n - 1) "
+            "(if acc then false else true)\n"
+            "def f xs = map (\\i -> flip i true) (iota 4)\n"
+            "f (iota 4)"
+        )
+        inputs = [np.asarray([0, 1, 2, 3], dtype=np.int32)]
+        ptx, kernels, _ = compile_function_source_to_mlir_gpu_ptx(
+            src,
+            "f",
+            (_iarr(4),),
+            include_prelude=False,
+            kernel_name="tail_bool",
+            syntax="ml",
+        )
+        executor = RemoraExecutor(ptx, kernels, runtime=runtime)
+        try:
+            gpu = np.asarray(
+                executor.execute("tail_bool", inputs),
+                dtype=np.bool_,
+            )
+        finally:
+            executor.close()
+
+        np.testing.assert_array_equal(
+            gpu.reshape(4),
+            np.asarray([True, False, True, False], dtype=np.bool_),
+        )
+    except RuntimeUnavailable as exc:
+        gpu_required_or_skip(str(exc))
+    finally:
+        if runtime is not None:
+            runtime.close()

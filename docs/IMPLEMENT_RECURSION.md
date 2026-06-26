@@ -427,9 +427,9 @@ Tasks:
 
 Acceptance tests:
 
-- [ ] GPU numeric parity for `sum_to` helper inside `map`, `Float`.
-- [ ] GPU numeric parity for `countdown`/identity helper inside `map`, `Int`.
-- [ ] GPU numeric parity for boolean tail-recursive helper inside `map`, if
+- [x] GPU numeric parity for `sum_to` helper inside `map`, `Float`.
+- [x] GPU numeric parity for `countdown`/identity helper inside `map`, `Int`.
+- [x] GPU numeric parity for boolean tail-recursive helper inside `map`, if
   bool map support is available for the shape.
 - [ ] GPU numeric parity for helper with two accumulators.
 - [ ] GPU rejected-not-silent test for non-tail recursion:

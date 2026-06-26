@@ -5601,6 +5601,13 @@ def build_descriptor_abi_general_map_gpu_module(
         _initial_env[f"%i{axis}_i32"] = f"%i{axis}_i32"
     result_ssa = _gpu_emit_expr(expr, body_lines, _initial_env)
 
+    def _store_value(value: str, suffix: str = "") -> str:
+        if result_elem_type != "i8":
+            return value
+        widened = f"%out_bool{suffix}"
+        body_lines.append(f"      {widened} = llvm.zext {value} : i1 to i8")
+        return widened
+
     # Store result — handle both scalar and array-valued results
     if isinstance(result_ssa, list):
         # Array-valued result: store each component at successive output offsets
@@ -5618,12 +5625,13 @@ def build_descriptor_abi_general_map_gpu_module(
             ptr = f"%out_elem_ptr{k}" if k > 0 else "%out_elem_ptr"
             # Always emit getelementptr for each component
             store_lines.append(f"      {ptr} = llvm.getelementptr %out_aligned[{k_offset}] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}")
-            store_lines.append(f"      llvm.store {result_ssa[k]}, {ptr} : {result_elem_type}, !llvm.ptr")
+            store_lines.append(f"      llvm.store {_store_value(result_ssa[k], str(k))}, {ptr} : {result_elem_type}, !llvm.ptr")
         body_lines.extend(store_lines)
     else:
+        result_store_ssa = _store_value(result_ssa)
         body_lines.extend([
             f"      %out_elem_ptr = llvm.getelementptr %out_aligned[%out_linear] : (!llvm.ptr, i64) -> !llvm.ptr, {result_elem_type}",
-            f"      llvm.store {result_ssa}, %out_elem_ptr : {result_elem_type}, !llvm.ptr",
+            f"      llvm.store {result_store_ssa}, %out_elem_ptr : {result_elem_type}, !llvm.ptr",
         ])
 
     body_lines.extend([
@@ -6410,6 +6418,11 @@ def _gpu_emit_expr(
             raise GPUScaffoldError("tail loop needs at least one loop variable")
 
         elem_type = expr.element_type or "f32"
+        param_types = list(getattr(expr, "param_types", None) or [])
+        if not param_types:
+            param_types = [elem_type for _ in range(K)]
+        if len(param_types) != K:
+            raise GPUScaffoldError("tail loop param type count mismatch")
 
         # Emit init values (these use the caller env to resolve inputs)
         init_ssas = [emit(expr.init_args[k], env) for k in range(K)]
@@ -6420,7 +6433,7 @@ def _gpu_emit_expr(
         done_label = f"{blk}_done"
 
         # Branch to loop header with init values
-        iter_types = ", ".join(elem_type for _ in range(K))
+        iter_types = ", ".join(param_types)
         iter_args = ", ".join(init_ssas)
         lines.append(
             f"      llvm.br ^{loop_label}({iter_args} : {iter_types})"
@@ -6428,7 +6441,9 @@ def _gpu_emit_expr(
 
         # Loop header: define block arguments and bind to param names
         acc_ssas = [_fresh_ssa() for _ in range(K)]
-        iter_params = ", ".join(f"{a}: {elem_type}" for a in acc_ssas)
+        iter_params = ", ".join(
+            f"{a}: {param_types[k]}" for k, a in enumerate(acc_ssas)
+        )
         lines.append(f"    ^{loop_label}({iter_params}):")
         loop_env = dict(env)
         for k in range(K):
@@ -6437,7 +6452,7 @@ def _gpu_emit_expr(
         # Emit condition in loop context
         cond_ssa = emit(expr.condition_expr, loop_env)
         done_vals = ", ".join(acc_ssas)
-        done_types = ", ".join(elem_type for _ in range(K))
+        done_types = ", ".join(param_types)
         lines.append(
             f"      llvm.cond_br {cond_ssa}, ^{done_label}({done_vals} : {done_types}), ^{body_label}"
         )
@@ -6448,7 +6463,7 @@ def _gpu_emit_expr(
         for k in range(K):
             body_env[expr.param_names[k]] = acc_ssas[k]
         next_ssas = [emit(expr.body_updates[k], body_env) for k in range(K)]
-        next_types = ", ".join(elem_type for _ in range(K))
+        next_types = ", ".join(param_types)
         next_args = ", ".join(next_ssas)
         lines.append(
             f"      llvm.br ^{loop_label}({next_args} : {next_types})"
@@ -6456,7 +6471,9 @@ def _gpu_emit_expr(
 
         # Done: receive loop variables, emit base result
         done_ssas = [_fresh_ssa() for _ in range(K)]
-        done_params = ", ".join(f"{r}: {elem_type}" for r in done_ssas)
+        done_params = ", ".join(
+            f"{r}: {param_types[k]}" for k, r in enumerate(done_ssas)
+        )
         lines.append(f"    ^{done_label}({done_params}):")
         done_env = dict(env)
         for k in range(K):

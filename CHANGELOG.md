@@ -53,8 +53,8 @@ full interpreter + CPU goal and the supported GPU helper subset.
   by scalar folds.
 - Added interpreter deep non-tail recursion tests, including an array-param
   case.
-- Added GPU numeric parity tests for supported float and int tail-recursive
-  scalar helpers inside `map`.
+- Added GPU numeric parity tests for supported float, int, and bool
+  tail-recursive scalar helpers inside `map`.
 - Added GPU rejected-not-silent tests for non-tail recursion, mutual
   recursion, and recursive helpers with array parameters.
 
