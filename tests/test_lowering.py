@@ -60,6 +60,30 @@ def test_lowering_matches_golden_mlir_fixtures(fixture_name: str, source: str):
     assert lowered.text.rstrip() + "\n" == (GOLDEN_DIR / fixture_name).read_text()
 
 
+def test_scalar_tail_recursion_lowers_to_state_machine():
+    mlir = compile_source_to_mlir(
+        "def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)\n"
+        "sum_to 10 0",
+        verify=False,
+    )
+
+    assert "@__tail_sum_to" in mlir
+    assert "scf.while" in mlir
+    assert "call @sum_to" in mlir
+    assert "func.call @sum_to" not in mlir
+
+
+def test_non_tail_recursion_keeps_native_recursive_calls():
+    mlir = compile_source_to_mlir(
+        "def fib n = if n <= 1 then n else fib (n - 1) + fib (n - 2)\n"
+        "fib 10",
+        verify=False,
+    )
+
+    assert "@__tail_fib" not in mlir
+    assert "func.call @fib" in mlir
+
+
 def test_type_to_mlir_scalars_arrays_and_functions():
     assert type_to_mlir(INT) == "i32"
     assert type_to_mlir(FLOAT) == "f32"

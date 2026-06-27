@@ -3,6 +3,23 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## CPU Tail-Recursion Optimization (June 2026)
+
+Implemented stack-safe CPU lowering for scalar tail-recursive function groups.
+
+- Added SCC detection for scalar-only recursive function groups and lowered
+  tail-recursive self and mutual recursion to an explicit `scf.while`
+  state machine with a program-counter tag and loop-carried parameter slots.
+- Preserved existing non-tail recursion behavior by detecting recursive calls
+  outside tail position and falling back to ordinary native `func.call`
+  lowering for those functions.
+- Added deep compiled CPU regressions for `sum_to 1000000 0` and mutual
+  `is_even`/`is_odd 1000000`, plus MLIR checks that tail recursion uses the
+  dispatcher loop while non-tail Fibonacci stays on native recursive calls.
+- Note: compiled `Int` remains the existing `i32` backend type, so deep integer
+  accumulations still wrap at 32 bits; this change fixes stack use, not integer
+  width semantics.
+
 ## Documentation, Benchmarks, and Project Landing Page (June 2026)
 
 Collected the post-AOT project status into current-facing docs, benchmark

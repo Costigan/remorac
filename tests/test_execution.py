@@ -1042,6 +1042,16 @@ def test_tail_recursion_regression_sum_to():
     assert result.value == 5050
 
 
+def test_tail_recursion_deep_compiled_stack_safe():
+    result = evaluate_source_compiled(
+        "def sum_to n acc = if n == 0 then acc else sum_to (n - 1) (acc + n)\n"
+        "sum_to 1000000 0",
+        strict=True,
+    )
+
+    assert result.value == 1784293664
+
+
 def test_mutual_recursion_regression_even_odd():
     """12.24: scalar mutual recursion regression."""
     result = evaluate_source_compiled(
@@ -1058,6 +1068,17 @@ def test_mutual_recursion_regression_even_odd():
         strict=True,
     )
     assert result.value is False
+
+
+def test_mutual_tail_recursion_deep_compiled_stack_safe():
+    result = evaluate_source_compiled(
+        "def is_even n = if n == 0 then true else is_odd (n - 1)\n"
+        "def is_odd  n = if n == 0 then false else is_even (n - 1)\n"
+        "is_even 1000000",
+        strict=True,
+    )
+
+    assert result.value is True
 
 
 def test_map_over_recursive_function_lisp():

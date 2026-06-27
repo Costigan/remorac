@@ -901,6 +901,7 @@ def _lower_functions(functions: dict[str, HIRFunction]) -> str:
     lowered: list[str] = []
     emitted: set[str] = set()
     tensor_recursive_groups = _recursive_tensor_sccs(functions)
+    scalar_recursive_groups = _recursive_scalar_sccs(functions)
 
     for function in functions.values():
         if function.name in emitted:
@@ -919,6 +920,23 @@ def _lower_functions(functions: dict[str, HIRFunction]) -> str:
                     lowered.append(text)
                 emitted.add(name)
             continue
+
+        group = scalar_recursive_groups.get(function.name)
+        if group is not None:
+            try:
+                lowered.append(
+                    _lower_scalar_tail_recursive_group(
+                        [functions[name] for name in group],
+                        functions,
+                    )
+                )
+                emitted.update(group)
+                continue
+            except RemoraLoweringError:
+                # Fall back to ordinary recursive calls for recursion shapes
+                # outside the scalar tail-state-machine subset.  Non-tail
+                # recursion remains supported through native calls.
+                pass
 
         text = _lower_function(function, functions)
         # Only include functions whose lowering produces a proper
@@ -958,6 +976,39 @@ def _recursive_tensor_sccs(
         if not recursive:
             continue
         if not any(_function_touches_array(functions[name]) for name in component):
+            continue
+        group = tuple(name for name in functions if name in set(component))
+        for name in group:
+            groups[name] = group
+    return groups
+
+
+def _recursive_scalar_sccs(
+    functions: dict[str, HIRFunction],
+) -> dict[str, tuple[str, ...]]:
+    graph = {
+        name: {
+            callee
+            for callee in _hir_call_names(function.body)
+            if callee in functions
+        }
+        for name, function in functions.items()
+    }
+    groups: dict[str, tuple[str, ...]] = {}
+    for component in _strongly_connected_components(graph):
+        recursive = len(component) > 1 or component[0] in graph[component[0]]
+        if not recursive:
+            continue
+        if any(_function_touches_array(functions[name]) for name in component):
+            continue
+        if not all(
+            isinstance(functions[name].return_type, ScalarType)
+            and all(isinstance(param.type, ScalarType) for param in functions[name].params)
+            for name in component
+        ):
+            continue
+        return_types = {functions[name].return_type for name in component}
+        if len(return_types) != 1:
             continue
         group = tuple(name for name in functions if name in set(component))
         for name in group:
@@ -1077,6 +1128,501 @@ def _lower_function(
 {body}
     return {result_value} : {result_type}
   }}"""
+
+
+@dataclass(frozen=True)
+class _TailSlot:
+    function_name: str
+    param_index: int
+    param_name: str
+    type: RemoraType
+    mlir_type: str
+
+
+@dataclass(frozen=True)
+class _TailState:
+    tag: str
+    result: str
+    slots: tuple[str, ...]
+
+
+def _lower_scalar_tail_recursive_group(
+    group: list[HIRFunction],
+    all_functions: dict[str, HIRFunction],
+) -> str:
+    if not group:
+        raise RemoraLoweringError("empty tail-recursive group")
+
+    return_type = group[0].return_type
+    if not isinstance(return_type, ScalarType):
+        raise RemoraLoweringError("tail-recursive group must return scalar")
+    result_type = type_to_mlir(return_type)
+    group_names = [function.name for function in group]
+    group_set = set(group_names)
+    tag_by_name = {name: index for index, name in enumerate(group_names)}
+    dispatcher_name = "__tail_" + "_".join(group_names)
+
+    slots: list[_TailSlot] = []
+    slot_index: dict[tuple[str, int], int] = {}
+    for function in group:
+        for index, param in enumerate(function.params):
+            if not isinstance(param.type, ScalarType):
+                raise RemoraLoweringError("tail-recursive params must be scalar")
+            slot_index[(function.name, index)] = len(slots)
+            slots.append(
+                _TailSlot(
+                    function.name,
+                    index,
+                    param.name,
+                    param.type,
+                    type_to_mlir(param.type),
+                )
+            )
+
+    for function in group:
+        if not _tail_calls_only(function.body, group_set):
+            raise RemoraLoweringError(
+                f"function {function.name} contains a non-tail recursive call"
+            )
+
+    state_types = ["i32", result_type, *(slot.mlir_type for slot in slots)]
+
+    dispatcher = _tail_dispatcher_function(
+        dispatcher_name,
+        group,
+        all_functions,
+        group_set,
+        tag_by_name,
+        slot_index,
+        slots,
+        result_type,
+        state_types,
+    )
+    wrappers = [
+        _tail_wrapper_function(
+            function,
+            dispatcher_name,
+            tag_by_name[function.name],
+            slots,
+            slot_index,
+            result_type,
+        )
+        for function in group
+    ]
+    return "\n\n".join([dispatcher, *wrappers])
+
+
+def _tail_dispatcher_function(
+    dispatcher_name: str,
+    group: list[HIRFunction],
+    all_functions: dict[str, HIRFunction],
+    group_set: set[str],
+    tag_by_name: dict[str, int],
+    slot_index: dict[tuple[str, int], int],
+    slots: list[_TailSlot],
+    result_type: str,
+    state_types: list[str],
+) -> str:
+    params = [
+        "%entry_tag: i32",
+        *(f"%init_s{i}: {slot.mlir_type}" for i, slot in enumerate(slots)),
+    ]
+    sentinel_const = "    %tail_done_tag = arith.constant -1 : i32"
+    default_result = _tail_zero_constant(result_type, "%result_init")
+
+    init_bindings = [
+        "%tag = %entry_tag",
+        "%result = %result_init",
+        *(f"%s{i} = %init_s{i}" for i in range(len(slots))),
+    ]
+    iter_args = ", ".join(init_bindings)
+    do_args = ["%tag_iter: i32", f"%result_iter: {result_type}"]
+    do_args.extend(f"%s{i}_iter: {slot.mlir_type}" for i, slot in enumerate(slots))
+    final_state = "%tail_final"
+
+    initial_state = _TailState(
+        tag="%tag_iter",
+        result="%result_iter",
+        slots=tuple(f"%s{i}_iter" for i in range(len(slots))),
+    )
+    dispatch_lines, dispatch_state = _tail_dispatch(
+        group,
+        0,
+        initial_state,
+        all_functions,
+        group_set,
+        tag_by_name,
+        slot_index,
+        slots,
+        result_type,
+        state_types,
+    )
+    yield_values = _tail_state_values(dispatch_state)
+
+    return f"""  func.func private @{dispatcher_name}({", ".join(params)}) -> {result_type} {{
+{sentinel_const}
+{default_result}
+    {final_state}:{len(state_types)} = scf.while ({iter_args}) : ({", ".join(state_types)}) -> ({", ".join(state_types)}) {{
+      %continue = arith.cmpi ne, %tag, %tail_done_tag : i32
+      scf.condition(%continue) %tag, %result{_tail_slot_suffix('%s', len(slots))} : {", ".join(state_types)}
+    }} do {{
+    ^bb0({", ".join(do_args)}):
+{_indent_lines(dispatch_lines, 6)}
+      scf.yield {", ".join(yield_values)} : {", ".join(state_types)}
+    }}
+    return {final_state}#1 : {result_type}
+  }}"""
+
+
+def _tail_dispatch(
+    group: list[HIRFunction],
+    index: int,
+    state: _TailState,
+    all_functions: dict[str, HIRFunction],
+    group_set: set[str],
+    tag_by_name: dict[str, int],
+    slot_index: dict[tuple[str, int], int],
+    slots: list[_TailSlot],
+    result_type: str,
+    state_types: list[str],
+) -> tuple[list[str], _TailState]:
+    function = group[index]
+    if index == len(group) - 1:
+        return _tail_lower_function_step(
+            function,
+            state,
+            all_functions,
+            group_set,
+            tag_by_name,
+            slot_index,
+            slots,
+            result_type,
+        )
+
+    compare = f"%dispatch_is_{function.name}"
+    next_tag = tag_by_name[function.name]
+    lines = [
+        f"%dispatch_tag_{function.name} = arith.constant {next_tag} : i32",
+        f"{compare} = arith.cmpi eq, {state.tag}, %dispatch_tag_{function.name} : i32",
+        f"%{function.name}_state:{len(state_types)} = scf.if {compare} -> ({', '.join(state_types)}) {{",
+    ]
+    then_lines, then_state = _tail_lower_function_step(
+        function,
+        state,
+        all_functions,
+        group_set,
+        tag_by_name,
+        slot_index,
+        slots,
+        result_type,
+    )
+    lines.extend(_indent_list(then_lines, 2))
+    lines.append(
+        "  scf.yield "
+        + ", ".join(_tail_state_values(then_state))
+        + " : "
+        + ", ".join(state_types)
+    )
+    lines.append("} else {")
+    else_lines, else_state = _tail_dispatch(
+        group,
+        index + 1,
+        state,
+        all_functions,
+        group_set,
+        tag_by_name,
+        slot_index,
+        slots,
+        result_type,
+        state_types,
+    )
+    lines.extend(_indent_list(else_lines, 2))
+    lines.append(
+        "  scf.yield "
+        + ", ".join(_tail_state_values(else_state))
+        + " : "
+        + ", ".join(state_types)
+    )
+    lines.append("}")
+    state_values = _tail_aggregate_values(f"%{function.name}_state", len(state_types))
+    return lines, _TailState(
+        tag=state_values[0],
+        result=state_values[1],
+        slots=tuple(state_values[2:]),
+    )
+
+
+def _tail_lower_function_step(
+    function: HIRFunction,
+    state: _TailState,
+    all_functions: dict[str, HIRFunction],
+    group_set: set[str],
+    tag_by_name: dict[str, int],
+    slot_index: dict[tuple[str, int], int],
+    slots: list[_TailSlot],
+    result_type: str,
+) -> tuple[list[str], _TailState]:
+    env = {
+        param.name: _Operand(
+            state.slots[slot_index[(function.name, index)]],
+            [],
+            type_to_mlir(param.type),
+        )
+        for index, param in enumerate(function.params)
+    }
+    emitter = _RegionEmitter(
+        input_name="",
+        input_type="",
+        functions=all_functions,
+        prefix=f"tail_{function.name}",
+    )
+    lines, next_state = _tail_lower_expr(
+        function.body,
+        env,
+        state,
+        emitter,
+        all_functions,
+        group_set,
+        tag_by_name,
+        slot_index,
+        slots,
+        result_type,
+    )
+    return [*emitter.lines, *lines], next_state
+
+
+def _tail_lower_expr(
+    expr: HIRExpr,
+    env: dict[str, _Operand],
+    state: _TailState,
+    emitter: _RegionEmitter,
+    all_functions: dict[str, HIRFunction],
+    group_set: set[str],
+    tag_by_name: dict[str, int],
+    slot_index: dict[tuple[str, int], int],
+    slots: list[_TailSlot],
+    result_type: str,
+) -> tuple[list[str], _TailState]:
+    if isinstance(expr, HIRLet):
+        value = emitter.emit_expr(expr.value, env)
+        old = env.get(expr.name)
+        env[expr.name] = value
+        try:
+            return _tail_lower_expr(
+                expr.body,
+                env,
+                state,
+                emitter,
+                all_functions,
+                group_set,
+                tag_by_name,
+                slot_index,
+                slots,
+                result_type,
+            )
+        finally:
+            if old is None:
+                env.pop(expr.name, None)
+            else:
+                env[expr.name] = old
+
+    if isinstance(expr, HIRIf):
+        condition = emitter.emit_expr(expr.condition, env)
+        condition = emitter._coerce(condition, "i1")
+        branch_prefix = emitter.temp().lstrip("%")
+        then_emitter = _RegionEmitter(
+            input_name="",
+            input_type="",
+            functions=all_functions,
+            prefix=f"{branch_prefix}_then",
+        )
+        then_lines, then_state = _tail_lower_expr(
+            expr.then_branch,
+            dict(env),
+            state,
+            then_emitter,
+            all_functions,
+            group_set,
+            tag_by_name,
+            slot_index,
+            slots,
+            result_type,
+        )
+        else_emitter = _RegionEmitter(
+            input_name="",
+            input_type="",
+            functions=all_functions,
+            prefix=f"{branch_prefix}_else",
+        )
+        else_lines, else_state = _tail_lower_expr(
+            expr.else_branch,
+            dict(env),
+            state,
+            else_emitter,
+            all_functions,
+            group_set,
+            tag_by_name,
+            slot_index,
+            slots,
+            result_type,
+        )
+        state_types = ["i32", result_type, *(slot.mlir_type for slot in slots)]
+        state_name = f"%{branch_prefix}_state"
+        lines = [
+            f"{state_name}:{len(state_types)} = scf.if {condition.value} -> ({', '.join(state_types)}) {{",
+            *_indent_list([*then_emitter.lines, *then_lines], 2),
+            "  scf.yield "
+            + ", ".join(_tail_state_values(then_state))
+            + " : "
+            + ", ".join(state_types),
+            "} else {",
+            *_indent_list([*else_emitter.lines, *else_lines], 2),
+            "  scf.yield "
+            + ", ".join(_tail_state_values(else_state))
+            + " : "
+            + ", ".join(state_types),
+            "}",
+        ]
+        state_values = _tail_aggregate_values(state_name, len(state_types))
+        return lines, _TailState(
+            tag=state_values[0],
+            result=state_values[1],
+            slots=tuple(state_values[2:]),
+        )
+
+    if isinstance(expr, HIRCall) and expr.func_name in group_set:
+        function = all_functions[expr.func_name]
+        args = [emitter.emit_expr(arg, env) for arg in expr.args]
+        if len(args) != len(function.params):
+            raise RemoraLoweringError(f"function {expr.func_name} arity mismatch")
+        new_slots = list(state.slots)
+        for index, arg in enumerate(args):
+            param_type = type_to_mlir(function.params[index].type)
+            coerced = emitter._coerce(arg, param_type)
+            new_slots[slot_index[(expr.func_name, index)]] = coerced.value
+        tag_name = emitter.temp()
+        emitter.lines.append(
+            f"      {tag_name} = arith.constant {tag_by_name[expr.func_name]} : i32"
+        )
+        return [], _TailState(
+            tag=tag_name,
+            result=state.result,
+            slots=tuple(new_slots),
+        )
+
+    value = emitter.emit_expr(expr, env)
+    value = emitter._coerce(value, result_type)
+    tag_name = emitter.temp()
+    emitter.lines.append(f"      {tag_name} = arith.constant -1 : i32")
+    return [], _TailState(
+        tag=tag_name,
+        result=value.value,
+        slots=state.slots,
+    )
+
+
+def _tail_calls_only(expr: HIRExpr, group_set: set[str], *, tail: bool = True) -> bool:
+    if isinstance(expr, HIRCall):
+        if expr.func_name in group_set and not tail:
+            return False
+        return all(_tail_calls_only(arg, group_set, tail=False) for arg in expr.args)
+    if isinstance(expr, HIRIf):
+        return (
+            _tail_calls_only(expr.condition, group_set, tail=False)
+            and _tail_calls_only(expr.then_branch, group_set, tail=tail)
+            and _tail_calls_only(expr.else_branch, group_set, tail=tail)
+        )
+    if isinstance(expr, HIRLet):
+        return _tail_calls_only(expr.value, group_set, tail=False) and _tail_calls_only(
+            expr.body, group_set, tail=tail
+        )
+    if isinstance(expr, HIRCast):
+        return _tail_calls_only(expr.value, group_set, tail=tail)
+    if not is_dataclass(expr):
+        return True
+    for field in fields(expr):
+        child = getattr(expr, field.name)
+        if isinstance(child, (list, tuple)):
+            if any(
+                isinstance(item, HIRExpr)
+                and not _tail_calls_only(item, group_set, tail=False)
+                for item in child
+            ):
+                return False
+        elif isinstance(child, HIRExpr) and not _tail_calls_only(
+            child, group_set, tail=False
+        ):
+            return False
+    return True
+
+
+def _tail_wrapper_function(
+    function: HIRFunction,
+    dispatcher_name: str,
+    tag: int,
+    slots: list[_TailSlot],
+    slot_index: dict[tuple[str, int], int],
+    result_type: str,
+) -> str:
+    args = [
+        f"%arg{index}: {type_to_mlir(param.type)}"
+        for index, param in enumerate(function.params)
+    ]
+    lines = [
+        f"    %entry_tag = arith.constant {tag} : i32",
+    ]
+    call_args = ["%entry_tag"]
+    call_types = ["i32"]
+    for index, slot in enumerate(slots):
+        if slot.function_name == function.name:
+            arg_index = slot.param_index
+            call_args.append(f"%arg{arg_index}")
+        else:
+            zero_name = f"%zero_s{index}"
+            lines.append(_tail_zero_constant(slot.mlir_type, zero_name, indent="    "))
+            call_args.append(zero_name)
+        call_types.append(slot.mlir_type)
+    lines.append(
+        f"    %result = func.call @{dispatcher_name}({', '.join(call_args)})"
+        f" : ({', '.join(call_types)}) -> {result_type}"
+    )
+    lines.append(f"    return %result : {result_type}")
+    return f"""  func.func private @{function.name}({", ".join(args)}) -> {result_type} {{
+{chr(10).join(lines)}
+  }}"""
+
+
+def _tail_zero_constant(mlir_type: str, name: str, *, indent: str = "    ") -> str:
+    if mlir_type == "i1":
+        return f"{indent}{name} = arith.constant false"
+    if mlir_type.startswith("i"):
+        return f"{indent}{name} = arith.constant 0 : {mlir_type}"
+    if mlir_type in {"f32", "f64"}:
+        return f"{indent}{name} = arith.constant 0.0 : {mlir_type}"
+    raise RemoraLoweringError(f"unsupported tail state type {mlir_type}")
+
+
+def _tail_slot_suffix(prefix: str, count: int) -> str:
+    if count == 0:
+        return ""
+    return ", " + ", ".join(f"{prefix}{i}" for i in range(count))
+
+
+def _tail_aggregate_values(name: str, count: int) -> list[str]:
+    return [f"{name}#{index}" for index in range(count)]
+
+
+def _tail_state_values(state: _TailState) -> list[str]:
+    return [state.tag, state.result, *state.slots]
+
+
+def _indent_list(lines: list[str], spaces: int) -> list[str]:
+    prefix = " " * spaces
+    return [prefix + line if line else line for line in lines]
+
+
+def _indent_lines(lines: list[str], spaces: int) -> str:
+    return "\n".join(_indent_list(lines, spaces))
 
 
 def _lower_function_with_tensor(function: HIRFunction, functions: dict[str, HIRFunction] | None = None) -> str:

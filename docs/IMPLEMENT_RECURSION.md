@@ -196,10 +196,13 @@ recursive function bodies. Implement it incrementally with tests:
 
 This removes Python call-stack dependence for non-tail recursive calls.
 
-### CPU: Native `func.call` Plus General Memref SCC Wrappers
+### CPU: Tail-State Loops Plus Native `func.call` Fallback
 
-For scalar-only recursive functions, the current native MLIR `func.call`
-approach is acceptable. MLIR/LLVM handles the call stack.
+Scalar-only tail-recursive SCCs lower to explicit `scf.while` state machines:
+the loop carries a program-counter tag, the current result value, and one slot
+per scalar parameter in the SCC. Tail calls update the tag and parameter slots;
+base cases set a sentinel tag and return the loop-carried result. Recursive
+calls outside tail position fall back to ordinary native `func.call` lowering.
 
 For recursive functions with array parameters or array returns, direct tensor
 function recursion is unsafe because `bufferize-function-boundaries` can hit
@@ -340,14 +343,15 @@ is added.
 
 Tasks:
 
-- [ ] Add SCC-aware function emission for scalar-only recursive groups, even
-  if it continues to emit native `func.call`.
+- [x] Add SCC-aware function emission for scalar-only recursive groups.
+- [x] Lower scalar tail-recursive self and mutual recursion to stack-safe CPU
+  loops.
 - [ ] Verify mutually recursive scalar functions are always emitted together
   in descriptor compilation.
 - [ ] Add CPU tests for:
-  - self tail recursion
+  - [x] self tail recursion
   - self non-tail recursion
-  - mutual tail recursion
+  - [x] mutual tail recursion
   - mutual non-tail recursion
   - three-function mutual recursion
   - higher-order recursive function after monomorphization

@@ -511,9 +511,11 @@ Vector-cell functions auto-lift to matrix inputs:
 
 ## Recursive Functions
 
-Self-recursion and mutual recursion work on CPU and in the interpreter. Tail-recursive
-and non-tail-recursive scalar functions compile to CPU, and recursive functions may
-take array parameters or return arrays.
+Self-recursion and mutual recursion work on CPU and in the interpreter. Scalar
+tail-recursive function groups lower to stack-safe CPU loops, including mutual
+tail recursion. Non-tail-recursive scalar functions still compile to CPU through
+ordinary native calls, and recursive functions may take array parameters or
+return arrays.
 
 ### Self-recursion (tail)
 
