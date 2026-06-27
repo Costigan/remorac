@@ -275,6 +275,8 @@ class _GpuTailStep:
     result_expr: "GpuExpr"
     tail_target: str
     tail_args: list["GpuExpr"]
+    let_bindings: list[tuple[str, "GpuExpr"]] = field(default_factory=list)
+    tail_is_then: bool = False
 
 
 @dataclass(frozen=True)
@@ -1064,13 +1066,13 @@ def _lower_tail_state_machine_call(
     steps: list[_GpuTailStep] = []
     for name in fn_names:
         fn = ctx.functions[name]
-        shape = _tail_if_shape(fn.body, group)
+        shape = _tail_lets_and_shape(fn.body, group)
         if shape is None:
             raise GPUScaffoldError(
                 f"{ctx.context}: GPU recursion supports tail-recursive "
                 "scalar helpers inside higher-order bodies only"
             )
-        condition, result_expr, tail_call = shape
+        lets, condition, result_expr, tail_call, tail_is_then = shape
         step_ctx = _copy_ctx(ctx)
         step_ctx.tail_group = set(group)
         step_ctx.tail_context = name
@@ -1080,6 +1082,14 @@ def _lower_tail_state_machine_call(
         ]
         for param in fn.params:
             step_ctx.let_env[param.name] = _placeholder(param.name)
+        # Lower any ``let`` bindings that wrap the terminal ``if`` once, in
+        # order, registering each so later bindings and the
+        # condition/result/tail expressions can reference it.
+        lowered_lets: list[tuple[str, GpuExpr]] = []
+        for let_name, let_value in lets:
+            lowered_value = _lower_hir(let_value, step_ctx)
+            step_ctx.let_env[let_name] = _placeholder(let_name)
+            lowered_lets.append((let_name, lowered_value))
         steps.append(
             _GpuTailStep(
                 name=name,
@@ -1089,6 +1099,8 @@ def _lower_tail_state_machine_call(
                 result_expr=_lower_hir(result_expr, step_ctx),
                 tail_target=tail_call.func_name,
                 tail_args=[_lower_hir(arg, step_ctx) for arg in tail_call.args],
+                let_bindings=lowered_lets,
+                tail_is_then=tail_is_then,
             )
         )
 
@@ -1103,16 +1115,62 @@ def _lower_tail_state_machine_call(
     )
 
 
-def _tail_if_shape(expr: HIRExpr, group: set[str]) -> tuple[HIRExpr, HIRExpr, HIRCall] | None:
-    """Return ``(condition, base_result, tail_call)`` for supported tail shape."""
+def _tail_if_shape(
+    expr: HIRExpr, group: set[str]
+) -> tuple[HIRExpr, HIRExpr, HIRCall, bool] | None:
+    """Return ``(condition, base_result, tail_call, tail_is_then)``.
+
+    The recursive (tail) call may sit in *either* branch of the ``if``; the
+    other branch is the base result.  ``tail_is_then`` is True when the tail
+    call is the ``then`` branch (e.g. a ``while``/``dotimes`` continue-condition
+    loop), in which case the emitter inverts the branch targets.
+    """
     if isinstance(expr, HIRIf):
         if isinstance(expr.else_branch, HIRCall) and expr.else_branch.func_name in group:
             if not _contains_call_to(expr.then_branch, group):
-                return expr.condition, expr.then_branch, expr.else_branch
+                return expr.condition, expr.then_branch, expr.else_branch, False
+        if isinstance(expr.then_branch, HIRCall) and expr.then_branch.func_name in group:
+            if not _contains_call_to(expr.else_branch, group):
+                return expr.condition, expr.else_branch, expr.then_branch, True
     if isinstance(expr, HIRLet):
         return _tail_if_shape(expr.body, group)
     if isinstance(expr, HIRCast):
         return _tail_if_shape(expr.value, group)
+    return None
+
+
+def _tail_lets_and_shape(
+    expr: HIRExpr, group: set[str]
+) -> tuple[list[tuple[str, HIRExpr]], HIRExpr, HIRExpr, HIRCall, bool] | None:
+    """Like :func:`_tail_if_shape`, but also collect the leading ``let``
+    bindings that wrap the terminal ``if``.
+
+    The state machine evaluates the condition, base result, and tail-call
+    arguments in separate blocks, so a ``let`` that wraps the whole ``if`` must
+    be threaded explicitly: its value is recomputed once per iteration and
+    rebound before those expressions are emitted.  A ``let`` whose value calls
+    back into the group is not a supported tail shape and is rejected.  The
+    tail call may be in either branch (see :func:`_tail_if_shape`).
+    """
+    lets: list[tuple[str, HIRExpr]] = []
+    while True:
+        if isinstance(expr, HIRLet):
+            if _contains_call_to(expr.value, group):
+                return None
+            lets.append((expr.name, expr.value))
+            expr = expr.body
+            continue
+        if isinstance(expr, HIRCast):
+            expr = expr.value
+            continue
+        break
+    if isinstance(expr, HIRIf):
+        if isinstance(expr.else_branch, HIRCall) and expr.else_branch.func_name in group:
+            if not _contains_call_to(expr.then_branch, group):
+                return lets, expr.condition, expr.then_branch, expr.else_branch, False
+        if isinstance(expr.then_branch, HIRCall) and expr.then_branch.func_name in group:
+            if not _contains_call_to(expr.else_branch, group):
+                return lets, expr.condition, expr.else_branch, expr.then_branch, True
     return None
 
 

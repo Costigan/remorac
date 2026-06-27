@@ -892,7 +892,16 @@ class TypeChecker:
             then_branch = self.infer(expr.then_branch, env)
             else_branch = self.infer(expr.else_branch, env)
             self._require(then_branch.type, else_branch.type, expr.loc)
-            return TypedIf(expr, condition, then_branch, else_branch, then_branch.type)
+            # Prefer the concrete branch type: a recursive call in either
+            # branch carries the provisional result ``TypeVar`` (e.g.
+            # ``$f_ret``); taking the other (concrete) branch's type lets the
+            # recursion result-type back-substitution resolve it.  Without this,
+            # an untyped tail-recursive helper with the recursive call in the
+            # ``then`` branch leaked an unresolved ``TypeVar`` into lowering.
+            result_type = then_branch.type
+            if _contains_type_var(then_branch.type) and not _contains_type_var(else_branch.type):
+                result_type = else_branch.type
+            return TypedIf(expr, condition, then_branch, else_branch, result_type)
         if isinstance(expr, SelectExpr):
             condition = self.infer(expr.condition, env)
             then_branch = self.infer(expr.then_branch, env)
@@ -903,7 +912,10 @@ class TypeChecker:
             elif condition.type != BOOL:
                 self._require(condition.type, BOOL, expr.loc)
             self._require(then_branch.type, else_branch.type, expr.loc)
-            return TypedIf(expr, condition, then_branch, else_branch, then_branch.type)  # type: ignore[arg-type]
+            select_type = then_branch.type
+            if _contains_type_var(then_branch.type) and not _contains_type_var(else_branch.type):
+                select_type = else_branch.type
+            return TypedIf(expr, condition, then_branch, else_branch, select_type)  # type: ignore[arg-type]
         if isinstance(expr, AppendExpr):
             left = self.infer(expr.left, env)
             right = self.infer(expr.right, env)
@@ -3384,7 +3396,7 @@ def _substitute_type_var(expr: TypedExpr, old: TypeVar, new: RemoraType) -> Type
         new_type = _replace_var_in_type(expr.type, old, new)
         if new_val is expr.value and new_body is expr.body and new_type is expr.type:
             return expr
-        return TypedLet(expr.name, new_val, new_body, new_type, expr.value_type)
+        return TypedLet(expr.expr, expr.name, new_val, new_body, new_type)
     if isinstance(expr, TypedCast):
         new_val = _substitute_type_var(expr.value, old, new)
         new_type = _replace_var_in_type(expr.type, old, new)

@@ -3,6 +3,93 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## `while` and `dotimes` loop forms (Lisp syntax) (June 2026)
+
+Added expression-valued loop sugar that desugars to tail-recursive `letrec`
+(and therefore runs on the interpreter, CPU, and GPU just like `letrec`).
+
+- `(while cond ((var init update) ...) result)` — a condition-terminated loop.
+  Bindings update simultaneously each iteration; the loop returns `result` when
+  `cond` becomes false.  A condition-terminated `while` is exactly a
+  tail-recursive `letrec`.
+- `(dotimes (i count) (acc init) body)` — a bounded counter loop with index `i`
+  in `0..count-1` and a threaded accumulator; returns the final `acc`.
+- Both are desugared in `remora/lisp_reader.py` (with a per-parse gensym) to a
+  single-binding `letrec`, then lambda-lifted by the existing pass; no new AST
+  nodes, type-checker, or backend code.
+- Supporting fixes so the loops' natural *continue-condition* desugaring (tail
+  call in the `then` branch) works everywhere:
+  - **Type checker:** `if`/`select` now take the concrete branch type when the
+    other branch is a recursion-provisional `TypeVar`.  Previously an untyped
+    tail-recursive helper with the recursive call in the `then` branch leaked an
+    unresolved `TypeVar` into lowering (`unknown scalar type $..._ret`).
+  - **GPU:** the tail-recursion state machine now accepts the tail call in
+    *either* `if` branch (`_tail_if_shape`/`_tail_lets_and_shape` return a
+    `tail_is_then` flag; the emitter swaps the `cond_br` targets accordingly).
+- Example: `examples/loops.lisp` (`letrec`, `while`, `dotimes`, mutual recursion,
+  Newton's method, and a loop applied per-element with `map`).
+- Tests: `tests/test_letrec.py::TestWhileDotimes` (interpreter/CPU + desugar)
+  and GPU numeric-parity cases `test_while_loop_in_map_parity`,
+  `test_dotimes_fixed_count_in_map_parity`,
+  `test_dotimes_variable_count_int_in_map_parity`
+  (`tests/test_gpu_general_lowering.py`).
+
+## `letrec` — local recursive bindings (Lisp syntax) (June 2026)
+
+Added `letrec` to the Lisp syntax: one or more local (optionally mutually)
+recursive function bindings, the missing primitive for writing loops without
+lifting a named top-level helper.
+
+- New `LetRecExpr` AST node and `(letrec ((name (lambda ...)) ...) body)` reader
+  form (`remora/ast_nodes.py`, `remora/lisp_reader.py`).
+- New whole-program desugaring pass (`remora/_letrec_lift.py`) that
+  **capture-aware lambda-lifts** each `letrec` group to ordinary *untyped*
+  top-level recursive `FuncDef`s before type checking (mirroring the existing
+  `_rewrite_applied_source_gradient` pattern). Free variables of the lifted
+  bodies are threaded as leading parameters and forwarded at every call site;
+  the letrec body stays in place, so its own free variables are not captured.
+  Runs inside `parse_lisp`, so the interpreter, CPU and GPU paths all see the
+  lifted program and it is a strict no-op for `letrec`-free programs.
+- Because lifting produces ordinary top-level recursion, `letrec` rides the
+  existing recursion support with no backend changes: interpreter and CPU
+  execution, scalar tail-recursion state machines on CPU, and — for a scalar
+  tail-recursive `letrec` used inside a `map` — the per-thread GPU tail-recursion
+  state machine. Self-recursion, mutual recursion, and free-variable capture all
+  work; a condition-terminated `while` loop (e.g. Newton's method) is simply a
+  tail-recursive `letrec`.
+- Loud rejections: non-lambda bindings, using a `letrec`-bound function as a
+  value (only direct calls are supported), and a captured-variable name that
+  collides with a binding parameter.
+- Tests: `tests/test_letrec.py` (lifting-pass unit tests, interpreter and CPU
+  parity, rejections) and GPU numeric-parity cases in
+  `tests/test_gpu_general_lowering.py::TestGPUNumericParity` for self-recursive,
+  capturing, mutual, and `Int` `letrec` loops inside `map`.
+
+## GPU `let` bindings inside tail-recursive bodies (June 2026)
+
+A tail-recursive helper whose body wraps the terminal `if` in one or more
+`let` bindings (e.g. `let d = f(x)/f'(x) in if converged then x else step`) now
+lowers on the GPU instead of failing with `unbound variable`.
+
+- `_tail_lets_and_shape` collects the leading `let` bindings that wrap the
+  terminal `if`; `_GpuTailStep` carries them (`let_bindings`); and
+  `_emit_tail_state_machine` recomputes them once per iteration, before the
+  condition / result / tail-argument expressions that reference them (their SSA
+  values dominate the finish and tail blocks). Multiple sequential `let`s and
+  bindings that reference earlier ones are supported; a `let` whose value calls
+  back into the recursive group is rejected (not a tail shape).
+- Fixed a pre-existing type-checker bug surfaced by this work: recursion
+  result-type back-substitution (`_substitute_type_var`) constructed `TypedLet`
+  with misaligned fields and a nonexistent `value_type`, breaking *untyped*
+  recursive helpers (such as lifted `letrec` functions) that have a
+  `let`-wrapped body and an inferred result type. This affected the interpreter
+  and CPU paths too, not only GPU.
+- Tests: GPU numeric-parity cases
+  `test_let_in_tail_recursive_body_in_map_parity` and
+  `test_letrec_with_let_in_body_in_map_parity`
+  (`tests/test_gpu_general_lowering.py`), and an interpreter/CPU regression lock
+  `tests/test_letrec.py::TestLetrecCompiledCPU::test_let_in_recursive_body_cpu`.
+
 ## GPU Tail-Recursive SCC Lowering (June 2026)
 
 Started the GPU plan for full tail-recursive higher-order callables.

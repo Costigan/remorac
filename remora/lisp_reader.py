@@ -70,6 +70,7 @@ from remora.ast_nodes import (
     LeftSectionExpr,
     LengthExpr,
     LetExpr,
+    LetRecExpr,
     MapExpr,
     OperatorFuncExpr,
     PairExpr,
@@ -124,6 +125,9 @@ array_lit: "[" sexpr* "]"
            | define_forall_form
            | define_form
            | let_form
+           | letrec_form
+           | while_form
+           | dotimes_form
            | if_form
            | select_form
            | lambda_form
@@ -218,6 +222,10 @@ param_spec: name_token        -> param_simple
 let_form: "let" "(" let_binding+ ")" sexpr -> let_expr
         | "let*" "(" let_binding+ ")" sexpr -> let_expr
 let_binding: "(" name_token sexpr ")"
+letrec_form: "letrec" "(" let_binding+ ")" sexpr -> letrec_expr
+while_form: "while" sexpr "(" while_binding+ ")" sexpr -> while_expr
+while_binding: "(" name_token sexpr sexpr ")"
+dotimes_form: "dotimes" "(" name_token sexpr ")" "(" name_token sexpr ")" sexpr -> dotimes_expr
 if_form: "if" sexpr sexpr sexpr -> if_expr
 select_form: "select" sexpr sexpr sexpr -> select_expr
 lambda_form: ("lambda" | "λ") "(" name_token* ")" sexpr -> lambda_expr
@@ -310,6 +318,12 @@ class LispASTBuilder(Transformer):
     def __init__(self, filename: str):
         super().__init__(visit_tokens=True)
         self.filename = filename
+        self._gensym_n = 0
+
+    def _gensym(self, prefix: str) -> str:
+        name = f"__{prefix}{self._gensym_n}"
+        self._gensym_n += 1
+        return name
 
     # ── program ──────────────────────────────────────────────────────────
 
@@ -468,6 +482,54 @@ class LispASTBuilder(Transformer):
         for name, value in reversed(bindings):
             result = LetExpr(name, value, result, self._loc_from(items))
         return result
+
+    def letrec_expr(self, items: list[Any]) -> LetRecExpr:
+        bindings = items[:-1]
+        body = items[-1]
+        return LetRecExpr(tuple((name, value) for name, value in bindings), body, self._loc_from(items))
+
+    def while_binding(self, items: list[Any]) -> tuple[str, Any, Any]:
+        return (str(items[0]), items[1], items[2])
+
+    def while_expr(self, items: list[Any]) -> LetRecExpr:
+        # (while cond ((var init update) ...) result)
+        #   ≡ (letrec ((loop (lambda (var ...)
+        #                      (if cond (loop update ...) result))))
+        #        (loop init ...))
+        cond = items[0]
+        bindings = items[1:-1]
+        result = items[-1]
+        loc = self._loc_from(items)
+        names = [name for name, _init, _upd in bindings]
+        inits = [init for _name, init, _upd in bindings]
+        updates = [upd for _name, _init, upd in bindings]
+        loop = self._gensym("while")
+        recur = AppExpr(VarExpr(loop, loc), updates, loc)
+        body = IfExpr(cond, recur, result, loc)
+        lam = LambdaExpr(names, body, loc)
+        entry = AppExpr(VarExpr(loop, loc), inits, loc)
+        return LetRecExpr(((loop, lam),), entry, loc)
+
+    def dotimes_expr(self, items: list[Any]) -> LetRecExpr:
+        # (dotimes (i count) (acc init) body)
+        #   ≡ (letrec ((loop (lambda (i acc)
+        #                      (if (< i count) (loop (+ i 1) body) acc))))
+        #        (loop 0 init))
+        i_name = str(items[0])
+        count = items[1]
+        acc_name = str(items[2])
+        init = items[3]
+        body = items[4]
+        loc = self._loc_from(items)
+        i_var = VarExpr(i_name, loc)
+        next_i = AppExpr(VarExpr("+", loc), [i_var, IntLit(1, loc)], loc)
+        loop = self._gensym("dotimes")
+        recur = AppExpr(VarExpr(loop, loc), [next_i, body], loc)
+        cond = AppExpr(VarExpr("<", loc), [i_var, count], loc)
+        if_body = IfExpr(cond, recur, VarExpr(acc_name, loc), loc)
+        lam = LambdaExpr([i_name, acc_name], if_body, loc)
+        entry = AppExpr(VarExpr(loop, loc), [IntLit(0, loc), init], loc)
+        return LetRecExpr(((loop, lam),), entry, loc)
 
     def if_expr(self, items: list[Any]) -> IfExpr:
         return IfExpr(items[0], items[1], items[2], self._loc_from(items))
@@ -758,8 +820,11 @@ class LispASTBuilder(Transformer):
 
 def parse_lisp(source: str, filename: str = "<input>") -> Program:
     """Parse a Remora Lisp-syntax program and return a Program AST."""
+    from remora._letrec_lift import desugar_letrec
+
     tree = _PARSER.parse(source, start="program")
-    return LispASTBuilder(filename).transform(tree)
+    program = LispASTBuilder(filename).transform(tree)
+    return desugar_letrec(program)
 
 
 def parse_lisp_file(path: str | Path) -> Program:

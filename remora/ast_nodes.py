@@ -55,6 +55,21 @@ class LetExpr:
 
 
 @dataclass(frozen=True)
+class LetRecExpr:
+    """Local (mutually) recursive function bindings.
+
+    Each binding pairs a name with a ``LambdaExpr``; every name is in scope in
+    all binding bodies and in ``body``.  This node is desugared away (lambda
+    lifted to top-level recursive functions) before type checking; no later
+    stage sees it.
+    """
+
+    bindings: tuple[tuple[str, LambdaExpr], ...]
+    body: Expr
+    loc: SourceLoc
+
+
+@dataclass(frozen=True)
 class IfExpr:
     condition: Expr
     then_branch: Expr
@@ -451,6 +466,7 @@ class SliceRange:
 
 Expr: TypeAlias = (
     LetExpr
+    | LetRecExpr
     | IfExpr
     | SelectExpr
     | AppendExpr

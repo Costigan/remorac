@@ -1374,6 +1374,136 @@ class TestGPUNumericParity:
             syntax="lisp",
         )
 
+    def test_letrec_self_recursive_in_map_parity(self):
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) "
+            "         (letrec ((go (lambda (i acc) "
+            "                        (if (< i 0.5) acc (go (- i 1.0) (+ acc i)))))) "
+            "           (go x 0.0))) xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_letrec_capture_in_map_parity(self):
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) "
+            "         (letrec ((go (lambda (i acc) "
+            "                        (if (< i 0.5) acc (go (- i 1.0) (+ acc x)))))) "
+            "           (go x 0.0))) xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_letrec_mutual_recursion_in_map_parity(self):
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) "
+            "         (letrec ((even (lambda (k) (if (== k 0.0) 1.0 (odd (- k 1.0))))) "
+            "                  (odd  (lambda (k) (if (== k 0.0) 0.0 (even (- k 1.0)))))) "
+            "           (even x))) xs))"
+        )
+        x = np.array([0.0, 1.0, 2.0, 7.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_letrec_int_in_map_parity(self):
+        src = (
+            "(define/pi () (f [xs (Array Int 4)] (Array Int 4)) "
+            "  (map (lambda (x) "
+            "         (letrec ((go (lambda (i acc) "
+            "                        (if (== i 0) acc (go (- i 1) (+ acc i)))))) "
+            "           (go x 0))) xs))"
+        )
+        x = np.array([1, 2, 3, 4], dtype=np.int32)
+        self._run_parity(
+            src, "f", (ArrayType(INT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp", dtype=np.int32,
+        )
+
+    def test_let_in_tail_recursive_body_in_map_parity(self):
+        # A `let` wrapping the terminal `if`, whose value feeds the tail call.
+        # Result is the triangular number n*(n+1)/2.
+        src = (
+            "(define/pi () (h [n Float acc Float] Float) "
+            "  (let ((d (- n 1.0))) "
+            "    (if (< n 0.5) acc (h d (+ acc n))))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (h x 0.0)) xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_letrec_with_let_in_body_in_map_parity(self):
+        # Two sequential `let`s wrapping the terminal `if`, inside a lifted
+        # letrec helper.  Result is n*(n+1).
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) "
+            "         (letrec ((go (lambda (n acc) "
+            "                        (let ((step (* n 2.0))) "
+            "                          (let ((nacc (+ acc step))) "
+            "                            (if (< n 0.5) nacc (go (- n 1.0) nacc))))))) "
+            "           (go x 0.0))) xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_while_loop_in_map_parity(self):
+        # `while` desugars to a tail-in-then loop (continue-condition); this
+        # exercises the GPU tail-call-in-either-branch path.  Per element x,
+        # sum 1..x -> triangular number.
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) "
+            "         (while (< 0.0 n) ((n x (- n 1.0)) (acc 0.0 (+ acc n))) acc)) "
+            "       xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_dotimes_fixed_count_in_map_parity(self):
+        # Add x four times -> 4x.  Mixed Int counter + Float accumulator.
+        src = (
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (dotimes (i 4) (acc 0.0) (+ acc x))) xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src, "f", (ArrayType(FLOAT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp",
+        )
+
+    def test_dotimes_variable_count_int_in_map_parity(self):
+        # Variable (captured) count: sum 0..x-1 -> x*(x-1)/2, all Int.
+        src = (
+            "(define/pi () (f [xs (Array Int 4)] (Array Int 4)) "
+            "  (map (lambda (x) (dotimes (i x) (acc 0) (+ acc i))) xs))"
+        )
+        x = np.array([1, 2, 3, 4], dtype=np.int32)
+        self._run_parity(
+            src, "f", (ArrayType(INT, (StaticDim(4),)),), [x],
+            include_prelude=False, syntax="lisp", dtype=np.int32,
+        )
+
     def test_rank2_map_parity(self):
         """rank-2 scale"""
         src = "def scale xs = map (* 2.0) xs"

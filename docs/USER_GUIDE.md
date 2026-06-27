@@ -543,6 +543,96 @@ return arrays.
 (is_even 4)  ;; → true
 ```
 
+### Local recursion with `letrec` (Lisp syntax)
+
+`letrec` introduces one or more **local** (optionally mutually) recursive
+functions. Every bound name is in scope in all binding bodies and in the body,
+so it is the natural way to write a loop without lifting a named helper to the
+top level. Each binding must be a `(lambda ...)`.
+
+```lisp
+;; named-loop style: sum 1..n, returning the accumulator
+(define/pi () (triangle [n Float] Float)
+  (letrec ((go (lambda (i acc)
+                 (if (< i 0.5) acc (go (- i 1.0) (+ acc i))))))
+    (go n 0.0)))
+(triangle 5.0)  ;; → 15.0
+```
+
+A `letrec` body may **capture** variables from the enclosing scope (here `base`),
+and bindings may be mutually recursive:
+
+```lisp
+(define/pi () (scaled-count [base Float n Float] Float)
+  (letrec ((go (lambda (i acc)
+                 (if (< i 0.5) acc (go (- i 1.0) (+ acc base))))))  ;; captures base
+    (go n 0.0)))
+
+(define/pi () (parity [n Float] Float)
+  (letrec ((even (lambda (k) (if (== k 0.0) 1.0 (odd (- k 1.0)))))
+           (odd  (lambda (k) (if (== k 0.0) 0.0 (even (- k 1.0))))))
+    (even n)))
+```
+
+`letrec` is **desugared by capture-aware lambda lifting** to ordinary top-level
+recursive functions before type checking, so it inherits the full recursion
+support: it runs on the interpreter and CPU, and a scalar tail-recursive
+`letrec` used inside a `map` lowers to the same per-thread GPU state machine as a
+top-level tail-recursive helper (`Float`, `Int`, `Bool`). Tail-recursion
+optimization applies when every recursive call is in tail position.
+
+Because `letrec` lowers to recursion, a condition-terminated **`while` loop is
+just a tail-recursive `letrec`** whose `if` tests the termination predicate (for
+example Newton's method or a fixed-point iteration). There is no separate
+`while`/`for` primitive.
+
+Limitations: bindings must be lambdas; a `letrec`-bound function must be *called*
+directly (it cannot be passed as a value); a captured variable whose name
+collides with one of a binding's parameters is rejected loudly; and the GPU
+envelope still applies (scalar loop state only — array-typed loop state or array
+returns fall back to CPU/interpreter or are rejected). `letrec` is currently
+Lisp-syntax only.
+
+### Loops: `while` and `dotimes` (Lisp syntax)
+
+`while` and `dotimes` are sugar over `letrec`/tail recursion. Like `letrec`,
+they are **expressions that return a value** (the final accumulator), not
+imperative statements, and they run on the interpreter, CPU, and — for a scalar
+loop used inside `map` — the GPU.
+
+`while` is a condition-terminated loop. Each binding is `(var init update)`;
+the updates are applied simultaneously each iteration, and the loop returns
+`result` once `cond` is false:
+
+```lisp
+;; sum 1..n
+(define/pi () (triangle [n Float] Float)
+  (while (< 0.0 k)
+    ((k   n   (- k 1.0))
+     (acc 0.0 (+ acc k)))
+    acc))
+(triangle 5.0)  ;; => 15.0
+```
+
+A condition-terminated `while` is exactly a tail-recursive `letrec`, so it
+covers Newton's method, fixed-point iteration, etc. (add a counter binding for a
+guaranteed iteration bound).
+
+`dotimes` is a bounded counter loop: the index `i` runs `0..count-1` and `(acc
+init)` is threaded; it returns the final accumulator. The count should be an
+`Int`:
+
+```lisp
+;; 0 + 1 + ... + (n-1)
+(define/pi () (gauss [n Int] Int)
+  (dotimes (i n) (acc 0) (+ acc i)))
+(gauss 5)  ;; => 10
+```
+
+See `examples/loops.lisp` for more (`letrec`, `while`, `dotimes`, mutual
+recursion, Newton's method, and a loop applied per-element with `map`). The same
+recursion limits apply: on the GPU the loop state must be scalar.
+
 ### Recursive define/pi with array parameters
 
 ```lisp
@@ -570,6 +660,12 @@ position.
   (f [xs (Array Float 4)] (Array Float 4))
   (map (lambda (x) (sum_to x 0.0)) xs))
 ```
+
+The recursive body may bind intermediates with `let` around the terminal `if`
+(for example `(let ((d (- (* x x) 2.0))) (if ... x (newton ...)))` in Newton's
+method); such `let`s are recomputed each iteration on the GPU. Several
+sequential `let`s are allowed; a `let` whose value itself calls back into the
+recursive group is rejected.
 
 This works for `Float`, `Int`, and `Bool` helpers. Tail-recursive helpers (self
 or mutual) are now also threaded through higher-order step functions:

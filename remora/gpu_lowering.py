@@ -6682,8 +6682,19 @@ def _gpu_emit_expr(
             for param_name in step.param_names:
                 idx = slot_index[f"{step.name}.{param_name}"]
                 step_env[param_name] = slot_ssas[idx]
+            # Recompute any ``let`` bindings that wrapped the terminal ``if``
+            # once per iteration, before the condition / result / tail args
+            # that may reference them.  These SSA values dominate the finish
+            # and tail blocks (reachable only from this step block).
+            for let_name, let_expr in step.let_bindings:
+                step_env[let_name] = emit(let_expr, step_env)
             cond_ssa = emit(step.condition_expr, step_env)
-            lines.append(f"      llvm.cond_br {cond_ssa}, ^{finish_label}, ^{tail_label}")
+            if step.tail_is_then:
+                # `if cond then <tail-call> else <base>`: cond true -> recurse.
+                lines.append(f"      llvm.cond_br {cond_ssa}, ^{tail_label}, ^{finish_label}")
+            else:
+                # `if cond then <base> else <tail-call>`: cond true -> finish.
+                lines.append(f"      llvm.cond_br {cond_ssa}, ^{finish_label}, ^{tail_label}")
 
             lines.append(f"    ^{finish_label}:")
             final_value = emit(step.result_expr, step_env)

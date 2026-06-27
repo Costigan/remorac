@@ -40,6 +40,15 @@ The following are covered by passing tests today:
 - GPU can inline some non-recursive helper calls into general map kernels.
 - GPU has a narrow `_GpuTailLoop` implementation for one self-tail-recursive
   helper shape inside map lowering.
+- Lisp `letrec` provides **local** (optionally mutually) recursive function
+  bindings. It is capture-aware lambda-lifted to top-level recursive functions
+  before type checking (`remora/_letrec_lift.py`, run from `parse_lisp`), so it
+  rides every backend: interpreter, CPU (including scalar tail-recursion state
+  machines), and the per-thread GPU tail-recursion state machine when a scalar
+  tail-recursive `letrec` is used inside a `map`. This is the local-recursion
+  primitive that loop sugar (`while`/`for`/`dotimes`) can later desugar to; a
+  condition-terminated `while` is already expressible as a tail-recursive
+  `letrec`.
 
 Relevant passing tests:
 
@@ -50,6 +59,7 @@ Relevant passing tests:
 | CPU scalar return + array params | `test_scalar_valued_recursion_with_array_param_compiled` |
 | Mutual recursion | `test_mutual_recursion_regression_even_odd`, `test_three_function_mutual_recursion_interpreted_and_compiled`, `test_mutual_recursion_deep_interpreted_and_compiled` |
 | HOF recursion | `test_hof_recursive_repeat_compiled` |
+| `letrec` local recursion | `tests/test_letrec.py`, `tests/test_gpu_general_lowering.py::TestGPUNumericParity::test_letrec_*` |
 
 ### Known Gaps
 
@@ -422,8 +432,24 @@ Tasks:
 - [ ] Normalize tail-recursive helper bodies before GPU lowering.
 - [ ] Support accumulator-style helpers with one input value and one or more
   scalar accumulators.
-- [ ] Support recursive call in either `if` branch.
-- [ ] Support simple `let` wrappers around update expressions.
+- [x] Support recursive call in either `if` branch. The GPU tail-recursion
+  state machine now accepts the tail call in the `then` *or* `else` branch
+  (`_tail_if_shape` / `_tail_lets_and_shape` return a `tail_is_then` flag and the
+  emitter swaps the `cond_br` targets).  This is what `while`/`dotimes` need
+  (their continue-condition desugaring puts the tail call in the `then` branch).
+  A companion type-checker fix makes `if`/`select` take the concrete branch type
+  when the other branch carries a recursion-provisional `TypeVar`, so an untyped
+  tail-recursive helper with the recursive call in the `then` branch no longer
+  leaks an unresolved `TypeVar` into CPU/GPU lowering.
+- [x] Support simple `let` wrappers around update expressions. Leading `let`
+  bindings (including several sequential ones) that wrap the terminal `if` of a
+  tail-recursive helper are now recomputed once per iteration in the GPU state
+  machine (`_tail_lets_and_shape` / `_GpuTailStep.let_bindings`), so loops can
+  bind intermediates such as `d = f(x)/f'(x)`. This also exposed and fixed a
+  pre-existing type-checker bug: recursion result-type back-substitution
+  (`_substitute_type_var`) reconstructed `TypedLet` with the wrong fields, which
+  broke *untyped* recursive helpers (e.g. lifted `letrec` functions) with a
+  `let`-wrapped body.
 - [ ] Ensure loop-carried values preserve scalar types (`f32`, `f64`, `i32`,
   `i1`) instead of assuming `f32`.
 - [x] Add compile-time rejection for non-tail self calls.
