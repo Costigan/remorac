@@ -103,6 +103,21 @@ class EvalTape:
                 _bcast_acc(adjs, e.inputs[0], adj * exp_val, self.values[e.inputs[0]])
             elif e.kind == "log":
                 _bcast_acc(adjs, e.inputs[0], adj / self.values[e.inputs[0]], self.values[e.inputs[0]])
+            elif e.kind == "sqrt":
+                _bcast_acc(adjs, e.inputs[0], adj / (2.0 * self.values[i]), self.values[e.inputs[0]])
+            elif e.kind == "cos":
+                _bcast_acc(adjs, e.inputs[0], adj * (-np.sin(self.values[e.inputs[0]])), self.values[e.inputs[0]])
+            elif e.kind == "sin":
+                _bcast_acc(adjs, e.inputs[0], adj * np.cos(self.values[e.inputs[0]]), self.values[e.inputs[0]])
+            elif e.kind in {"ceil", "floor"}:
+                pass  # piecewise constant, gradient is zero
+            elif e.kind == "expt":
+                base_val = np.asarray(e.saved[0], dtype=np.float64) if len(e.saved) > 0 else self.values[e.inputs[0]]
+                exp_val = np.asarray(e.saved[1], dtype=np.float64) if len(e.saved) > 1 else self.values[e.inputs[1]]
+                db = adj * exp_val * np.power(base_val, exp_val - 1.0)
+                _bcast_acc(adjs, e.inputs[0], db, self.values[e.inputs[0]])
+                de = adj * self.values[i] * np.log(np.maximum(base_val, 1e-10))
+                _bcast_acc(adjs, e.inputs[1], de, self.values[e.inputs[1]])
             elif e.kind == "fold":
                 iv = np.asarray(e.saved[0], dtype=np.float64)
                 axis = int(e.saved[1]) if len(e.saved) > 1 else 0
@@ -216,9 +231,10 @@ _VJP_REGISTRY: dict[str, tuple[str, int]] = {
     "-": ("sub", 0),
     "*": ("mul", 2),
     "/": ("div", 2),
+    "expt": ("expt", 2),
 }
 
-_INACTIVE_BINARY_OPS = {"<", "<=", ">", ">=", "==", "!=", "&&", "||"}
+_INACTIVE_BINARY_OPS = {"modulo", "<", "<=", ">", ">=", "==", "!=", "&&", "||"}
 
 
 def _record_primitive(tape, op, left_idx, right_idx, left_val, right_val) -> int:
@@ -236,6 +252,16 @@ def _record_unary_primitive(tape, op, input_idx, input_val) -> int:
         result = np.exp(input_val)
     elif op == "log":
         result = np.log(input_val)
+    elif op == "sqrt":
+        result = np.sqrt(input_val)
+    elif op == "cos":
+        result = np.cos(input_val)
+    elif op == "sin":
+        result = np.sin(input_val)
+    elif op == "ceil":
+        result = np.ceil(input_val)
+    elif op == "floor":
+        result = np.floor(input_val)
     else:
         raise NotImplementedError(f"no unary VJP registered for {op!r}")
     return tape.push(TapeEntry(op, (input_idx,), (result,)), result)
@@ -246,6 +272,7 @@ def _apply_bin_op(op, lv, rv):
     if op == "-": return lv - rv
     if op == "*": return lv * rv
     if op == "/": return lv / rv
+    if op == "expt": return np.power(lv, rv)
     raise NotImplementedError(f"apply bin op: {op}")
 
 
@@ -362,7 +389,7 @@ def _trace_app(
         tape._typed_lambda_cache[cache_key] = result_idx
         return result_idx
     op = _get_op(expr.func)
-    if len(args) == 1 and op in {"exp", "log"}:
+    if len(args) == 1 and op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
         input_idx = args[0]
         return _record_unary_primitive(
             tape, op, input_idx, _value(tape, input_idx)
@@ -395,6 +422,8 @@ def _apply_inactive_bin_op(op: str, left, right):
         return np.logical_and(left, right)
     if op == "||":
         return np.logical_or(left, right)
+    if op == "modulo":
+        return left % right
     raise NotImplementedError(f"inactive binary op: {op}")
 
 
@@ -439,7 +468,7 @@ def _trace_map(
                 expr.arrays[0], env, tape, fold_axis=fold_axis
             )
             op = _get_op(expr.func)
-            if op in {"exp", "log"}:
+            if op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
                 return _record_unary_primitive(
                     tape, op, input_idx, _value(tape, input_idx)
                 )

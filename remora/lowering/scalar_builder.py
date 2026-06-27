@@ -135,12 +135,17 @@ class _BuilderRegionEmitter:
     def _emit_prim_op(
         self, op: str, args: list[_Operand], result_type: str
     ) -> _Operand:
-        if op in {"expf", "logf"}:
+        if op in {"expf", "logf", "sqrtf", "cosf", "sinf", "ceilf", "floorf"}:
             if len(args) != 1:
                 raise RemoraLoweringError(f"{op[:-1]} expects one operand")
             operand = self._coerce(args[0], "f32")
             result = self.temp()
-            mlir_op = "math.exp" if op == "expf" else "math.log"
+            mlir_op = {
+                "expf": "math.exp", "logf": "math.log",
+                "sqrtf": "math.sqrt",
+                "cosf": "math.cos", "sinf": "math.sin",
+                "ceilf": "math.ceil", "floorf": "math.floor",
+            }[op]
             self.lines.append(
                 f"      {result} = {mlir_op} {operand.value} : f32"
             )

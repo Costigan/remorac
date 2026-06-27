@@ -3407,12 +3407,17 @@ def _lower_primitive_callable_result(
     result_type: str,
     scalar_env: dict[str, _Operand] | None = None,
 ) -> tuple[list[str], str]:
-    if callable_.op in {"exp", "log"}:
+    if callable_.op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
         input_lines = _cast_if_needed(
             input_name, input_type, "f32", "%input_cast"
         )
         input_value = "%input_cast" if input_lines else input_name
-        mlir_op = "math.exp" if callable_.op == "exp" else "math.log"
+        mlir_op = {
+            "exp": "math.exp", "log": "math.log",
+            "sqrt": "math.sqrt",
+            "cos": "math.cos", "sin": "math.sin",
+            "ceil": "math.ceil", "floor": "math.floor",
+        }[callable_.op]
         return [
             *input_lines,
             f"      %result = {mlir_op} {input_value} : f32",

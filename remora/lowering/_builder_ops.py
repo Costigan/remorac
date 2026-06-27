@@ -628,9 +628,14 @@ def _build_map_callable_body(
 
     if isinstance(callable_, HIRPrimCallable):
         op = callable_.op
-        if op in {"exp", "log"}:
+        if op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
             return ir_mod.Operation.create(
-                "math.exp" if op == "exp" else "math.log",
+                {
+                    "exp": "math.exp", "log": "math.log",
+                    "sqrt": "math.sqrt",
+                    "cos": "math.cos", "sin": "math.sin",
+                    "ceil": "math.ceil", "floor": "math.floor",
+                }[op],
                 operands=[input_arg],
                 results=[result_type],
                 ip=ir_mod.InsertionPoint(body_block),

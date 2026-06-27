@@ -914,7 +914,7 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
 
     lowered_args = [_lower_hir(a, ctx) for a in expr.args]
 
-    if base_op in {"+", "-", "*", "/", "&&", "||"}:
+    if base_op in {"+", "-", "*", "/", "modulo", "&&", "||"}:
         if len(lowered_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: binary op needs 2 args")
         return _gpu_element_wise_binary(base_op, lowered_args[0], lowered_args[1], elem_type)
@@ -932,10 +932,18 @@ def _lower_prim_op(expr: HIRPrimOp, ctx: _CompileCtx) -> GpuExpr:
         _comp_et = next(iter(_hir_types)) if len(_hir_types) == 1 else "f32"
         return GpuCompareOp(base_op, lowered_args[0], lowered_args[1], _comp_et)
 
-    if base_op in {"exp", "log", "sqrt"}:
+    if base_op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
         if len(lowered_args) != 1:
             raise GPUScaffoldError(f"{ctx.context}: math intrinsic needs 1 arg")
         return GpuIntrinsic(base_op, lowered_args[0])
+
+    if base_op == "expt":
+        if len(lowered_args) != 2:
+            raise GPUScaffoldError(f"{ctx.context}: expt needs 2 args")
+        base, exp = lowered_args
+        log_base = GpuIntrinsic("log", base)
+        prod = _gpu_element_wise_binary("*", exp, log_base, elem_type)
+        return GpuIntrinsic("exp", prod)
 
     raise GPUScaffoldError(f"{ctx.context}: unsupported prim op '{op}'")
 
@@ -1359,7 +1367,7 @@ def _lower_prim_callable(
     else:
         elem_type = "f32"
 
-    if op in {"+", "-", "*", "/"}:
+    if op in {"+", "-", "*", "/", "modulo"}:
         if len(full_args) != 2:
             raise GPUScaffoldError(f"{ctx.context}: op {op} needs 2 operands")
         return _gpu_element_wise_binary(op, full_args[0], full_args[1], elem_type)
@@ -1375,6 +1383,19 @@ def _lower_prim_callable(
             elif isinstance(p0, ArrayType):
                 param_type = _scalar_type_to_mlir(p0.element)
         return GpuCompareOp(op, full_args[0], full_args[1], param_type)
+
+    if op == "expt":
+        if len(full_args) != 2:
+            raise GPUScaffoldError(f"{ctx.context}: expt needs 2 operands")
+        base, exp = full_args
+        log_base = GpuIntrinsic("log", base)
+        prod = _gpu_element_wise_binary("*", exp, log_base, elem_type)
+        return GpuIntrinsic("exp", prod)
+
+    if op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
+        if len(full_args) != 1:
+            raise GPUScaffoldError(f"{ctx.context}: {op} needs 1 operand")
+        return GpuIntrinsic(op, full_args[0])
 
     raise GPUScaffoldError(f"{ctx.context}: unsupported prim op '{op}'")
 

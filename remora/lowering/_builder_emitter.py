@@ -442,7 +442,7 @@ class _BuilderRegionEmitter:
         result_type = type_to_mlir(expr.result_type)
         op = expr.op
 
-        if op in {"expf", "logf"}:
+        if op in {"expf", "logf", "sqrtf", "cosf", "sinf", "ceilf", "floorf"}:
             if len(args) != 1:
                 raise RemoraLoweringError(f"{op[:-1]} expects one operand")
             operand = self._coerce(args[0], "f32")
@@ -493,7 +493,12 @@ class _BuilderRegionEmitter:
     def _emit_math_op(
         self, op: str, operand: _BuilderOperand
     ) -> _BuilderOperand:
-        mlir_op_name = "math.exp" if op == "expf" else "math.log"
+        mlir_op_name = {
+            "expf": "math.exp", "logf": "math.log",
+            "sqrtf": "math.sqrt",
+            "cosf": "math.cos", "sinf": "math.sin",
+            "ceilf": "math.ceil", "floorf": "math.floor",
+        }[op]
         result_name = self.temp()
         ir_type = _ir_type_for("f32", self._ctx)
         ir_value = None

@@ -3,7 +3,61 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
-## `while` and `dotimes` loop forms (Lisp syntax) (June 2026)
+## New Math Primitives and Prelude Functions (June 2026)
+
+Added 8 new built-in primitive operators and 7 new prelude functions,
+available in both Lisp and ML syntax.
+
+### New primitive operators
+
+| Op | Arity | Type | Notes |
+|----|-------|------|-------|
+| `sqrt` | 1 | `Float → Float` | Already had MLIR/GPU lowering; frontend-only wiring |
+| `cos` | 1 | `Float → Float` | NVVM `cos.approx.f` on GPU; VJP: `-sin(x)` |
+| `sin` | 1 | `Float → Float` | NVVM `sin.approx.f` on GPU; VJP: `cos(x)` |
+| `ceil` | 1 | `Float → Float` | NVVM `ceil.f` on GPU; gradient = 0 |
+| `floor` | 1 | `Float → Float` | NVVM `floor.f` on GPU; gradient = 0 |
+| `modulo` | 2 | `∀t.(t,t) → t` | Float and Int; GPU via `GpuBinaryOp`; inactive in AD |
+| `expt` | 2 | `(Float,Float) → Float` | a^b; GPU via `exp(b·log(a))` decomposition; has VJP |
+
+All wired through: `operators.py` metadata, type checker `_PRIMITIVE_FORALL`,
+HIR name suffixing, CPU lowering (text + builder paths), GPU expression compiler
+(intrinsics + decomposition), interpreter `_apply_op`, and AD (forward recording
++ VJP reversal + source generation for `sqrt`, `cos`, `sin`, `expt`; `ceil`,
+`floor`, `modulo` are inactive).
+
+### New prelude functions (both syntaxes)
+
+| Lisp | ML | Implementation |
+|------|----|----------------|
+| `pi` | `pi` | Constant `3.141592653589793` |
+| `signum` | `signum` | `(select (> x 0) 1 (select (< x 0) -1 0))` |
+| `positive?` | `is_positive` | `(> x 0)` |
+| `negative?` | `is_negative` | `(< x 0)` |
+| `zero?` | `is_zero` | `(== x 0)` |
+| `even?` | `is_even` | `(== (modulo n 2) 0)` |
+| `odd?` | `is_odd` | `(!= (modulo n 2) 0)` |
+
+ML names drop `?` (not a valid CNAME in the Lark grammar).
+
+### Bug fixes
+
+- **ML grammar**: `>` and `>=` added to `COMP_OP` terminal — were missing
+  despite being defined in operators, typechecker, and all lowering layers.
+- **HIR**: `body_result_type` now handles `HIRIf` (exposed by the new prelude
+  function `signum` which uses `if` in its body).
+
+### Translated examples (from full Remora)
+
+New `.lisp` examples translated from `/e/projects/Remora/remora/examples/*.rkt`:
+- `examples/lerp.lisp` — Linear interpolation with reranking
+- `examples/kernels.lisp` — mean, variance, covariance, autocovariance
+- `examples/idioms.lisp` — flat-apply, count-value, contains?, zero-to-n, int->bool
+- `examples/dsp.lisp` — dot, simple-low-pass, simple-high-pass, fir-filter
+
+Six `.rkt` examples cannot be translated yet: `99-bottles` (no strings),
+`image`, `image-loading` (Racket FFI), `using-structs` (no structs),
+`dtmf` (complex numbers, chars, box/unbox), `naive-bayes` (file I/O).
 
 Added expression-valued loop sugar that desugars to tail-recursive `letrec`
 (and therefore runs on the interpreter, CPU, and GPU just like `letrec`).

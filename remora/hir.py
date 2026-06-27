@@ -938,6 +938,8 @@ def body_result_type(expr: HIRExpr) -> RemoraType:
         return expr.result_type
     if isinstance(expr, HIRLet):
         return expr.result_type
+    if isinstance(expr, HIRIf):
+        return expr.result_type
     if isinstance(expr, HIRCall):
         return expr.result_type
     if isinstance(expr, HIRLambda):

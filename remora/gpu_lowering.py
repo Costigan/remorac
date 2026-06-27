@@ -5764,6 +5764,10 @@ def build_descriptor_abi_general_map_gpu_module(
     text = f"""module {{
   gpu.module @{module_name} {{
     llvm.func @llvm.nvvm.sqrt.f(f32) -> f32
+    llvm.func @llvm.nvvm.cos.approx.f(f32) -> f32
+    llvm.func @llvm.nvvm.sin.approx.f(f32) -> f32
+    llvm.func @llvm.nvvm.ceil.f(f32) -> f32
+    llvm.func @llvm.nvvm.floor.f(f32) -> f32
     llvm.func @llvm.nvvm.ex2.approx.f(f32) -> f32
     llvm.func @llvm.nvvm.lg2.approx.f(f32) -> f32
     llvm.func @{name}({all_params}) attributes {{gpu.kernel, nvvm.kernel}} {{
@@ -6058,6 +6062,22 @@ def _gpu_emit_expr(
             if expr.intrinsic == "sqrt":
                 lines.append(
                     f"      {ssa} = llvm.call @llvm.nvvm.sqrt.f({inner}) : (f32) -> f32"
+                )
+            elif expr.intrinsic == "cos":
+                lines.append(
+                    f"      {ssa} = llvm.call @llvm.nvvm.cos.approx.f({inner}) : (f32) -> f32"
+                )
+            elif expr.intrinsic == "sin":
+                lines.append(
+                    f"      {ssa} = llvm.call @llvm.nvvm.sin.approx.f({inner}) : (f32) -> f32"
+                )
+            elif expr.intrinsic == "ceil":
+                lines.append(
+                    f"      {ssa} = llvm.call @llvm.nvvm.ceil.f({inner}) : (f32) -> f32"
+                )
+            elif expr.intrinsic == "floor":
+                lines.append(
+                    f"      {ssa} = llvm.call @llvm.nvvm.floor.f({inner}) : (f32) -> f32"
                 )
             elif expr.intrinsic == "exp":
                 # exp(x) = ex2(x * log2(e)), log2(e) ≈ 1.44269504089

@@ -14,12 +14,13 @@ from typing import ClassVar
 # Numeric / comparison / boolean core operators
 # ---------------------------------------------------------------------------
 
-ARITHMETIC_OPS = frozenset({"+", "-", "*", "/"})
-UNARY_FLOAT_OPS = frozenset({"exp", "log"})
+ARITHMETIC_OPS = frozenset({"+", "-", "*", "/", "modulo"})
+UNARY_FLOAT_OPS = frozenset({"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"})
+BINARY_FLOAT_OPS = frozenset({"expt"})
 COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "==", "!="})
 BOOLEAN_OPS = frozenset({"&&", "||"})
 ALL_PRIMITIVE_OPS = (
-    ARITHMETIC_OPS | UNARY_FLOAT_OPS | COMPARISON_OPS | BOOLEAN_OPS
+    ARITHMETIC_OPS | UNARY_FLOAT_OPS | BINARY_FLOAT_OPS | COMPARISON_OPS | BOOLEAN_OPS
 )
 
 
@@ -40,6 +41,12 @@ _ARITH_OPS_F32: dict[str, str] = {
     "exp": "math.exp",
     "log": "math.log",
     "sqrt": "math.sqrt",
+    "cos": "math.cos",
+    "sin": "math.sin",
+    "ceil": "math.ceil",
+    "floor": "math.floor",
+    "expt": "math.powf",
+    "modulo": "arith.remf",
     "==": "arith.cmpf oeq",
     "!=": "arith.cmpf une",
     "<": "arith.cmpf olt",
@@ -53,6 +60,7 @@ _ARITH_OPS_I32: dict[str, str] = {
     "-": "arith.subi",
     "*": "arith.muli",
     "/": "arith.divsi",
+    "modulo": "arith.remsi",
     "==": "arith.cmpi eq",
     "!=": "arith.cmpi ne",
     "<": "arith.cmpi slt",
@@ -64,6 +72,7 @@ _ARITH_OPS_I64: dict[str, str] = {
     "-": "arith.subi",
     "*": "arith.muli",
     "/": "arith.divsi",
+    "modulo": "arith.remsi",
     "==": "arith.cmpi eq",
     "!=": "arith.cmpi ne",
     "<": "arith.cmpi slt",
@@ -106,6 +115,7 @@ _LLVM_OPS_F32: dict[str, str] = {
     "-": "llvm.fsub",
     "*": "llvm.fmul",
     "/": "llvm.fdiv",
+    "modulo": "llvm.frem",
 }
 
 _LLVM_OPS_F64: dict[str, str] = _LLVM_OPS_F32  # same LLVM ops for f64
@@ -115,6 +125,7 @@ _LLVM_OPS_I32: dict[str, str] = {
     "-": "llvm.sub",
     "*": "llvm.mul",
     "/": "llvm.sdiv",
+    "modulo": "llvm.srem",
 }
 
 _LLVM_OPS_I1: dict[str, str] = {
@@ -220,10 +231,19 @@ _OPERATOR_TABLE: ClassVar[dict[str, OperatorMeta]] = {
     "-": OperatorMeta("-", is_arithmetic=True),
     "*": OperatorMeta("*", is_arithmetic=True),
     "/": OperatorMeta("/", is_arithmetic=True),
+    "modulo": OperatorMeta("modulo", is_arithmetic=True),
+    "expt": OperatorMeta("expt", is_arithmetic=True),
     "exp": OperatorMeta("exp", arity=1, is_arithmetic=True),
     "log": OperatorMeta("log", arity=1, is_arithmetic=True),
+    "sqrt": OperatorMeta("sqrt", arity=1, is_arithmetic=True),
+    "cos": OperatorMeta("cos", arity=1, is_arithmetic=True),
+    "sin": OperatorMeta("sin", arity=1, is_arithmetic=True),
+    "ceil": OperatorMeta("ceil", arity=1, is_arithmetic=True),
+    "floor": OperatorMeta("floor", arity=1, is_arithmetic=True),
     "<": OperatorMeta("<", is_comparison=True),
     "<=": OperatorMeta("<=", is_comparison=True),
+    ">": OperatorMeta(">", is_comparison=True),
+    ">=": OperatorMeta(">=", is_comparison=True),
     "==": OperatorMeta("==", is_comparison=True),
     "!=": OperatorMeta("!=", is_comparison=True),
     "&&": OperatorMeta("&&", is_boolean=True),

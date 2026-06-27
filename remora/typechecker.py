@@ -142,8 +142,18 @@ _PRIMITIVE_FORALL = {
         FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
     ),
     "/": FuncType((FLOAT, FLOAT), FLOAT),
+    "modulo": ForallType(
+        (_TypeBinder("t"),),
+        FuncType((TypeVar("t"), TypeVar("t")), TypeVar("t")),
+    ),
+    "expt": FuncType((FLOAT, FLOAT), FLOAT),
     "exp": FuncType((FLOAT,), FLOAT),
     "log": FuncType((FLOAT,), FLOAT),
+    "sqrt": FuncType((FLOAT,), FLOAT),
+    "cos": FuncType((FLOAT,), FLOAT),
+    "sin": FuncType((FLOAT,), FLOAT),
+    "ceil": FuncType((FLOAT,), FLOAT),
+    "floor": FuncType((FLOAT,), FLOAT),
     "<": ForallType(
         (_TypeBinder("t"),),
         FuncType((TypeVar("t"), TypeVar("t")), BOOL),
@@ -1414,12 +1424,11 @@ class TypeChecker:
 
         if isinstance(sig, FuncType):
             result_type = sig.result
-            # /: force Float; && / ||: force Bool
-            if op == "/":
+            if op in {"/", "expt"}:
                 if not _contains_type_var(left.type) and not is_numeric(left.type):
-                    raise RemoraTypeError("division expects numeric operands", expr.loc)
+                    raise RemoraTypeError(f"operator {op} expects numeric operands", expr.loc)
                 if not _contains_type_var(right.type) and not is_numeric(right.type):
-                    raise RemoraTypeError("division expects numeric operands", expr.loc)
+                    raise RemoraTypeError(f"operator {op} expects numeric operands", expr.loc)
                 return TypedApp(
                     expr,
                     TypedExprNode(expr.func, sig),

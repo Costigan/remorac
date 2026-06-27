@@ -255,6 +255,15 @@ def generate_gradient_source(
         elif entry.kind == "log":
             operand = entry.inputs[0]
             _accumulate(adjs, operand, _binary("/", adj, primals[operand]))
+        elif entry.kind == "sqrt":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("/", adj, _binary("*", _constant(2.0), primals[index])))
+        elif entry.kind == "cos":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, _neg(_unary("sin", primals[operand]))))
+        elif entry.kind == "sin":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, _unary("cos", primals[operand])))
         elif entry.kind == "fold":
             operand = entry.inputs[0]
             axis = int(entry.saved[1]) if len(entry.saved) > 1 else 0
@@ -383,7 +392,7 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
         elif entry.kind in {"add", "sub", "mul", "div"}:
             op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[entry.kind]
             expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
-        elif entry.kind in {"exp", "log"}:
+        elif entry.kind in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
             expr = _unary(entry.kind, primals[entry.inputs[0]])
         elif entry.kind == "fold":
             operand = primals[entry.inputs[0]]
@@ -501,6 +510,15 @@ def _reconstruct_primals_multi(tape: EvalTape, name_map: dict[int, str]) -> list
         elif entry.kind == "log":
             operand = entry.inputs[0]
             _accumulate(adjs, operand, _binary("/", adj, primals[operand]))
+        elif entry.kind == "sqrt":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("/", adj, _binary("*", _constant(2.0), primals[index])))
+        elif entry.kind == "cos":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, _neg(_unary("sin", primals[operand]))))
+        elif entry.kind == "sin":
+            operand = entry.inputs[0]
+            _accumulate(adjs, operand, _binary("*", adj, _unary("cos", primals[operand])))
         elif entry.kind == "fold":
             operand = entry.inputs[0]
             _accumulate(adjs, operand, _fill(adj, primals[operand]))
@@ -793,7 +811,7 @@ def _reconstruct_primals(tape: EvalTape, input_idx: int, param_name: str) -> lis
         elif entry.kind in {"add", "sub", "mul", "div"}:
             op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[entry.kind]
             expr = _binary(op, primals[entry.inputs[0]], primals[entry.inputs[1]])
-        elif entry.kind in {"exp", "log"}:
+        elif entry.kind in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
             expr = _unary(entry.kind, primals[entry.inputs[0]])
         elif entry.kind == "fold":
             operand = primals[entry.inputs[0]]
@@ -1175,7 +1193,7 @@ def _emit(expr: _Expr) -> str:
         return f"(pair {_emit(expr.left)} {_emit(expr.right)})"
     if expr.op == "neg":
         return f"(- {_emit(expr.left)})"
-    if expr.op in {"exp", "log"}:
+    if expr.op in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}:
         value = _emit(expr.left)
         if expr.left.shape:
             return f"(map {expr.op} {value})"

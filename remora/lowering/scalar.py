@@ -73,12 +73,27 @@ def _arith_op(op: str, result_type: str) -> str:
         raise RemoraLoweringError(str(exc)) from exc
 
 
+def _math_op_for_unary(op: str) -> str:
+    """Return the MLIR math.* operation name for a unary HIR primitive op."""
+    base = op[:-1]  # strip type suffix (f or d)
+    mapping = {
+        "exp": "math.exp",
+        "log": "math.log",
+        "sqrt": "math.sqrt",
+        "cos": "math.cos",
+        "sin": "math.sin",
+        "ceil": "math.ceil",
+        "floor": "math.floor",
+    }
+    return mapping[base]
+
+
 def _hir_prim_op(op: str, result_type: str) -> str:
-    if op in {"+f", "-f", "*f", "/f", "+d", "-d", "*d", "/d"}:
-        return _arith_op(op[0], result_type)
-    if op in {"+i", "-i", "*i", "/i"}:
-        return _arith_op(op[0], result_type)
-    raise RemoraLoweringError(f"primitive HIR op {op} is deferred")
+    if op[-1] in ("f", "d", "i"):
+        base_op = op[:-1]  # strip type suffix
+    else:
+        base_op = op
+    return _arith_op(base_op, result_type)
 
 
 def _comparison_op(op: str, operand_type: str) -> tuple[str, str]:
@@ -306,12 +321,13 @@ class _RegionEmitter:
         args: list[_Operand],
         result_type: str,
     ) -> _Operand:
-        if op in {"expf", "logf", "expd", "logd"}:
+        if op in {"expf", "logf", "expd", "logd", "sqrtf", "sqrtd", "cosf", "cosd",
+                   "sinf", "sind", "ceilf", "ceild", "floorf", "floord"}:
             if len(args) != 1:
                 raise RemoraLoweringError(f"{op[:-1]} expects one operand")
             operand = self._coerce(args[0], result_type)
             result = self.temp()
-            mlir_op = "math.exp" if op.startswith("exp") else "math.log"
+            mlir_op = _math_op_for_unary(op)
             self.lines.append(
                 f"      {result} = {mlir_op} {operand.value} : {result_type}"
             )

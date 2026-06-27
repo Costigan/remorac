@@ -20,3 +20,14 @@ def abs x = if x < 0 then 0 - x else x
 
 def any xs = fold (\a x -> a || x) false xs
 def all xs = fold (\a x -> a && x) true xs
+
+def pi = 3.141592653589793
+
+def signum x = if x > 0 then 1 else if x < 0 then -1 else 0
+
+def is_positive x = x > 0
+def is_negative x = x < 0
+def is_zero x = x == 0
+
+def is_even n = modulo n 2 == 0
+def is_odd n = modulo n 2 != 0

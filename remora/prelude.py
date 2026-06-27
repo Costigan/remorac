@@ -38,6 +38,13 @@ def lisp_prelude_definition_sources() -> list[str]:
         "(define (abs [x]) (if (< x 0) (- 0 x) x))",
         "(define (any [xs]) (fold (lambda (a x) (|| a x)) #f xs))",
         "(define (all [xs]) (fold (lambda (a x) (&& a x)) #t xs))",
+        "(define pi 3.141592653589793)",
+        "(define (signum [x]) (select (> x 0) 1 (select (< x 0) -1 0)))",
+        "(define (positive? [x]) (> x 0))",
+        "(define (negative? [x]) (< x 0))",
+        "(define (zero? [x]) (== x 0))",
+        "(define (even? [n]) (== (modulo n 2) 0))",
+        "(define (odd? [n]) (!= (modulo n 2) 0))",
     ]
 
 

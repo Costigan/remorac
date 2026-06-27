@@ -1268,7 +1268,7 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         if (
             isinstance(expr.func, TypedExprNode)
             and isinstance(expr.func.expr, VarExpr)
-            and expr.func.expr.name in {"exp", "log"}
+            and expr.func.expr.name in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}
         ):
             return _coerce_runtime_value(
                 _apply_op(expr.func.expr.name, *arrays), expr.type
@@ -1740,7 +1740,7 @@ def _eval_callable(expr: TypedExpr, env: Env) -> CallableValue:
     if (
         isinstance(expr, TypedExprNode)
         and isinstance(expr.expr, VarExpr)
-        and expr.expr.name in {"exp", "log"}
+        and expr.expr.name in {"exp", "log", "sqrt", "cos", "sin", "ceil", "floor"}
     ):
         return lambda value: _coerce_runtime_value(
             _apply_op(expr.expr.name, value), expr.type.result
@@ -1942,8 +1942,22 @@ def _apply_op(op: str, left: Value, right: Value | None = None) -> Value:
         return np.exp(left)
     if op == "log":
         return np.log(left)
+    if op == "sqrt":
+        return np.sqrt(left)
+    if op == "cos":
+        return np.cos(left)
+    if op == "sin":
+        return np.sin(left)
+    if op == "ceil":
+        return np.ceil(left)
+    if op == "floor":
+        return np.floor(left)
     if right is None:
         raise EvaluationError(f"operator {op} expects two operands")
+    if op == "expt":
+        return np.power(left, right)
+    if op == "modulo":
+        return left % right
     if op == "+":
         return left + right
     if op == "-":
