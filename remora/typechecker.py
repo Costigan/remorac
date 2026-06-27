@@ -121,6 +121,7 @@ from remora.types import (
     enforce_rank_limit,
     eval_static_dim,
     is_numeric,
+    static_dim,
 )
 
 
@@ -2141,12 +2142,12 @@ class TypeChecker:
 
         if not isinstance(expr.kernel_shape, ArrayLit):
             raise RemoraTypeError("im2col kernel_shape must be a literal array", expr.loc)
-        kh = int(expr.kernel_shape.elements[0].value)
-        kw = int(expr.kernel_shape.elements[1].value)
+        kh = static_dim(expr.kernel_shape.elements[0])
+        kw = static_dim(expr.kernel_shape.elements[1])
 
         if not isinstance(expr.stride, IntLit):
             raise RemoraTypeError("im2col stride must be an integer literal", expr.loc)
-        stride = int(expr.stride.value)
+        stride = static_dim(expr.stride)
 
         h_dim, w_dim = typed_image.type.shape
         if not isinstance(h_dim, StaticDim) or not isinstance(w_dim, StaticDim):

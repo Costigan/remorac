@@ -2,24 +2,25 @@
 
 Remora is an array programming language for high-performance numerical
 computation on CPUs and GPUs. It belongs to the same family as APL, J,
-and Futhark where programs operate on whole arrays at once. Remora
-adds a static type system that catches shape errors before execution
-and enables efficient compilation to parallel hardware via MLIR.
+and Futhark where programs operate on whole arrays. Remora adds a
+static type system that catches shape errors before execution and
+enables efficient compilation to parallel hardware.
 
 Remora was introduced by Shivers, Slepak and Manolis in *An
 Introduction to Rank-polymorphic Programming in Remora*
 (arxiv.org/abs/1912.13451) and further defined by Justin Slepak in his
-dissertation at Northeastern University.  Spelak's Racket
-implementation is at github.com/jrslepak/Remora.
+dissertation at Northeastern University.  Spelak's implementation on
+top of Racket is at github.com/jrslepak/Remora.
 
 RemoraC compiles a subset of the Remora language. It currently
-implements the dense, statically shaped core of Remora and compiles
-ML-syntax and Lisp-syntax programs to CPU and NVIDIA GPU via MLIR and
-LLVM.
+implements the language's dense, statically-shaped core, i.e., no
+boxes, and remorac compiles ML-syntax and Lisp-syntax programs to CPU
+and CUDA via LLVM.  RemoraC also provides in interpreter to compare
+with and help debug the compiler.
 		
-While RemoraC is useful now for regular dense numeric programs, tests,
-examples, and compiler experiments, we do intend to fully implement
-the language.  Here are the known gaps:
+While RemoraC is useful now for running examples and compiler
+experiments on regular, dense numeric programs, we do intend to fully
+implement the language.  Here are the known gaps:
 
 1. true dynamic shapes
 2. runtime boxes and existential dimension witnesses
@@ -50,11 +51,12 @@ The dense core supports static rectangular arrays with ranks 0 through 10,
 `map`, `fold`/`reduce`, scans, conditionals, views, top-level definitions,
 monomorphized higher-order calls, recursion, and a small standard library.
 
-Backend support is strongest on the interpreter and compiled CPU paths. The CPU
-backend covers the current dense-core typechecker surface, including recursion,
-closure conversion, higher-order monomorphization, views, scans, sort/grade,
-matmul, pairs, boxes as static type-erasure, and automatic differentiation for
-scalar-cost functions.
+Backend support is strongest using the interpreter and compiled CPU
+paths. The CPU backend covers the current dense-core typechecker
+surface, including recursion, closure conversion, higher-order
+monomorphization, views, scans, sort/grade, matmul, pairs, boxes as
+static type-erasure, and automatic differentiation for scalar-cost
+functions.
 
 The GPU backend is narrower. It supports many dense numeric patterns,
 including element-wise maps, reductions, scans within current scale
@@ -180,6 +182,23 @@ RTX 5090 Laptop GPU.
    composition (lowering a sub-expression GPU op into a combined
    device-resident plan) would eliminate host round-trips for
    source-level pipelines.
+
+## Integration with Python and Jupyter
+
+The RemoraC compiler is implemented as python calling LLMV.  This
+makes integrating Remora programs with python straightforward.  Remora
+functions accept and return numpy-compatible arrays.  There are several
+python programs that define and use Remora functions in the examples/
+directory.  Currently, this requires Remora ML- or Lisp-syntax
+functions to be provided as strings.
+
+RemoraC also integrates with Jupyter notebooks and IPython through a
+magic extension, loaded with %load_ext remora.jupyter.magics. The
+%%remora cell magic lets you write Remora source directly in a
+notebook cell without wrapping in quotations.  A trailing body
+expression is evaluated and its result returned for inline display.
+
+A worked example is in docs/old/jupyter_tutorial.ipynb.
 
 ## Roadmap
 

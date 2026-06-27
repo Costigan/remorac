@@ -46,7 +46,7 @@ from remora.hir import (
     HIRVar,
     HIRWithShape,
 )
-from remora.types import BOOL, FLOAT, FLOAT64, INT, ArrayType, ScalarType, StaticDim
+from remora.types import BOOL, FLOAT, FLOAT64, INT, ArrayType, ScalarType, StaticDim, static_dim, static_shape
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
 
     # HIRSubarray — offset each coordinate by the subarray offsets
     if isinstance(expr, HIRSubarray):
-        offsets = tuple(int(o.value) for o in expr.offsets)
+        offsets = static_shape(expr.offsets)
         return _lower_view_offset(expr.array, ctx, per_axis_offsets=offsets)
 
     # HIRSlice (standalone) — offset first coordinate by start
@@ -517,13 +517,13 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
 
     # HIRReverse — reverse first coordinate
     if isinstance(expr, HIRReverse):
-        N = int(expr.result_type.shape[0].value)
+        N = static_dim(expr.result_type.shape[0])
         return _lower_view_transform(expr.array, ctx, dim0_transform=f"reverse:{N}")
 
     # HIRRotate — modular shift on first coordinate
     if isinstance(expr, HIRRotate):
-        N = int(expr.result_type.shape[0].value)
-        shift = int(expr.shift.value)
+        N = static_dim(expr.result_type.shape[0])
+        shift = static_dim(expr.shift)
         return _lower_view_transform(expr.array, ctx, dim0_transform=f"mod:{N}:{shift}")
 
     # HIRTranspose — swap first two coordinates
@@ -697,7 +697,7 @@ def _lower_iota(expr: HIRIota, ctx: _CompileCtx) -> GpuExpr:
     iterated.  Standalone iota (e.g. as a map array) resolves to
     the current coordinate.
     """
-    dim = int(expr.size.value) if isinstance(expr.size, StaticDim) else 0
+    dim = static_dim(expr.size) if isinstance(expr.size, StaticDim) else 0
     if len(ctx.coords) >= 1 and dim > 0:
         return GpuIndexCoordinate("_iota_coord")
     raise GPUScaffoldError(
@@ -728,7 +728,7 @@ def _maybe_expand_rank1_cell(inner: GpuExpr, array: HIRExpr) -> "GpuArrayExpr | 
         cell_type = getattr(array, "result_type", None)
     if not isinstance(cell_type, ArrayType) or cell_type.rank != 1:
         return None
-    K = int(cell_type.shape[0].value)
+    K = static_dim(cell_type.shape[0])
     if K <= 0:
         return None
     comps: list[GpuExpr] = [
@@ -847,7 +847,7 @@ def _lower_transpose(expr: HIRTranspose, ctx: _CompileCtx) -> GpuExpr:
 def _lower_reshape(expr: HIRReshape, ctx: _CompileCtx) -> GpuExpr:
     inner = _lower_hir(expr.array, ctx)
     if isinstance(inner, GpuInputLoad):
-        output_shape = tuple(int(d.value) for d in expr.result_type.shape)
+        output_shape = static_shape(expr.result_type)
         return GpuFlatLoad(inner.index, list(ctx.coords), output_shape)
     raise GPUScaffoldError(
         f"{ctx.context}: reshape on non-input-load expression ({type(inner).__name__})"
@@ -857,7 +857,7 @@ def _lower_reshape(expr: HIRReshape, ctx: _CompileCtx) -> GpuExpr:
 def _lower_ravel(expr: HIRRavel, ctx: _CompileCtx) -> GpuExpr:
     inner = _lower_hir(expr.array, ctx)
     if isinstance(inner, GpuInputLoad):
-        output_shape = tuple(int(d.value) for d in expr.result_type.shape)
+        output_shape = static_shape(expr.result_type)
         return GpuFlatLoad(inner.index, list(ctx.coords), output_shape)
     raise GPUScaffoldError(
         f"{ctx.context}: ravel on non-input-load expression ({type(inner).__name__})"
@@ -879,7 +879,7 @@ def _lower_append(expr: HIRAppend, ctx: _CompileCtx) -> GpuExpr:
             raise GPUScaffoldError(
                 f"{ctx.context}: GPU append supports rank-1 arrays only (got rank {left_type.rank})"
             )
-        left_size = int(left_type.shape[0].value)
+        left_size = static_dim(left_type.shape[0])
         return GpuAppendLoad(left.index, right.index, left_size, list(ctx.coords))
     raise GPUScaffoldError(
         f"{ctx.context}: append on non-input-load expressions"
@@ -965,7 +965,7 @@ def _lower_map_apply(expr: HIRMap | HIRApply, ctx: _CompileCtx) -> GpuExpr:
         # Check for the pattern: map over iota → bind param to loop variable
         # This is used inside fold bodies
         if len(args) == 1 and isinstance(args[0], HIRIota):
-            iota_dim = int(args[0].size.value) if isinstance(args[0].size, StaticDim) else 0
+            iota_dim = static_dim(args[0].size) if isinstance(args[0].size, StaticDim) else 0
             if iota_dim > 0:
                 param_name = callable_expr.params[0].name
                 # Return a GpuReduce placeholder: the outer fold handles the loop
@@ -1463,7 +1463,7 @@ def _lower_index(expr: HIRIndex, ctx: _CompileCtx) -> GpuExpr:
         result = GpuInputLoad(slot, index_coords, element_type=_scalar_type_to_mlir(result_type))
     elif isinstance(result_type, ArrayType):
         import itertools
-        dims = [int(d.value) for d in result_type.shape]
+        dims = [static_dim(d) for d in result_type.shape]
         if not dims or any(d <= 0 for d in dims):
             raise GPUScaffoldError(
                 f"{ctx.context}: array index result has zero-size dimension"
@@ -1508,7 +1508,7 @@ def _lower_fold_to_gpu(
         raise GPUScaffoldError(
             f"{ctx.context}: fold dimension must be static"
         )
-    dim = int(fold.reduction_dim.value)
+    dim = static_dim(fold.reduction_dim)
 
     array_expr = fold.array
 
@@ -1521,7 +1521,7 @@ def _lower_fold_to_gpu(
         if isinstance(array_expr.func, HIRLambda) and len(array_expr.arrays) == 1:
             inner_array = array_expr.arrays[0]
             if isinstance(inner_array, HIRIota):
-                iota_dim = int(inner_array.size.value) if isinstance(inner_array.size, StaticDim) else 0
+                iota_dim = static_dim(inner_array.size) if isinstance(inner_array.size, StaticDim) else 0
                 if iota_dim > 0:
                     param_name = array_expr.func.params[0].name
                     inner_ctx = _copy_ctx(ctx)
@@ -1532,7 +1532,7 @@ def _lower_fold_to_gpu(
 
     # Pattern: fold over HIRIota(N) directly
     if isinstance(array_expr, HIRIota):
-        iota_dim = int(array_expr.size.value) if isinstance(array_expr.size, StaticDim) else 0
+        iota_dim = static_dim(array_expr.size) if isinstance(array_expr.size, StaticDim) else 0
         if iota_dim > 0:
             body_raw: GpuExpr = GpuIndexCoordinate("_iota_coord")
             to_etype = _scalar_type_to_mlir(result_type) if isinstance(result_type, ScalarType) else "f32"
@@ -1571,7 +1571,7 @@ def _lower_fold_to_gpu(
     assert isinstance(result_type, ArrayType)
     K = 1
     for d in result_type.shape:
-        K *= int(d.value)
+        K *= static_dim(d)
     if K <= 0:
         raise GPUScaffoldError(
             f"{ctx.context}: array-valued fold has zero-size result"

@@ -25,7 +25,7 @@ from remora.hir import HIRFold, HIRFoldRight, HIRFunction, HIRLambda, HIRLit, HI
 from remora.hir import HIRApply
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
-from remora.types import FLOAT, BOOL, INT, ArrayType, ScalarType
+from remora.types import FLOAT, BOOL, INT, ArrayType, ScalarType, static_dim, static_shape
 # f64: not a pre-defined constant in types.py, but used directly
 _FLOAT64 = ScalarType("float64")
 
@@ -311,7 +311,7 @@ def build_descriptor_abi_cell_fold_dot_gpu_module(
     param_type = function.params[0].type
     if not isinstance(param_type, ArrayType):
         raise GPUScaffoldError("cell-fold dot requires an array image parameter")
-    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    h, w = static_dim(param_type.shape[0]), static_dim(param_type.shape[1])
     patches_per_axis = (h - kh) // stride + 1
     patch_count = patches_per_axis * patches_per_axis
 
@@ -456,7 +456,7 @@ def build_descriptor_abi_im2col_gpu_module(
     param_type = function.params[0].type
     if not isinstance(param_type, ArrayType):
         raise GPUScaffoldError("im2col requires an array image parameter")
-    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    h, w = static_dim(param_type.shape[0]), static_dim(param_type.shape[1])
     patches_per_axis = (h - kh) // stride + 1
     patch_count = patches_per_axis * patches_per_axis
     patch_size = kh * kw
@@ -614,7 +614,7 @@ def build_descriptor_abi_f32_scan_gpu_module(
             "GPU scan builder requires a scan (iscan/escan) body"
         )
 
-    shape = _validate_shape(tuple(int(d.value) for d in param_type.shape))
+    shape = _validate_shape(static_shape(param_type))
     N = shape[0]
     name = kernel_name or f"remora_{function.name}_f32_scan"
     _validate_scaffold_names(module_name, name)
@@ -965,7 +965,7 @@ def build_descriptor_abi_multiblock_f32_scan_gpu_module(
             _mb_op = "fmul"
             _mb_ident = "1.000000e+00"
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     BS = block_size
     if N <= BS:
         raise GPUScaffoldError("Use single-block scan for N <= block_size")
@@ -1558,7 +1558,7 @@ def build_descriptor_abi_reverse_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU reverse supports rank-1 f32 only")
-    N = int(rt.shape[0].value)
+    N = static_dim(rt.shape[0])
     name = kernel_name or f"remora_{function.name}_reverse"
     return _build_view_copy_kernel(
         function, name,
@@ -1580,8 +1580,8 @@ def build_descriptor_abi_rotate_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU rotate supports rank-1 f32 only")
-    N = int(rt.shape[0].value)
-    S = int(body.shift.value) % N
+    N = static_dim(rt.shape[0])
+    S = static_dim(body.shift) % N
     name = kernel_name or f"remora_{function.name}_rotate"
     if S > 0:
         idx_block = f"""      %vc_Nshift = llvm.mlir.constant({N - S} : index) : i64
@@ -1614,7 +1614,7 @@ def build_descriptor_abi_take_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU take supports rank-1 f32 only")
-    count = int(rt.shape[0].value)
+    count = static_dim(rt.shape[0])
     name = kernel_name or f"remora_{function.name}_take"
     return _build_view_copy_kernel(
         function, name,
@@ -1639,7 +1639,7 @@ def build_descriptor_abi_drop_gpu_module(
     from remora.types import StaticDim as _SD
     _dc = body.count
     drop_count = int(_dc.value) if isinstance(_dc, _SD) else int(_dc)
-    out_N = int(rt.shape[0].value)
+    out_N = static_dim(rt.shape[0])
     name = kernel_name or f"remora_{function.name}_drop"
     idx_block = f"      %vc_Dshift = llvm.mlir.constant({drop_count} : index) : i64\n      %vc_src_idx = llvm.add %vc_tid, %vc_Dshift  : i64"
     return _build_view_copy_kernel(
@@ -1662,7 +1662,7 @@ def build_descriptor_abi_reshape_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.element != FLOAT:
         raise GPUScaffoldError("GPU reshape supports f32 only")
-    out_shape = tuple(int(d.value) for d in rt.shape)
+    out_shape = static_shape(rt)
     name = kernel_name or f"remora_{function.name}_reshape"
     return _build_view_copy_kernel(
         function, name,
@@ -1684,7 +1684,7 @@ def build_descriptor_abi_ravel_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.element != FLOAT:
         raise GPUScaffoldError("GPU ravel supports f32 only")
-    out_shape = tuple(int(d.value) for d in rt.shape)
+    out_shape = static_shape(rt)
     name = kernel_name or f"remora_{function.name}_ravel"
     return _build_view_copy_kernel(
         function, name,
@@ -1706,10 +1706,10 @@ def build_descriptor_abi_slice_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU slice supports rank-1 f32 only")
-    out_shape = tuple(int(d.value) for d in rt.shape)
+    out_shape = static_shape(rt)
     name = kernel_name or f"remora_{function.name}_slice"
-    start = int(body.start.value) if hasattr(body, 'start') else 0
-    step = int(body.step.value) if hasattr(body, 'step') else 1
+    start = static_dim(body.start) if hasattr(body, 'start') else 0
+    step = static_dim(body.step) if hasattr(body, 'step') else 1
     if step != 1:
         idx_block = f"      %vc_sstart = llvm.mlir.constant({start} : index) : i64\n      %vc_sstep = llvm.mlir.constant({step} : index) : i64\n      %vc_s1 = llvm.mul %vc_tid, %vc_sstep  : i64\n      %vc_src_idx = llvm.add %vc_s1, %vc_sstart  : i64"
     else:
@@ -1734,7 +1734,7 @@ def build_descriptor_abi_subarray_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU subarray supports rank-1 f32 only")
-    out_shape = tuple(int(d.value) for d in rt.shape)
+    out_shape = static_shape(rt)
     name = kernel_name or f"remora_{function.name}_subarray"
     from remora.types import StaticDim as _SD
     offsets = body.offsets
@@ -1760,8 +1760,8 @@ def build_descriptor_abi_transpose_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 2 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU transpose supports rank-2 f32 only")
-    out_rows = int(rt.shape[0].value)
-    out_cols = int(rt.shape[1].value)
+    out_rows = static_dim(rt.shape[0])
+    out_cols = static_dim(rt.shape[1])
     name = kernel_name or f"remora_{function.name}_transpose"
     _validate_scaffold_names("remora_gpu", name)
     total = out_rows * out_cols
@@ -1816,9 +1816,9 @@ def build_descriptor_abi_append_gpu_module(
     rt = body.result_type
     if not isinstance(rt, ArrayType) or rt.rank != 1 or rt.element != FLOAT:
         raise GPUScaffoldError("GPU append supports rank-1 f32 only")
-    out_N = int(rt.shape[0].value)
+    out_N = static_dim(rt.shape[0])
     left_rt = body.left.result_type if hasattr(body.left, 'result_type') else None
-    left_N = int(left_rt.shape[0].value) if isinstance(left_rt, ArrayType) else 0
+    left_N = static_dim(left_rt.shape[0]) if isinstance(left_rt, ArrayType) else 0
     name = kernel_name or f"remora_{function.name}_append"
     _validate_scaffold_names("remora_gpu", name)
 
@@ -2530,7 +2530,7 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
         if len(function.params) != 1 or function.body.array.name != function.params[0].name:
             raise GPUScaffoldError("descriptor ABI GPU reduction input must be the function parameter")
         param_type = _require_rank1_f32_param(function.params[0].type)
-        shape = tuple(int(d.value) for d in param_type.shape)
+        shape = static_shape(param_type)
         return F32ReductionKernel(shape, function.body.func.op, float(function.body.init.value))
 
     if isinstance(function.body.array, HIRMap):
@@ -2553,7 +2553,7 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
         second_type = _require_rank1_f32_param(function.params[1].type)
         if first_type.shape != second_type.shape:
             raise GPUScaffoldError("descriptor ABI GPU dot reduction input shapes must match")
-        shape = tuple(int(d.value) for d in first_type.shape)
+        shape = static_shape(first_type)
         return F32ReductionKernel(
             shape,
             function.body.func.op,
@@ -2596,7 +2596,7 @@ def build_descriptor_abi_f32_compound_fold_gpu_module(
     ):
         raise GPUScaffoldError("GPU compound fold currently supports rank-1 f32 inputs only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     name = kernel_name or f"remora_{function.name}_f32_fold"
     _validate_scaffold_names(module_name, name)
 
@@ -2892,7 +2892,7 @@ def build_descriptor_abi_sobel_gpu_module(
     param_type = function.params[0].type
     if not isinstance(param_type, ArrayType):
         raise GPUScaffoldError("Sobel requires an array image parameter")
-    h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+    h, w = static_dim(param_type.shape[0]), static_dim(param_type.shape[1])
     ppa = (h - kh) // stride + 1; pc = ppa * ppa; cs = kh * kw
     name = kernel_name or f"remora_{function.name}_sobel"
     _validate_scaffold_names(module_name, name)
@@ -3272,7 +3272,7 @@ def build_descriptor_abi_sort_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU sort supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     name = kernel_name or f"remora_{function.name}_sort"
     _validate_scaffold_names(module_name, name)
 
@@ -3376,7 +3376,7 @@ def build_descriptor_abi_grade_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU grade supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     name = kernel_name or f"remora_{function.name}_grade"
     _validate_scaffold_names(module_name, name)
 
@@ -3482,7 +3482,7 @@ def build_descriptor_abi_bitonic_sort_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU bitonic sort supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     NP = 1
     while NP < N:
         NP *= 2
@@ -3612,7 +3612,7 @@ def build_descriptor_abi_bitonic_grade_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU bitonic grade supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     NP = 1
     while NP < N:
         NP *= 2
@@ -3766,7 +3766,7 @@ def build_descriptor_abi_multiblock_bitonic_sort_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU multi-block sort supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     BS = block_size
     NP = 1
     while NP < N:
@@ -3975,7 +3975,7 @@ def build_descriptor_abi_multiblock_bitonic_grade_gpu_module(
     if param_type.rank != 1:
         raise GPUScaffoldError("GPU multi-block grade supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     BS = block_size
     NP = 1
     while NP < N:
@@ -4228,14 +4228,14 @@ def build_descriptor_abi_indices_of_gpu_module(
     if not isinstance(param_type, ArrayType):
         raise GPUScaffoldError("GPU indices-of requires an array parameter")
 
-    input_shape = tuple(int(d.value) for d in param_type.shape)
+    input_shape = static_shape(param_type)
     input_rank = len(input_shape)
     input_total = 1
     for d in input_shape:
         input_total *= d
 
     result_type = function.body.result_type
-    out_shape = tuple(int(d.value) for d in result_type.shape)
+    out_shape = static_shape(result_type)
     out_rank = len(out_shape)
 
     name = kernel_name or f"remora_{function.name}_indices"
@@ -4400,7 +4400,7 @@ def build_descriptor_abi_filter_gpu_module(
     if cmp_const is None:
         raise GPUScaffoldError("GPU filter predicate requires a literal constant")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     name = kernel_name or f"remora_{function.name}_filter"
     _validate_scaffold_names(module_name, name)
 
@@ -4502,7 +4502,7 @@ def build_descriptor_abi_parallel_filter_gpu_module(
         raise GPUScaffoldError("GPU parallel filter supports f32 and i32 only")
         raise GPUScaffoldError("GPU parallel filter supports rank-1 only")
 
-    N = int(param_type.shape[0].value)
+    N = static_dim(param_type.shape[0])
     if N > 1024:
         raise GPUScaffoldError("GPU parallel filter requires N ≤ 1024")
 
@@ -5016,7 +5016,7 @@ def build_descriptor_abi_scatter_add_gpu_module(
     if not isinstance(sa.result_type, ArrayType) or sa.result_type.element != FLOAT:
         raise GPUScaffoldError("GPU scatter-add currently supports f32 output only")
 
-    shape = tuple(int(d.value) for d in sa.result_type.shape)
+    shape = static_shape(sa.result_type)
     if len(shape) != 1:
         raise GPUScaffoldError("GPU scatter-add currently supports rank-1 output only")
     N = shape[0]
@@ -5132,7 +5132,7 @@ def build_descriptor_abi_parallel_scatter_add_gpu_module(
     if not isinstance(sa.result_type, ArrayType) or sa.result_type.element != FLOAT:
         raise GPUScaffoldError("GPU parallel scatter-add supports f32 only")
 
-    shape = tuple(int(d.value) for d in sa.result_type.shape)
+    shape = static_shape(sa.result_type)
     if len(shape) != 1:
         raise GPUScaffoldError("GPU parallel scatter-add supports rank-1 only")
     N = shape[0]
@@ -5402,7 +5402,7 @@ def build_descriptor_abi_general_map_gpu_module(
             "general GPU map requires an array result type"
         )
 
-    result_shape = tuple(int(d.value) for d in result_type.shape)
+    result_shape = static_shape(result_type)
     _validate_shape(result_shape)
 
     # Determine rank and total output size
@@ -5462,9 +5462,9 @@ def build_descriptor_abi_general_map_gpu_module(
     def _detect_reshape(ae):
         """Check if array_expr is a reshape/ravel wrapping an input."""
         if isinstance(ae, HIRReshape):
-            return ae, tuple(int(d.value) for d in ae.result_type.shape)
+            return ae, static_shape(ae.result_type)
         if isinstance(ae, HIRRavel):
-            return ae, tuple(int(d.value) for d in ae.result_type.shape)
+            return ae, static_shape(ae.result_type)
         return None, None
 
     def _detect_append(ae):

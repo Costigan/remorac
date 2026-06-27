@@ -46,7 +46,7 @@ from remora.hir import (
     HIRWithShape,
     HIRIndicesOf,
 )
-from remora.types import ArrayType, BOOL, FLOAT, INT, ScalarType, SigmaType, StaticDim
+from remora.types import ArrayType, BOOL, FLOAT, INT, ScalarType, SigmaType, StaticDim, static_dim
 
 from remora.lowering.scalar import (
     _Operand,
@@ -2236,7 +2236,7 @@ def _lower_state_fold_result(
 
     result_mlir = type_to_mlir(node.result_type)
     reduction_dim = node.reduction_dim
-    N_val = int(reduction_dim.value)
+    N_val = static_dim(reduction_dim)
 
     init_code, init_name, init_type, init_elem = _lower_tensor_input(
         node.init, _join_prefix(prefix, "sf_init"), functions, tensor_env, scalar_env,
@@ -2269,7 +2269,7 @@ def _lower_state_fold_result(
 
     if not isinstance(node.result_type, ArrayType) or node.result_type.rank != 1:
         raise RemoraLoweringError("state fold scalar decomposition supports rank-1 results only")
-    K = int(node.result_type.shape[0].value)
+    K = static_dim(node.result_type.shape[0])
 
     init_scalars: list[str] = []
     init_extract_code = ""
@@ -4869,10 +4869,10 @@ def _lower_im2col_tensor_input(
     result_elem = type_to_mlir(node.result_type.element)
     kh, kw = node.kernel_shape
     stride = node.stride
-    n_patches = int(node.result_type.shape[0].value)
-    patch_size = int(node.result_type.shape[1].value)
+    n_patches = static_dim(node.result_type.shape[0])
+    patch_size = static_dim(node.result_type.shape[1])
     image_remora_type = _expr_result_type(node.image)
-    w = int(image_remora_type.shape[1].value)
+    w = static_dim(image_remora_type.shape[1])
     out_w = (w - kw) // stride + 1
 
     lines: list[str] = []
@@ -4932,8 +4932,8 @@ def _lower_col2im_tensor_input(
     stride = node.stride
     out_w = (w - kw) // stride + 1
     columns_remora = _expr_result_type(node.columns)
-    n_patches = int(columns_remora.shape[0].value)
-    patch_size = int(columns_remora.shape[1].value)
+    n_patches = static_dim(columns_remora.shape[0])
+    patch_size = static_dim(columns_remora.shape[1])
 
     lines: list[str] = []
     lines.append(columns_code)

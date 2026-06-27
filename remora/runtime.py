@@ -141,7 +141,7 @@ from remora.typechecker import (
     TypedCol2im,
     TypedMatmul,
 )
-from remora.types import ArrayType, BOOL, FLOAT, FLOAT64, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim, TypeVar
+from remora.types import ArrayType, BOOL, FLOAT, FLOAT64, INT, PairType, RemoraType, ScalarType, SigmaType, StaticDim, TypeVar, static_dim, static_shape
 
 
 class RuntimeUnavailable(RemoraError):
@@ -1371,7 +1371,7 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
             raise EvaluationError("scan expects an array value")
         result_dtype = _numpy_dtype(expr.type.element)
         if hasattr(expr.type, "shape") and expr.type.shape:
-            result_shape = tuple(int(d.value) for d in expr.type.shape)
+            result_shape = static_shape(expr.type)
         else:
             result_shape = (len(array),)
         result = np.empty(result_shape, dtype=result_dtype)
@@ -1437,7 +1437,7 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         return np.concatenate([_eval_expr(expr.left, env), _eval_expr(expr.right, env)], axis=0)
 
     if isinstance(expr, TypedLength):
-        return int(expr.dim.value)
+        return static_dim(expr.dim)
 
     if isinstance(expr, TypedSort):
         array = _eval_expr(expr.array, env)
@@ -1530,7 +1530,7 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
         return np.concatenate([left, right], axis=0)
 
     if isinstance(expr, TypedLength):
-        return int(expr.dim.value)
+        return static_dim(expr.dim)
 
     if isinstance(expr, TypedScatterAdd):
         array = _eval_expr(expr.array, env)
@@ -1545,9 +1545,9 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
     if isinstance(expr, TypedIm2col):
         image = _eval_expr(expr.image, env)
         ast = expr.expr
-        kh = int(ast.kernel_shape.elements[0].value)
-        kw = int(ast.kernel_shape.elements[1].value)
-        stride = int(ast.stride.value)
+        kh = static_dim(ast.kernel_shape.elements[0])
+        kw = static_dim(ast.kernel_shape.elements[1])
+        stride = static_dim(ast.stride)
         h, w = image.shape
         out_h = (h - kh) // stride + 1
         out_w = (w - kw) // stride + 1
@@ -1561,11 +1561,11 @@ def _eval_expr(expr: TypedExpr, env: Env) -> Value:
     if isinstance(expr, TypedCol2im):
         columns = _eval_expr(expr.columns, env)
         ast = expr.expr
-        h = int(ast.image_shape.elements[0].value)
-        w = int(ast.image_shape.elements[1].value)
-        kh = int(ast.kernel_shape.elements[0].value)
-        kw = int(ast.kernel_shape.elements[1].value)
-        stride = int(ast.stride.value)
+        h = static_dim(ast.image_shape.elements[0])
+        w = static_dim(ast.image_shape.elements[1])
+        kh = static_dim(ast.kernel_shape.elements[0])
+        kw = static_dim(ast.kernel_shape.elements[1])
+        stride = static_dim(ast.stride)
         out_h = (h - kh) // stride + 1
         out_w = (w - kw) // stride + 1
         result = np.zeros((h, w), dtype=np.float64)

@@ -3,6 +3,153 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Workstream 0 — Technical-Debt Paydown for Full-Language Work (June 2026)
+
+Infrastructure-only changes that make the compiler auditable without changing
+any observable compilation behavior.  All golden MLIR/PTX output remains
+byte-identical; all existing numeric-parity tests pass.
+
+### Executable capability matrix (`remora/capabilities.py`)
+
+One structured, importable source of truth for operation support and
+cost-relevant properties, consumed by docs, tests, `--explain-lowering`,
+and the route registry.
+
+- **Data model**: `Backend` (interp/cpu/gpu), `Context` (top-level /
+  map-body / fold-body / scan-body / ad-generated), and frozen
+  `Capability` dataclass with op, backend, dtypes, ranks, static/dynamic
+  shape flags, boxed/ragged flag, contexts, work/memory estimates,
+  fallback, unsupported reason, and status (supported/limited/unsupported).
+- **Entries** cover the current dense-core implementation across all
+  three backends with accurate GPU narrowness (e.g. sort f32-only,
+  matmul f32-only, closures + pairs + boxes + compose + im2col/col2im
+  GPU-unsupported).
+- **Record/data-frame placeholder entries** (`record`, `record_field`,
+  `record_constructor`, `record_update`) all marked unsupported.
+- **All** `dynamic_shape` and `boxed_ragged` fields are `False` to
+  make the current static-only reality explicit.
+- **Query helpers**: `lookup(op, backend, *, dtype, rank, context)`,
+  `supported_ops(backend)`, `as_rows()` (for doc/table generation).
+- **`tests/test_capabilities.py`** (17 tests): registry integrity,
+  no duplicate keys, all unsupported/limited entries have a reason,
+  dtype strings are from the known set, ranks within `MAX_DENSE_RANK`,
+  lookup hit/miss, and supported-ops queries.
+
+### Backend route registry (`remora/route_registry.py`)
+
+Explicit, testable GPU dispatch routes wrapping the `codegen.py` cascade.
+
+- **`Route` dataclass**: name, priority (lower = tried first), predicate,
+  capability keys, build function.
+- **`select_route(function, ctx)`** walks routes in priority order,
+  recording a `RouteDecision` per candidate (accept/reject + reason),
+  returning the first acceptor and the full decision trace.
+- Routes preserve the existing priority order exactly (im2col first …
+  general-dispatch fallback last).
+- Every route cross-links to its `capabilities.py` keys.
+- **`tests/test_route_registry.py`** (9 tests): priorities are total
+  and unique, every route has a name and build function, capability
+  keys exist in the matrix, general-dispatch is last, and selection
+  returns decisions with reasons.
+
+### Extracted lowering utilities
+
+- **`remora/types.py`**: new `static_dim(d) -> int` and
+  `static_shape(t) -> tuple[int, ...]` helpers that centralize the
+  `int(d.value)` / `tuple(int(d.value) for d in shape)` pattern behind
+  an explicit "static-only here" assertion.  Applied across **14 files**
+  (~180 call sites replaced).  This makes the Workstream 2 `DimValue`
+  swap a local, one-helper change.
+- **`remora/codegen.py`**: new `_gpu_module_to_ptx()` helper that
+  consolidates the 20 repeated `extract_gpu_module_body_as_module →
+  translate_mlir_to_llvmir → translate_llvmir_to_nvptx_text →
+  return ptx, [meta], plan` triplets into one function call.
+- **`remora/lowering/_emit_helpers.py`**: shared lowering helpers:
+  `emit_delinearize(linear, sizes)` (linear → multi-index via udiv/urem),
+  `emit_2d_decompose(flat, row, col, n_cols)`, and `llvm_op(op, type)`
+  (unified dtype-parameterized LLVM IR op emitter).  Module docs
+  point to the canonical descriptor-ABI helpers in `gpu_lowering.py`
+  (`_descriptor_type`, `_descriptor_load_lines`, `_multi_index_lines`,
+  `_linear_index_lines`).
+- **`tests/test_emit_helpers.py`** (25 tests): unit tests for all
+  three helpers across llvm and arith dialects, rank 0–3.
+
+### `--explain-lowering` (CLI + API)
+
+- **`remora/cli.py`**: new `--explain-lowering` flag (accepted values
+  `text` or `json`) alongside the `--emit-*` flags.  Prints the target,
+  selected route, capability keys, and a decision trace showing every
+  candidate route with accept/reject status and reason.
+- **`remora/compiler.py`**: new `explain_lowering(source, ...) →
+  LoweringExplanation` structured API returning target, route_selected,
+  decisions list, and capability keys — so tests never scrape stdout.
+- **`tests/test_explain_lowering.py`** (7 tests): structured-object
+  tests and CLI text/JSON smoke tests.
+
+### Source-located diagnostics
+
+- **`remora/errors.py`**: new `SourceSpan` frozen dataclass (file, line,
+  col, optional end_line/end_col, `format()`) and `RemoraError.located()`
+  method.  `RemoraError.__str__` now prefixes `file:line:col: ` when a
+  span is set.
+- **`remora/types.py`**: `RemoraTypeError` now converts its existing `loc`
+  `SourceLoc` to a `SourceSpan` via the base `located()` method.
+- **`tests/test_diagnostics.py`** (14 tests): `SourceSpan` formatting,
+  `located()` attaches/prints span, error subclasses degrade gracefully
+  without a span, and all key error classes (`RemoraTypeError`,
+  `CodegenUnavailable`, `GPUScaffoldError`, `HIRLoweringError`) are
+  `RemoraError` subclasses.
+
+### Generated differential test harness
+
+- **`tests/_dense_gen.py`**: deterministic, seeded Remora program generator
+  (scalar arithmetic, sum, map with operator sections) exercising f32/i32,
+  rank-1 with small sizes.  Includes `is_well_typed()` validation and
+  `generate_programs()` iterator.
+- **`tests/test_differential_dense.py`** (20 parametrized cases):
+  interpreter (oracle) vs CPU compiled parity comparison with numpy
+  `array_equal` for array results.  GPU parity is deferred (requires
+  CUDA runtime).
+
+### Documentation reconciliation
+
+- **`tests/test_docs_match_capabilities.py`** (10 tests): validates that
+  capabilities.py matches the doc-visible claims — GPU sort/grade f32-only,
+  GPU matmul f32-only, GPU pair/box/im2col unsupported, CPU supports core
+  ops, interpreter supports the full subset, and all GPU unsupported have
+  a reason.
+
+### Cost-annotation data structures
+
+- **`remora/cost.py`**: inert frozen `CostShape` and `ScheduleCandidate`
+  dataclasses (definitions only, no scheduling logic or cost math).
+  Ready for Workstream 7.
+- **`tests/test_cost.py`** (6 tests): instantiation, frozen validation,
+  symbolic dimensions, and fallback-reason plumbing.
+
+### MLIR builder path deleted (Track D / D1)
+
+The disabled MLIR builder API path has been retired with a documented
+rationale:
+
+- **Removed 4 modules** (~2.4 kLOC): `remora/lowering/_builder_emitter.py`,
+  `remora/lowering/_builder_ops.py`, `remora/lowering/scalar_builder.py`,
+  `remora/lowering/_gpu_builder.py`.
+- **Removed 11 builder-only tests** from `tests/test_lowering.py` and
+  `tests/test_gpu_lowering.py`.
+- **`remora/lowering/module.py`**: removed the large disabled-builder
+  comment block; `_lower_via_builder` now raises a clear error directing
+  users to the text-based path.
+
+### Bug fix — `_lower_tensor_if_module` missing functions dict
+
+- **`remora/lowering/module.py`**: `_lower_tensor_if_module` was passing
+  `{}` instead of the actual `functions` dict to `_lower_tensor_if_result`,
+  causing `unknown map function __lambda_N` errors for any program that
+  used an anonymous lambda inside a tensor `if` condition.  Fixed by
+  threading `functions` through the call chain.  Fixes the pre-existing
+  `cpu_tensor_if_elementwise` acceptance test failure.
+
 ## New Math Primitives and Prelude Functions (June 2026)
 
 Added 8 new built-in primitive operators and 7 new prelude functions,

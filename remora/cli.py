@@ -9,7 +9,7 @@ from pprint import pformat
 from typing import Any
 
 from remora.codegen import CodegenUnavailable
-from remora.compiler import compile_source, compile_source_to_ptx
+from remora.compiler import compile_source, compile_source_to_ptx, explain_lowering
 from remora.defunc import defunctionalize
 from remora.display import format_result
 from remora.errors import RemoraError
@@ -78,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--emit-hir", action="store_true", help="print defunctionalized HIR and exit")
     parser.add_argument("--emit-mlir", action="store_true", help="print validated MLIR and exit")
     parser.add_argument("--emit-ptx", action="store_true", help="print generated PTX and exit")
+    parser.add_argument(
+        "--explain-lowering", nargs="?", const="text", default=None,
+        choices=("text", "json"),
+        help="explain which lowering route was selected for GPU (text or json)",
+    )
     parser.add_argument(
         "--cpu-threads", type=int, default=None,
         help="requested CPU worker thread count; defaults to REMORA_NUM_THREADS when set",
@@ -190,6 +195,26 @@ def _run(args: argparse.Namespace) -> int:
     if args.emit_ptx:
         artifact = compile_source_to_ptx(combined_source, syntax=syntax)
         print(artifact.ptx_text)
+        return 0
+    if args.explain_lowering is not None:
+        explanation = explain_lowering(combined_source, syntax=syntax)
+        if args.explain_lowering == "json":
+            import json
+            print(json.dumps({
+                "target": explanation.target,
+                "route_selected": explanation.route_selected,
+                "capability_keys": explanation.capability_keys,
+                "decisions": explanation.decisions,
+            }, indent=2))
+        else:
+            print(f"target: {explanation.target}")
+            if explanation.route_selected:
+                print(f"route selected: {explanation.route_selected}")
+                print(f"capability keys: {', '.join(explanation.capability_keys) if explanation.capability_keys else 'none'}")
+            print("decisions:")
+            for d in explanation.decisions:
+                status = "ACCEPTED" if d["accepted"] else "REJECTED"
+                print(f"  [{status}] {d['route_name']}: {d['reason']}")
         return 0
 
     # --- resolve output path ---

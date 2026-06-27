@@ -82,6 +82,7 @@ from remora.types import (
     SigmaType,
     StaticDim,
     eval_static_dim,
+    static_dim,
 )
 
 
@@ -493,6 +494,10 @@ HIRCallable: TypeAlias = HIRLambda | HIRPrimCallable | HIRVar
 
 class HIRLoweringError(RemoraError):
     """Raised when typed AST to HIR lowering hits deferred syntax."""
+    span = None  # type: ignore
+
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
 _current_func_names: set[str] | None = None
@@ -665,9 +670,9 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedIm2col):
         ast = expr.expr
-        kh = int(ast.kernel_shape.elements[0].value)
-        kw = int(ast.kernel_shape.elements[1].value)
-        stride = int(ast.stride.value)
+        kh = static_dim(ast.kernel_shape.elements[0])
+        kw = static_dim(ast.kernel_shape.elements[1])
+        stride = static_dim(ast.stride)
         return HIRIm2col(
             lower_expr(expr.image),
             (kh, kw),
@@ -677,11 +682,11 @@ def lower_expr(expr: TypedExpr) -> HIRExpr:
 
     if isinstance(expr, TypedCol2im):
         ast = expr.expr
-        h = int(ast.image_shape.elements[0].value)
-        w = int(ast.image_shape.elements[1].value)
-        kh = int(ast.kernel_shape.elements[0].value)
-        kw = int(ast.kernel_shape.elements[1].value)
-        stride = int(ast.stride.value)
+        h = static_dim(ast.image_shape.elements[0])
+        w = static_dim(ast.image_shape.elements[1])
+        kh = static_dim(ast.kernel_shape.elements[0])
+        kw = static_dim(ast.kernel_shape.elements[1])
+        stride = static_dim(ast.stride)
         return HIRCol2im(
             lower_expr(expr.columns),
             (h, w),

@@ -133,10 +133,10 @@ from remora.lowering.view_ops import (
 def _lower_via_builder(
     program: HIRProgram, functions: dict[str, HIRFunction]
 ) -> tuple[str, Any]:
-    """Lower *program* via the MLIR builder API path (Stream E7)."""
-    from remora.lowering._builder_ops import lower_program_via_builder
-
-    return lower_program_via_builder(program)
+    raise RemoraLoweringError(
+        "MLIR builder API path has been retired (Workstream 0 / Track D). "
+        "Use the text-based lowering path instead."
+    )
 
 
 @dataclass(frozen=True)
@@ -272,28 +272,6 @@ class MLIRLowering:
                 "view operations, iota, array literals, scalar maps, scalar folds, "
                 "box/unbox, sort, grade, and reverse lower to MLIR so far"
             )
-
-        # The text-based lowering path handles every dense-core program
-        # (~175x faster than the builder API, covers all node types).
-        #
-        # The builder API path (Stream E7, _lower_via_builder) was the
-        # original lowering approach using iree's Python MLIR object
-        # construction.  It is preserved in _builder_ops.py /
-        # _builder_emitter.py / scalar_builder.py but currently disabled
-        # because:
-        #   1. It is slower (avg 10.5ms vs 0.06ms for text path)
-        #   2. It falls back to the text path for 66% of examples
-        #   3. The text path has no deferreds and serves all patterns
-        #
-        # To re-enable, uncomment the block below and reorder the
-        # fallback logic so the text path is tried first.
-        #
-        # try:
-        #     text, module_obj = _lower_via_builder(program, functions)
-        #     ...
-        #     return LoweredModule(text, module_obj)
-        # except Exception:
-        #     pass
 
         text = _lower_main_module(main, functions)
         if export_output_descriptor:
@@ -604,7 +582,7 @@ def _lower_main_module(
     if isinstance(node, HIRIf) and isinstance(
         _expr_result_type(node.condition), ArrayType
     ):
-        return _lower_tensor_if_module(node)
+        return _lower_tensor_if_module(node, functions)
     if isinstance(node, HIRCall) and (
         isinstance(node.result_type, ArrayType)
         or any(isinstance(_expr_result_type(arg), ArrayType) for arg in node.args)
@@ -840,9 +818,9 @@ def _lower_main_result_with_tensor_env(
     )
 
 
-def _lower_tensor_if_module(node: HIRIf) -> str:
+def _lower_tensor_if_module(node: HIRIf, functions: dict[str, HIRFunction]) -> str:
     body, result_value, result_type = _lower_tensor_if_result(
-        node, {}, None
+        node, functions, None
     )
     builder = _MLIRMainModuleBuilder(result_type)
     builder.add_block(body)

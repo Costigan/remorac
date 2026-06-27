@@ -16,7 +16,7 @@ from remora.hir import (
     HIRPrimOp,
     HIRVar,
 )
-from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType
+from remora.types import BOOL, FLOAT, INT, ArrayType, ScalarType, static_dim
 
 
 @dataclass(frozen=True)
@@ -216,8 +216,8 @@ def _analyze_fused_f32_map(
     def _collect_subarrays(expr: HIRExpr) -> None:
         if isinstance(expr, HIRSubarray) and isinstance(expr.array, HIRVar):
             base = expr.array.name
-            ro = int(expr.offsets[0].value)
-            co = int(expr.offsets[1].value)
+            ro = static_dim(expr.offsets[0])
+            co = static_dim(expr.offsets[1])
             key = (base, ro, co)
             if key not in subarray_map:
                 subarray_map[key] = len(input_types)
@@ -332,8 +332,8 @@ def _f32_expr_from_array(
     if isinstance(expr, HIRLit):
         return F32ConstantExpr(float(expr.value))
     if isinstance(expr, HIRSubarray) and isinstance(expr.array, HIRVar):
-        ro = int(expr.offsets[0].value)
-        co = int(expr.offsets[1].value)
+        ro = static_dim(expr.offsets[0])
+        co = static_dim(expr.offsets[1])
         key = f"{expr.array.name}__{ro}_{co}"
         if key in param_indices:
             return F32InputExpr(param_indices[key])

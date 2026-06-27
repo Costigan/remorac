@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from remora.runtime import CPUFunctionExecutor, EvaluationResult
-from remora.types import ArrayType, FuncType, RemoraType, ScalarType
+from remora.types import ArrayType, FuncType, RemoraType, ScalarType, static_dim
 
 
 class RemoraRankMismatchError(TypeError):
@@ -90,7 +90,7 @@ def _check_argument(arr: np.ndarray, expected: RemoraType, func_name: str, index
                 f"array, got rank-{arr.ndim} (shape {arr.shape})"
             )
         for axis, dim in enumerate(expected.shape):
-            expected_size = int(dim.value)
+            expected_size = static_dim(dim)
             if arr.shape[axis] != expected_size:
                 raise RemoraRankMismatchError(
                     f"{func_name}() argument {index}: dimension {axis} expected "

@@ -252,6 +252,79 @@ def compile_function_source_to_mlir_gpu_ptx(
     return ptx, kernels, artifact
 
 
+@dataclass(frozen=True)
+class LoweringExplanation:
+    target: str
+    route_selected: str | None
+    decisions: list[dict[str, object]]
+    capability_keys: list[str]
+
+
+def explain_lowering(
+    source: str,
+    *,
+    function_name: str | None = None,
+    include_prelude: bool = True,
+    syntax: str = "ml",
+) -> LoweringExplanation:
+    from remora.pipeline import detect_toolchain
+    from remora.route_registry import RouteContext, select_route
+
+    program_source = with_prelude(source) if include_prelude and syntax == "ml" else source
+    ast = _parse_source(program_source, syntax)
+    typed = TypeChecker().check_program(ast)
+    hir = defunctionalize(lower_to_hir(typed))
+
+    if function_name is not None:
+        target_fn = None
+        for fn in hir.functions:
+            if fn.name == function_name:
+                target_fn = fn
+                break
+        if target_fn is None and hir.main is not None:
+            target_fn = HIRFunction(
+                name=function_name, params=[], body=hir.main,
+                return_type=hir.return_type or INT,
+            )
+    elif hir.main is not None:
+        target_fn = HIRFunction(
+            name="main", params=[], body=hir.main,
+            return_type=hir.return_type or INT,
+        )
+    else:
+        return LoweringExplanation(
+            target="interp",
+            route_selected=None,
+            decisions=[],
+            capability_keys=[],
+        )
+
+    try:
+        toolchain = detect_toolchain()
+    except Exception:
+        toolchain = None
+
+    ctx = RouteContext(
+        kernel_name=function_name or "main",
+        toolchain=toolchain,
+    )
+    route, decisions = select_route(target_fn, ctx)
+    raw_decisions: list[dict[str, object]] = []
+    for d in decisions:
+        raw_decisions.append({
+            "route_name": d.route_name,
+            "accepted": d.accepted,
+            "reason": d.reason,
+            "capability_keys": list(d.capability_keys),
+        })
+    return LoweringExplanation(
+        target="gpu",
+        route_selected=route.name if route else None,
+        decisions=raw_decisions,
+        capability_keys=list(route.capability_keys) if route else [],
+    )
+
+
 def _collect_callee_hir_functions(
     hir_function: HIRFunction,
     source: str,

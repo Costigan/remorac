@@ -22,7 +22,7 @@ from remora.codegen import KernelMeta
 from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep
 from remora.gpu_lowering import GPUScaffoldError, _descriptor_load_lines
 from remora.hir import HIRFunction, HIRSort
-from remora.types import ArrayType, FLOAT, INT
+from remora.types import ArrayType, FLOAT, INT, static_dim
 
 BS = 1024
 NEG = -2147483648  # 0x80000000 as i32
@@ -460,7 +460,7 @@ def build_radix_sort_gpu_module(function: HIRFunction, *, kernel_name: str | Non
         _is_int = True
     else:
         raise GPUScaffoldError("radix sort supports f32 and i32 only")
-    N = int(pt.shape[0].value)
+    N = static_dim(pt.shape[0])
     if N <= BS or N > RADIX_MAX_N:
         raise GPUScaffoldError(f"radix sort handles 1024 < N <= {RADIX_MAX_N}")
 

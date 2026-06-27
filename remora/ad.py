@@ -35,7 +35,7 @@ from remora.typechecker import (
     TypedTranspose,
     TypedIm2col,
 )
-from remora.types import FLOAT
+from remora.types import FLOAT, static_dim, static_shape
 
 
 @dataclass
@@ -527,7 +527,7 @@ def _trace_if(
 def _trace_reshape(expr: TypedReshape, env: dict[str, int], tape: EvalTape) -> int:
     array_idx = trace_expr(expr.array, env, tape)
     array = _value(tape, array_idx)
-    output_shape = tuple(int(dim.value) for dim in expr.type.shape)
+    output_shape = static_shape(expr.type)
     return tape.push(
         TapeEntry("reshape", (array_idx,), (array.shape, output_shape)),
         np.asarray(array).reshape(output_shape),
@@ -597,8 +597,8 @@ def _trace_append(expr: TypedAppend, env: dict[str, int], tape: EvalTape) -> int
 def _trace_subarray(expr: TypedSubarray, env: dict[str, int], tape: EvalTape) -> int:
     array_idx = trace_expr(expr.array, env, tape)
     array = _value(tape, array_idx)
-    offsets = tuple(int(o.value) for o in expr.offsets)
-    sizes = tuple(int(s.value) for s in expr.sizes)
+    offsets = static_shape(expr.offsets)
+    sizes = static_shape(expr.sizes)
     slices = tuple(slice(o, o + s) for o, s in zip(offsets, sizes))
     result = np.asarray(array)[slices]
     return tape.push(
@@ -610,7 +610,7 @@ def _trace_subarray(expr: TypedSubarray, env: dict[str, int], tape: EvalTape) ->
 def _trace_rotate(expr: TypedRotate, env: dict[str, int], tape: EvalTape) -> int:
     array_idx = trace_expr(expr.array, env, tape)
     array = _value(tape, array_idx)
-    shift = int(expr.shift.value)
+    shift = static_dim(expr.shift)
     n = np.asarray(array).shape[0]
     result = np.roll(np.asarray(array), -shift, axis=0)
     return tape.push(
@@ -637,9 +637,9 @@ def _trace_im2col(expr, env: dict[str, int], tape: EvalTape) -> int:
     image_idx = trace_expr(expr.image, env, tape)
     image = _value(tape, image_idx)
     ast = expr.expr
-    kh = int(ast.kernel_shape.elements[0].value)
-    kw = int(ast.kernel_shape.elements[1].value)
-    stride = int(ast.stride.value)
+    kh = static_dim(ast.kernel_shape.elements[0])
+    kw = static_dim(ast.kernel_shape.elements[1])
+    stride = static_dim(ast.stride)
     h, w = image.shape
     out_h = (h - kh) // stride + 1
     out_w = (w - kw) // stride + 1

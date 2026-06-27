@@ -186,9 +186,10 @@ class RemoraTypeError(RemoraError):
     """Raised when Dense Core type checking fails."""
 
     def __init__(self, message: str, loc: SourceLoc | None = None):
-        if loc is not None:
-            message = f"{loc.file}:{loc.line}:{loc.col}: {message}"
         super().__init__(message)
+        if loc is not None:
+            from remora.errors import SourceSpan
+            self.located(SourceSpan(file=loc.file, line=loc.line, col=loc.col))
         self.loc = loc
 
 
@@ -222,3 +223,26 @@ def common_numeric_type(left: RemoraType, right: RemoraType) -> ScalarType:
 
 def is_numeric(value_type: RemoraType) -> bool:
     return value_type in (INT, FLOAT, FLOAT64)
+
+
+def static_dim(d: DimExpr | int) -> int:
+    if isinstance(d, int):
+        return d
+    if not hasattr(d, "value"):
+        raise RemoraTypeError(
+            f"expected a static dimension constant, got {type(d).__name__}"
+        )
+    return int(d.value)
+
+
+def static_shape(t: ArrayType | tuple[DimExpr, ...] | list[DimExpr]) -> tuple[int, ...]:
+    shape: tuple[DimExpr, ...] | list[DimExpr]
+    if isinstance(t, ArrayType):
+        shape = t.shape
+    elif isinstance(t, (tuple, list)):
+        shape = t
+    else:
+        raise RemoraTypeError(
+            f"expected an ArrayType or sequence of DimExpr, got {type(t).__name__}"
+        )
+    return tuple(static_dim(d) for d in shape)

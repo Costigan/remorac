@@ -28,7 +28,7 @@ from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep, LoopPla
 from remora.hir import HIRFunction, HIRParam, HIRProgram
 from remora.hir import HIRArrayLit, HIRFold, HIRIota, HIRLit, HIRVar
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
-from remora.types import ArrayType, BOOL, FLOAT64 as _FLOAT64, INT, ScalarType
+from remora.types import ArrayType, BOOL, FLOAT64 as _FLOAT64, INT, ScalarType, static_dim, static_shape
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
@@ -69,6 +69,19 @@ from remora.gpu_lowering import (
 
 class CodegenUnavailable(RemoraError):
     """Raised when PTX generation cannot run with the installed toolchain."""
+
+
+def _gpu_module_to_ptx(
+    gpu_module: Any,
+    *,
+    metas: list[KernelMeta],
+    plan: ExecutionPlan | None,
+    toolchain: PipelineToolchain,
+) -> tuple[str, list[KernelMeta], ExecutionPlan | None]:
+    device_module = extract_gpu_module_body_as_module(gpu_module.text)
+    llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
+    ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
+    return ptx, metas, plan
 
 
 @dataclass(frozen=True)
@@ -165,7 +178,7 @@ def generate_mlir_descriptor_abi_ptx(
         kh, kw = im2col.kernel_shape
         param_type = function.params[0].type
         if isinstance(param_type, ArrayType) and param_type.rank == 2:
-            h, w = int(param_type.shape[0].value), int(param_type.shape[1].value)
+            h, w = static_dim(param_type.shape[0]), static_dim(param_type.shape[1])
             ppa = (h - kh) // im2col.stride + 1
             pc = ppa * ppa
             ps = kh * kw
@@ -181,17 +194,14 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=(pc, ps),
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
 
     # ── try GPU scatter-add ──
     if isinstance(function.body, HIRScatterAdd):
         try:
             gpu_module = build_descriptor_abi_parallel_scatter_add_gpu_module(function, kernel_name=name)
             sa_result = function.body.result_type
-            sa_shape = tuple(int(d.value) for d in sa_result.shape) if isinstance(sa_result, ArrayType) else ()
+            sa_shape = static_shape(sa_result) if isinstance(sa_result, ArrayType) else ()
             sa_N = sa_shape[0] if sa_shape else 1
             num_array = sum(1 for p in function.params if isinstance(p.type, ArrayType))
             num_scalar = sum(1 for p in function.params if not isinstance(p.type, ArrayType))
@@ -206,17 +216,14 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=sa_shape,
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
         try:
             gpu_module = build_descriptor_abi_scatter_add_gpu_module(function, kernel_name=name)
             sa_result = function.body.result_type
-            sa_shape = tuple(int(d.value) for d in sa_result.shape) if isinstance(sa_result, ArrayType) else ()
+            sa_shape = static_shape(sa_result) if isinstance(sa_result, ArrayType) else ()
             num_array = sum(1 for p in function.params if isinstance(p.type, ArrayType))
             num_scalar = sum(1 for p in function.params if not isinstance(p.type, ArrayType))
             meta = KernelMeta(
@@ -230,10 +237,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=sa_shape,
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -243,7 +247,7 @@ def generate_mlir_descriptor_abi_ptx(
             TILE = 16
             gpu_module = build_descriptor_abi_tiled_matmul_gpu_module(function, kernel_name=name, tile_size=TILE)
             mm_result = function.body.result_type
-            mm_shape = tuple(int(d.value) for d in mm_result.shape) if isinstance(mm_result, ArrayType) else ()
+            mm_shape = static_shape(mm_result) if isinstance(mm_result, ArrayType) else ()
             mm_M = mm_shape[0] if len(mm_shape) >= 1 else 1
             mm_N = mm_shape[1] if len(mm_shape) >= 2 else 1
             gridRows = (mm_M + TILE - 1) // TILE
@@ -260,17 +264,14 @@ def generate_mlir_descriptor_abi_ptx(
                 output_dtype="float32",
                 grid_size=gridRows * gridCols,
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
         try:
             gpu_module = build_descriptor_abi_matmul_gpu_module(function, kernel_name=name)
             mm_result = function.body.result_type
-            mm_shape = tuple(int(d.value) for d in mm_result.shape) if isinstance(mm_result, ArrayType) else ()
+            mm_shape = static_shape(mm_result) if isinstance(mm_result, ArrayType) else ()
             meta = KernelMeta(
                 name=name,
                 grid_dims=1,
@@ -282,10 +283,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=mm_shape,
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -313,7 +311,7 @@ def generate_mlir_descriptor_abi_ptx(
                 gpu_module = build_descriptor_abi_bitonic_grade_gpu_module(function, kernel_name=name)
                 out_dtype = "int32"
             sg_result = function.body.result_type
-            sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+            sg_shape = static_shape(sg_result) if isinstance(sg_result, ArrayType) else ()
             sg_N = sg_shape[0] if sg_shape else 1
             sg_NP = 1
             while sg_NP < sg_N:
@@ -324,10 +322,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_elem_types=[out_et],
                 output_shape=sg_shape, output_dtype=out_dtype, grid_size=1,
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -335,7 +330,7 @@ def generate_mlir_descriptor_abi_ptx(
             try:
                 gpu_module = build_descriptor_abi_multiblock_bitonic_sort_gpu_module(function, kernel_name=name)
                 sg_result = function.body.result_type
-                sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+                sg_shape = static_shape(sg_result) if isinstance(sg_result, ArrayType) else ()
                 mb_N = sg_shape[0] if sg_shape else 1
                 mb_NP = 1
                 while mb_NP < mb_N:
@@ -373,10 +368,7 @@ def generate_mlir_descriptor_abi_ptx(
                     output_shape=sg_shape,
                     output_dtype="f32",
                 )
-                device_module = extract_gpu_module_body_as_module(gpu_module.text)
-                llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-                ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-                return ptx, mb_all_kernels, mb_plan
+                return _gpu_module_to_ptx(gpu_module, metas=mb_all_kernels, plan=mb_plan, toolchain=toolchain)
             except GPUScaffoldError:
                 pass
 
@@ -385,7 +377,7 @@ def generate_mlir_descriptor_abi_ptx(
             try:
                 gpu_module = build_descriptor_abi_multiblock_bitonic_grade_gpu_module(function, kernel_name=name)
                 sg_result = function.body.result_type
-                sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+                sg_shape = static_shape(sg_result) if isinstance(sg_result, ArrayType) else ()
                 mg_N = sg_shape[0] if sg_shape else 1
                 mg_NP = 1
                 while mg_NP < mg_N:
@@ -434,10 +426,7 @@ def generate_mlir_descriptor_abi_ptx(
                     output_shape=sg_shape,
                     output_dtype="i32",
                 )
-                device_module = extract_gpu_module_body_as_module(gpu_module.text)
-                llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-                ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-                return ptx, mg_kernels, mg_plan
+                return _gpu_module_to_ptx(gpu_module, metas=mg_kernels, plan=mg_plan, toolchain=toolchain)
             except GPUScaffoldError:
                 pass
 
@@ -449,17 +438,14 @@ def generate_mlir_descriptor_abi_ptx(
                 gpu_module = build_descriptor_abi_grade_gpu_module(function, kernel_name=name)
                 out_dtype = "int32"
             sg_result = function.body.result_type
-            sg_shape = tuple(int(d.value) for d in sg_result.shape) if isinstance(sg_result, ArrayType) else ()
+            sg_shape = static_shape(sg_result) if isinstance(sg_result, ArrayType) else ()
             meta = KernelMeta(
                 name=name, grid_dims=1, block_size=1, num_inputs=1, num_outputs=1,
                 input_elem_types=["f32"],
                 output_elem_types=["f32" if out_dtype == "float32" else "i32"],
                 output_shape=sg_shape, output_dtype=out_dtype,
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -468,7 +454,7 @@ def generate_mlir_descriptor_abi_ptx(
         try:
             gpu_module = build_descriptor_abi_indices_of_gpu_module(function, kernel_name=name)
             io_result = function.body.result_type
-            io_shape = tuple(int(d.value) for d in io_result.shape) if isinstance(io_result, ArrayType) else ()
+            io_shape = static_shape(io_result) if isinstance(io_result, ArrayType) else ()
             meta = KernelMeta(
                 name=name,
                 grid_dims=1,
@@ -480,10 +466,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=io_shape,
                 output_dtype="int32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -491,7 +474,7 @@ def generate_mlir_descriptor_abi_ptx(
     if isinstance(function.body, HIRFilter):
         try:
             gpu_module = build_descriptor_abi_parallel_filter_gpu_module(function, kernel_name=name)
-            f_shape = tuple(int(d.value) for d in function.params[0].type.shape) if isinstance(function.params[0].type, ArrayType) else ()
+            f_shape = static_shape(function.params[0].type) if isinstance(function.params[0].type, ArrayType) else ()
             N = f_shape[0] if f_shape else 1
             pred_name = f"{name}_pred"
             scan_name = f"{name}_scan"
@@ -531,25 +514,19 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=f_shape,
                 output_dtype="f32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, kernels, plan
+            return _gpu_module_to_ptx(gpu_module, metas=kernels, plan=plan, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
         try:
             gpu_module = build_descriptor_abi_filter_gpu_module(function, kernel_name=name)
-            f_shape = tuple(int(d.value) for d in function.params[0].type.shape) if isinstance(function.params[0].type, ArrayType) else ()
+            f_shape = static_shape(function.params[0].type) if isinstance(function.params[0].type, ArrayType) else ()
             meta = KernelMeta(
                 name=name, grid_dims=1, block_size=1, num_inputs=1, num_outputs=1,
                 input_elem_types=["f32"], output_elem_types=["f32"],
                 output_shape=f_shape, output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -557,7 +534,7 @@ def generate_mlir_descriptor_abi_ptx(
     if isinstance(function.body, HIRReplicate):
         try:
             gpu_module = build_descriptor_abi_parallel_replicate_gpu_module(function, kernel_name=name)
-            r_N = int(function.params[1].type.shape[0].value) if isinstance(function.params[1].type, ArrayType) else 0
+            r_N = static_dim(function.params[1].type.shape[0]) if isinstance(function.params[1].type, ArrayType) else 0
             out_N = r_N * r_N
             scan_name_r = f"{name}_scan"
             scatter_name_r = f"{name}_scatter"
@@ -588,25 +565,19 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=(out_N,),
                 output_dtype="f32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, kernels, plan
+            return _gpu_module_to_ptx(gpu_module, metas=kernels, plan=plan, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
         try:
             gpu_module = build_descriptor_abi_replicate_gpu_module(function, kernel_name=name)
-            r_N = int(function.params[1].type.shape[0].value) if isinstance(function.params[1].type, ArrayType) else 0
+            r_N = static_dim(function.params[1].type.shape[0]) if isinstance(function.params[1].type, ArrayType) else 0
             meta = KernelMeta(
                 name=name, grid_dims=1, block_size=1, num_inputs=2, num_outputs=1,
                 input_elem_types=["i32", "f32"], output_elem_types=["f32"],
                 output_shape=(r_N * r_N,), output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
         except GPUScaffoldError:
             pass
 
@@ -618,7 +589,7 @@ def generate_mlir_descriptor_abi_ptx(
         _, (kh, kw), stride = _cell_fold_dot_kernel(function)
         param_type2 = function.params[0].type
         if isinstance(param_type2, ArrayType) and param_type2.rank == 2:
-            h2, w2 = int(param_type2.shape[0].value), int(param_type2.shape[1].value)
+            h2, w2 = static_dim(param_type2.shape[0]), static_dim(param_type2.shape[1])
             ppa2 = (h2 - kh) // stride + 1
             pc2 = ppa2 * ppa2
             gpu_module = build_descriptor_abi_cell_fold_dot_gpu_module(function, kernel_name=name)
@@ -633,10 +604,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=(pc2,),
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
     except GPUScaffoldError:
         pass
 
@@ -679,7 +647,7 @@ def generate_mlir_descriptor_abi_ptx(
         else:
             raise GPUScaffoldError("not a supported view op")
         rt = body.result_type
-        v_shape = tuple(int(d.value) for d in rt.shape) if isinstance(rt, ArrayType) else ()
+        v_shape = static_shape(rt) if isinstance(rt, ArrayType) else ()
         v_total = 1
         for d in v_shape:
             v_total *= d
@@ -691,10 +659,7 @@ def generate_mlir_descriptor_abi_ptx(
             input_elem_types=v_ie, output_elem_types=["f32"],
             output_shape=v_shape, output_dtype="float32",
         )
-        device_module = extract_gpu_module_body_as_module(gpu_module.text)
-        llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-        ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-        return ptx, [meta], None
+        return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
     except (GPUScaffoldError, CodegenUnavailable):
         pass
 
@@ -705,7 +670,7 @@ def generate_mlir_descriptor_abi_ptx(
         _, (kh, kw), stride = _sobel_kernel(function)
         param_type3 = function.params[0].type
         if isinstance(param_type3, ArrayType) and param_type3.rank == 2:
-            h3, w3 = int(param_type3.shape[0].value), int(param_type3.shape[1].value)
+            h3, w3 = static_dim(param_type3.shape[0]), static_dim(param_type3.shape[1])
             ppa3 = (h3 - kh) // stride + 1
             pc3 = ppa3 * ppa3
             gpu_module = build_descriptor_abi_sobel_gpu_module(function, kernel_name=name)
@@ -720,10 +685,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_shape=(pc3,),
                 output_dtype="float32",
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
     except GPUScaffoldError:
         pass
 
@@ -746,9 +708,7 @@ def generate_mlir_descriptor_abi_ptx(
                     "general GPU map requires an array result type"
                 )
 
-            output_shape = tuple(
-                int(d.value) for d in result_type.shape
-            )
+            output_shape = static_shape(result_type)
 
             # Determine input types from function params
             num_array_inputs = sum(
@@ -806,10 +766,7 @@ def generate_mlir_descriptor_abi_ptx(
                 output_dtype=_out_dtype,
                 input_kinds=_kind,
             )
-            device_module = extract_gpu_module_body_as_module(gpu_module.text)
-            llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
-            ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)
-            return ptx, [meta], None
+            return _gpu_module_to_ptx(gpu_module, metas=[meta], plan=None, toolchain=toolchain)
     except (GPUScaffoldError, CodegenUnavailable):
         pass
 
@@ -939,7 +896,7 @@ def generate_mlir_descriptor_abi_ptx(
                             gpu_module = build_descriptor_abi_f32_scan_gpu_module(
                                 function, kernel_name=name, functions=functions,
                             )
-                            scan_shape = tuple(int(d.value) for d in function.params[0].type.shape)
+                            scan_shape = static_shape(function.params[0].type)
                             _num_inputs = len(function.params)
                             _scan_elem_types: list[str] = []
                             _scan_kinds: list[str] = []
@@ -979,10 +936,7 @@ def generate_mlir_descriptor_abi_ptx(
                                     output_shape=sc_shape,
                                     output_dtype="f32",
                                 )
-                                mb_dev = extract_gpu_module_body_as_module(mb_module.text)
-                                mb_ir = translate_mlir_to_llvmir(mb_dev, toolchain=toolchain)
-                                mb_ptx = translate_llvmir_to_nvptx_text(mb_ir, toolchain=toolchain)
-                                return mb_ptx, mb_kernels, mb_plan
+                                return _gpu_module_to_ptx(mb_module, metas=mb_kernels, plan=mb_plan, toolchain=toolchain)
                             except GPUScaffoldError:
                                 pass
                             try:
@@ -1000,9 +954,7 @@ def generate_mlir_descriptor_abi_ptx(
                                     raise CodegenUnavailable(
                                         "general GPU map fallback requires an array result type"
                                     )
-                                output_shape2 = tuple(
-                                    int(d.value) for d in result_type2.shape
-                                )
+                                output_shape2 = static_shape(result_type2)
                                 num_array_inputs2 = sum(
                                     1 for p in function.params
                                     if isinstance(p.type, ArrayType)
@@ -1236,7 +1188,7 @@ def try_compile_state_fold_gpu(
     result_type = fold.result_type
     if not isinstance(result_type, ArrayType):
         return None
-    shape = tuple(int(d.value) for d in result_type.shape)
+    shape = static_shape(result_type)
     if result_type.rank != 1:
         return None
 
@@ -1251,7 +1203,7 @@ def try_compile_state_fold_gpu(
     else:
         return None
 
-    N = int(fold.array.size.value)
+    N = static_dim(fold.array.size)
 
     step_func = HIRFunction(
         name="__gpu_fold_step",

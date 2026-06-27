@@ -9,7 +9,7 @@ import numpy as np
 
 from remora.ad import EvalTape
 from remora.ast_nodes import FuncDef
-from remora.types import ArrayType, FLOAT, RemoraType, ScalarType, StaticDim
+from remora.types import ArrayType, FLOAT, RemoraType, ScalarType, StaticDim, static_shape
 
 
 Shape = tuple[int, ...]
@@ -775,7 +775,7 @@ def _validate_example_input(param_type: RemoraType, example_input: np.ndarray) -
     if isinstance(param_type, ArrayType) and param_type.element == FLOAT:
         if not all(isinstance(dim, StaticDim) for dim in param_type.shape):
             raise ValueError("gradient source requires a concrete parameter shape")
-        expected = tuple(int(dim.value) for dim in param_type.shape)
+        expected = static_shape(param_type)
         if shape != expected:
             raise ValueError(
                 f"example input shape {shape} does not match parameter shape {expected}"
@@ -793,7 +793,7 @@ def _placeholder_input(param_type: RemoraType) -> np.ndarray:
     if isinstance(param_type, ArrayType) and param_type.element == FLOAT:
         if not all(isinstance(dim, StaticDim) for dim in param_type.shape):
             raise ValueError("gradient source requires a concrete parameter shape")
-        shape = tuple(int(dim.value) for dim in param_type.shape)
+        shape = static_shape(param_type)
         return np.ones(shape, dtype=np.float64)
     raise ValueError("gradient source requires a scalar or array Float parameter")
 
