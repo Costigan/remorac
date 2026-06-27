@@ -557,7 +557,9 @@ return arrays.
 ### GPU recursion
 
 GPU supports a narrower subset: scalar tail-recursive helper functions used inside a
-`map`. The recursive call must be in tail position.
+`map`. Self-recursive helpers and mutually recursive helper groups lower to a
+per-thread state machine when every recursive call in the group is in tail
+position.
 
 ```lisp
 (define/pi ()
@@ -569,8 +571,19 @@ GPU supports a narrower subset: scalar tail-recursive helper functions used insi
   (map (lambda (x) (sum_to x 0.0)) xs))
 ```
 
-This works for `Float`, `Int`, and `Bool` helpers. Non-tail recursion, mutual
-recursion, and array-returning recursive helpers are rejected on GPU.
+This works for `Float`, `Int`, and `Bool` helpers. Tail-recursive helpers (self
+or mutual) are now also threaded through higher-order step functions:
+
+- `scan` step functions on the single-block `f32` path, and
+- serial rank-1 `f32` `fold`/`reduce`/`fold-right` step functions (an inline
+  `lambda` taking an accumulator and an element, with a literal `f32`
+  initializer over a direct rank-1 `f32` array parameter).
+
+Non-tail recursion, array-parameter recursive helpers, and array-returning
+recursive helpers are still rejected on GPU. The compound `fold` path is
+deliberately conservative: it runs serially on a single thread and is limited to
+rank-1 `f32` inputs and scalar `f32` results; other shapes/dtypes fall back to
+the existing reduction/scan paths or are rejected loudly.
 
 ## Automatic Differentiation
 

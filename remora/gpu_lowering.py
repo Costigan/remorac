@@ -21,7 +21,7 @@ from remora._gpu_map_support import (
     analyze_supported_i32_map_function,
 )
 from remora.errors import RemoraError
-from remora.hir import HIRFold, HIRFoldRight, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRVar
+from remora.hir import HIRFold, HIRFoldRight, HIRFunction, HIRLambda, HIRLit, HIRMap, HIRPrimCallable, HIRReduce, HIRVar
 from remora.hir import HIRApply
 from remora.hir import HIRAppend, HIRDrop, HIRFilter, HIRIndicesOf, HIRIota, HIRMatmul, HIRRavel, HIRReplicate, HIRReshape, HIRReverse, HIRRotate, HIRScatterAdd, HIRSort, HIRGrade, HIRSubarray, HIRTake, HIRTranspose, HIRWithShape
 from remora.operators import arith_op, llvm_op
@@ -562,6 +562,7 @@ def build_descriptor_abi_f32_scan_gpu_module(
     *,
     module_name: str = "remora_gpu",
     kernel_name: str | None = None,
+    functions: dict | None = None,
 ) -> GPUModuleScaffold:
     """Build a descriptor-ABI GPU module for f32 scan (prefix-sum).
 
@@ -669,6 +670,7 @@ def build_descriptor_abi_f32_scan_gpu_module(
                 _scan_lambda.params[1].name: _x_map,
             },
             context="scan compound body",
+            functions=functions,
         )
         # Force serial path for compound bodies
         _use_serial = True
@@ -2561,6 +2563,117 @@ def _f32_reduction_kernel(function: HIRFunction) -> F32ReductionKernel:
         )
 
     raise GPUScaffoldError("descriptor ABI GPU reduction input must be a parameter or binary map over parameters")
+
+
+def build_descriptor_abi_f32_compound_fold_gpu_module(
+    function: HIRFunction,
+    *,
+    module_name: str = "remora_gpu",
+    kernel_name: str | None = None,
+    functions: dict | None = None,
+) -> GPUModuleScaffold:
+    """Build a serial rank-1 f32 fold kernel for an arbitrary lambda step."""
+    fold = function.body
+    if not isinstance(fold, (HIRFold, HIRReduce, HIRFoldRight)):
+        raise GPUScaffoldError("GPU compound fold builder requires a fold body")
+    if not isinstance(fold.func, HIRLambda):
+        raise GPUScaffoldError("GPU compound fold requires an inline lambda callable")
+    if len(fold.func.params) != 2:
+        raise GPUScaffoldError("GPU compound fold lambda must take accumulator and element")
+    if function.return_type != FLOAT or fold.result_type != FLOAT:
+        raise GPUScaffoldError("GPU compound fold currently supports f32 scalar results only")
+    if not isinstance(fold.init, HIRLit) or fold.init.type != FLOAT:
+        raise GPUScaffoldError("GPU compound fold requires a literal f32 initializer")
+    if not isinstance(fold.array, HIRVar):
+        raise GPUScaffoldError("GPU compound fold currently requires a direct array parameter")
+    if len(function.params) != 1 or function.params[0].name != fold.array.name:
+        raise GPUScaffoldError("GPU compound fold input must be the function parameter")
+    param_type = function.params[0].type
+    if not (
+        isinstance(param_type, ArrayType)
+        and param_type.element == FLOAT
+        and param_type.rank == 1
+    ):
+        raise GPUScaffoldError("GPU compound fold currently supports rank-1 f32 inputs only")
+
+    N = int(param_type.shape[0].value)
+    name = kernel_name or f"remora_{function.name}_f32_fold"
+    _validate_scaffold_names(module_name, name)
+
+    from remora._gpu_expr_lowering import gpu_expr_from_hir as _gfeh
+
+    step_expr = _gfeh(
+        fold.func.body,
+        input_map={function.params[0].name: 0},
+        scalar_env={},
+        coords=["%sf_idx_i32"],
+        coord_map={
+            fold.func.params[0].name: "%sf_acc",
+            fold.func.params[1].name: "%sf_elem",
+        },
+        context="fold compound body",
+        functions=functions,
+    )
+
+    expr_lines: list[str] = []
+    expr_env = {
+        "%sf_idx": "%sf_idx",
+        "%sf_idx_i32": "%sf_idx_i32",
+        "%sf_acc": "%sf_acc",
+        "%sf_elem": "%sf_elem",
+    }
+    step_ssa = _gpu_emit_expr(step_expr, expr_lines, expr_env, temp_counter=2000)
+    if isinstance(step_ssa, list):
+        raise GPUScaffoldError("GPU compound fold lambda must return a scalar")
+
+    desc_lines = _descriptor_load_lines("in0", "%input_desc", 1)
+    desc_lines.extend(_descriptor_load_lines("out", "%output_desc", 0))
+    init = f"{float(fold.init.value):.6e}"
+    idx_expr = "llvm.sub %sf_Nm1, %sf_i" if isinstance(fold, HIRFoldRight) else "llvm.add %sf_i, %sf_c0"
+    expr_text = "\n".join(expr_lines)
+
+    text = f"""module {{
+  gpu.module @{module_name} {{
+    llvm.func @{name}(%input_desc: !llvm.ptr, %output_desc: !llvm.ptr) attributes {{gpu.kernel, nvvm.kernel}} {{
+{chr(10).join(desc_lines)}
+      %sf_tid32 = nvvm.read.ptx.sreg.tid.x : i32
+      %sf_tid = llvm.sext %sf_tid32 : i32 to i64
+      %sf_c0 = llvm.mlir.constant(0 : index) : i64
+      %sf_is_t0 = llvm.icmp "eq" %sf_tid, %sf_c0 : i64
+      llvm.cond_br %sf_is_t0, ^sf_work, ^sf_done
+
+    ^sf_work:
+      %sf_N = llvm.mlir.constant({N} : index) : i64
+      %sf_Nm1 = llvm.mlir.constant({N - 1} : index) : i64
+      %sf_c1 = llvm.mlir.constant(1 : index) : i64
+      %sf_init = llvm.mlir.constant({init} : f32) : f32
+      llvm.br ^sf_loop(%sf_c0, %sf_init : i64, f32)
+
+    ^sf_loop(%sf_i: i64, %sf_acc: f32):
+      %sf_done_cond = llvm.icmp "uge" %sf_i, %sf_N : i64
+      llvm.cond_br %sf_done_cond, ^sf_store, ^sf_body
+
+    ^sf_body:
+      %sf_idx = {idx_expr}  : i64
+      %sf_idx_i32 = llvm.trunc %sf_idx : i64 to i32
+      %sf_si = llvm.add %in0_offset, %sf_idx  : i64
+      %sf_sp = llvm.getelementptr %in0_aligned[%sf_si] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      %sf_elem = llvm.load %sf_sp : !llvm.ptr -> f32
+{expr_text}
+      %sf_ni = llvm.add %sf_i, %sf_c1 : i64
+      llvm.br ^sf_loop(%sf_ni, {step_ssa} : i64, f32)
+
+    ^sf_store:
+      %sf_out_ptr = llvm.getelementptr %out_aligned[%out_offset] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+      llvm.store %sf_acc, %sf_out_ptr : f32, !llvm.ptr
+      llvm.br ^sf_done
+
+    ^sf_done:
+      llvm.return
+    }}
+  }}
+}}"""
+    return GPUModuleScaffold(text, module_name, name)
 
 
 def _require_rank1_f32_param(param_type: object) -> ArrayType:
@@ -5705,6 +5818,7 @@ def _gpu_emit_expr(
         GpuSelect,
         _GpuLetExpr,
         _GpuTailLoop,
+        _GpuTailStateMachine,
     )
 
     def _fresh() -> str:
@@ -5911,6 +6025,9 @@ def _gpu_emit_expr(
         # _GpuTailLoop (Phase 6.4): tail-recursive scf.for loop
         if isinstance(expr, _GpuTailLoop):
             return _emit_tail_loop(expr, env)
+
+        if isinstance(expr, _GpuTailStateMachine):
+            return _emit_tail_state_machine(expr, env)
 
         # GpuArrayExpr: emit all components, return list of SSA names
         if isinstance(expr, GpuArrayExpr):
@@ -6479,6 +6596,121 @@ def _gpu_emit_expr(
         for k in range(K):
             done_env[expr.param_names[k]] = done_ssas[k]
         return emit(expr.result_expr, done_env)
+
+    def _emit_tail_state_machine(expr: _GpuTailStateMachine, env: dict[str, str]) -> str:
+        """Emit an LLVM-block state machine for a scalar tail-recursive SCC."""
+
+        def zero_value(typ: str) -> str:
+            ssa = _fresh_ssa()
+            if typ in {"f32", "f64"}:
+                lines.append(f"      {ssa} = llvm.mlir.constant(0.000000e+00 : {typ}) : {typ}")
+            elif typ == "i1":
+                lines.append(f"      {ssa} = llvm.mlir.constant(0 : i1) : i1")
+            else:
+                lines.append(f"      {ssa} = llvm.mlir.constant(0 : {typ}) : {typ}")
+            return ssa
+
+        slot_names = [name for name, _typ in expr.slots]
+        slot_types = [typ for _name, typ in expr.slots]
+        init_by_slot: dict[str, str] = {}
+        init_args = [emit(arg, env) for arg in expr.init_args]
+        init_fn = next(step for step in expr.steps if step.name == expr.init_target)
+        for param_name, arg_ssa in zip(init_fn.param_names, init_args):
+            init_by_slot[f"{expr.init_target}.{param_name}"] = arg_ssa
+
+        init_tag = _fresh_ssa()
+        lines.append(
+            f"      {init_tag} = llvm.mlir.constant({expr.tags[expr.init_target]} : i32) : i32"
+        )
+        init_result = zero_value(expr.result_type)
+        init_slots = [
+            init_by_slot.get(slot_name) or zero_value(slot_type)
+            for slot_name, slot_type in expr.slots
+        ]
+
+        blk = _fresh_block()
+        loop_label = f"{blk}_loop"
+        dispatch_label = f"{blk}_dispatch"
+        done_label = f"{blk}_done"
+        state_types = ["i32", expr.result_type] + slot_types
+        state_values = [init_tag, init_result] + init_slots
+        lines.append(
+            f"      llvm.br ^{loop_label}({', '.join(state_values)} : {', '.join(state_types)})"
+        )
+
+        tag_ssa = _fresh_ssa()
+        result_ssa = _fresh_ssa()
+        slot_ssas = [_fresh_ssa() for _ in expr.slots]
+        state_params = [f"{tag_ssa}: i32", f"{result_ssa}: {expr.result_type}"]
+        state_params.extend(
+            f"{slot_ssas[i]}: {slot_types[i]}" for i in range(len(slot_ssas))
+        )
+        lines.append(f"    ^{loop_label}({', '.join(state_params)}):")
+        done_tag = _fresh_ssa()
+        done_cond = _fresh_ssa()
+        lines.append(f"      {done_tag} = llvm.mlir.constant(-1 : i32) : i32")
+        lines.append(f'      {done_cond} = llvm.icmp "eq" {tag_ssa}, {done_tag} : i32')
+        lines.append(
+            f"      llvm.cond_br {done_cond}, ^{done_label}({result_ssa} : {expr.result_type}), ^{dispatch_label}"
+        )
+
+        lines.append(f"    ^{dispatch_label}:")
+        fallback_label = f"{blk}_bad_tag"
+        check_label = dispatch_label
+        for index, step in enumerate(expr.steps):
+            step_label = f"{blk}_step_{step.name}"
+            next_label = f"{blk}_dispatch_{index}" if index < len(expr.steps) - 1 else fallback_label
+            tag_const = _fresh_ssa()
+            tag_match = _fresh_ssa()
+            lines.append(f"      {tag_const} = llvm.mlir.constant({expr.tags[step.name]} : i32) : i32")
+            lines.append(f'      {tag_match} = llvm.icmp "eq" {tag_ssa}, {tag_const} : i32')
+            lines.append(f"      llvm.cond_br {tag_match}, ^{step_label}, ^{next_label}")
+            lines.append(f"    ^{next_label}:")
+            check_label = next_label
+
+        lines.append(
+            f"      llvm.br ^{done_label}({result_ssa} : {expr.result_type})"
+        )
+
+        slot_index = {slot_name: i for i, slot_name in enumerate(slot_names)}
+        for step in expr.steps:
+            step_label = f"{blk}_step_{step.name}"
+            tail_label = f"{blk}_tail_{step.name}"
+            finish_label = f"{blk}_finish_{step.name}"
+            lines.append(f"    ^{step_label}:")
+            step_env = dict(env)
+            for param_name in step.param_names:
+                idx = slot_index[f"{step.name}.{param_name}"]
+                step_env[param_name] = slot_ssas[idx]
+            cond_ssa = emit(step.condition_expr, step_env)
+            lines.append(f"      llvm.cond_br {cond_ssa}, ^{finish_label}, ^{tail_label}")
+
+            lines.append(f"    ^{finish_label}:")
+            final_value = emit(step.result_expr, step_env)
+            final_tag = _fresh_ssa()
+            lines.append(f"      {final_tag} = llvm.mlir.constant(-1 : i32) : i32")
+            lines.append(
+                f"      llvm.br ^{loop_label}({', '.join([final_tag, final_value] + slot_ssas)} : {', '.join(state_types)})"
+            )
+
+            lines.append(f"    ^{tail_label}:")
+            tail_ssas = [emit(arg, step_env) for arg in step.tail_args]
+            next_tag = _fresh_ssa()
+            lines.append(
+                f"      {next_tag} = llvm.mlir.constant({expr.tags[step.tail_target]} : i32) : i32"
+            )
+            next_slots = list(slot_ssas)
+            target_step = next(s for s in expr.steps if s.name == step.tail_target)
+            for param_name, arg_ssa in zip(target_step.param_names, tail_ssas):
+                idx = slot_index[f"{step.tail_target}.{param_name}"]
+                next_slots[idx] = arg_ssa
+            lines.append(
+                f"      llvm.br ^{loop_label}({', '.join([next_tag, result_ssa] + next_slots)} : {', '.join(state_types)})"
+            )
+
+        final_result = _fresh_ssa()
+        lines.append(f"    ^{done_label}({final_result}: {expr.result_type}):")
+        return final_result
 
     result = emit(expr, env)
     return result

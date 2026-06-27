@@ -3,6 +3,36 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## GPU Tail-Recursive SCC Lowering (June 2026)
+
+Started the GPU plan for full tail-recursive higher-order callables.
+
+- Replaced the GPU map-only self-recursion special case with scalar recursive
+  SCC detection in the GPU expression lowering path.
+- Added a per-thread LLVM-block state machine for supported scalar
+  tail-recursive helper groups, including mutual recursion, used from GPU map
+  bodies.
+- Kept unsupported recursive GPU helpers loud: non-tail recursion and
+  recursive helpers with array parameters still raise recursion-specific
+  `CodegenUnavailable`/`GPUScaffoldError` failures.
+- Added a CPU-only lowering unit test for mutual scalar tail recursion and a
+  GPU compile/parity case for mutual tail recursion in a map body.
+- Threaded tail-recursive helper groups (self and mutual) through GPU
+  higher-order step functions: the single-block `f32` `scan` builder and a new
+  serial rank-1 `f32` `fold` builder
+  (`build_descriptor_abi_f32_compound_fold_gpu_module`) now pass the function
+  table into GPU expression lowering. Added GPU numeric-parity tests for a
+  tail-recursive helper used as a `scan` step (self and mutual) and as a `fold`
+  step.
+- Repaired the `codegen.py` GPU fallback cascade: the general-map fallback now
+  imports `ScalarType`/`INT`/`BOOL`/`FLOAT64`, and the final fallback re-raises
+  the recursion-specific `"GPU recursion supports ..."` message verbatim instead
+  of masking it behind the combined builder-error summary.
+- Remaining GPU gaps after this slice: non-tail recursion, array-parameter
+  recursive helpers, and array-returning recursive helpers are still rejected
+  loudly; the compound `fold` path is serial (single-thread), rank-1, and `f32`
+  only.
+
 ## CPU Tail-Recursion Optimization (June 2026)
 
 Implemented stack-safe CPU lowering for scalar tail-recursive function groups.

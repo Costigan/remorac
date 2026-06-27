@@ -28,7 +28,7 @@ from remora.execution_plan import BufferSpec, ExecutionPlan, KernelStep, LoopPla
 from remora.hir import HIRFunction, HIRParam, HIRProgram
 from remora.hir import HIRArrayLit, HIRFold, HIRIota, HIRLit, HIRVar
 from remora.hir import HIRFilter, HIRIndicesOf, HIRMatmul, HIRReplicate, HIRScatterAdd, HIRSort, HIRGrade
-from remora.types import ArrayType
+from remora.types import ArrayType, BOOL, FLOAT64 as _FLOAT64, INT, ScalarType
 from remora.pipeline import (
     PipelineToolchain,
     detect_toolchain,
@@ -42,6 +42,7 @@ from remora.gpu_lowering import (
     build_descriptor_abi_bool_map_gpu_module,
     build_descriptor_abi_cell_fold_dot_gpu_module,
     build_descriptor_abi_f32_map_gpu_module,
+    build_descriptor_abi_f32_compound_fold_gpu_module,
     build_descriptor_abi_f32_reduction_gpu_module,
     build_descriptor_abi_f32_scan_gpu_module,
     build_descriptor_abi_filter_gpu_module,
@@ -918,198 +919,154 @@ def generate_mlir_descriptor_abi_ptx(
                     )
                 except GPUScaffoldError as reduction_error:
                     try:
-                        gpu_module = build_descriptor_abi_f32_scan_gpu_module(function, kernel_name=name)
-                        scan_shape = tuple(int(d.value) for d in function.params[0].type.shape)
-                        _num_inputs = len(function.params)
-                        _scan_elem_types: list[str] = []
-                        _scan_kinds: list[str] = []
-                        for p in function.params:
-                            _scan_kinds.append("array")
-                            if isinstance(p.type, ArrayType):
-                                en = p.type.element.name
-                                _scan_elem_types.append("f32" if en == "float" else "i1" if en == "bool" else "f32")
-                            else:
-                                _scan_elem_types.append("f32")
-                        _out_ename = function.params[0].type.element.name if isinstance(function.params[0].type, ArrayType) else "float"
-                        _out_et = ("f32" if _out_ename == "float" else "i1" if _out_ename == "bool"
-                                   else "i32" if _out_ename == "int" else "f64" if _out_ename == "float64"
-                                   else "f32")
-                        _out_dt = ("float32" if _out_ename == "float" else "bool" if _out_ename == "bool"
-                                   else "int32" if _out_ename == "int" else "float64" if _out_ename == "float64"
-                                   else "float32")
+                        gpu_module = build_descriptor_abi_f32_compound_fold_gpu_module(
+                            function, kernel_name=name, functions=functions,
+                        )
                         meta = KernelMeta(
                             name=name,
                             grid_dims=1,
-                            block_size=scan_shape[0],
-                            num_inputs=_num_inputs,
+                            block_size=1,
+                            num_inputs=1,
                             num_outputs=1,
-                            input_elem_types=_scan_elem_types,
-                            output_elem_types=[_out_et],
-                            output_shape=scan_shape,
-                            output_dtype=_out_dt,
-                            input_kinds=_scan_kinds,
+                            input_elem_types=["f32"],
+                            output_elem_types=["f32"],
+                            output_shape=(),
+                            output_dtype="float32",
+                            is_reduction=True,
                         )
-                    except GPUScaffoldError as scan_error:
+                    except GPUScaffoldError as compound_fold_error:
                         try:
-                            mb_module = build_descriptor_abi_multiblock_f32_scan_gpu_module(function, kernel_name=name)
-                            sc_shape = tuple(int(d.value) for d in function.params[0].type.shape)
-                            sc_N = sc_shape[0]
-                            sc_BS = 1024
-                            sc_NB = (sc_N + sc_BS - 1) // sc_BS
-                            sc_local = f"{name}_local"
-                            sc_extract = f"{name}_extract"
-                            sc_sums = f"{name}_sums"
-                            sc_prop = f"{name}_propagate"
-                            mb_kernels = [
-                                KernelMeta(name=sc_local, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
-                                           input_elem_types=["f32"], output_elem_types=["f32"],
-                                           output_shape=sc_shape, output_dtype="float32", grid_size=sc_NB),
-                                KernelMeta(name=sc_extract, grid_dims=1, block_size=sc_NB, num_inputs=1, num_outputs=1,
-                                           input_elem_types=["f32"], output_elem_types=["f32"],
-                                           output_shape=(sc_NB,), output_dtype="float32", grid_size=1),
-                                KernelMeta(name=sc_sums, grid_dims=1, block_size=sc_NB, num_inputs=1, num_outputs=1,
-                                           input_elem_types=["f32"], output_elem_types=["f32"],
-                                           output_shape=(sc_NB,), output_dtype="float32", grid_size=1),
-                                KernelMeta(name=sc_prop, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
-                                           input_elem_types=["f32"], output_elem_types=["f32"],
-                                           output_shape=sc_shape, output_dtype="float32", grid_size=sc_NB),
-                            ]
-                            mb_buffers = [
-                                BufferSpec("scanned", sc_shape, "f32"),
-                                BufferSpec("block_sums", (sc_NB,), "f32"),
-                                BufferSpec("block_prefix", (sc_NB,), "f32"),
-                            ]
-                            mb_steps = [
-                                KernelStep(sc_local, ["input_0"], "scanned"),
-                                KernelStep(sc_extract, ["scanned"], "block_sums"),
-                                KernelStep(sc_sums, ["block_sums"], "block_prefix"),
-                                KernelStep(sc_prop, ["block_prefix"], "scanned"),
-                            ]
-                            # If level-2 (recursive) kernels exist, add them
-                            _l2_text = mb_module.text
-                            if "_l2_local" in _l2_text:
-                                l2_local = f"{name}_l2_local"
-                                l2_extract = f"{name}_l2_extract"
-                                l2_sums = f"{name}_l2_sums"
-                                l2_prop = f"{name}_l2_prop"
-                                sc_L2_NB = (sc_NB + sc_BS - 1) // sc_BS
-                                mb_kernels.extend([
-                                    KernelMeta(name=l2_local, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
-                                               input_elem_types=["f32"], output_elem_types=["f32"],
-                                               output_shape=(sc_NB,), output_dtype="float32", grid_size=sc_L2_NB),
-                                    KernelMeta(name=l2_extract, grid_dims=1, block_size=sc_L2_NB, num_inputs=1, num_outputs=1,
-                                               input_elem_types=["f32"], output_elem_types=["f32"],
-                                               output_shape=(sc_L2_NB,), output_dtype="float32", grid_size=1),
-                                    KernelMeta(name=l2_sums, grid_dims=1, block_size=sc_L2_NB, num_inputs=1, num_outputs=1,
-                                               input_elem_types=["f32"], output_elem_types=["f32"],
-                                               output_shape=(sc_L2_NB,), output_dtype="float32", grid_size=1),
-                                    KernelMeta(name=l2_prop, grid_dims=1, block_size=sc_BS, num_inputs=1, num_outputs=1,
-                                               input_elem_types=["f32"], output_elem_types=["f32"],
-                                               output_shape=(sc_NB,), output_dtype="float32", grid_size=sc_L2_NB),
-                                ])
-                                mb_buffers.extend([
-                                    BufferSpec("l2_scanned", (sc_NB,), "f32"),
-                                    BufferSpec("l2_sums", (sc_L2_NB,), "f32"),
-                                    BufferSpec("l2_prefix", (sc_L2_NB,), "f32"),
-                                ])
-                                # Replace scan_sums step with the 4-kernel L2 plan
-                                mb_steps = [
-                                    KernelStep(sc_local, ["input_0"], "scanned"),
-                                    KernelStep(sc_extract, ["scanned"], "block_sums"),
-                                    KernelStep(l2_local, ["block_sums"], "l2_scanned"),
-                                    KernelStep(l2_extract, ["l2_scanned"], "l2_sums"),
-                                    KernelStep(l2_sums, ["l2_sums"], "l2_prefix"),
-                                    KernelStep(l2_prop, ["l2_prefix"], "l2_scanned"),
-                                    KernelStep(sc_prop, ["l2_scanned"], "scanned"),
-                                ]
-                            mb_plan = ExecutionPlan(
-                                buffers=mb_buffers,
-                                steps=mb_steps,
-                                final_output="scanned",
-                                output_shape=sc_shape,
-                                output_dtype="f32",
-                            )
-                            mb_dev = extract_gpu_module_body_as_module(mb_module.text)
-                            mb_ir = translate_mlir_to_llvmir(mb_dev, toolchain=toolchain)
-                            mb_ptx = translate_llvmir_to_nvptx_text(mb_ir, toolchain=toolchain)
-                            return mb_ptx, mb_kernels, mb_plan
-                        except GPUScaffoldError:
-                            pass
-                        try:
-                            from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2, HIRApply as _HIRApply2
-                            if not isinstance(function.body, (_HIRMap2, _HIRApply2)):
-                                raise CodegenUnavailable(
-                                    "general GPU fallback requires a HIRMap with HIRLambda"
-                                )
-                            gpu_module = build_descriptor_abi_general_map_gpu_module(
+                            gpu_module = build_descriptor_abi_f32_scan_gpu_module(
                                 function, kernel_name=name, functions=functions,
                             )
-                            body_map2 = function.body
-                            result_type2 = body_map2.result_type
-                            if not isinstance(result_type2, ArrayType):
-                                raise CodegenUnavailable(
-                                    "general GPU map fallback requires an array result type"
-                                )
-                            output_shape2 = tuple(
-                                int(d.value) for d in result_type2.shape
-                            )
-                            num_array_inputs2 = sum(
-                                1 for p in function.params
-                                if isinstance(p.type, ArrayType)
-                            )
-                            num_scalar_inputs2 = sum(
-                                1 for p in function.params
-                                if not isinstance(p.type, ArrayType)
-                            )
-                            input_elem_types2: list[str] = []
-                            for param in function.params:
-                                if isinstance(param.type, ArrayType):
-                                    elem = param.type.element.name
-                                    if elem == "float":
-                                        input_elem_types2.append("f32")
-                                    elif elem == "float64":
-                                        input_elem_types2.append("f64")
-                                    elif elem == "int":
-                                        input_elem_types2.append("i32")
-                                    elif elem == "bool":
-                                        input_elem_types2.append("i1")
-                                    else:
-                                        input_elem_types2.append("f32")
+                            scan_shape = tuple(int(d.value) for d in function.params[0].type.shape)
+                            _num_inputs = len(function.params)
+                            _scan_elem_types: list[str] = []
+                            _scan_kinds: list[str] = []
+                            for p in function.params:
+                                _scan_kinds.append("array")
+                                if isinstance(p.type, ArrayType):
+                                    en = p.type.element.name
+                                    _scan_elem_types.append("f32" if en == "float" else "i1" if en == "bool" else "f32")
                                 else:
-                                    input_elem_types2.append("f32")
-                            _out_elem_name2 = getattr(result_type2.element, "name", "float")
-                            if _out_elem_name2 == "int":
-                                _out_et2, _out_dtype2 = "i32", "int32"
-                            elif _out_elem_name2 == "bool":
-                                _out_et2, _out_dtype2 = "i8", "bool"
-                            elif _out_elem_name2 == "float64":
-                                _out_et2, _out_dtype2 = "f64", "float64"
-                            else:
-                                _out_et2, _out_dtype2 = "f32", "float32"
-                            _kind2: list[str] = []
-                            for param2 in function.params:
-                                _kind2.append("array" if isinstance(param2.type, ArrayType) else "scalar")
-                            _total2 = 1
-                            for d in output_shape2:
-                                _total2 *= d
+                                    _scan_elem_types.append("f32")
+                            _out_ename = function.params[0].type.element.name if isinstance(function.params[0].type, ArrayType) else "float"
+                            _out_et = ("f32" if _out_ename == "float" else "i1" if _out_ename == "bool"
+                                       else "i32" if _out_ename == "int" else "f64" if _out_ename == "float64"
+                                       else "f32")
+                            _out_dt = ("float32" if _out_ename == "float" else "bool" if _out_ename == "bool"
+                                       else "int32" if _out_ename == "int" else "float64" if _out_ename == "float64"
+                                       else "float32")
                             meta = KernelMeta(
                                 name=name,
                                 grid_dims=1,
-                                block_size=max(1, min(_total2, 1024)),
-                                num_inputs=num_array_inputs2 + num_scalar_inputs2,
+                                block_size=scan_shape[0],
+                                num_inputs=_num_inputs,
                                 num_outputs=1,
-                                input_elem_types=input_elem_types2,
-                                output_elem_types=[_out_et2],
-                                output_shape=output_shape2,
-                                output_dtype=_out_dtype2,
-                                input_kinds=_kind2,
+                                input_elem_types=_scan_elem_types,
+                                output_elem_types=[_out_et],
+                                output_shape=scan_shape,
+                                output_dtype=_out_dt,
+                                input_kinds=_scan_kinds,
                             )
-                        except (GPUScaffoldError, CodegenUnavailable) as general_error:
-                            general_message = str(general_error)
-                            if "GPU recursion supports" in general_message:
-                                raise CodegenUnavailable(general_message) from general_error
-                            raise CodegenUnavailable(str(bool_map_error)) from general_error
-
+                        except GPUScaffoldError as scan_error:
+                            try:
+                                mb_module, mb_kernels, mb_buffers, mb_steps, sc_shape = build_descriptor_abi_multiblock_f32_scan_gpu_module(function, kernel_name=name)
+                                mb_plan = ExecutionPlan(
+                                    buffers=mb_buffers,
+                                    steps=mb_steps,
+                                    final_output="scanned",
+                                    output_shape=sc_shape,
+                                    output_dtype="f32",
+                                )
+                                mb_dev = extract_gpu_module_body_as_module(mb_module.text)
+                                mb_ir = translate_mlir_to_llvmir(mb_dev, toolchain=toolchain)
+                                mb_ptx = translate_llvmir_to_nvptx_text(mb_ir, toolchain=toolchain)
+                                return mb_ptx, mb_kernels, mb_plan
+                            except GPUScaffoldError:
+                                pass
+                            try:
+                                from remora.hir import HIRLambda as _HIRLambda2, HIRMap as _HIRMap2, HIRApply as _HIRApply2
+                                if not isinstance(function.body, (_HIRMap2, _HIRApply2)):
+                                    raise CodegenUnavailable(
+                                        "general GPU fallback requires a HIRMap with HIRLambda"
+                                    )
+                                gpu_module = build_descriptor_abi_general_map_gpu_module(
+                                    function, kernel_name=name, functions=functions,
+                                )
+                                body_map2 = function.body
+                                result_type2 = body_map2.result_type
+                                if not isinstance(result_type2, ArrayType):
+                                    raise CodegenUnavailable(
+                                        "general GPU map fallback requires an array result type"
+                                    )
+                                output_shape2 = tuple(
+                                    int(d.value) for d in result_type2.shape
+                                )
+                                num_array_inputs2 = sum(
+                                    1 for p in function.params
+                                    if isinstance(p.type, ArrayType)
+                                )
+                                num_scalar_inputs2 = sum(
+                                    1 for p in function.params
+                                    if isinstance(p.type, ScalarType)
+                                )
+                                _input_types2: list[str] = []
+                                _input_kinds2: list[str] = []
+                                for p in function.params:
+                                    if isinstance(p.type, ArrayType):
+                                        _input_kinds2.append("array")
+                                        if p.type.element == INT:
+                                            _input_types2.append("i32")
+                                        elif p.type.element == BOOL:
+                                            _input_types2.append("i1")
+                                        elif p.type.element == _FLOAT64:
+                                            _input_types2.append("f64")
+                                        else:
+                                            _input_types2.append("f32")
+                                    elif isinstance(p.type, ScalarType):
+                                        _input_kinds2.append("scalar")
+                                        if p.type == INT:
+                                            _input_types2.append("i32")
+                                        elif p.type == BOOL:
+                                            _input_types2.append("i1")
+                                        elif p.type == _FLOAT64:
+                                            _input_types2.append("f64")
+                                        else:
+                                            _input_types2.append("f32")
+                                _out_elem2 = result_type2.element
+                                _out_et2 = ("i32" if _out_elem2 == INT else "i1" if _out_elem2 == BOOL
+                                            else "f64" if _out_elem2 == _FLOAT64 else "f32")
+                                _out_dt2 = ("int32" if _out_elem2 == INT else "bool" if _out_elem2 == BOOL
+                                            else "float64" if _out_elem2 == _FLOAT64 else "float32")
+                                meta = KernelMeta(
+                                    name=name,
+                                    grid_dims=1,
+                                    block_size=0,
+                                    num_inputs=num_array_inputs2 + num_scalar_inputs2,
+                                    num_outputs=1,
+                                    input_elem_types=_input_types2,
+                                    output_elem_types=[_out_et2],
+                                    input_kinds=_input_kinds2,
+                                    output_shape=output_shape2,
+                                    output_dtype=_out_dt2,
+                                )
+                            except Exception as general_map_error:
+                                for _rec_err in (
+                                    general_map_error,
+                                    scan_error,
+                                    compound_fold_error,
+                                    reduction_error,
+                                ):
+                                    _rec_msg = str(_rec_err)
+                                    if "GPU recursion supports" in _rec_msg:
+                                        raise CodegenUnavailable(_rec_msg) from _rec_err
+                                raise CodegenUnavailable(
+                                    "MLIR-derived descriptor-ABI PTX could not lower function to any GPU kernel: "
+                                    f"f32_map={f32_map_error}; i32_map={i32_map_error}; bool_map={bool_map_error}; "
+                                    f"reduction={reduction_error}; compound_fold={compound_fold_error}; "
+                                    f"scan={scan_error}; general_map={general_map_error}"
+                                ) from general_map_error
     device_module = extract_gpu_module_body_as_module(gpu_module.text)
     llvm_ir = translate_mlir_to_llvmir(device_module, toolchain=toolchain)
     ptx = translate_llvmir_to_nvptx_text(llvm_ir, toolchain=toolchain)

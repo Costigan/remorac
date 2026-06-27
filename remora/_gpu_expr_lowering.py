@@ -266,6 +266,30 @@ class _GpuTailLoop:
     element_type: str = "f32"
 
 
+@dataclass(frozen=True)
+class _GpuTailStep:
+    name: str
+    param_names: list[str]
+    param_types: list[str]
+    condition_expr: "GpuExpr"
+    result_expr: "GpuExpr"
+    tail_target: str
+    tail_args: list["GpuExpr"]
+
+
+@dataclass(frozen=True)
+class _GpuTailStateMachine:
+    """Tail-recursive loop generated from a scalar recursive SCC."""
+
+    functions: list[str]
+    tags: dict[str, int]
+    slots: list[tuple[str, str]]
+    init_target: str
+    init_args: list["GpuExpr"]
+    steps: list[_GpuTailStep]
+    result_type: str
+
+
 GpuExpr: TypeAlias = (
     GpuInputLoad
     | GpuConstant
@@ -284,6 +308,7 @@ GpuExpr: TypeAlias = (
     | GpuAppendLoad
     | _GpuLetExpr
     | _GpuTailLoop
+    | _GpuTailStateMachine
 )
 
 
@@ -316,6 +341,7 @@ class _CompileCtx:
     tail_base: object = None              # base case result GpuExpr
     tail_cond: object = None              # loop condition GpuExpr
     tail_elem_type: str | None = None     # element type for loop vars
+    tail_group: set[str] = field(default_factory=set)
 
 
 def _scalar_type_to_mlir(t: ScalarType) -> str:
@@ -554,6 +580,9 @@ def _lower_hir(expr: HIRExpr, ctx: _CompileCtx) -> GpuExpr:
         if callee_name and callee_name in ctx.functions:
             from remora.compiler import _substitute_hir
             callee_fn = ctx.functions[callee_name]
+            recursive_group = _recursive_scalar_tail_scc(callee_name, ctx.functions)
+            if recursive_group and ctx.tail_context is None:
+                return _lower_tail_state_machine_call(expr, recursive_group, ctx)
             # Phase 6.4: check for self-recursion BEFORE substitution
             _is_self_recursive = _detect_self_call(callee_fn.body, callee_name)
             if (
@@ -1005,6 +1034,161 @@ def _is_supported_tail_recursive_shape(expr, func_name: str) -> bool:
     return not then_has_call and else_is_tail_call
 
 
+def _lower_tail_state_machine_call(
+    call: HIRCall,
+    group: set[str],
+    ctx: _CompileCtx,
+) -> _GpuTailStateMachine:
+    callee = call.func_name
+    fn_names = sorted(group)
+    tags = {name: idx for idx, name in enumerate(fn_names)}
+    result_type = ctx.functions[callee].return_type
+    if not isinstance(result_type, ScalarType):
+        raise GPUScaffoldError(
+            f"{ctx.context}: GPU recursion supports tail-recursive "
+            "scalar helpers inside higher-order bodies only"
+        )
+    result_mlir_type = _scalar_type_to_mlir(result_type)
+
+    slots: list[tuple[str, str]] = []
+    for name in fn_names:
+        fn = ctx.functions[name]
+        for param in fn.params:
+            if not isinstance(param.type, ScalarType):
+                raise GPUScaffoldError(
+                    f"{ctx.context}: GPU recursion supports tail-recursive "
+                    "scalar helpers inside higher-order bodies only"
+                )
+            slots.append((f"{name}.{param.name}", _scalar_type_to_mlir(param.type)))
+
+    steps: list[_GpuTailStep] = []
+    for name in fn_names:
+        fn = ctx.functions[name]
+        shape = _tail_if_shape(fn.body, group)
+        if shape is None:
+            raise GPUScaffoldError(
+                f"{ctx.context}: GPU recursion supports tail-recursive "
+                "scalar helpers inside higher-order bodies only"
+            )
+        condition, result_expr, tail_call = shape
+        step_ctx = _copy_ctx(ctx)
+        step_ctx.tail_group = set(group)
+        step_ctx.tail_context = name
+        step_ctx.tail_params = [p.name for p in fn.params]
+        step_ctx.tail_param_types = [
+            _scalar_type_to_mlir(p.type) for p in fn.params
+        ]
+        for param in fn.params:
+            step_ctx.let_env[param.name] = _placeholder(param.name)
+        steps.append(
+            _GpuTailStep(
+                name=name,
+                param_names=[p.name for p in fn.params],
+                param_types=[_scalar_type_to_mlir(p.type) for p in fn.params],
+                condition_expr=_lower_hir(condition, step_ctx),
+                result_expr=_lower_hir(result_expr, step_ctx),
+                tail_target=tail_call.func_name,
+                tail_args=[_lower_hir(arg, step_ctx) for arg in tail_call.args],
+            )
+        )
+
+    return _GpuTailStateMachine(
+        functions=fn_names,
+        tags=tags,
+        slots=slots,
+        init_target=callee,
+        init_args=[_lower_hir(arg, ctx) for arg in call.args],
+        steps=steps,
+        result_type=result_mlir_type,
+    )
+
+
+def _tail_if_shape(expr: HIRExpr, group: set[str]) -> tuple[HIRExpr, HIRExpr, HIRCall] | None:
+    """Return ``(condition, base_result, tail_call)`` for supported tail shape."""
+    if isinstance(expr, HIRIf):
+        if isinstance(expr.else_branch, HIRCall) and expr.else_branch.func_name in group:
+            if not _contains_call_to(expr.then_branch, group):
+                return expr.condition, expr.then_branch, expr.else_branch
+    if isinstance(expr, HIRLet):
+        return _tail_if_shape(expr.body, group)
+    if isinstance(expr, HIRCast):
+        return _tail_if_shape(expr.value, group)
+    return None
+
+
+def _contains_call_to(expr: HIRExpr, names: set[str]) -> bool:
+    if isinstance(expr, HIRCall) and expr.func_name in names:
+        return True
+    for attr_name in ("args", "arrays", "init", "array", "body", "func", "value",
+                      "components", "predicate", "index", "target", "update",
+                      "condition", "then_branch", "else_branch",
+                      "left", "right", "elements"):
+        val = getattr(expr, attr_name, None)
+        if val is None:
+            continue
+        items = val if isinstance(val, list) else [val]
+        for item in items:
+            if _contains_call_to(item, names):
+                return True
+    return False
+
+
+def _recursive_scalar_tail_scc(func_name: str, functions: dict) -> set[str] | None:
+    if func_name not in functions:
+        return None
+    graph: dict[str, set[str]] = {
+        name: {callee for callee in _direct_call_names(fn.body) if callee in functions}
+        for name, fn in functions.items()
+    }
+    if not _can_reach_via_edge(func_name, func_name, graph):
+        return None
+    reachable = _reachable_from(func_name, graph)
+    group = {name for name in reachable if _can_reach_via_edge(name, func_name, graph)}
+    if func_name not in group:
+        return None
+    return_type = functions[func_name].return_type
+    if not isinstance(return_type, ScalarType):
+        return None
+    for name in group:
+        fn = functions[name]
+        if fn.return_type != return_type:
+            return None
+        if any(not isinstance(param.type, ScalarType) for param in fn.params):
+            return None
+        if _tail_if_shape(fn.body, group) is None:
+            return None
+    return group
+
+
+def _reachable_from(start: str, graph: dict[str, set[str]]) -> set[str]:
+    seen: set[str] = set()
+
+    def walk(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        for callee in graph.get(name, set()):
+            walk(callee)
+
+    walk(start)
+    return seen
+
+
+def _can_reach_via_edge(start: str, target: str, graph: dict[str, set[str]]) -> bool:
+    seen: set[str] = set()
+
+    def walk(name: str) -> bool:
+        if name in seen:
+            return False
+        seen.add(name)
+        for callee in graph.get(name, set()):
+            if callee == target or walk(callee):
+                return True
+        return False
+
+    return walk(start)
+
+
 def _function_is_in_recursive_cycle(func_name: str, functions: dict) -> bool:
     visiting: set[str] = set()
 
@@ -1077,6 +1261,7 @@ def _copy_ctx(ctx: _CompileCtx) -> _CompileCtx:
         tail_base=ctx.tail_base,
         tail_cond=ctx.tail_cond,
         tail_elem_type=ctx.tail_elem_type,
+        tail_group=set(ctx.tail_group),
     )
 
 

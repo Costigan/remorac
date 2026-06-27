@@ -136,6 +136,7 @@ It must support common cases:
 
 - non-recursive helper calls inside GPU map bodies by inlining
 - self-tail-recursive scalar helper calls inside GPU map bodies
+- mutual tail-recursive scalar helper groups inside GPU map bodies
 - accumulator-style helpers such as:
 
   ```lisp
@@ -150,12 +151,13 @@ It must support common cases:
 
 - the same supported shape for `Float`, `Int`, and `Bool` where the scalar
   operations are otherwise supported by GPU expression lowering
+- tail-recursive scalar helpers (self or mutual) used as the step function of a
+  GPU `scan` (single-block `f32` path) or a serial rank-1 `f32` `fold`
 - numeric parity against the interpreter on an actual GPU
 
 It may reject:
 
-- non-tail recursion
-- mutual recursion
+- non-tail recursion (including non-tail mutual recursion)
 - recursion requiring a per-thread stack
 - recursive functions that return arrays
 - recursive helpers with array parameters
@@ -415,7 +417,8 @@ numeric parity tests.
 
 Tasks:
 
-- [ ] Make `_GpuTailLoop` detection explicit and tested.
+- [x] Make recursive SCC detection explicit and tested for the GPU expression
+  lowering path.
 - [ ] Normalize tail-recursive helper bodies before GPU lowering.
 - [ ] Support accumulator-style helpers with one input value and one or more
   scalar accumulators.
@@ -423,11 +426,18 @@ Tasks:
 - [ ] Support simple `let` wrappers around update expressions.
 - [ ] Ensure loop-carried values preserve scalar types (`f32`, `f64`, `i32`,
   `i1`) instead of assuming `f32`.
-- [ ] Add compile-time rejection for non-tail self calls.
-- [ ] Add compile-time rejection for mutual recursion.
+- [x] Add compile-time rejection for non-tail self calls.
+- [x] Lower supported mutual tail recursion to a per-thread GPU state machine.
+- [x] Thread tail-recursive helpers through GPU `scan` step functions
+  (single-block `f32` path) by passing the function table into the compound
+  scan builder.
+- [x] Thread tail-recursive helpers through a serial rank-1 `f32` GPU `fold`
+  step function (`build_descriptor_abi_f32_compound_fold_gpu_module`).
 - [ ] Add compile-time rejection for recursive array-returning helpers.
-- [ ] Fix `codegen.py` fallback error propagation so recursion-specific
-  errors are not masked by bool/int/f32 specialized fallback errors.
+- [x] Fix `codegen.py` fallback error propagation so recursion-specific
+  errors are not masked by bool/int/f32 specialized fallback errors. The final
+  fallback now re-raises the recursion-specific message (`"GPU recursion
+  supports ..."`) verbatim when any accumulated builder error contains it.
 
 Acceptance tests:
 
@@ -436,7 +446,7 @@ Acceptance tests:
 - [x] GPU numeric parity for boolean tail-recursive helper inside `map`, if
   bool map support is available for the shape.
 - [ ] GPU numeric parity for helper with two accumulators.
-- [ ] GPU rejected-not-silent test for non-tail recursion:
+- [x] GPU rejected-not-silent test for non-tail recursion:
 
   ```lisp
   (define/pi ()
@@ -444,8 +454,12 @@ Acceptance tests:
     (if (== n 0.0) 0.0 (+ n (sum_to (- n 1.0)))))
   ```
 
-- [ ] GPU rejected-not-silent test for mutual recursion.
-- [ ] GPU rejected-not-silent test for recursive helper with array parameter.
+- [x] GPU compile test for supported mutual tail recursion.
+- [x] GPU rejected-not-silent test for recursive helper with array parameter.
+- [x] GPU numeric parity for a tail-recursive helper used as a `scan` step
+  function (self and mutual).
+- [x] GPU numeric parity for a tail-recursive helper used as a serial rank-1
+  `f32` `fold` step function.
 
 ### Milestone 6: GPU Documentation and User-Facing Behavior
 
@@ -474,7 +488,7 @@ only.
 |---|---:|---:|---:|
 | self tail scalar | required | required | helper-in-map required |
 | self non-tail scalar | required | required | rejected |
-| mutual tail scalar | required | required | rejected |
+| mutual tail scalar | required | required | helper-in-map/scan/fold numeric parity |
 | mutual non-tail scalar | required | required | rejected |
 | higher-order recursive scalar | required | required | rejected unless monomorphized to supported helper |
 | self tail array return | required | required | rejected |
@@ -482,6 +496,7 @@ only.
 | scalar return + array params | required | required | rejected |
 | mutual recursion + array params | required | required | rejected |
 | recursive helper inside map | required | required | tail-only numeric parity |
+| recursive helper as scan/fold step | required | required | tail-only numeric parity (single-block f32 scan; serial rank-1 f32 fold) |
 
 ## Done Criteria
 

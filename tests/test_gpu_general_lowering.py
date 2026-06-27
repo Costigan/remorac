@@ -1355,6 +1355,25 @@ class TestGPUNumericParity:
         x = np.array([1, 2, 3, 4], dtype=np.int32)
         self._run_parity(src, "inc", (ArrayType(INT, (StaticDim(4),)),), [x])
 
+    def test_mutual_tail_recursion_in_map_parity(self):
+        src = (
+            "(define/pi () (even [n Float] Float) "
+            "  (if (== n 0.0) 1.0 (odd (- n 1.0)))) "
+            "(define/pi () (odd [n Float] Float) "
+            "  (if (== n 0.0) 0.0 (even (- n 1.0)))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (map (lambda (x) (even x)) xs))"
+        )
+        x = np.array([0.0, 1.0, 2.0, 7.0], dtype=np.float32)
+        self._run_parity(
+            src,
+            "f",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            [x],
+            include_prelude=False,
+            syntax="lisp",
+        )
+
     def test_rank2_map_parity(self):
         """rank-2 scale"""
         src = "def scale xs = map (* 2.0) xs"
@@ -1386,6 +1405,23 @@ class TestGPUNumericParity:
             (ArrayType(FLOAT, (StaticDim(4),)), ArrayType(FLOAT, (StaticDim(4),))),
             [x, y],
             include_prelude=False,
+        )
+
+    def test_tail_recursive_helper_in_fold_parity(self):
+        src = (
+            "(define/pi () (add_n [n Float acc Float] Float) "
+            "  (if (== n 0.0) acc (add_n (- n 1.0) (+ acc 1.0)))) "
+            "(define/pi () (f [xs (Array Float 4)] Float) "
+            "  (fold (lambda (acc x) (add_n x acc)) 0.0 xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src,
+            "f",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            [x],
+            include_prelude=False,
+            syntax="lisp",
         )
 
     # ------------------------------------------------------------------
@@ -1459,7 +1495,7 @@ class TestGPUNumericParity:
                 syntax="lisp",
             )
 
-    def test_mutual_recursion_rejected_with_specific_error(self):
+    def test_mutual_tail_recursion_compiles_to_state_machine(self):
         src = (
             "(define/pi () (even [n Float] Float) "
             "  (if (== n 0.0) 1.0 (odd (- n 1.0)))) "
@@ -1469,17 +1505,16 @@ class TestGPUNumericParity:
             "  (map (lambda (x) (even x)) xs))"
         )
 
-        with pytest.raises(
-            (CodegenUnavailable, GPUScaffoldError),
-            match="GPU recursion supports tail-recursive scalar helpers inside map bodies only",
-        ):
-            compile_function_source_to_mlir_gpu_ptx(
-                src,
-                "f",
-                (ArrayType(FLOAT, (StaticDim(4),)),),
-                include_prelude=False,
-                syntax="lisp",
-            )
+        ptx, kernels, _ = compile_function_source_to_mlir_gpu_ptx(
+            src,
+            "f",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            include_prelude=False,
+            syntax="lisp",
+        )
+
+        assert kernels
+        assert ".visible .entry" in ptx
 
     def test_recursive_array_param_helper_rejected_with_specific_error(self):
         src = (
@@ -1514,6 +1549,42 @@ class TestGPUNumericParity:
         self._run_parity(
             src, "f", (ArrayType(FLOAT, (StaticDim(8),)),), [x],
             include_prelude=False,
+        )
+
+    def test_tail_recursive_helper_in_scan_parity(self):
+        src = (
+            "(define/pi () (add_n [n Float acc Float] Float) "
+            "  (if (== n 0.0) acc (add_n (- n 1.0) (+ acc 1.0)))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (iscan (lambda (acc x) (add_n x acc)) 0.0 xs))"
+        )
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        self._run_parity(
+            src,
+            "f",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            [x],
+            include_prelude=False,
+            syntax="lisp",
+        )
+
+    def test_mutual_tail_recursive_helper_in_scan_parity(self):
+        src = (
+            "(define/pi () (even [n Float] Float) "
+            "  (if (== n 0.0) 1.0 (odd (- n 1.0)))) "
+            "(define/pi () (odd [n Float] Float) "
+            "  (if (== n 0.0) 0.0 (even (- n 1.0)))) "
+            "(define/pi () (f [xs (Array Float 4)] (Array Float 4)) "
+            "  (iscan (lambda (acc x) (+ acc (even x))) 0.0 xs))"
+        )
+        x = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32)
+        self._run_parity(
+            src,
+            "f",
+            (ArrayType(FLOAT, (StaticDim(4),)),),
+            [x],
+            include_prelude=False,
+            syntax="lisp",
         )
 
     def test_scatter_add_in_map_parity(self):
