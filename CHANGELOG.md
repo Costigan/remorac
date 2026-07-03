@@ -3,6 +3,41 @@
 All notable changes to RemoraC are documented here, organized by
 feature area.  See also the per-phase changelog in the git history.
 
+## Documentation — Expanded Study Guide (July 2026)
+
+Expanded `docs/STUDY_GUIDE.md` from a structured topic outline into a
+long-form learning guide for understanding RemoraC's language theory, compiler
+architecture, and backend implementation.
+
+- Added a 2-3 page `Overview` subsection for each of the 16 Learning Path
+  topics, covering array programming, rank-polymorphic semantics, dependent
+  shape typing, functional-language implementation, frontends, IRs, MLIR, CPU
+  and GPU code generation, descriptor ABI, execution plans, AD, parallel
+  algorithms, compiler testing, and performance engineering.
+- Added concrete examples for frame/cell decomposition, rank-polymorphic
+  application, reshape shape checking, descriptor-based views, reverse-mode AD,
+  and GPU parity testing.
+- Added a table of contents and converted overview labels to proper markdown
+  subheadings.
+- Annotated the section-level recommended reading lists with guidance on what
+  each source contributes.
+
+## Documentation — Study Guide (July 2026)
+
+Added `docs/STUDY_GUIDE.md`, a structured learning path for understanding
+RemoraC from the language model through the compiler backends.
+
+- Covers array-language foundations, rank-polymorphic semantics, static and
+  dependent shape typing, functional-language implementation, parsing,
+  compiler IRs, MLIR lowering, CPU code generation, CPU vectorization, GPU/PTX
+  execution, descriptor ABI, execution plans, AD, testing, benchmarking, and
+  future full-language work.
+- Includes a topic map by project area, a suggested reading order, a deeper
+  reading list, and practical exercises using `remorac --emit-*` stages.
+- Points readers to current project contracts (`DENSE_CORE.md`, `ABI.md`,
+  `USER_GUIDE.md`, `BACKEND_GAPS.md`, `ROADMAP.md`) while treating older plan
+  docs as historical context.
+
 ## Workstream 0 — Technical-Debt Paydown for Full-Language Work (June 2026)
 
 Infrastructure-only changes that make the compiler auditable without changing
