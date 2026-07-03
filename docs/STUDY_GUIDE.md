@@ -7,12 +7,12 @@ vector, and GPU compilation paths.
 Start with the current project docs:
 
 1. `docs/PROJECT_OVERVIEW_AND_ARCHITECTURE.md`
-2. `docs/DENSE_CORE.md`
-3. `docs/USER_GUIDE.md`
-4. `docs/ABI.md`
-5. `docs/BACKEND_GAPS.md`
-6. `docs/ROADMAP.md`
-7. `docs/remora-reference/README.md`
+1. `docs/DENSE_CORE.md`
+1. `docs/USER_GUIDE.md`
+1. `docs/ABI.md`
+1. `docs/BACKEND_GAPS.md`
+1. `docs/ROADMAP.md`
+1. `docs/remora-reference/README.md`
 
 Some docs in this directory are archived or historical. Use them to understand
 why the project took a path, not as the final support matrix. The current
@@ -21,6 +21,12 @@ implementation log, and project overview.
 
 ## Table Of Contents
 
+- [Start Here](#start-here)
+  - [Minimum Viable Path](#minimum-viable-path)
+  - [Goal-Based Entry Points](#goal-based-entry-points)
+  - [What Changed Since About 1995](#what-changed-since-about-1995)
+  - [Modern Python And Tooling Primer](#modern-python-and-tooling-primer)
+  - [Pipeline Landmarks](#pipeline-landmarks)
 - [Learning Path](#learning-path)
   - [1. Array Programming Languages](#1-array-programming-languages)
   - [2. Rank Polymorphism And Remora Semantics](#2-rank-polymorphism-and-remora-semantics)
@@ -43,6 +49,129 @@ implementation log, and project overview.
 - [Minimal Background Checklist](#minimal-background-checklist)
 - [Deeper Reading List](#deeper-reading-list)
 - [Practical Exercises](#practical-exercises)
+
+## Start Here
+
+This guide is intentionally broad, but most readers should not read it
+front-to-back on the first pass. Use the goal-based paths below, skim the
+foundation rows in the delta table, and spend close attention on the modern or
+RemoraC-specific rows.
+
+### Minimum Viable Path
+
+If you want the shortest useful path through the project:
+
+1. Read `docs/USER_GUIDE.md` and run two examples: one with `--target interp`
+   and one with the default compiled CPU target.
+1. Read sections 1, 2, 7, 11, and 15 in this guide.
+1. Read `docs/PROJECT_OVERVIEW_AND_ARCHITECTURE.md`, `docs/DENSE_CORE.md`, and
+   `docs/ABI.md`.
+1. Follow one small program through `--emit-ast`, `--emit-typed-ast`,
+   `--emit-hir`, and `--emit-mlir`.
+1. Run `uv run python -m compileall -q remora` before and after a small edit.
+
+Expected time: one focused day for orientation, two to three days to read the
+core docs and trace the pipeline, and one to two weeks to become productive in
+a backend or typechecker area.
+
+Prerequisites to check up front:
+
+- You can read Python classes with type annotations and `@dataclass`.
+- You are comfortable with basic functional-programming vocabulary: lexical
+  scope, closures, higher-order functions, and recursion.
+- You know the difference between scalar values, vectors, matrices, and
+  higher-rank tensors.
+- You can read a simple compiler pipeline diagram and inspect intermediate
+  representations without expecting source-level structure to survive intact.
+
+### Goal-Based Entry Points
+
+| Goal                         | Read first                         | Then study                                                                                                              | Skip or defer                                         |
+| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Use Remora programs          | `docs/USER_GUIDE.md`, sections 1-2 | `docs/DENSE_CORE.md`; examples in `examples/`                                                                           | MLIR, GPU routing, compiler QA                        |
+| Work on the typechecker      | Sections 1-3                       | `remora/typechecker.py`, `remora/types.py`, `remora/constraints.py`, Slepak dissertation                                | CPU vectorization and GPU execution plans             |
+| Work on CPU compilation      | Sections 6-8 and 11                | `docs/ABI.md`, `remora/lowering/`, `remora/pipeline.py`, `remora/runtime.py`                                            | Full Remora dynamic shapes                            |
+| Work on GPU lowering         | Sections 10-12 and 15              | `docs/BACKEND_GAPS.md`, `remora/codegen.py`, `remora/gpu_lowering.py`, `remora/_gpu_expr_lowering.py`, GPU parity tests | First-principles functional compiler material         |
+| Work on AD                   | Section 13 plus sections 1-2 and 6 | `examples/ad_*.lisp`, `remora/ad.py`, HIR optimization, backend support limits                                          | Introductory backprop material if you already know it |
+| Plan future full Remora work | Sections 2-3, 11-12, 14-16         | `docs/ROADMAP.md`, `docs/PLAN_TO_IMPLEMENT_FULL_REMORA.md`, records/ragged/dynamic-shape papers                         | Current CPU ABI minutiae until needed                 |
+
+### What Changed Since About 1995
+
+For a CS/AI reader returning after a long interval, the efficient path is a
+delta, not a from-scratch course. The top table lists material you likely still
+own; skim those sections for RemoraC-specific constraints. The second table is
+where most of the new or substantially changed material lives.
+
+| Foundations you likely already own                                                            | Guide section | How to read it                                                                           |
+| --------------------------------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| Lambda calculus, function types, type soundness                                               | 3             | Skim the refresher; focus on shape-indexed typing and erasure.                           |
+| Closures, lexical scope, free variables, lambda lifting, defunctionalization                  | 4             | Read "Why it matters here" and the RemoraC lowering notes.                               |
+| Recursion, mutual recursion, tail calls, call graphs and SCCs                                 | 4             | Standard material; only the CPU/interpreter support rules are project-specific.          |
+| CFGs, LALR parsing, parser generators, AST vs parse tree, desugaring                          | 5             | Skim unless changing grammar or reader code.                                             |
+| CSE, DCE, inlining, ANF, IR design                                                            | 6             | Classic compiler material; focus on this project's AST -> HIR -> MLIR handoff.           |
+| AD fundamentals: forward/reverse mode, tapes, VJPs, gradient descent                          | 13            | As an AI reader, jump to array cotangents and source generation.                         |
+| Parallel skeletons: tree reduction, prefix sum, sort, scatter/gather, tiling, matmul blocking | 14            | Skim for how these appear as Remora primitives and backend tests.                        |
+| SIMD, cache locality, memory vs compute bound, roofline intuition                             | 9, 16         | The ideas are familiar; study current MLIR/LLVM/vector tooling and hardware constraints. |
+
+| New or materially different                                                       | Guide section | What to study closely                                                                                  |
+| --------------------------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------ |
+| Rank polymorphism as a typed semantic discipline                                  | 1-2           | Principal frames, type-directed dynamic semantics, and shape soundness.                                |
+| Bidirectional typechecking                                                        | 3             | The infer/check split and why it helps higher-rank and shape-indexed programs.                         |
+| Restricted dependent/indexed types for shapes                                     | 3             | DML/Xi-style indexed dimensions, shape constraints, and erasure that still preserves runtime metadata. |
+| MLIR: dialects, regions, `linalg.generic`, progressive lowering                   | 7             | This did not exist in 1995; it is the central modern compiler substrate here.                          |
+| Tensor-to-memref bufferization and `llvm.emit_c_interface`                        | 7-8           | Value-semantic tensors becoming ABI-compatible buffers.                                                |
+| GPU/CUDA/SIMT, warps, coalescing, occupancy                                       | 10            | The execution and memory model behind the CUDA target.                                                 |
+| PTX, NVVM, and LLVM's NVPTX backend                                               | 10            | The target stack below GPU MLIR lowering.                                                              |
+| Multi-kernel execution plans, fusion, device-resident buffers, capability routing | 12            | Modern array-compiler architecture with little direct 1990s analogue.                                  |
+| Descriptor ABI: aligned pointer, offset, sizes, strides                           | 11            | The exact contract shared by CPU, GPU, ctypes, and views.                                              |
+| AD by source generation into the normal pipeline; array-op VJPs                   | 13            | RemoraC's implementation strategy for gradients over rank-polymorphic array code.                      |
+| Silent-miscompile testing: oracle, differential, metamorphic, expected rejection  | 15            | The project-specific correctness discipline, especially for GPU lowering.                              |
+| Modern Python tooling: dataclasses, type hints, `uv`, `pytest`                    | This section  | The mechanics needed to read and safely modify this Python compiler.                                   |
+
+### Modern Python And Tooling Primer
+
+RemoraC is a Python compiler, not a Python DSL. Most source modules are ordinary
+Python 3.11+ code using dataclasses, type annotations, pytest tests, and `uv`
+for environment management.
+
+| Tool or idiom    | What to know here                                                                                                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@dataclass`     | AST, type, and IR nodes are mostly immutable-looking records with named fields. Read them as algebraic data type variants, even though Python does not enforce that model as tightly as ML or Haskell. |
+| Type hints       | Annotations document expected shapes of compiler data structures and help readers; there is no configured type checker in this repo. Do not assume `mypy` has enforced them.                           |
+| Pattern matching | Some modules use `isinstance` cascades rather than ML-style pattern matching. Treat each branch as one constructor case.                                                                               |
+| `uv`             | `uv sync` installs dependencies; `uv run ...` executes commands inside the managed environment. Prefer the documented `uv run` commands over invoking system Python.                                   |
+| `pytest`         | Tests are plain pytest. GPU tests run by default when the environment supports them; `REMORA_TEST_GPU=0` only allows unavailable GPU support to skip.                                                  |
+| `compileall`     | `uv run python -m compileall -q remora` is the fast syntax/import sanity check because no linter, formatter, or static type checker is configured.                                                     |
+
+When reading dataclass IR nodes, start from the type definitions, then search
+for construction sites, then search for consumers. For example, read a HIR node
+in `remora/hir.py`, find where `elaborate.py` or optimizer passes create it,
+and then inspect the lowering or interpreter branch that consumes it.
+
+### Pipeline Landmarks
+
+Keep this map nearby while reading the detailed sections:
+
+```text
+source (.remora / .lisp)
+  -> parser.py / lisp_reader.py
+  -> ast_nodes.py
+  -> typechecker.py
+  -> elaborate.py
+  -> hir.py
+  -> hir_opt.py / defunc.py
+  -> remora/lowering/* for MLIR
+  -> pipeline.py and runtime.py for CPU
+  -> codegen.py, gpu_lowering.py, _gpu_expr_lowering.py for GPU
+```
+
+Two contracts recur throughout the guide:
+
+- Descriptor ABI: the canonical treatment is section 11 and `docs/ABI.md`.
+  Other sections mention descriptors only to show where that contract is used.
+- Correctness testing: the canonical treatment is section 15. GPU compile-only
+  tests are smoke tests; numeric parity against the interpreter is the standard
+  for lowering correctness.
 
 ## Learning Path
 
@@ -474,8 +603,7 @@ nearest enclosing binding with the same name, not to a dynamically chosen caller
 environment. A lambda expression may mention variables defined outside the
 lambda. Those variables are its free variables, and the runtime representation
 of the lambda must preserve their values. A closure is the usual representation:
-code pointer plus environment. For example, a function that returns `lambda x.
-x + y` must remember the particular `y` in scope when the lambda was created.
+code pointer plus environment. For example, a function that returns `lambda x. x + y` must remember the particular `y` in scope when the lambda was created.
 The source program treats the result as a function value; the implementation
 must decide how that value is represented, passed, specialized, or eliminated.
 
@@ -1614,44 +1742,47 @@ dense numeric loops.
 
 #### Overview
 
-Automatic differentiation computes derivatives by systematically applying the
-chain rule to a program. It is not symbolic differentiation in the traditional
-computer-algebra sense, where an expression is transformed into a closed-form
-derivative and then simplified. It is also not finite differencing, where one
-approximates derivatives by evaluating the function at nearby points. AD works
-on the actual computation performed by the program, decomposes it into
-elementary operations with known derivatives, and composes those derivatives in
-a way that is exact up to ordinary floating-point rounding.
+If you already know backpropagation, VJPs, and optimizer loops, do not spend
+time re-learning AD from first principles here. The RemoraC-specific questions
+are different: how reverse-mode AD interacts with rank-polymorphic array
+semantics, how cotangent shapes are represented for cells and frames, and how
+generated gradient programs travel through the same compiler pipeline as
+hand-written Remora.
 
-Forward-mode AD propagates tangent values alongside primal values. If a
-program computes `y = f(x)`, forward mode computes how a small perturbation in
-`x` changes each intermediate and eventually `y`. It is efficient when the
-number of input directions is small. Reverse-mode AD propagates cotangents
-backward from outputs to inputs. It is efficient for scalar-output functions
-with many inputs, such as loss functions in optimization and machine learning,
-because one reverse pass can compute the gradient of one scalar result with
-respect to many parameters. RemoraC focuses on reverse-mode AD for scalar-cost
-functions, which matches common optimization workloads.
+RemoraC focuses on reverse-mode AD for scalar-cost functions. The objective is
+the familiar one from optimization and machine learning: compute one scalar
+loss and accumulate sensitivities with respect to many dense numeric inputs.
+The novelty is that the program being differentiated is not a scalar expression
+tree. It may contain elementwise maps, folds, scans, views, reshapes,
+transposes, and rank-polymorphic applications whose iteration space is
+determined by frame/cell decomposition.
 
-Reverse mode needs to remember enough of the forward computation to run the
-backward computation. This remembered structure is often called a tape. The
-forward pass computes primal values and records operations or intermediate
-values. The backward pass starts with a cotangent for the output, usually 1 for
-a scalar objective, and applies vector-Jacobian products to distribute
-cotangents to each operation's inputs. A vector-Jacobian product, or VJP, says
-how sensitivity of an operation's output contributes to sensitivity of its
-inputs without materializing the full Jacobian matrix.
+For arrays, a VJP is also a shape transformation. An elementwise map
+differentiates elementwise, but the cotangent must preserve the result's frame
+and cell structure. A reduction maps many input contributions to fewer output
+cotangents, so the backward pass often replicates, broadcasts, or otherwise
+distributes the reduced cotangent across the original cells. A scan has prefix
+dependencies and may require a reverse scan or a structured adjoint. A view
+operation such as reshape or transpose usually has an inverse-view cotangent
+rule, while a slice-like operation may need to scatter cotangents into a larger
+zero-initialized array. These are array algorithms as much as calculus rules.
 
-Arrays make AD more interesting than scalar expression trees. An elementwise
-map differentiates elementwise, but its result shape and tangent shape still
-matter. A reduction maps many input cotangents to fewer output cotangents, so
-the backward pass often broadcasts or replicates the output cotangent across
-the reduced cells and applies the derivative of the combining function. A scan
-has prefix dependencies and may require a reverse scan or more structured
-adjoint. A view operation such as reshape or transpose usually has a simple
-backward rule: the cotangent is reshaped or transposed in the inverse way. A
-slice may scatter cotangents back into a larger zero-initialized array. These
-rules are array algorithms as much as calculus rules.
+RemoraC's implementation strategy is source generation around an AD
+expression/tape representation. Instead of introducing a separate derivative IR
+that bypasses the normal compiler, it constructs gradient source that can pass
+through parsing, typechecking, elaboration, HIR optimization, MLIR lowering,
+and backend execution. This is high leverage because AD bugs then exercise the
+same shape checker and lowering paths as ordinary user programs. It also means
+AD can fail for ordinary compiler reasons: generated source may be too large,
+an optimizer may miss a simplification, or a backend may not support the
+generated combination of array operations.
+
+GPU AD should be read as an explicit envelope, not as full-language automatic
+GPU differentiation. Selected dense numeric loops and optimizer-shaped
+programs exist, but arbitrary higher-order AD, dynamic shapes, boxes, and
+general recursive differentiated programs are outside the current GPU support
+model. When extending this area, make the accepted subset and rejection paths
+clear; a silently wrong GPU gradient is worse than a rejected program.
 
 The distinction between primal values and cotangents is semantic and
 representational. A primal is an ordinary value computed by the original
@@ -1663,15 +1794,9 @@ support is aimed at dense numeric scalar-cost functions, so the implemented
 path can avoid some of the full generality that a language-wide AD semantics
 would require.
 
-There are several implementation strategies for AD. Operator overloading
-records a tape dynamically as the program runs with special numeric objects.
-Source transformation rewrites a program into another program that computes
-derivatives. IR transformation differentiates an intermediate representation.
-RemoraC uses a source-generation path around an AD expression/tape
-representation: it constructs gradient source that can then pass through the
-ordinary compiler. This has a valuable engineering property: generated
-gradients exercise the same parser, typechecker, elaborator, HIR lowering,
-MLIR lowering, and CPU runtime as hand-written programs.
+Other AD systems may use operator overloading or IR transformation. Keep those
+models in mind for comparison, but read this codebase as a source-generation
+system whose generated program must be valid RemoraC input.
 
 AD-generated programs can be much larger and less friendly than hand-written
 programs. They may contain many temporaries, repeated subexpressions, generated
@@ -2228,9 +2353,9 @@ Read:
 ### Phase 1: User-Level Remora
 
 1. `docs/USER_GUIDE.md`
-2. `docs/DENSE_CORE.md`
-3. `docs/remora-reference/remora-tutorial-draft.txt`
-4. Run examples with `uv run remorac --target interp ...` and
+1. `docs/DENSE_CORE.md`
+1. `docs/remora-reference/remora-tutorial-draft.txt`
+1. Run examples with `uv run remorac --target interp ...` and
    `uv run remorac ...`
 
 Goal: understand how rank-polymorphic Remora programs are written.
@@ -2238,18 +2363,18 @@ Goal: understand how rank-polymorphic Remora programs are written.
 ### Phase 2: Formal Semantics And Types
 
 1. `docs/remora-reference/semantics-of-rank-polymorphism.txt`
-2. `docs/remora-reference/slepak-dissertation.txt`
-3. Dunfield and Krishnaswami on bidirectional typing
-4. `remora/typechecker.py` with tests open beside it
+1. `docs/remora-reference/slepak-dissertation.txt`
+1. Dunfield and Krishnaswami on bidirectional typing
+1. `remora/typechecker.py` with tests open beside it
 
 Goal: understand how Remora's types determine shape-safe execution.
 
 ### Phase 3: Compiler Architecture
 
 1. `docs/PROJECT_OVERVIEW_AND_ARCHITECTURE.md`
-2. `docs/IMPLEMENTATION_NOTES.md`
-3. `docs/IMPLEMENTATION_LOG.md`
-4. Inspect output from `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, and
+1. `docs/IMPLEMENTATION_NOTES.md`
+1. `docs/IMPLEMENTATION_LOG.md`
+1. Inspect output from `--emit-ast`, `--emit-typed-ast`, `--emit-hir`, and
    `--emit-mlir`
 
 Goal: understand how the source program becomes HIR and MLIR.
@@ -2257,22 +2382,22 @@ Goal: understand how the source program becomes HIR and MLIR.
 ### Phase 4: CPU Backend
 
 1. MLIR Toy tutorial and dialect docs
-2. `docs/ABI.md`
-3. `remora/lowering/`
-4. `remora/pipeline.py`
-5. `remora/runtime.py`
+1. `docs/ABI.md`
+1. `remora/lowering/`
+1. `remora/pipeline.py`
+1. `remora/runtime.py`
 
 Goal: understand descriptor-based CPU compilation and execution.
 
 ### Phase 5: GPU Backend
 
 1. CUDA programming guide
-2. PTX ISA overview
-3. `docs/BACKEND_GAPS.md`
-4. `remora/codegen.py`
-5. `remora/gpu_lowering.py`
-6. `remora/_gpu_expr_lowering.py`
-7. GPU parity tests
+1. PTX ISA overview
+1. `docs/BACKEND_GAPS.md`
+1. `remora/codegen.py`
+1. `remora/gpu_lowering.py`
+1. `remora/_gpu_expr_lowering.py`
+1. GPU parity tests
 
 Goal: understand which programs are accepted on GPU, which lowering route they
 take, and how correctness is tested.
@@ -2280,11 +2405,11 @@ take, and how correctness is tested.
 ### Phase 6: Performance And Research Directions
 
 1. `docs/BENCHMARK_PLAN.md`
-2. `docs/BENCHMARK_RESULTS.md`
-3. `docs/remorac-vs-futhark.md`
-4. Futhark PLDI 2017, incremental flattening, and memory papers
-5. `docs/ROADMAP.md`
-6. `docs/PLAN_TO_IMPLEMENT_FULL_REMORA.md`
+1. `docs/BENCHMARK_RESULTS.md`
+1. `docs/remorac-vs-futhark.md`
+1. Futhark PLDI 2017, incremental flattening, and memory papers
+1. `docs/ROADMAP.md`
+1. `docs/PLAN_TO_IMPLEMENT_FULL_REMORA.md`
 
 Goal: understand where RemoraC is strong, where it is behind mature systems,
 and what full-language work requires.
@@ -2368,19 +2493,19 @@ Automatic differentiation:
    uv run remorac --emit-mlir examples/prelude_sum.remora
    ```
 
-2. Write a scalar function and apply it to a vector, matrix, and rank-3 tensor.
+1. Write a scalar function and apply it to a vector, matrix, and rank-3 tensor.
    Predict the frame/cell split before running it.
 
-3. Write a row-wise reduction using `rerank` or a function expecting vector
+1. Write a row-wise reduction using `rerank` or a function expecting vector
    cells. Compare interpreter and CPU output.
 
-4. Pick a view operation such as `transpose`, `reshape`, `ravel`, or `take`.
+1. Pick a view operation such as `transpose`, `reshape`, `ravel`, or `take`.
    Trace how its shape changes at the type level and how its descriptor offset,
    sizes, and strides should change.
 
-5. For a GPU-supported map, find the numeric parity test that proves it computes
+1. For a GPU-supported map, find the numeric parity test that proves it computes
    the same result as the interpreter. Add a dtype or shape variation.
 
-6. Run a benchmark from `docs/BENCHMARK_PLAN.md` and classify the bottleneck:
+1. Run a benchmark from `docs/BENCHMARK_PLAN.md` and classify the bottleneck:
    compile time, launch overhead, memory bandwidth, missing fusion, missing
    vectorization, or algorithm choice.
